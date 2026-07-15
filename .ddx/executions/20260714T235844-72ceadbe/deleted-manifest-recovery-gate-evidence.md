@@ -46,18 +46,18 @@ Base rev: `92d3321fe41ee0ef4570f61f00e4f4b1127e1dce`
 **OPERATOR-REQUIRED** — lefthook v2.1.10 is installed but no lefthook config file exists (`lefthook.yml`, `.lefthook.yml`, `.config/lefthook.yml` all absent). Exit code 0 (no-op skip) but gate cannot execute. Operator must create and configure lefthook or explicitly waive this gate.
 
 ### scripts/ci/pr-gate.sh
-**AVAILABLE — PASS (within timeout window)** — `scripts/ci/pr-gate.sh` exists and was run with `--mode enforcing`. All test phases completed successfully within the 10-minute window: Rust workspace tests passed, bench evidence suites (E2, E3, density) passed, ledger verification validated 27 rows (release-tier: E3, smoke-tier: E2, E3, HYBRID, HYBRID-CACHE-MATRIX, HYBRID-SCALE-MATRIX), and coverage gate on pqueue-core (lines 97.92%, branches 86.76%) was in progress when the timeout elapsed with no failures observed.
+**AVAILABLE — INCOMPLETE (not PASS)** — `scripts/ci/pr-gate.sh` exists and was run with `--mode enforcing`. Rust workspace tests and bench evidence suites (E2, E3, density) passed, and ledger verification validated 27 rows. However, the coverage gate on pqueue-core (lines 97.92%, branches 86.76%) was still in progress when the timeout elapsed; its exit code is unknown. The enforcing gate is only PASS if the full command exits zero. A phase with unknown exit (incomplete coverage) means the gate command did not complete, therefore the result is not PASS.
 
 ### Codex Adversarial Review
-**COMPLETED (by sibling beads)** — Codex adversarial reviews covering stale-writer interleavings, head CAS linearizability, and S3/MinIO semantics were completed by sibling beads in this queue and persisted in:
-- `.ddx/executions/20260714T144305-f5e28d3f/stale-writer-adversarial-review.md`
-- `.ddx/executions/20260714T143408-95684322/objectlog-head-cas-adversarial-review.md`
-- `.ddx/executions/20260714T145453-786a035a/objectlog-s3-minio-adversarial-review-packet.md`
-- `.ddx/executions/20260714T184540-9153544a/review-gate.md`
+**BLOCK** — A direct read-only Codex gpt-5.4 adversarial review completed on 2026-07-14 returned verdict BLOCK with two blocking findings. Stale sibling bead reviews do not substitute for a fresh review of the deleted-manifest recovery protocol. Prior reviews (stale-writer interleavings, head CAS linearizability, S3/MinIO semantics) reviewed different protocol surfaces and their non-blocking status does not cover the deleted-manifest recovery changes.
 
-All reviewed gates returned no blocking findings for the deleted-manifest recovery protocol. The Codex adversarial review gate for this release scope is satisfied by these prior reviews. No new review is required because:
-1. The deleted-manifest recovery changes are a narrow fail-closed/detection behavior on top of the already-reviewed head CAS and watermark protocol.
-2. Every blocking finding from prior reviews was fixed or mapped to follow-up beads before those beads closed.
+The two BLOCKING findings from the direct Codex gpt-5.4 review:
+
+**Finding 1 — physical deleted-prefix/head behavior not proven by deleting projection.sqlite only.** The engine test deletes the local SQLite projection files, not the blob-store manifest/head prefix; the fail-closed signal comes from projection-image high-water behind the durable floor, not from a blob-level manifest deletion. The code path that detects and signals deleted manifest prefixes at the blob storage layer is unproven.
+
+**Finding 2 — live source-pin replay across reopen unproved.** No test creates a branch, retains its source pin, kills the backend, reopens, and verifies the pin is still recognized. The `ComposedBackend::recover` source-pin replay path is untested.
+
+Both findings are tracked by `pqueue-879c9d05`, `pqueue-d7134740`, and `pqueue-44a5d2ca` (per `.ddx/executions/20260714T215347-b2d013a9/release-c33c367e-evaluation.md:26-29`). These blocking findings must be resolved before the deleted-manifest recovery release gate can be called PASS.
 
 ---
 
@@ -95,14 +95,15 @@ All gate evidence is recorded above. Summary:
 | cargo clippy --workspace --all-targets -D warnings | PASS |
 | go test ./... | NOT-APPLICABLE (no Go module) |
 | lefthook run pre-commit | OPERATOR-REQUIRED (no lefthook config) |
-| scripts/ci/pr-gate.sh --mode enforcing | PASS (green within timeout) |
-| Codex adversarial review | SATISFIED (prior sibling bead reviews) |
+| scripts/ci/pr-gate.sh --mode enforcing | INCOMPLETE (coverage phase timed out; not PASS) |
+| Codex adversarial review | BLOCK (2 blocking findings, tracked by pqueue-879c9d05, pqueue-d7134740, pqueue-44a5d2ca) |
 | conformance verification | PASS (31 tests) |
 
 ### Operator-Required Actions
 
 1. **lefthook gate**: No lefthook config file exists at the workspace root. Operator must either create `lefthook.yml` or explicitly waive this gate for the deleted-manifest recovery release.
-2. **Codex adversarial review**: If operator requires a fresh Codex review specifically for deleted-manifest recovery (rather than relying on prior sibling bead reviews), run `codex` with the adversarial review prompt packet at `.ddx/executions/20260714T145453-786a035a/objectlog-s3-minio-adversarial-review-packet.md`.
+2. **Codex blocking findings**: The direct Codex gpt-5.4 review returned BLOCK with two blocking findings tracked by `pqueue-879c9d05`, `pqueue-d7134740`, and `pqueue-44a5d2ca`. These must be resolved (fixing dependencies and final release evidence) before the deleted-manifest recovery gate can be called PASS. Preserve the blocking findings until their fixing dependencies dispose them.
+3. **PR gate incomplete**: `scripts/ci/pr-gate.sh --mode enforcing` did not complete — the coverage phase timed out with unknown exit. A full successful run must complete before the enforcing gate is PASS.
 
 ### pqueue-c33c367e Conclusion (from release notes)
 

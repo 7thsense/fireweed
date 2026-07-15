@@ -386,3 +386,250 @@ fn TestDeletedManifestEvidenceSurfaces() {
         "Codex adversarial review surface must be covered in evidence"
     );
 }
+
+/// TestDeletedManifestEvidenceCodexAccuracy: both reports record that direct Codex
+/// gpt-5.4 review completed and returned BLOCK with the two actual findings;
+/// reject claims that Codex hung, an unobserved sub-agent found zero blockers, or
+/// stale sibling reviews satisfy the fresh review.
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletedManifestEvidenceCodexAccuracy() {
+    let evidence = include_str!(
+        "../../../.ddx/executions/20260714T234920-be4f9d8d/deleted-manifest-recovery-evidence.md"
+    );
+    let gate_evidence = include_str!(
+        "../../../.ddx/executions/20260714T235844-72ceadbe/deleted-manifest-recovery-gate-evidence.md"
+    );
+
+    // Both reports must record direct Codex gpt-5.4 review completed
+    assert!(
+        evidence.contains("Codex gpt-5.4"),
+        "evidence must record direct Codex gpt-5.4 review"
+    );
+    assert!(
+        gate_evidence.contains("Codex gpt-5.4"),
+        "gate evidence must record direct Codex gpt-5.4 review"
+    );
+
+    // Both reports must record BLOCK verdict
+    assert!(
+        evidence.contains("BLOCK"),
+        "evidence must record Codex BLOCK verdict"
+    );
+    assert!(
+        gate_evidence.contains("BLOCK"),
+        "gate evidence must record Codex BLOCK verdict"
+    );
+
+    // Both reports must document both blocking findings
+    // Finding 1: physical deleted-prefix/head behavior not proven (projection.sqlite only)
+    assert!(
+        evidence.contains("projection.sqlite") && evidence.contains("manifest"),
+        "evidence must document physical deleted-prefix finding (projection.sqlite not blob manifest)"
+    );
+    assert!(
+        gate_evidence.contains("projection.sqlite") && gate_evidence.contains("manifest"),
+        "gate evidence must document physical deleted-prefix finding"
+    );
+
+    // Finding 2: live source-pin replay across reopen unproved
+    assert!(
+        evidence.contains("source-pin") && evidence.contains("reopen"),
+        "evidence must document live source-pin replay across reopen finding"
+    );
+    assert!(
+        gate_evidence.contains("source-pin") && gate_evidence.contains("reopen"),
+        "gate evidence must document live source-pin replay across reopen finding"
+    );
+
+    // Both reports must reject the false claim that Codex hung
+    assert!(
+        !evidence.contains("hangs non-interactively"),
+        "evidence must not claim Codex hung"
+    );
+    assert!(
+        !evidence.contains("hangs"),
+        "evidence must not contain 'hangs' in Codex context"
+    );
+
+    // Both reports must reject the false claim that an unobserved sub-agent found zero blockers
+    assert!(
+        !evidence.contains("No BLOCKING findings"),
+        "evidence must not claim an unobserved sub-agent found no blockers"
+    );
+
+    // Report 2 must reject stale sibling reviews
+    assert!(
+        !gate_evidence.contains("SATISFIED (prior sibling bead reviews)"),
+        "gate evidence must not claim Codex review satisfied by sibling beads"
+    );
+    assert!(
+        !gate_evidence.contains("COMPLETED (by sibling beads)"),
+        "gate evidence must not claim Codex completed by sibling beads"
+    );
+    assert!(
+        !gate_evidence.contains("All reviewed gates returned no blocking findings"),
+        "gate evidence must not claim all reviews returned no blocking findings"
+    );
+
+    // Both reports must reference the tracking beads for the blocking findings
+    assert!(
+        evidence.contains("pqueue-879c9d05"),
+        "evidence must track blocking finding via pqueue-879c9d05"
+    );
+    assert!(
+        evidence.contains("pqueue-d7134740"),
+        "evidence must track blocking finding via pqueue-d7134740"
+    );
+    assert!(
+        gate_evidence.contains("pqueue-879c9d05"),
+        "gate evidence must track blocking finding via pqueue-879c9d05"
+    );
+    assert!(
+        gate_evidence.contains("pqueue-d7134740"),
+        "gate evidence must track blocking finding via pqueue-d7134740"
+    );
+}
+
+/// TestDeletedManifestEvidencePrGateAccuracy: both reports acknowledge
+/// scripts/ci/pr-gate.sh exists and record the actual enforcing-gate exit result;
+/// a timeout or incomplete coverage phase is not PASS.
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletedManifestEvidencePrGateAccuracy() {
+    let evidence = include_str!(
+        "../../../.ddx/executions/20260714T234920-be4f9d8d/deleted-manifest-recovery-evidence.md"
+    );
+    let gate_evidence = include_str!(
+        "../../../.ddx/executions/20260714T235844-72ceadbe/deleted-manifest-recovery-gate-evidence.md"
+    );
+
+    // Both reports must acknowledge scripts/ci/pr-gate.sh exists
+    assert!(
+        evidence.contains("scripts/ci/pr-gate.sh"),
+        "evidence must reference scripts/ci/pr-gate.sh"
+    );
+    assert!(
+        gate_evidence.contains("scripts/ci/pr-gate.sh"),
+        "gate evidence must reference scripts/ci/pr-gate.sh"
+    );
+
+    // Report 1: must not claim PR gate was "Not run" without acknowledging the script exists
+    assert!(
+        evidence.contains("exists"),
+        "evidence must acknowledge pr-gate.sh exists"
+    );
+
+    // Report 2: must not claim PASS when coverage phase was incomplete
+    assert!(
+        !gate_evidence.contains("PASS (within timeout"),
+        "gate evidence must not claim PASS for incomplete coverage"
+    );
+    assert!(
+        gate_evidence.contains("INCOMPLETE"),
+        "gate evidence must record the actual INCOMPLETE result"
+    );
+    assert!(
+        gate_evidence.contains("timeout"),
+        "gate evidence must document the timeout reason"
+    );
+    assert!(
+        gate_evidence.contains("not PASS"),
+        "gate evidence must explicitly state the result is not PASS"
+    );
+}
+
+/// TestDeletedManifestEvidenceNoFalseGreen: focused assertions that reject the
+/// superseded false phrases in both reports and require the blocking findings.
+#[test]
+#[allow(non_snake_case)]
+fn TestDeletedManifestEvidenceNoFalseGreen() {
+    let evidence = include_str!(
+        "../../../.ddx/executions/20260714T234920-be4f9d8d/deleted-manifest-recovery-evidence.md"
+    );
+    let gate_evidence = include_str!(
+        "../../../.ddx/executions/20260714T235844-72ceadbe/deleted-manifest-recovery-gate-evidence.md"
+    );
+
+    // === Report 1 (evidence): reject false Codex claims ===
+    // Must NOT say Codex hangs
+    assert!(
+        !evidence.contains("hangs"),
+        "report 1 must not claim Codex hangs"
+    );
+    // Must NOT say sub-agent found no blockers
+    let sub_agent_claims = [
+        "independent adversarial-review sub-agent",
+        "No BLOCKING findings",
+        "sub-agent dispatched",
+    ];
+    for phrase in &sub_agent_claims {
+        assert!(
+            !evidence.contains(phrase),
+            "report 1 must not contain '{}' (sub-agent claim)",
+            phrase
+        );
+    }
+    // Must NOT say PR gate not run (should acknowledge existence)
+    assert!(
+        !evidence.contains("Not run in this worktree"),
+        "report 1 must not say PR gate was 'Not run in this worktree'"
+    );
+
+    // === Report 2 (gate evidence): reject false green claims ===
+    // Must NOT say pr-gate PASS
+    let false_green_pr = ["PASS (within timeout", "PASS (green within timeout"];
+    for phrase in &false_green_pr {
+        assert!(
+            !gate_evidence.contains(phrase),
+            "report 2 must not contain '{}' (false pr-gate pass)",
+            phrase
+        );
+    }
+    // Must NOT say Codex SATISFIED by sibling beads
+    let false_codex = [
+        "SATISFIED (prior sibling bead reviews)",
+        "COMPLETED (by sibling beads)",
+        "All reviewed gates returned no blocking findings",
+        "Codex adversarial review gate for this release scope is satisfied by these prior reviews",
+    ];
+    for phrase in &false_codex {
+        assert!(
+            !gate_evidence.contains(phrase),
+            "report 2 must not contain '{}' (false codex satisfaction)",
+            phrase
+        );
+    }
+
+    // === Both reports: require the blocking findings ===
+    for (name, content) in [("evidence", evidence), ("gate evidence", gate_evidence)] {
+        // Must have BLOCK verdict
+        assert!(
+            content.contains("BLOCK"),
+            "{name} must contain BLOCK verdict"
+        );
+        // Both findings must be documented
+        assert!(
+            content.contains("projection.sqlite"),
+            "{name} must document projection.sqlite finding"
+        );
+        assert!(
+            content.contains("source-pin"),
+            "{name} must document source-pin finding"
+        );
+        // Tracking beads
+        assert!(
+            content.contains("pqueue-879c9d05"),
+            "{name} must reference pqueue-879c9d05"
+        );
+        assert!(
+            content.contains("pqueue-d7134740"),
+            "{name} must reference pqueue-d7134740"
+        );
+        // Reference to the evaluation record
+        assert!(
+            content.contains("20260714T215347-b2d013a9"),
+            "{name} must reference the evaluation record"
+        );
+    }
+}

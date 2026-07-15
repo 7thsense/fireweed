@@ -107,8 +107,8 @@ Per-surface confirmation:
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean, 0 warnings |
 | `go test ./...` | Not applicable — no `go.mod` or Go packages found |
 | `lefthook run pre-commit` | Not configured — no lefthook config found; operator-required gate failure (config absent) |
-| PR gate (enforcing mode) | Not run in this worktree — the `scripts/ci/pr-gate.sh` script is available but this evidence document is created from the execution worktree which does not have the full CI pipeline; operator-required gate |
-| Codex adversarial review | `codex exec` hangs non-interactively (consistent with every prior bead); operator-required gate. Independent adversarial-review sub-agent dispatched — see results below. |
+| PR gate (enforcing mode) | Command `scripts/ci/pr-gate.sh --mode enforcing` exists but was not run in this worktree (the evidence worktree does not have the full CI pipeline); operator-required gate — see report 2 for observed evidence |
+| Codex adversarial review | Direct Codex gpt-5.4 review completed on 2026-07-14 and returned **BLOCK** with two blocking findings. See details below. |
 
 ## Gate results
 
@@ -199,18 +199,15 @@ Not configured — `No config files with names ["lefthook" ".lefthook" ".config/
 
 ### Codex adversarial review
 
-`codex exec` (codex-cli) hangs non-interactively in this worktree, consistent with every prior bead in this queue (e.g. `.ddx/executions/20260714T184540-9153544a/review-gate.md`). **Classification: operator_required.**
+A direct read-only Codex gpt-5.4 adversarial review was completed on 2026-07-14 with verdict **BLOCK**. The review identified two blocking findings, preserved here until fixing dependencies dispose them:
 
-An independent adversarial-review sub-agent (no conversation context, acting as a critic) was dispatched to review the deleted-manifest recovery code paths across objectlog, SQLite, and engine. The agent reviewed:
-- `fail_closed_below_floor` in `crates/pqueue-objectlog/src/segmented.rs`
-- `deleted_manifest_prefix_error` / `is_deleted_manifest_prefix_error` signal
-- `ComposedBackend` guard in `crates/pqueue-engine/src/compose.rs`
-- Objectlog-level deleted-manifest recovery tests
-- SQLite-level deleted-manifest recovery and floor/head replay tests
-- Engine-level deleted-manifest recovery conformance tests
-- All `pqueue-c33c367e` interaction recording tests
+**Finding 1 — physical deleted-prefix/head behavior not proven by deleting projection.sqlite only**
+The engine test (`TestEngineObjectlogDeletedManifestRecovery`) proves fail-closed recovery after deleting the local SQLite projection files (`projection.sqlite`, `-wal`, `-shm`), but that is a projection-only deletion — not a physical manifest/head prefix deletion on the blob store. The test does not exercise the actual deleted-manifest-prefix path where blob-store objects under `manifest/` and `manifest_head/` are removed. The fail-closed signal (`read below retention floor`) was produced by a projection-image high-water behind the durable floor, not by a blob-level manifest deletion event. So the code path that detects and signals deleted manifest prefixes at the blob storage layer is not proven by this test.
 
-**No BLOCKING findings.** All tests pass, all `pqueue-c33c367e` evaluations are recorded, all governing artifacts are named, and fail-closed behavior is verified across objectlog, SQLite, and engine surfaces.
+**Finding 2 — live source-pin replay across reopen unproved**
+The SQLite/engine tests never reopen with a live source pin present. The test `TestEngineObjectlogFloorHeadReplayRecovery` opens a pristine new backend, trims it, drops it, reopens, and reads — but there is no source pin in play during reopen because no concurrent branch is holding one. The `ComposedBackend::recover` path that replays source-pin state from the object-log into the projection on reopen is therefore untested. A source pin that was live at crash time could be lost across reopen, silently dropping the pin's segment-retention guarantee. No test creates a branch, retains its pin, crashes the backend, reopens, and asserts the pin is still recognized.
+
+Both findings are tracked as follow-up dependencies (`pqueue-879c9d05`, `pqueue-d7134740`, `pqueue-44a5d2ca`) per the record at `.ddx/executions/20260714T215347-b2d013a9/release-c33c367e-evaluation.md:26-29`.
 
 ## Related release notes
 
