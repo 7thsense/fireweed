@@ -103,6 +103,7 @@ pub fn open_hybrid(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBack
 /// - `SegmentConfig(1, 1)` — one command per segment
 /// - Strict projection ordering (SQLite-first, no async-apply debt monitor)
 /// - Recovery runs on open (panics on error).
+#[allow(dead_code)]
 pub fn open_hybrid_strict(root: &Path) -> HybridBackend {
     std::fs::create_dir_all(root).ok();
     let sqlite = root.join("projection.sqlite");
@@ -121,6 +122,7 @@ pub fn open_hybrid_strict(root: &Path) -> HybridBackend {
 /// stamped from the batch's `max(created_at)`, not from group-commit's deferred flush.
 ///
 /// Recovery runs on open (panics on error).
+#[allow(dead_code)]
 pub fn open_hybrid_raw(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend {
     std::fs::create_dir_all(root).ok();
     let sqlite = root.join("projection.sqlite");
@@ -140,6 +142,7 @@ pub fn open_hybrid_raw(root: &Path, thresholds: HybridAsyncThresholds) -> Hybrid
 
 /// The two projection substrate modes exercised by conformance tests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ProjectionMode {
     /// Hybrid-async: SQLite deferred apply with async-apply debt monitor.
     HybridAsync,
@@ -148,6 +151,7 @@ pub enum ProjectionMode {
 }
 
 /// Open a backend by projection mode, using [`clear_thresholds`] for the async variant.
+#[allow(dead_code)]
 pub fn open_mode(root: &Path, mode: ProjectionMode) -> HybridBackend {
     match mode {
         ProjectionMode::HybridAsync => open_hybrid(root, clear_thresholds()),
@@ -170,6 +174,7 @@ pub async fn push(backend: &HybridBackend, key: &str, at_s: i64) -> Vec<pqueue_c
 
 /// Push under `rid` with a default [`PushSpec`] at `at_s`. Returns the `EngineResult` so
 /// consumers can decide whether to unwrap or assert expected errors.
+#[allow(dead_code)]
 pub async fn push_rid(
     backend: &HybridBackend,
     rid: &str,
@@ -206,6 +211,7 @@ pub fn drain(backend: &HybridBackend) {
 /// The SQLite checkpoint high-water sequence — the highest command sequence that has been
 /// durably checkpointed into the SQLite projection image. Returns `None` when no checkpoint
 /// has ever been written.
+#[allow(dead_code)]
 pub fn checkpoint_seq(backend: &HybridBackend) -> Option<u64> {
     backend
         .with_projection(|p| ProjectionStore::recovery_high_water(p, &shard()))
@@ -231,17 +237,20 @@ pub fn floor_pos(backend: &HybridBackend) -> Option<CommandPosition> {
 }
 
 /// Count of segment delete operations the log store has performed.
+#[allow(dead_code)]
 pub fn delete_count(backend: &HybridBackend) -> u64 {
     backend.with_log(|l| l.counters().delete_count)
 }
 
 /// Count of segment objects the log store currently tracks.
+#[allow(dead_code)]
 pub fn object_count(backend: &HybridBackend) -> u64 {
     backend.with_log(|l| l.counters().object_count)
 }
 
 /// Count the `.seg` files physically present under `root` (recursive walk). Used as durable
 /// evidence that below-floor segment objects were (or were not) actually reclaimed.
+#[allow(dead_code)]
 pub fn count_seg_files(root: &Path) -> usize {
     let mut n = 0;
     let Ok(rd) = std::fs::read_dir(root) else {
@@ -259,6 +268,7 @@ pub fn count_seg_files(root: &Path) -> usize {
 }
 
 /// Check whether a file with exactly `name` exists anywhere under `root` (recursive walk).
+#[allow(dead_code)]
 pub fn walk_has_file(root: &Path, name: &str) -> bool {
     let Ok(rd) = std::fs::read_dir(root) else {
         return false;
@@ -277,6 +287,7 @@ pub fn walk_has_file(root: &Path, name: &str) -> bool {
 }
 
 /// Return the current `pending` count from `QueueMetrics`.
+#[allow(dead_code)]
 pub async fn pending(backend: &HybridBackend) -> u64 {
     backend.metrics(&shard()).await.expect("metrics").pending
 }
