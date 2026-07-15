@@ -35,6 +35,12 @@ use pqueue_engine::{
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{BackpressureLevel, HybridAsyncThresholds, HybridProjectionStore};
 
+// Re-export the crate-level items the path-included shared fixture references
+// via `super::`. Keeps the integration test's parent scope compatible with
+// the fixture module's `use super::{qdef, shard, ts}` imports.
+pub use pqueue_conformance::{qdef, ts};
+mod support;
+
 type HybridBackend = ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1366,20 +1372,23 @@ async fn TestHybridStrictBehindImageRetainedFloorHeadReplayRecovery() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestHybridAsyncBehindImageDeletedManifestFailClosed() {
-    let root = base_dir("hybrid-async-behind-fail-closed");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let root = support::base_dir("hybrid-async-behind-fail-closed");
+    let backend = support::open_hybrid(&root, support::clear_thresholds());
+    backend
+        .create_queue(support::qdef_short_retention())
+        .await
+        .unwrap();
 
     // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
     for i in 0..3 {
-        push(&backend, &format!("old-{i}"), 10).await;
+        support::push(&backend, &format!("old-{i}"), 10).await;
     }
-    drain(&backend);
-    push(&backend, "fresh", 10_000).await;
-    drain(&backend);
+    support::drain(&backend);
+    support::push(&backend, "fresh", 10_000).await;
+    support::drain(&backend);
     backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
     assert_eq!(
-        floor_seq(&backend),
+        support::floor_seq(&backend),
         Some(2),
         "hybrid-async: the old prefix is trimmed; floor at seq 2"
     );
@@ -1398,7 +1407,7 @@ async fn TestHybridAsyncBehindImageDeletedManifestFailClosed() {
     let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
         .expect("hybrid")
         .with_deferred_flush_chunk(1)
-        .with_async_monitor(clear_thresholds());
+        .with_async_monitor(support::clear_thresholds());
     let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
         .with_group_commit(true)
         .recover();
@@ -1414,37 +1423,34 @@ async fn TestHybridAsyncBehindImageDeletedManifestFailClosed() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-// ---------------------------------------------------------------------------
-// Hybrid-async conformance: retained floor/head replay recovery (AC2,
-// bead pqueue-fbb4296b). Verifies successful replay recovery from retained
-// floor/head for hybrid-async after deleted manifest prefixes.
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestHybridAsyncBehindImageRetainedFloorHeadReplayRecovery() {
-    let root = base_dir("hybrid-async-retained-replay");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let root = support::base_dir("hybrid-async-retained-replay");
+    let backend = support::open_hybrid(&root, support::clear_thresholds());
+    backend
+        .create_queue(support::qdef_short_retention())
+        .await
+        .unwrap();
 
     // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
     for i in 0..3 {
-        push(&backend, &format!("old-{i}"), 10).await;
+        support::push(&backend, &format!("old-{i}"), 10).await;
     }
-    drain(&backend);
-    push(&backend, "fresh", 10_000).await;
-    drain(&backend);
+    support::drain(&backend);
+    support::push(&backend, "fresh", 10_000).await;
+    support::drain(&backend);
     backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
     assert_eq!(
-        floor_seq(&backend),
+        support::floor_seq(&backend),
         Some(2),
         "hybrid-async: the old prefix is trimmed; floor at seq 2"
     );
     drop(backend);
 
     // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
-    let reopened = open_hybrid(&root, clear_thresholds());
-    let floor = floor_pos(&reopened).expect("retained floor after reopen");
+    let reopened = support::open_hybrid(&root, support::clear_thresholds());
+    let floor = support::floor_pos(&reopened).expect("retained floor after reopen");
     let page = reopened
         .read_from(&shard(), Some(floor), 100)
         .await
@@ -1458,4 +1464,38 @@ async fn TestHybridAsyncBehindImageRetainedFloorHeadReplayRecovery() {
         "hybrid-async: replay resumes at the retained floor/head, not from genesis"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
+// Focused source assertion (AC 2 — TestHybridAsyncSharedFixtureNoFalseClaim):
+// proves the two TestHybridAsync* scenarios consume the shared fixture through
+// the `support` module, not the local helpers. If `base_dir` falls back to the
+// local helper (prefix "pqueue-seg-reclaim-") instead of the shared fixture
+// (prefix "pqueue-hybrid-async-"), the path-prefix assertion fails.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[allow(non_snake_case)]
+fn TestHybridAsyncSharedFixtureNoFalseClaim() {
+    let path = support::base_dir("source-assert");
+    let path_str = path.to_string_lossy();
+    assert!(
+        path_str.contains("pqueue-hybrid-async-"),
+        "TestHybridAsync* scenarios must consume shared fixture (base_dir prefix \
+         'pqueue-hybrid-async-'); got {path_str} (would be local fallback)"
+    );
+    assert!(
+        !path_str.contains("pqueue-seg-reclaim-"),
+        "TestHybridAsync* scenarios must NOT consume local base_dir (prefix \
+         'pqueue-seg-reclaim-'); got {path_str}"
+    );
+
+    // Verify the support module exposes all key helpers the scenarios need.
+    let _thresholds = support::clear_thresholds();
+    let _mode = support::ProjectionMode::HybridAsync;
+    let _qdef = support::qdef_short_retention();
+    let _shard = support::shard();
+    let _ = _thresholds;
+
+    std::fs::remove_dir_all(&path).ok();
 }

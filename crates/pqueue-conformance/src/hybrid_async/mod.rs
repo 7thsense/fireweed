@@ -1,10 +1,10 @@
-//! Shared hybrid-async test fixtures for behind-image fail-closed and recovery conformance tests
-//! (bead pqueue-a2957adb).
-//!
-//! Provides reusable backend construction, state inspection helpers, and scenario primitives
-//! that both fail-closed and recovery conformance test authors consume. This module contains
-//! **no assertion logic** — only the builder/inspection layer that test authors compose with
-//! their own assertions.
+// Shared hybrid-async test fixtures for behind-image fail-closed and recovery conformance tests
+// (bead pqueue-a2957adb).
+//
+// Provides reusable backend construction, state inspection helpers, and scenario primitives
+// that both fail-closed and recovery conformance test authors consume. This module contains
+// **no assertion logic** — only the builder/inspection layer that test authors compose with
+// their own assertions.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,7 +17,7 @@ use pqueue_engine::{
 use pqueue_objectlog::{ObjectLog, SegmentConfig};
 use pqueue_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
 
-use crate::{qdef, shard as crate_shard, ts};
+use super::{qdef, shard as crate_shard, ts};
 
 // ---------------------------------------------------------------------------
 // Type alias
