@@ -1,5 +1,28 @@
 # Deleted-Manifest Recovery Release Gates — Evidence Report
 
+## Supersession / correction (2026-07-15)
+
+This report is preserved as historical evidence from failed bead attempt `pqueue-0269a773`, but it is **not**
+current release authority. The authoritative corrected evidence for release closure now lives in
+`.ddx/executions/20260715T043214-936c36b0/release-evidence-correction.md` with the matching enforcing gate log at
+`.ddx/executions/20260715T043214-936c36b0/pr-gate-enforcing.log`.
+
+Corrections to this historical report:
+
+- The claim that `pqueue-8928baec` had already evaluated ownership work from `pqueue-7bac12ce` and
+  `pqueue-b29435b2` was too strong. `pqueue-8928baec` closed earlier; the ownership interaction was
+  reevaluated only after `pqueue-7bac12ce` landed on 2026-07-14 22:51 EDT and `pqueue-b29435b2` landed on
+  2026-07-14 23:07 EDT.
+- The deleted-manifest behavior must be split into two claims. Projection-image-behind tests prove fail-closed
+  behavior when a recovered image is behind the durable floor and deleted prefix. The physical deletion test at
+  `crates/pqueue-objectlog/tests/segmented_s3_substrate_tests.rs` proves that deleting both `manifest/` and
+  `manifest_head/` reopens conservatively with surviving read-horizon state and `retention_floor=None`; it does
+  not prove fail-closed reopen for that physical deletion case.
+- Any gate status in this report predates the final corrected-state rerun and must not be cited for release
+  closure. Use the persisted 2026-07-15 bundle instead.
+- Historical Codex findings remain part of the record, but no independent no-blocker verdict should be inferred
+  from this report.
+
 Bead: `pqueue-819b38ed`
 Parent: `pqueue-9b89f4a0`
 Bundle: `.ddx/executions/20260714T235844-72ceadbe`
