@@ -36,6 +36,12 @@ CARGO="rustup run 1.92.0 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+if (($# > 0)); then
+    printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
+    echo "usage: bash scripts/ci/release-gate.sh" >&2
+    exit 64
+fi
+
 echo "=== pqueue release gate (SMOKE lane) ==="
 echo "    RELEASE-tier E0-E3 headline is DEFERRED to live runs (NOT proven here):"
 echo "      E0/E1 perf-env throughput+latency -> pqueue-d3371502"
