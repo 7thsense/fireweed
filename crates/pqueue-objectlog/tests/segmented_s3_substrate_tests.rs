@@ -30,7 +30,7 @@ use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
 use pqueue_objectlog::segmented::{
     BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
-    S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    PartialExpireVisibility, S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -5352,14 +5352,311 @@ fn TestPartialExpireVisibilityUsesDurableManifestDeletionWatermark() {
     partial_expire_does_not_hide_undeleted_below_floor_segments();
 }
 
-/// TestPartialExpireVisibilityDecisionHidesOnlyReclaimedPrefix: expiry-side manifest enumeration skips
-/// only the prefix that was durably reclaimed, while the first undeleted below-floor entry stays visible
-/// to later manifest enumeration.
+/// TestPartialExpireVisibilityDecisionHidesOnlyReclaimedPrefix: construct a helper-level fixture
+/// with a durable retention floor above multiple segment entries, durable manifest deletion watermark
+/// covering the earliest below-floor entries, and an active partial reclaimed-through boundary that
+/// has advanced farther than the durable deletion watermark. Assert the helper hides only entries at
+/// or below the durable manifest deletion watermark when they are proven reclaimed.
 #[test]
 #[allow(non_snake_case)]
 fn TestPartialExpireVisibilityDecisionHidesOnlyReclaimedPrefix() {
-    let (store, cfg, source, seg_keys) = lagging_partial_expire_fixture();
-    assert_partial_expire_visibility_decision_fixture(&store, cfg, &source, &seg_keys);
+    // Use the standard lagging-partial-expire fixture: floor at seq 15, first 2 segments deleted,
+    // durable watermark at index 1 (proof that entries 0,1 are durably reclaimed).
+    let (_store, _cfg, _source, _seg_keys) = lagging_partial_expire_fixture();
+
+    // With reclaimed_through=7 (advanced past watermark=1):
+    // Entry 0: reclaimed (visible_last_seq=1 <= 7), index 0 <= watermark 1 → HiddenAsReclaimed
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            0,
+            0,
+            1,
+            false,
+            None,
+            None,
+            Some(1),
+            7,
+            Some(15),
+        ),
+        PartialExpireVisibility::HiddenAsReclaimed,
+        "entry at reclaimed index 0 at/below watermark must be HiddenAsReclaimed"
+    );
+
+    // Entry 1: reclaimed (visible_last_seq=3 <= 7), index 1 <= watermark 1 → HiddenAsReclaimed
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            1,
+            2,
+            3,
+            false,
+            None,
+            None,
+            Some(1),
+            7,
+            Some(15),
+        ),
+        PartialExpireVisibility::HiddenAsReclaimed,
+        "entry at reclaimed index 1 at/below watermark must be HiddenAsReclaimed"
+    );
+
+    // Entry 2: reclaimed (visible_last_seq=5 <= 7), index 2 > watermark 1 → StopHiddenPrefix
+    // (NOT HiddenAsReclaimed because the watermark has not advanced far enough).
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            2,
+            4,
+            5,
+            false,
+            None,
+            None,
+            Some(1),
+            7,
+            Some(15),
+        ),
+        PartialExpireVisibility::StopHiddenPrefix,
+        "reclaimed entry above watermark must be StopHiddenPrefix, not HiddenAsReclaimed"
+    );
+
+    // Entry 3: reclaimed (visible_last_seq=7 <= 7), index 3 > watermark 1 → StopHiddenPrefix.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            3,
+            6,
+            7,
+            false,
+            None,
+            None,
+            Some(1),
+            7,
+            Some(15),
+        ),
+        PartialExpireVisibility::StopHiddenPrefix,
+        "entry at index 3 above watermark must be StopHiddenPrefix"
+    );
+
+    // With reclaimed_through=3 (not past watermark):
+    // Entry 2: NOT reclaimed (5 > 3), below floor → StopHiddenPrefix.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            2,
+            4,
+            5,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::StopHiddenPrefix,
+        "non-reclaimed below-floor entry above watermark must be StopHiddenPrefix"
+    );
+
+    // Authoritative floor entry → Visible (not affected by partial-expire logic).
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            3,
+            0,
+            0,
+            false,
+            Some(15),
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::Visible,
+        "authoritative floor entry must be Visible"
+    );
+
+    // No floor → all entries Visible.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            0,
+            0,
+            1,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            None,
+        ),
+        PartialExpireVisibility::Visible,
+        "every entry must be Visible when there is no durable floor"
+    );
+
+    // Compacted marker → HiddenAsReclaimed.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            0,
+            0,
+            0,
+            false,
+            None,
+            Some(0),
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::HiddenAsReclaimed,
+        "reclaimed manifest marker must be HiddenAsReclaimed"
+    );
+}
+
+/// TestPartialExpireVisibilityDecisionHidesOnlyReclaimedPrefixStopsAtFirstUndeletedBelowFloorEntry:
+/// using the same fixture shape, assert the first not-yet-deleted below-floor data entry returns the
+/// helper's stop-hidden-prefix decision and prevents subsequent entries from being considered part of
+/// the hidden prefix.
+#[test]
+#[allow(non_snake_case)]
+fn TestPartialExpireVisibilityDecisionHidesOnlyReclaimedPrefixStopsAtFirstUndeletedBelowFloorEntry()
+{
+    // Same fixture shape: floor at seq 15, watermark at index 1 (entries 0,1 durably reclaimed),
+    // entries 2+ still present (undeleted below-floor).
+    let (_store, _cfg, _source, _seg_keys) = lagging_partial_expire_fixture();
+
+    // With reclaimed_through=3 (the reclaim pass covers only entries 0,1):
+    //
+    // Entry 0: reclaimed, index 0 <= W → HiddenAsReclaimed (part of hidden prefix).
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            0,
+            0,
+            1,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::HiddenAsReclaimed,
+        "entry 0 in hidden prefix"
+    );
+
+    // Entry 1: reclaimed, index 1 <= W → HiddenAsReclaimed (part of hidden prefix).
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            1,
+            2,
+            3,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::HiddenAsReclaimed,
+        "entry 1 in hidden prefix"
+    );
+
+    // Entry 2: below-floor, NOT reclaimed (visible_last_seq=5 > reclaimed_through=3)
+    // → StopHiddenPrefix (first undeleted below-floor entry — stops the hidden prefix).
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            2,
+            4,
+            5,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::StopHiddenPrefix,
+        "entry 2 (first undeleted below-floor) must be StopHiddenPrefix"
+    );
+
+    // Subsequent below-floor entries that are also not reclaimed must remain StopHiddenPrefix
+    // — the hidden prefix cannot skip past them either.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            3,
+            6,
+            7,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::StopHiddenPrefix,
+        "entry 3 must also be StopHiddenPrefix (undeleted below-floor)"
+    );
+
+    // Even if the caller advances reclaimed_through past a later entry's visible_last_seq,
+    // if the entry is above the watermark it is StopHiddenPrefix, NOT HiddenAsReclaimed.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            3,
+            6,
+            7,
+            false,
+            None,
+            None,
+            Some(1),
+            7,
+            Some(15),
+        ),
+        PartialExpireVisibility::StopHiddenPrefix,
+        "entry 3 reclaimed but above watermark must be StopHiddenPrefix"
+    );
+
+    // Entry at index 4: below floor (first_seq=8), NOT reclaimed (visible_last_seq=9 > reclaimed_through=3)
+    // → StopHiddenPrefix. The hidden prefix from entry 0,1 stops at entry 2, so entry 4 cannot be
+    // part of any hidden prefix either.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            4,
+            8,
+            9,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::StopHiddenPrefix,
+        "entry 4 must be StopHiddenPrefix (undeleted below-floor after the first stop)"
+    );
+
+    // Re-verify that entries 0 and 1 are still HiddenAsReclaimed — the first stop does not
+    // retroactively change earlier decisions.
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            0,
+            0,
+            1,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::HiddenAsReclaimed,
+        "entry 0 remains HiddenAsReclaimed regardless of later stop"
+    );
+    assert_eq!(
+        SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
+            1,
+            2,
+            3,
+            false,
+            None,
+            None,
+            Some(1),
+            3,
+            Some(15),
+        ),
+        PartialExpireVisibility::HiddenAsReclaimed,
+        "entry 1 remains HiddenAsReclaimed regardless of later stop"
+    );
 }
 
 /// TestPartialExpireVisibilityDecisionExpiryStopsAtUndeletedBelowFloor: the first not-yet-deleted
@@ -5428,8 +5725,9 @@ fn helper_level_partial_expire_visibility_decision_keeps_undeleted() {
     assert_eq!(durable_watermark, Some(1), "watermark at index 1");
 
     // Entry at index 2: below-floor data entry with visible_last_seq=5.
-    // With reclaimed_through=3 (< visible_last_seq=5): data check says NOT reclaimed → visible.
-    assert!(
+    // With reclaimed_through=3 (< visible_last_seq=5): data check says NOT reclaimed
+    // → StopHiddenPrefix (first undeleted below-floor entry).
+    assert_eq!(
         SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
             2,     // entry_index
             4,     // first_seq
@@ -5441,13 +5739,14 @@ fn helper_level_partial_expire_visibility_decision_keeps_undeleted() {
             3, // reclaimed_through (below visible_last_seq)
             floor_seq,
         ),
-        "below-floor undeleted data entry at index 2 must be visible when reclaimed_through \
+        PartialExpireVisibility::StopHiddenPrefix,
+        "below-floor undeleted data entry at index 2 must be StopHiddenPrefix when reclaimed_through \
          is below its visible_last_seq"
     );
 
     // Same entry with reclaimed_through=7 (> visible_last_seq=5): data check says reclaimed
-    // BUT index 2 > watermark 1 → still visible due to watermark defense.
-    assert!(
+    // BUT index 2 > watermark 1 → StopHiddenPrefix due to watermark defense.
+    assert_eq!(
         SegmentedObjectLog::<InMemoryBlobStore>::partial_expire_entry_visible(
             2,
             4,
@@ -5459,7 +5758,8 @@ fn helper_level_partial_expire_visibility_decision_keeps_undeleted() {
             7,
             floor_seq,
         ),
-        "below-floor undeleted data entry at index 2 must stay visible when above the durable \
+        PartialExpireVisibility::StopHiddenPrefix,
+        "below-floor undeleted data entry at index 2 must be StopHiddenPrefix when above the durable \
          watermark even if reclaimed_through advanced past visible_last_seq"
     );
 }
