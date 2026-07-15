@@ -13,6 +13,7 @@ The current release workflow publishes:
 | Helm chart package | GitHub Release asset `pqueue-<version>.tgz` |
 | Helm chart evidence | GitHub Release asset `pqueue-helm-chart.txt` |
 | Binary archives | GitHub Release assets `pqueue-<version>-<target-triple>.tar.gz` |
+| Deployment proof | GitHub Release assets `deployment-proof.json` and `deployment-proof.md` |
 | Checksums | GitHub Release asset `SHA256SUMS` |
 
 For example, release tag `v0.9.0` uses version `0.9.0`, so the chart package is
@@ -38,6 +39,8 @@ gh release download "$TAG" \
   --pattern "pqueue-${VERSION}.tgz" \
   --pattern "pqueue-service-image.txt" \
   --pattern "pqueue-helm-chart.txt" \
+  --pattern "deployment-proof.json" \
+  --pattern "deployment-proof.md" \
   --pattern "SHA256SUMS" \
   --dir "$DIST_DIR"
 ```
@@ -62,7 +65,7 @@ fi
 ```
 
 `SHA256SUMS` covers the release files, including binary archives, the Helm chart
-package, `pqueue-service-image.txt`, and `pqueue-helm-chart.txt`.
+package, image and chart evidence, and both deployment-proof files.
 
 Operators with a source checkout can also verify a downloaded distribution with
 the repository helper from the repository root:
@@ -100,8 +103,9 @@ and `digest_coordinate` for audit trails.
 
 ## Deployment Release Proof
 
-Source checkouts can generate release-note-ready deployment proof after the
-release artifacts are present:
+The release workflow publishes its release-note-ready deployment proof as
+`deployment-proof.json` and `deployment-proof.md`. Source checkouts can generate
+the same file shape after the release artifacts are present:
 
 ```sh
 bash scripts/ci/deployment-release-gate.sh

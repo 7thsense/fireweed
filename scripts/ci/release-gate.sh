@@ -18,18 +18,12 @@
 #     pqueue-engine >=80% line (enforced below; this comment is not the
 #     authority — the check-lcov-coverage.py calls are).
 #
-# WHAT THIS GATE DOES *NOT* PROVE (RELEASE tier — LOUDLY DEFERRED, never faked):
-#   All in-process evidence is SMOKE tier (single process, reduced scale). The
-#   RELEASE-tier E0-E3 headline (per-queue 10M items/hr floor, sub-second
-#   p95/p99, >=3.5x@8 multi-node scale-out, S3 object-log cost/recovery) is
-#   gated on the deferred live / provisioned runs and is NOT asserted here:
-#       E0/E1  perf-env throughput + latency   -> bead pqueue-d3371502
-#       E2     multi-node scale-out            -> bead pqueue-f1d107de
-#       E3     S3 object-log cost/recovery     -> bead pqueue-2f9ebac3
-#   `pqueue-verify-ledger --require-smoke-evidence` (used below) counts ONLY
-#   smoke rows; the tier-aware `--require-evidence` (release headline) would
-#   find ZERO release rows and fail by construction until those live runs
-#   land. This gate never claims release-tier green.
+# WHAT THIS GATE DOES *NOT* PROVE (RELEASE tier — never faked):
+#   This script creates a clean temporary ledger and validates only the
+#   newly-generated SMOKE-tier E2/E3 rows. Repository-held RELEASE-tier E0-E3
+#   evidence under docs/perf/evidence is not ingested or asserted here, so a
+#   green smoke lane is not a release-tier evidence verdict. Integrating the
+#   governed release evidence into the tag gate is tracked by pqueue-bf46289d.
 set -euo pipefail
 
 CARGO="rustup run 1.92.0 cargo"
@@ -43,11 +37,8 @@ if (($# > 0)); then
 fi
 
 echo "=== pqueue release gate (SMOKE lane) ==="
-echo "    RELEASE-tier E0-E3 headline is DEFERRED to live runs (NOT proven here):"
-echo "      E0/E1 perf-env throughput+latency -> pqueue-d3371502"
-echo "      E2    multi-node scale-out        -> pqueue-f1d107de"
-echo "      E3    S3 object-log cost/recovery -> pqueue-2f9ebac3"
-echo "    This gate validates the SMOKE lane only; it never claims release-tier green."
+echo "    This gate validates newly generated SMOKE-tier E2,E3 evidence only."
+echo "    It does not assert repository-held RELEASE-tier E0-E3 evidence (pqueue-bf46289d)."
 
 echo "--- fmt ---"
 ${CARGO} fmt --all --check
@@ -113,5 +104,4 @@ bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
 
 echo "=== release gate (SMOKE lane) PASSED ==="
 echo "    Smoke evidence E2,E3 present + well-formed; coverage bars met."
-echo "    RELEASE-tier E0-E3 remains DEFERRED to pqueue-d3371502 (E0/E1),"
-echo "    pqueue-f1d107de (E2), pqueue-2f9ebac3 (E3) — NOT claimed green here."
+echo "    Repository-held RELEASE-tier E0-E3 evidence was not asserted by this lane."

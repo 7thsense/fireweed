@@ -50,6 +50,8 @@ shopt -u nullglob
 
 require_file "${DIST_DIR}/pqueue-helm-chart.txt"
 require_file "${DIST_DIR}/pqueue-service-image.txt"
+require_file "${DIST_DIR}/deployment-proof.json"
+require_file "${DIST_DIR}/deployment-proof.md"
 require_file "${DIST_DIR}/SHA256SUMS"
 
 grep -Eq '^digest=sha256:[0-9a-fA-F]{64}$' "${DIST_DIR}/pqueue-service-image.txt" \

@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 60db3c040d6460facb135b4b9dc9d89b71d16af4dd80dab787eb8f11b7c5ded0
+    self_hash: f1b390e64cb29c96f4ec785185dccc3c623add90e17dd671feaf579f847beb41
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: 39792548c579ce686ad8f57017bfcd49f56fe584443ffedd29baf149ba641cb0
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-11T01:06:40Z"
+    reviewed_at: "2026-07-15T19:40:50Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -38,11 +38,11 @@ rendering, and CI evidence actually cover.
 ## Current Release Boundary
 
 > **Version source of truth:** the workspace `Cargo.toml` `[workspace.package] version`
-> (currently **0.11.0**) is canonical for the current release line. Release tags follow it
-> (`v0.11.0`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
+> (currently **0.15.0**) is canonical for the current release line. Release tags follow it
+> (`v0.15.0`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The v0.11.x release packaging ships the `pqueue-service` RESP binary, container
+The v0.15.x release packaging ships the `pqueue-service` RESP binary, container
 image, Helm chart, binary archive, checksums, and release evidence. The service
 runtime (`crates/pqueue-server/src/env_config.rs`) currently wires these
 executable combinations:
@@ -71,8 +71,8 @@ combinations:
 | `objectlog` | `hybrid-async` | Runtime wired; chart-schema-selectable with a CI values file (`charts/pqueue/ci/objectlog-hybrid-async-values.yaml`), but not yet in the `helm-gate.sh` static-combination list or the live-`kind` matrix. |
 | `objectlog` | `hybrid-strict` | Runtime wired via env only; **not** chart-selectable (projection enum omits it). |
 | `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend inmemory`). |
-| `postgres` | `sqlite` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite`). TP-003/TP-002 production-claim evidence still owed (`pqueue-52e1a2ff`). |
-| `postgres` | `postgres` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres`). TP-003/TP-002 production-claim evidence still owed (`pqueue-52e1a2ff`). |
+| `postgres` | `sqlite` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite`). TP-003 production-claim evidence for this exact pairing remains owed (`pqueue-949933e4`). |
+| `postgres` | `postgres` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres`). TP-003 production-claim evidence for this exact pairing remains owed (`pqueue-949933e4`). |
 
 Unsupported runtime combinations must fail loudly at process startup with the
 requested log/projection pair. They must not be silently mapped onto a synthetic
@@ -151,7 +151,7 @@ CI live-`kind` matrix covers `objectlog-inmemory`, `postgres-inmemory`,
 `postgres-sqlite`, and `postgres-postgres`; the `objectlog` sqlite/hybrid
 projection combinations are static-render-gated only (see the table above).
 
-Current CI state (v0.11.0): the `ci` workflow is green on `main`; all GitHub
+Current CI state (v0.15.0): the `ci` workflow is green on `main`; all GitHub
 Actions are on their current (Node 24) action majors (`actions/checkout@v5`,
 `azure/setup-helm@v5`, `azure/setup-kubectl@v5`, `docker/build-push-action@v7`,
 `docker/login-action@v4`, `docker/setup-buildx-action@v4`); and the embedded
@@ -191,19 +191,18 @@ Databricks Lakebase when the runtime adapter is wired. Lakebase is
 Postgres-wire compatible. Connection setup belongs to
 `pqueue-postgres::connect`:
 
-- TLS is required for Lakebase. The current connector is `NoTls`-only (parses
-  `sslmode` but rejects `sslmode=require`); the earlier tracking bead
-  `pqueue-13924b0e` is closed, and the remaining TLS-capable connector/runtime
-  work is now folded into the postgres production-hardening bead
-  `pqueue-52e1a2ff`.
+- TLS is required for Lakebase. The connector supports native TLS behind the
+  `tls` Cargo feature. The stock release binary is built without optional
+  features and therefore rejects `sslmode=require` rather than downgrading to
+  plaintext.
 - Native password through a pooler and OAuth-generated database credentials are
   connection-layer concerns, not new storage combinations.
 - A credentialed live acceptance run against a real managed endpoint is required
   before any release claims provider-specific managed-Postgres certification.
 
-Until the TLS/runtime work and live run exist, releases may claim only
-chart/render support for the Lakebase Postgres storage axes unless the service
-runtime and `kind` gate prove the combination.
+Until a credentialed managed-endpoint run exists, releases may claim only
+generic TLS-capable Postgres support, not provider-specific Lakebase
+certification.
 
 ## Postgres Commit-Transition Parity Scope
 
@@ -267,10 +266,11 @@ no new table.
   whichever later change wires `RecoveryReadPort`'s authoritative recovery reads
   for postgres, if that read needs more than `response_payload` provides.
 
-Update (2026-07): the `commit_transition` implementation for `PostgresRelationalBackend` has
-LANDED (`relational.rs:3800`) and epic `pqueue-2201fd37` is closed. Any remaining
-`CommitCapabilities`/`RecoveryReadPort`/delayed-timer refinements are folded into the postgres
-production-hardening bead `pqueue-52e1a2ff`.
+Update (2026-07): the `commit_transition` implementation for
+`PostgresRelationalBackend` has landed (`relational.rs:3800`) and epic
+`pqueue-2201fd37` is closed. Exact-pair external transaction evidence for the
+postgres deployment combinations is tracked by `pqueue-949933e4`; future
+`RecoveryReadPort` or delayed-timer refinements require separately scoped work.
 
 ## Object-Log Boundary
 

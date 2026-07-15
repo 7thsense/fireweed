@@ -90,6 +90,15 @@ jobs:
             --tag "${{ steps.release.outputs.tag }}" \
             --destination target/release-dist
 
+      - name: Stage deployment proof
+        run: |
+          install -m 0644 \
+            target/deployment-release-gate/deployment-proof.json \
+            target/release-dist/deployment-proof.json
+          install -m 0644 \
+            target/deployment-release-gate/deployment-proof.md \
+            target/release-dist/deployment-proof.md
+
       - name: Stage container image context
         run: |
           rm -rf target/release-image
