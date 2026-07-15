@@ -3,7 +3,7 @@
 **Inventory ID:** `pqueue-1b1fb5ec-inventory`
 **Source transcript:** `docs/helix/05-review/head-cas-linearizability-review.md`
 **Last updated:** 2026-07-15
-**Status:** RAW (pre-disposition)
+**Status:** CLASSIFIED
 
 ## Scope statement
 
@@ -20,6 +20,8 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F1` |
 | **Severity** | BLOCKING |
+| **Disposition** | blocking |
+| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:52-53` §Findings row F1 — review transcript documents control-plane epoch gap; `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md:235-237` — current-epoch validation rule requiring manifest commit to validate against control-plane epoch; `crates/pqueue-objectlog/src/segmented.rs:1662` — `seal()` code location where epoch check against manifest-recorded epoch occurs |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F1 |
 | **Area** | Epoch fencing: current-epoch validation |
 | **Governing spec** | TD-004:235–237 (Manifest Commit and Epoch Fencing) |
@@ -33,6 +35,8 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F2` |
 | **Severity** | BLOCKING |
+| **Disposition** | blocking |
+| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:53` §Findings row F2 — review transcript documents versioned-head staleness after fence entry; `crates/pqueue-objectlog/src/segmented.rs:1506` — `acquire_epoch()` lacks `update_manifest_head_if_version()` call after fence entry commit; `crates/pqueue-objectlog/src/segmented.rs:163` — `update_manifest_head_if_version()` exists but unused by epoch acquisition path |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F2 |
 | **Area** | Manifest entry CAS: reader-visible atomicity |
 | **Code location** | `crates/pqueue-objectlog/src/segmented.rs` — `acquire_epoch()` at 1506, `commit_manifest_entry()` at 1096, `read_manifest_head()` at 134, `update_manifest_head_if_version()` at 163 |
@@ -45,6 +49,8 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F3` |
 | **Severity** | WARNING |
+| **Disposition** | non-blocking |
+| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:54` §Findings row F3 — review transcript documents `create_new(true)` non-atomicity on FUSE/overlay; `crates/pqueue-objectlog/src/segmented.rs:60-65` — `BlobStore::put_if_absent` trait contract; `LocalFsBlobStore` impl — `OpenOptions::new().create_new(true)` used for local-fs CAS |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F3 |
 | **Area** | BlobStore CAS contract portability |
 | **Code location** | `crates/pqueue-objectlog/src/segmented.rs:60–65` (BlobStore::put_if_absent), `LocalFsBlobStore` impl (local-fs atomic create via `OpenOptions::new().create_new(true)`) |
@@ -57,6 +63,8 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F4` |
 | **Severity** | WARNING |
+| **Disposition** | non-blocking |
+| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:55` §Findings row F4 — review transcript documents watermark staleness bypassing reclaim-time fence; `crates/pqueue-objectlog/src/segmented.rs:1668-1684` — reclaim-time fence code in `seal()`; `crates/pqueue-objectlog/src/segmented.rs:1122` — `mark_manifest_entry_reclaimed()` address-retention invariant |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F4 |
 | **Area** | Reclaim-time fence caching |
 | **Code location** | `crates/pqueue-objectlog/src/segmented.rs:1668–1684` (reclaim-time fence in seal()) |
@@ -69,6 +77,8 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F5` |
 | **Severity** | NOTE |
+| **Disposition** | non-blocking |
+| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:56` §Findings row F5 — review transcript documents untested Postgres-manifest-pointer fallback epoch-atomicity boundary; `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md:220` — Postgres-manifest-pointer fallback normative rule requiring epoch-atomic CAS in control plane |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F5 |
 | **Area** | Postgres-manifest-pointer fallback |
 | **Governing spec** | TD-004:220 (Postgres-manifest-pointer fallback) |
@@ -82,6 +92,8 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F6` |
 | **Severity** | NOTE |
+| **Disposition** | non-blocking |
+| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:57` §Findings row F6 — review transcript documents unbounded retry budget pathology; `crates/pqueue-objectlog/src/segmented.rs:1506-1551` — `acquire_epoch()` bounded retry loop with 16-retry budget |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F6 |
 | **Area** | Epoch acquisition retry policy |
 | **Code location** | `crates/pqueue-objectlog/src/segmented.rs:1506–1551` (acquire_epoch bounded retry loop) |
@@ -90,14 +102,14 @@ explicitly excluded.
 
 ## Index
 
-| Entry ID | Severity | Status | Disposition target |
-|----------|----------|--------|-------------------|
-| HCAS-F1 | BLOCKING | RAW | TBD |
-| HCAS-F2 | BLOCKING | RAW | TBD |
-| HCAS-F3 | WARNING | RAW | TBD |
-| HCAS-F4 | WARNING | RAW | TBD |
-| HCAS-F5 | NOTE | RAW | TBD |
-| HCAS-F6 | NOTE | RAW | TBD |
+| Entry ID | Severity | Status | Disposition |
+|----------|----------|--------|-------------|
+| HCAS-F1 | BLOCKING | CLASSIFIED | blocking |
+| HCAS-F2 | BLOCKING | CLASSIFIED | blocking |
+| HCAS-F3 | WARNING | CLASSIFIED | non-blocking |
+| HCAS-F4 | WARNING | CLASSIFIED | non-blocking |
+| HCAS-F5 | NOTE | CLASSIFIED | non-blocking |
+| HCAS-F6 | NOTE | CLASSIFIED | non-blocking |
 
 ## Evidence mapping
 
