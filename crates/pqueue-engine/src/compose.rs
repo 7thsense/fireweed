@@ -22,7 +22,7 @@
 //! path (memory, sqlite-log-replay). The unified-transactional path (relational) reuses the same choke
 //! point with a single transactional store implementing BOTH axes — see ADR-012 §"The atomic write seam".
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -41,14 +41,14 @@ use crate::active_scope::{ActiveScope, DiscoveryGranularity};
 use crate::claim_validation::{ClaimCompatibility, ClaimUnit, validate_claim_compatibility};
 use crate::command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum,
-    CommandEnvelope, CommandId, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    CommandEnvelope, CommandId, CommitOutcomeEntry, FinalizeCommand, FinalizeKind, FinalizeOutcome,
     LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
     QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome,
     ScheduleUpdate, SetGatesCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
     build_push_items, command_envelope_change_records, validate_gate_command, validate_gate_push,
     validate_request_replay_metadata,
 };
-use crate::error::{EngineError, EngineResult};
+use crate::error::{CommitRejection, EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
 use crate::idempotency::{IdempotencyDecision, QueueIdempotencyCache};
 use crate::port::{
@@ -115,6 +115,74 @@ pub trait LogStore: Send {
 
     fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>>;
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()>;
+
+    // -- retention floor (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7) -------------
+    //
+    // The durable retention floor + segment-object trim seam. ALL default to no-op / `Ok(None)` / `Ok(0)`, so
+    // every non-object-log backend (memory, sqlite-log, relational, postgres) is UNAFFECTED — only the
+    // segmented object log overrides them. The composition computes a trim horizon (min of the durable
+    // checkpoint high-water and the request-id-retention-expired manifest prefix), writes the floor FIRST,
+    // then deletes the segment objects — the crash-safe order that never leaves the floor pointing past a
+    // deleted segment. See `trim_reclaimable_segments_locked`.
+
+    /// The durably-recorded retention floor: the highest command position whose segment objects have been
+    /// trimmed, an EXCLUSIVE lower bound (recovery/idempotency folds resume at `sequence + 1`). `None` (the
+    /// default, and a never-trimmed log) means genesis — folds start from the beginning, byte-identical to a
+    /// pre-floor log.
+    fn retention_floor(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
+        Ok(None)
+    }
+
+    /// Monotonically advance the durable retention floor to `position` (rejecting a regression). Written
+    /// BEFORE `expire_segments_through` deletes the corresponding segment objects. `expected_epoch` is the
+    /// writing owner's currently-held assignment epoch; the impl re-reads the authoritative current epoch and
+    /// rejects a SUPERSEDED writer with [`EngineError::EpochFenced`] (bug 2b — a stale owner must not lower a
+    /// newer owner's floor). Default: no-op.
+    fn advance_retention_floor(
+        &mut self,
+        _shard: &QueueKey,
+        _position: CommandPosition,
+        _expected_epoch: u64,
+    ) -> EngineResult<()> {
+        Ok(())
+    }
+
+    /// The highest command sequence whose segment is safe to trim by REQUEST-ID RETENTION: the max
+    /// `visible_last_seq` over the contiguous prefix of data segments committed at or before `cutoff_ms`. The
+    /// composition takes the min of this and the durable checkpoint high-water to get the trim horizon.
+    /// Default: `None` — a non-segmented log has nothing to trim.
+    fn max_trimmable_seq_before(
+        &self,
+        _shard: &QueueKey,
+        _cutoff_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Delete the segment OBJECTS at or before `through_seq` (keeping their manifest entries as tombstones the
+    /// read path skips, and skipping branch-pinned segments). Returns the number of objects deleted. Default:
+    /// no-op (0 deleted).
+    fn expire_segments_through(
+        &mut self,
+        _shard: &QueueKey,
+        _through_seq: u64,
+        _now_ms: i64,
+    ) -> EngineResult<u64> {
+        Ok(0)
+    }
+
+    /// The lowest segment sequence at or below `through_seq` that `expire_segments_through` SKIPS only because
+    /// a live branch pins it (a transient condition). The composed trim caller uses this to keep its
+    /// completed-deletion watermark BELOW a branch-pinned segment so a released pin is re-scanned later (bug
+    /// 2b). Default: `None` (no branch-pin concept).
+    fn lowest_branch_pinned_below(
+        &self,
+        _shard: &QueueKey,
+        _through_seq: u64,
+        _now_ms: i64,
+    ) -> EngineResult<Option<u64>> {
+        Ok(None)
+    }
 
     /// The current durable command position for `shard` (thin wrapper over `high_water`).
     fn current_position(&self, shard: &QueueKey) -> EngineResult<CommandPosition> {
@@ -446,6 +514,21 @@ pub fn resolve_recovery_start(
         return Ok(RecoveryStart::FromGenesis);
     }
     Ok(RecoveryStart::FromHighWater(high_water))
+}
+
+/// The greater of two optional replay-start positions by `(epoch, sequence)`, treating `None` as genesis (the
+/// least). Used to floor the recovery replay start at the durable retention floor (bead pqueue-b5cc2bc7): a
+/// `FromGenesis` (None) start under Hard backpressure is lifted to the floor so recovery never reads a trimmed
+/// below-floor segment, while a healthy checkpoint start (>= floor) is left unchanged.
+pub fn max_position(
+    a: Option<CommandPosition>,
+    b: Option<CommandPosition>,
+) -> Option<CommandPosition> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if y.precedes(&x) { x } else { y }),
+        (Some(x), None) => Some(x),
+        (None, b) => b,
+    }
 }
 
 /// The result of a NON-item claim selection ([`ProjectionStore::select_rich_claim`]): the candidate item
@@ -932,6 +1015,13 @@ struct Inner<L, P> {
     /// path; populated only when the composition runs the ack-after-seal write path against a group-commit
     /// log. Protected by the SAME `Mutex<Inner>` as `log`/`projection` — no async lock.
     coords: HashMap<QueueKey, ShardCoord>,
+    /// Per-queue IN-MEMORY watermark of the highest sequence whose below-floor segment objects this process
+    /// has already fully deleted (bead pqueue-b5cc2bc7). Empty on process start, so the FIRST trim tick after
+    /// a (re)open re-runs `expire_segments_through` up to the durable floor to FINISH any deletion a crash
+    /// interrupted BETWEEN the floor write and the segment delete — the deletion is idempotent, and this
+    /// watermark keeps subsequent idle ticks from re-scanning the manifest once the durable floor is fully
+    /// reclaimed. NOT durable: a restart re-verifies against the durable floor.
+    trim_completed_through: HashMap<QueueKey, u64>,
 }
 
 /// Default recovery-window budget: the max durable-log tail (commands) a normal reopen replays beyond the
@@ -941,6 +1031,12 @@ struct Inner<L, P> {
 /// the log. (For a fresh in-memory projection the whole log is the "tail", so the budget is generous.)
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 const RECOVERY_READ_PAGE_LIMIT: usize = 8_192;
+
+/// A conservative cross-owner clock-skew guard band (ms) subtracted from the retention cutoff before a
+/// segment is eligible for object-log trimming (bead pqueue-b5cc2bc7, risk R4): a segment is trimmed only if
+/// its `committed_at_ms <= now - request_id_retention_ms - RETENTION_TRIM_SKEW_MARGIN_MS`, so a small clock
+/// skew between the sealing owner and the trimming owner can never trim a segment still within retention.
+const RETENTION_TRIM_SKEW_MARGIN_MS: i64 = 5_000;
 
 /// The two composed-layer projection-apply crash instants (TP-003 §3.10 AC-TXN-4, row 209). These live in
 /// the [`ComposedBackend`] apply step — ABOVE the [`LogStore`] substrate, whose own internal cut points
@@ -1006,6 +1102,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 commit_idempotency: HashMap::new(),
                 cmd_seq: 0,
                 coords: HashMap::new(),
+                trim_completed_through: HashMap::new(),
             }),
             control,
             fault_hook: Mutex::new(None),
@@ -1165,6 +1262,152 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             terminal_retention_ms,
             emit_change_records,
         )
+    }
+
+    /// Reclaim object-log SEGMENT OBJECTS whose commands are all past request-id retention AND already durably
+    /// checkpointed (bead pqueue-b5cc2bc7). Runs under the composed unit-of-work lock right after the reap tick
+    /// advances retention, so it never races the local writer or the manifest CAS.
+    ///
+    /// GATE: only when [`ProjectionStore::retention_may_advance`] is true (Clear / non-poisoned /
+    /// lineage-proven). Under Hard async-apply debt or poison the reap already short-circuited and this returns
+    /// without deleting anything OR advancing the floor — the durable floor is monotone and never advances past
+    /// unproven debt. (Under Hard the checkpoint high-water is ALSO withheld, so this is belt-and-suspenders.)
+    ///
+    /// HORIZON: `trim_through = min(checkpoint_high_water_seq, max_trimmable_seq_before(cutoff))` with
+    /// `cutoff = now - request_id_retention_ms - SKEW_MARGIN`. The `min` never trims past the durably-applied
+    /// checkpoint (a below-floor command SQLite has not yet applied is never lost — the SQLite next_seq guard
+    /// skips already-applied ones on replay), and the time term guarantees every trimmed segment holds ONLY
+    /// expired request_ids (created_at <= committed_at_ms by causality), preserving AC-TXN-3.
+    ///
+    /// ORDER (crash-safe, MANDATORY): (b) advance the durable floor FIRST, THEN (c) delete the segment objects.
+    /// A crash between them leaves floor=F with some below-F segments still present — recovery reads from F+1
+    /// and skips them, no "missing segment" error. The reverse order would leave the floor pointing past a
+    /// deleted segment. Returns the number of segment objects deleted.
+    ///
+    /// FINISH-INTERRUPTED-DELETION (bug 2a): a crash BETWEEN (b) and (c) — or a partial (c) — leaves segment
+    /// objects at/below the durable floor undeleted. The in-memory `trim_completed_through` watermark is empty
+    /// on process start, so the FIRST trim tick after a (re)open re-runs `expire_segments_through` up to the
+    /// durable floor to finish that deletion (idempotent), even when the newly-computed horizon does not
+    /// advance. Once completed, the watermark suppresses re-scanning on idle ticks.
+    ///
+    /// EPOCH FENCE (bug 2b/3): the composed UoW lock is process-LOCAL and does not fence a peer owner. The floor
+    /// advance is therefore an EPOCH-FENCED MANIFEST CAS inside `advance_retention_floor` — a superseded owner
+    /// LOSES the CAS or is `EpochFenced` and cannot regress a newer owner's floor (which would strand recovery
+    /// at a reclaimed segment). A fenced/raced advance is treated here as a benign skip (delete nothing, don't
+    /// error the tick). BRANCH PINS (bug 2b): the completed-deletion watermark is held BELOW any branch-pinned
+    /// segment (a transient condition) so a released pin is re-scanned and reclaimed on a later tick.
+    fn trim_reclaimable_segments_locked(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<u64> {
+        // (gate) Retention advancement must be permitted — mirrors the reap short-circuit at
+        // `reap_terminal_items_locked`. No-op unless a hybrid-async projection reports Clear.
+        if !inner.projection.retention_may_advance(shard) {
+            return Ok(0);
+        }
+        let now_ms = ts_to_ms(now);
+        let mut deleted = 0u64;
+
+        // (bug 2a) FINISH any crash-interrupted deletion up to the DURABLE floor before considering new
+        // reclamation. `trim_completed_through` is `None` (absent) on process start, so this runs once after
+        // each (re)open per shard — INCLUDING when the durable floor is at sequence 0 (an absent watermark is
+        // treated as "nothing completed yet", not 0, which a bare `0 < 0` comparison would wrongly skip). A
+        // watermark held below a branch pin also re-triggers this until the pin releases.
+        let durable_floor = inner.log.retention_floor(shard)?;
+        if let Some(floor) = &durable_floor {
+            let completed = inner.trim_completed_through.get(shard).copied();
+            if completed.is_none_or(|c| c < floor.sequence) {
+                deleted += inner
+                    .log
+                    .expire_segments_through(shard, floor.sequence, now_ms)?;
+                Self::record_trim_watermark_locked(inner, shard, floor.sequence, now_ms)?;
+            }
+        }
+
+        // (a1) The durable checkpoint high-water — the highest seq the durable projection image has absorbed.
+        // Under the Clear gate the hybrid-async monitor returns the REAL (un-withheld) value. `None` means
+        // nothing is durably applied, so nothing is safe to trim.
+        let Some(checkpoint) = inner.projection.recovery_high_water(shard)? else {
+            return Ok(deleted);
+        };
+        // (a2) The request-id-retention horizon: newest data segment whose commands are all past retention.
+        let cutoff_ms = now_ms
+            .saturating_sub(request_id_retention_ms as i64)
+            .saturating_sub(RETENTION_TRIM_SKEW_MARGIN_MS);
+        let Some(time_expired_seq) = inner.log.max_trimmable_seq_before(shard, cutoff_ms)? else {
+            return Ok(deleted);
+        };
+        // (a3) The trim horizon is the min of the two terms.
+        let trim_through_seq = checkpoint.sequence.min(time_expired_seq);
+        // No NEW reclamation beyond the durable floor (both terms are monotone; the finish-deletion pass above
+        // already handled the existing floor).
+        if let Some(floor) = &durable_floor
+            && trim_through_seq <= floor.sequence
+        {
+            return Ok(deleted);
+        }
+        // The owner's currently-held epoch — re-read authoritatively inside `advance_retention_floor` against
+        // the manifest tail, so a superseded owner is fenced (bug 3). Stamp the floor position with the
+        // checkpoint epoch (<= held epoch), which keeps the recovery-start `max_position` compare well-defined
+        // (`trim_through_seq <= checkpoint.sequence`, so the floor never exceeds the checkpoint position).
+        let expected_epoch = inner.log.current_epoch(shard)?;
+        let floor_pos =
+            CommandPosition::new(shard.clone(), checkpoint.backend_epoch, trim_through_seq);
+        // (b) Durable floor FIRST via the epoch-fenced manifest CAS. A fenced/raced advance means another owner
+        // is authoritative here — skip cleanly (delete nothing) rather than deleting under a floor we did not
+        // durably set.
+        match inner
+            .log
+            .advance_retention_floor(shard, floor_pos, expected_epoch)
+        {
+            Ok(()) => {}
+            Err(EngineError::EpochFenced) | Err(EngineError::Conflict) => return Ok(deleted),
+            Err(e) => return Err(e),
+        }
+        // (c) THEN delete the segment objects, and record the completed watermark (below any branch pin).
+        deleted += inner
+            .log
+            .expire_segments_through(shard, trim_through_seq, now_ms)?;
+        Self::record_trim_watermark_locked(inner, shard, trim_through_seq, now_ms)?;
+        Ok(deleted)
+    }
+
+    /// Record the completed-deletion watermark after an `expire_segments_through(target)` (bug 2b). If nothing
+    /// at/below `target` is branch-pinned, record `target` (idle ticks then skip the re-scan). If ANY segment
+    /// at/below `target` was skipped ONLY because a live branch pins it — a TRANSIENT condition — CLEAR the
+    /// watermark instead, so every subsequent tick re-scans up to the floor and reclaims the segment the
+    /// instant the pin is released (correct even when `target == 0`, where a numeric "below the pin" watermark
+    /// could not go lower).
+    fn record_trim_watermark_locked(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        target: u64,
+        now_ms: i64,
+    ) -> EngineResult<()> {
+        if inner
+            .log
+            .lowest_branch_pinned_below(shard, target, now_ms)?
+            .is_some()
+        {
+            inner.trim_completed_through.remove(shard);
+        } else {
+            inner.trim_completed_through.insert(shard.clone(), target);
+        }
+        Ok(())
+    }
+
+    /// Public entry to [`Self::trim_reclaimable_segments_locked`] (the background sink loop drives this after
+    /// its reap, mirroring the reap tick). Acquires the unit-of-work lock.
+    pub fn trim_reclaimable_segments(
+        &self,
+        shard: &QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<u64> {
+        let mut g = self.inner.lock().expect("composed backend poisoned");
+        Self::trim_reclaimable_segments_locked(&mut g, shard, request_id_retention_ms, now)
     }
 
     fn durable_definitions_locked(inner: &Inner<L, P>) -> EngineResult<Vec<QueueDefinition>> {
@@ -1483,6 +1726,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             // from genesis rather than trusting its lagging high-water as a safe skip point.
             let recovery_poison = projection.recovery_poison(&key);
             let hard_backpressure = projection.recovery_backpressured(&key);
+            // The durable retention floor (bead pqueue-b5cc2bc7): the highest command position whose segment
+            // OBJECTS have been trimmed, an EXCLUSIVE lower bound. `None` (a never-trimmed / pre-floor log)
+            // means genesis, so every fold below starts from the beginning — BYTE-IDENTICAL to a pre-floor
+            // log. When a trim HAS run, the below-floor segments are gone from the store, so both idempotency
+            // folds AND the projection replay must start at `floor + 1` (the trim guarantees every below-floor
+            // request_id is already past request_id_retention_ms, so none is dropped — see AC-TXN-3 proof).
+            let floor = log.retention_floor(&key)?;
             // Rebuild the in-memory `request_id -> result` push-idempotency map from the durable log for
             // EVERY composed-log backend, not only the eventual-apply ones. `push_with_request_id`
             // consults/records only this in-memory map (see the `check`/`record` calls), which starts
@@ -1498,6 +1748,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 idempotency,
                 &key,
                 def.request_id_retention_ms,
+                floor.clone(),
             )?;
             // Symmetric rebuild for the OTHER request_id-bearing mutating op: `commit_transition` (the
             // authoritative vectorized claimed-work commit). Its in-memory `commit_idempotency` cache is
@@ -1513,11 +1764,37 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 commit_idempotency,
                 &key,
                 def.request_id_retention_ms,
+                floor.clone(),
             )?;
             // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
             // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
             let recorded_high_water = projection.recovery_high_water(&key)?;
-            let mut from = match resolve_recovery_start(
+            // FAIL-CLOSED (bead pqueue-b5cc2bc7 bug 3): if this shard has a durable retention floor, the
+            // below-floor object-log segments are RECLAIMED, so the durable projection image MUST already
+            // cover the floor (`recovery_high_water >= floor`). It always does for a consistent store (the
+            // floor was advanced only while `checkpoint >= floor`, and the checkpoint is monotone). A
+            // projection BEHIND the floor — a restored, rolled-back, or FOREIGN SQLite image over a trimmed
+            // log — would make the R1 replay-start flooring omit the commands between the image and the floor
+            // (absent from BOTH the reclaimed log AND the behind image): a SILENT data loss. Refuse to serve.
+            // (At reopen the async-apply monitor is Clear — it is memoryless across restart — so
+            // `recovery_high_water` here is the REAL durable high-water, not a withheld one; a poisoned
+            // projection already failed in `resolve_recovery_start` below.)
+            if let Some(fl) = &floor {
+                let covers_floor = recorded_high_water
+                    .as_ref()
+                    .is_some_and(|hw| hw.sequence >= fl.sequence);
+                if !covers_floor {
+                    let hw_seq = recorded_high_water.as_ref().map(|hw| hw.sequence);
+                    return Err(EngineError::Storage(format!(
+                        "read below retention floor: projection high-water {:?} <= reclaimed floor {} \
+                         (recovery refused: the projection image is behind the durable floor; a restored, \
+                         rolled-back, or foreign projection image over a trimmed log is an unrecoverable \
+                         inconsistency)",
+                        hw_seq, fl.sequence,
+                    )));
+                }
+            }
+            let resolved_start = match resolve_recovery_start(
                 recovery_poison.as_deref(),
                 hard_backpressure,
                 recorded_high_water,
@@ -1525,6 +1802,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 RecoveryStart::FromHighWater(pos) => pos,
                 RecoveryStart::FromGenesis => None,
             };
+            // R1 FIX (bead pqueue-b5cc2bc7): floor the replay start at the durable retention floor. Under Hard
+            // backpressure `resolve_recovery_start` returns `FromGenesis` (start = None) which, on a trimmed
+            // log, would read a DELETED below-floor segment and fail "missing segment". Flooring is safe: the
+            // floor is <= checkpoint_high_water at trim time, and the durable SQLite next_seq guard skips any
+            // below-floor command it has already applied when the tail replays over its durable image. The
+            // healthy path is unchanged — floor <= checkpoint, so the max is the checkpoint high-water.
+            let mut from = max_position(resolved_start, floor.clone());
             let mut tail: u64 = 0;
             loop {
                 let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
@@ -1582,8 +1866,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
         shard: &QueueKey,
         retention_ms: u64,
+        floor: Option<CommandPosition>,
     ) -> EngineResult<()> {
-        let mut from = None;
+        // Start the fold at the durable retention floor (bead pqueue-b5cc2bc7): the below-floor segments are
+        // trimmed away, and the trim horizon guarantees every below-floor push request_id is already past
+        // `retention_ms`, so none is dropped. `None` (a never-trimmed log) is genesis — unchanged behavior.
+        let mut from = floor;
         loop {
             let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
             for (_, env) in &page.entries {
@@ -1603,7 +1891,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     fingerprint,
                     match &env.request_outcome {
                         Some(RequestOutcome::Push { item_ids }) => item_ids.clone(),
-                        None => env.item_ids.clone(),
+                        // A `Push` command never carries a `CommitTransition` outcome; fall back to the
+                        // envelope's minted ids (same as the `None` legacy-push path).
+                        Some(RequestOutcome::CommitTransition { .. }) | None => {
+                            env.item_ids.clone()
+                        }
                     },
                     expires_at,
                 );
@@ -1631,25 +1923,34 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// `consumed_input_id` from the `Finalize` outcome, `side_record_keys` from `WriteSideRecords`, `instance`
     /// from `AdvanceInstanceFence`, `lifecycle_item_ids` from the lifecycle `Push`'s server-minted ids.
     ///
-    /// `request_outcome.is_some()` envelopes are `push_with_request_id` writes (handled by the push rebuild)
-    /// and are skipped; a `commit_transition`'s own lifecycle `Push` carries `request_outcome = None` and so
-    /// stays in the fold. A `request_id` with no stamped `request_fingerprint` (logs written before commit
-    /// envelopes carried one) is skipped — its cross-restart replay stays unavailable, exactly as before,
-    /// rather than being reconstructed without a conflict-detection fingerprint.
+    /// `push_with_request_id` envelopes carry `request_outcome = Some(RequestOutcome::Push)` (handled by the
+    /// push rebuild) and are skipped; a `commit_transition`'s own lifecycle `Push` carries
+    /// `request_outcome = None` and so stays in the fold. A `request_id` with no stamped `request_fingerprint`
+    /// (logs written before commit envelopes carried one) is skipped — its cross-restart replay stays
+    /// unavailable, exactly as before, rather than being reconstructed without a conflict-detection fingerprint.
     ///
-    /// LIMITATION (honest, guarded): a REJECTED entry mutates nothing and appends nothing durable, so a commit
-    /// that mixed committed and rejected entries reconstructs only its COMMITTED entries here — a SHORTER vec
-    /// than the live record. This is NOT silently replayed: `commit_transition`'s replay path guards on
-    /// `recovery.len() == entries.len()` (the resubmitted body's entry count), so a short reconstructed record
-    /// falls through to safe 0-duplicate re-execution instead of returning a misleading short outcome vec. The
-    /// all-committed commit — the realistic unknown-outcome retry, and what AC-TXN-3 exercises — reconstructs
-    /// exactly (len matches) and replays faithfully. Faithful REPLAY of a mixed commit across restart needs
-    /// durable rejection records (a deferred wire-format change); until then a mixed commit safely re-executes.
+    /// REJECTION-bearing commits — MIXED committed+rejected AND ALL-REJECTED (bead pqueue-db60657d): a
+    /// REJECTED entry mutates nothing and appends nothing durable of its own, so the piecemeal
+    /// `Finalize`-delimited fold alone reconstructs only the COMMITTED entries (a SHORTER vec for a mixed
+    /// commit; NOTHING for an all-rejected one). To replay such a commit faithfully, `commit_transition` stamps
+    /// the WHOLE per-entry vec (committed AND rejected, each rejection's structured error projected via
+    /// [`CommitRejection`]) onto a terminal marker envelope carrying [`RequestOutcome::CommitTransition`],
+    /// appended in the SAME atomic batch as the committed entries. This fold treats that marker as
+    /// AUTHORITATIVE (`durable_full`), superseding the piecemeal reconstruction, so the rebuilt record equals
+    /// the live one and the `recovery.len() == entries.len()` replay guard passes — the retry replays
+    /// byte-identically (including a time-dependent rejection that bare re-execution would resolve differently).
+    ///
+    /// BACK-COMPAT: a log written before the marker existed simply has no `CommitTransition` envelope, so
+    /// `durable_full` stays `None` and the fold falls back to the committed-only piecemeal `entries`. An
+    /// all-committed commit reconstructs exactly from its `Finalize` runs (no marker is written for it); a
+    /// mixed commit in a pre-change log stays short and safely re-executes under the length guard, exactly as
+    /// before — old logs are never corrupted or rejected.
     fn rebuild_commit_idempotency_from_log(
         log: &L,
         commit_idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
         shard: &QueueKey,
         retention_ms: u64,
+        floor: Option<CommandPosition>,
     ) -> EngineResult<()> {
         /// Per-`request_id` reconstruction state: the completed entries plus the parts of the entry currently
         /// being assembled (until its `Finalize` closes it).
@@ -1660,23 +1961,59 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             pending_instance: Option<(Vec<u8>, u64)>,
             pending_lifecycle_ids: Vec<ItemId>,
             entries: Vec<EntryRecovery>,
+            /// The AUTHORITATIVE full per-entry vec (committed AND rejected) decoded from a
+            /// [`RequestOutcome::CommitTransition`] marker, when one was durably recorded (a MIXED commit; bead
+            /// pqueue-db60657d). When present it supersedes the piecemeal `entries` reconstruction so the
+            /// rejected entries — which appended nothing themselves — are replayed with their structured error.
+            /// `None` for all-committed commits and for logs written before the marker existed (back-compat:
+            /// those fall back to `entries`).
+            durable_full: Option<Vec<EntryRecovery>>,
         }
         let mut accums: HashMap<RequestId, CommitAccum> = HashMap::new();
-        let mut from = None;
+        // Start at the durable retention floor (bead pqueue-b5cc2bc7). A commit_transition's whole
+        // Finalize-delimited run is durably contiguous and stamped with the SAME created_at; the trim horizon
+        // only reclaims segments all past `retention_ms`, so an unexpired commit's entire run is above the
+        // floor and reconstructed intact. `None` (a never-trimmed log) is genesis — unchanged behavior.
+        let mut from = floor;
         loop {
             let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
             for (_, env) in &page.entries {
                 let Some(request_id) = &env.request_id else {
                     continue;
                 };
-                // `push_with_request_id` envelopes carry `request_outcome = Some(_)`; the push rebuild owns
-                // them. Only `commit_transition` envelopes (request_outcome == None) belong to this fold.
-                if env.request_outcome.is_some() {
-                    continue;
-                }
                 let Some(fingerprint) = env.request_fingerprint else {
                     continue;
                 };
+                // A `commit_transition`'s terminal marker carries the FULL per-entry outcome for a mixed commit.
+                // Capture it as authoritative; it delimits nothing (no `Finalize`) so it stays out of the
+                // piecemeal fold below.
+                if let Some(RequestOutcome::CommitTransition { entries }) = &env.request_outcome {
+                    let accum = accums
+                        .entry(request_id.clone())
+                        .or_insert_with(|| CommitAccum {
+                            fingerprint,
+                            created_at: env.created_at,
+                            pending_side_keys: Vec::new(),
+                            pending_instance: None,
+                            pending_lifecycle_ids: Vec::new(),
+                            entries: Vec::new(),
+                            durable_full: None,
+                        });
+                    accum.durable_full = Some(
+                        entries
+                            .iter()
+                            .cloned()
+                            .map(recovery_from_outcome_entry)
+                            .collect(),
+                    );
+                    continue;
+                }
+                // `push_with_request_id` envelopes carry `request_outcome = Some(RequestOutcome::Push)`; the push
+                // rebuild owns them. Only `commit_transition` envelopes (request_outcome == None) belong to the
+                // piecemeal fold.
+                if env.request_outcome.is_some() {
+                    continue;
+                }
                 let accum = accums
                     .entry(request_id.clone())
                     .or_insert_with(|| CommitAccum {
@@ -1686,6 +2023,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                         pending_instance: None,
                         pending_lifecycle_ids: Vec::new(),
                         entries: Vec::new(),
+                        durable_full: None,
                     });
                 match &env.command {
                     QueueCommand::WriteSideRecords(cmd) => {
@@ -1727,14 +2065,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             }
         }
         for (request_id, accum) in accums {
-            if accum.entries.is_empty() {
+            // A durable `CommitTransition` marker (mixed commit) is authoritative — it holds the whole vec
+            // including the rejected entries; otherwise fall back to the committed-only piecemeal `entries`.
+            let entries = accum.durable_full.unwrap_or(accum.entries);
+            if entries.is_empty() {
                 continue;
             }
             let expires_at = request_expires_at(accum.created_at, retention_ms);
             commit_idempotency.entry(shard.clone()).or_default().record(
                 request_id,
                 BodyHash(accum.fingerprint),
-                accum.entries,
+                entries,
                 expires_at,
             );
         }
@@ -1822,11 +2163,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// selection with `Unavailable`, so the log-replay family rejects non-item units unchanged.
     fn claim_rich(&self, req: &ClaimRequest, unit: ClaimUnit) -> EngineResult<Claimed> {
         let mut g = self.inner.lock().expect("poisoned");
+        // Due-ness at the caller-resolved eligibility epoch (see `ClaimRequest::eligibility_at`); the lease
+        // and the committed command below are still stamped with the operational `req.now`.
         let selection = g.projection.select_rich_claim(
             &req.shard,
             unit,
             &req.compatibility,
-            req.now,
+            req.eligibility_at(),
             req.max_items,
         )?;
         if selection.item_ids.is_empty() {
@@ -1987,6 +2330,38 @@ fn outcomes_from_recovery(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome>
             CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
         })
         .collect()
+}
+
+/// Project one [`EntryRecovery`] to its durable serializable form for [`RequestOutcome::CommitTransition`].
+/// The inverse is [`recovery_from_outcome_entry`]; together they let a mixed commit's whole per-entry vec
+/// (committed AND rejected, with the rejection's structured error) round-trip through the durable log.
+fn outcome_entry_from_recovery(r: &EntryRecovery) -> CommitOutcomeEntry {
+    CommitOutcomeEntry {
+        consumed_input_id: r.consumed_input_id,
+        instance: r.instance.clone(),
+        side_record_keys: r.side_record_keys.clone(),
+        lifecycle_item_ids: r.lifecycle_item_ids.clone(),
+        rejection: match &r.status {
+            CommitEntryStatus::Committed => None,
+            CommitEntryStatus::Rejected(e) => Some(CommitRejection::from_error(e)),
+        },
+    }
+}
+
+/// Reconstruct an [`EntryRecovery`] from its durable serializable form (inverse of
+/// [`outcome_entry_from_recovery`]).
+fn recovery_from_outcome_entry(e: CommitOutcomeEntry) -> EntryRecovery {
+    let status = match e.rejection {
+        None => CommitEntryStatus::Committed,
+        Some(rej) => CommitEntryStatus::Rejected(rej.into_error()),
+    };
+    EntryRecovery {
+        consumed_input_id: e.consumed_input_id,
+        instance: e.instance,
+        side_record_keys: e.side_record_keys,
+        lifecycle_item_ids: e.lifecycle_item_ids,
+        status,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2452,6 +2827,105 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         };
         Ok((env, fingerprint))
     }
+
+    fn build_request_id_commit_envelopes(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+        entries: Vec<crate::port::CommitTransitionEntry>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> EngineResult<(Vec<CommandEnvelope>, BodyHash)> {
+        if !self.is_atomic() {
+            return Err(EngineError::Unavailable);
+        }
+        // The whole-body fingerprint `commit_transition` stamps on EVERY envelope of this commit, so a
+        // post-reopen retry of the same body computes the identical fingerprint → Replay (not Conflict).
+        let fingerprint = commit_body_hash(&entries)?;
+        let mut g = self.inner.lock().expect("poisoned");
+        if !g.projection.supports_commit_transition() {
+            return Err(EngineError::Unavailable);
+        }
+        let _ = expected_epoch;
+        let commit_fingerprint = fingerprint.0;
+        let mut envelopes: Vec<CommandEnvelope> = Vec::new();
+        let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            // Finalize-only restriction (mirrors `build_request_id_commit_envelope`'s single-entry scope): a
+            // side-record / lifecycle / instance-fence entry would need the full commit machinery (counter
+            // reservation, index validation) this probe deliberately does not replicate.
+            if !entry.side_records.is_empty()
+                || !entry.lifecycle_items.is_empty()
+                || entry.instance_fence.is_some()
+            {
+                return Err(EngineError::Invalid(
+                    "build_request_id_commit_envelopes: finalize-only entries",
+                ));
+            }
+            let claim_ref = entry.claim_ref;
+            let consumed_input_id = claim_ref.item_id;
+            match g
+                .projection
+                .commit_validate(shard, std::slice::from_ref(&claim_ref), now)
+            {
+                Ok(()) => {
+                    let command_id = Self::next_command_id(&mut g, self.node_id);
+                    envelopes.push(CommandEnvelope {
+                        command_id,
+                        request_id: Some(request_id.clone()),
+                        request_fingerprint: Some(commit_fingerprint),
+                        request_outcome: None,
+                        item_ids: vec![consumed_input_id],
+                        command: QueueCommand::Finalize(FinalizeCommand {
+                            outcomes: vec![FinalizeOutcome::new(consumed_input_id, entry.finalize)],
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: now,
+                    });
+                    recovery.push(EntryRecovery {
+                        consumed_input_id,
+                        instance: None,
+                        side_record_keys: Vec::new(),
+                        lifecycle_item_ids: Vec::new(),
+                        status: CommitEntryStatus::Committed,
+                    });
+                }
+                Err(e) => recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(e),
+                }),
+            }
+        }
+        // Emit the terminal marker whenever the commit has >=1 REJECTED entry (mixed OR all-rejected),
+        // byte-for-byte as `commit_transition` does, so recovery rebuilds the FULL per-entry vec (committed +
+        // rejected) from this durable envelope.
+        let has_rejected = recovery
+            .iter()
+            .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)));
+        if has_rejected {
+            let outcome_entries: Vec<CommitOutcomeEntry> =
+                recovery.iter().map(outcome_entry_from_recovery).collect();
+            let command_id = Self::next_command_id(&mut g, self.node_id);
+            envelopes.push(CommandEnvelope {
+                command_id,
+                request_id: Some(request_id.clone()),
+                request_fingerprint: Some(commit_fingerprint),
+                request_outcome: Some(RequestOutcome::CommitTransition {
+                    entries: outcome_entries,
+                }),
+                item_ids: Vec::new(),
+                command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                    records: Vec::new(),
+                }),
+                checksum: CommandChecksum(0),
+                created_at: now,
+            });
+        }
+        Ok((envelopes, fingerprint))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2505,13 +2979,21 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                     Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
                 }
             }
+            // Selection runs at the caller-resolved eligibility epoch (`eligibility_time`, defaulting to
+            // `now`); the lease/command stamping below stays on `req.now`, so a claim can select work due at
+            // one epoch while leasing it against the operational clock.
+            let eligibility_at = req.eligibility_at();
             let candidates: Vec<ItemId> = if gc && strict_candidate_cursor {
                 let after = g
                     .coords
                     .get(&req.shard)
                     .and_then(|coord| coord.in_flight_claim_tail);
-                g.projection
-                    .eligible_candidates_after(&req.shard, req.now, after, req.max_items)?
+                g.projection.eligible_candidates_after(
+                    &req.shard,
+                    eligibility_at,
+                    after,
+                    req.max_items,
+                )?
             } else {
                 let in_flight_claims = g
                     .coords
@@ -2520,7 +3002,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                     .unwrap_or_default();
                 let candidate_limit = req.max_items.saturating_add(in_flight_claims.len()).max(1);
                 g.projection
-                    .eligible_candidates(&req.shard, req.now, candidate_limit)?
+                    .eligible_candidates(&req.shard, eligibility_at, candidate_limit)?
                     .into_iter()
                     .filter(|id| !in_flight_claims.contains(id))
                     .take(req.max_items)
@@ -3058,16 +3540,25 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                 report.leases_reclaimed += ids.len() as u64;
             }
             for def in definitions {
-                if !def.emit_change_records {
-                    continue;
-                }
                 let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-                Self::reap_terminal_items_locked(
+                if def.emit_change_records {
+                    Self::reap_terminal_items_locked(
+                        &mut g,
+                        &shard,
+                        now,
+                        def.terminal_retention_ms,
+                        def.emit_change_records,
+                    )?;
+                }
+                // Segment-object reclamation (bead pqueue-b5cc2bc7): gated INSIDE on retention_may_advance +
+                // the durable checkpoint high-water, so it is a no-op for every non-hybrid-async backend (no
+                // durable checkpoint => nothing trimmed) and withheld under Hard debt. Runs for ALL queues
+                // (not just emit-enabled ones) because segment reclamation is independent of change records.
+                Self::trim_reclaimable_segments_locked(
                     &mut g,
                     &shard,
+                    def.request_id_retention_ms,
                     now,
-                    def.terminal_retention_ms,
-                    def.emit_change_records,
                 )?;
             }
             Ok(report)
@@ -3646,19 +4137,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     .check(rid, fingerprint, now)
                 {
                     IdempotencyDecision::Replay(recovery) => {
-                        // FAITHFULNESS GUARD (mixed committed+rejected commits across restart). An
-                        // in-process record holds ONE `EntryRecovery` per input entry (committed AND rejected;
-                        // see the `recovery.push` loop below), so its length always equals the resubmitted
-                        // body's entry count and this guard is a no-op. But `rebuild_commit_idempotency_from_log`
-                        // can only reconstruct the COMMITTED, `Finalize`-delimited entries: a rejected entry
-                        // mutates and appends NOTHING durable, so it leaves no trace to rebuild. A cached record
-                        // is therefore a faithful replay of the (same-body, fingerprint-matched) request ONLY
-                        // when it accounts for every entry in the body. If it is short, the original commit
-                        // mixed committed + rejected entries and this reconstructed record is NOT faithful — do
-                        // NOT return the misleading short outcome vec; fall through to safe re-execution
-                        // (the already-committed inputs stay finalized exactly once — commit_validate fences
-                        // them — so re-execution is 0-duplicate, and the end-of-call record overwrites the stale
-                        // short entry with the full re-executed vec).
+                        // FAITHFULNESS GUARD (safety net for pre-marker logs). An in-process record, and a
+                        // record rebuilt across restart from the durable `CommitTransition` marker, both hold
+                        // ONE `EntryRecovery` per input entry (committed AND rejected), so their length equals
+                        // the resubmitted body's entry count and the replay is faithful — including for a MIXED
+                        // commit (bead pqueue-db60657d). This guard only bites on a log written BEFORE the
+                        // marker existed: there a mixed commit rebuilds to just its COMMITTED,
+                        // `Finalize`-delimited entries (a rejected entry appended nothing to reconstruct), a
+                        // SHORTER vec. Do NOT return that misleading short outcome vec; fall through to safe
+                        // re-execution (the already-committed inputs stay finalized exactly once — commit_validate
+                        // fences them — so re-execution is 0-duplicate, and the end-of-call record overwrites the
+                        // stale short entry with the full re-executed vec).
                         if recovery.len() == entries.len() {
                             return Ok(outcomes_from_recovery(&recovery));
                         }
@@ -3669,9 +4158,27 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
             }
 
             // (2) Per entry: validate the lease-token + version-fenced claim_ref AND the optional instance
-            //     fence, then commit the entry's side-records + fence advance + lifecycle push + input
-            //     finalize atomically. A rejected entry mutates nothing.
+            //     fence, then BUILD (but do not yet append) the entry's side-records + fence advance +
+            //     lifecycle push + input finalize. A rejected entry mutates nothing. The whole commit — every
+            //     committed entry's envelopes AND the outcome marker (below) — is appended as ONE atomic log
+            //     batch at the end, so a crash can never leave a HALF state (committed entries durable but the
+            //     outcome record not, or vice-versa; bead pqueue-db60657d Problem 1).
+            //
+            //     Because the durable append is deferred to the end, a committed entry is NOT applied to the
+            //     projection before the next entry validates, so we thread the in-commit effects that a later
+            //     entry could observe through lightweight overlays: `finalized_in_commit` (an input already
+            //     finalized by a prior entry is no longer a live claim), `staged_fences` (a prior entry may
+            //     have advanced an instance fence this entry chains onto), and `committed_pushes` (a prior
+            //     entry's lifecycle push occupies unique-index keys). These make the deferred-append path
+            //     BYTE-IDENTICAL to the old per-entry apply for the realistic disjoint-entry commit AND prevent
+            //     a batched apply from ever double-finalizing (an apply error) or double-inserting a unique key
+            //     (silent overwrite) when two entries touch the same input/index within one commit.
+            let commit_fingerprint = fingerprint.0;
             let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
+            let mut committed_envelopes: Vec<CommandEnvelope> = Vec::new();
+            let mut finalized_in_commit: HashSet<ItemId> = HashSet::new();
+            let mut staged_fences: HashMap<Vec<u8>, u64> = HashMap::new();
+            let mut committed_pushes: Vec<PushItem> = Vec::new();
             for entry in entries {
                 let claim_ref = entry.claim_ref;
                 let consumed_input_id = claim_ref.item_id;
@@ -3683,6 +4190,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     status: CommitEntryStatus::Rejected(e),
                 };
 
+                // In-commit duplicate-input guard: a prior entry in THIS commit already finalized this input,
+                // so it is no longer a live claim (mirrors the sequential-apply rejection — its lease is gone —
+                // and prevents a second Finalize for the same item, which would be an apply error).
+                if finalized_in_commit.contains(&consumed_input_id) {
+                    recovery.push(reject(EngineError::Terminal));
+                    continue;
+                }
                 if let Err(e) =
                     g.projection
                         .commit_validate(shard, std::slice::from_ref(&claim_ref), now)
@@ -3691,12 +4205,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     continue;
                 }
 
-                // C6: validate the caller-supplied instance fence against the stored fence (absent == 0).
+                // C6: validate the caller-supplied instance fence against the stored fence (absent == 0),
+                // reading through the in-commit `staged_fences` overlay so a fence a prior entry advanced is
+                // visible here exactly as sequential apply would have made it.
                 if let Some(fence) = &entry.instance_fence {
-                    let stored = g
-                        .projection
-                        .instance_fence(shard, &fence.instance_key)?
-                        .unwrap_or(0);
+                    let stored = match staged_fences.get(&fence.instance_key) {
+                        Some(v) => *v,
+                        None => g
+                            .projection
+                            .instance_fence(shard, &fence.instance_key)?
+                            .unwrap_or(0),
+                    };
                     if let Err(e) = validate_instance_fence(stored, fence) {
                         recovery.push(reject(e));
                         continue;
@@ -3719,7 +4238,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 // wire-format change, no new serialization) is exactly what lets recovery rebuild the
                 // `commit_idempotency` cache from the log (`rebuild_commit_idempotency_from_log`) so a
                 // post-restart request_id retry replays the one committed result instead of re-executing.
-                let commit_fingerprint = fingerprint.0;
                 let mut envelopes: Vec<CommandEnvelope> = Vec::new();
                 let mk_env = |g: &mut Inner<L, P>, command: QueueCommand, item_ids: Vec<ItemId>| {
                     let command_id = Self::next_command_id(g, self.node_id);
@@ -3757,6 +4275,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     envelopes.push(e);
                 }
                 let mut lifecycle_item_ids = Vec::new();
+                let mut entry_pushes: Vec<PushItem> = Vec::new();
                 if !entry.lifecycle_items.is_empty() {
                     if let Some(e) = entry.lifecycle_items.iter().find_map(|item| {
                         validate_entity(schema.as_ref(), item.entity.as_ref()).err()
@@ -3775,11 +4294,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                         counter_base,
                         max_attempts,
                     );
-                    if let Err(e) = g.projection.index_validate_push(shard, &push_items) {
+                    // Index-validate against the projection AND the pushes prior committed entries in THIS
+                    // commit already claimed (they are not yet applied), so a unique-key collision between two
+                    // entries of the same commit rejects here exactly as sequential apply would have.
+                    let mut candidate = committed_pushes.clone();
+                    candidate.extend(push_items.iter().cloned());
+                    if let Err(e) = g.projection.index_validate_push(shard, &candidate) {
                         recovery.push(reject(e));
                         continue;
                     }
                     lifecycle_item_ids = ids.clone();
+                    entry_pushes = push_items.clone();
                     let e = mk_env(
                         &mut g,
                         QueueCommand::Push(PushCommand { items: push_items }),
@@ -3790,16 +4315,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 let e = mk_env(
                     &mut g,
                     QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: vec![FinalizeOutcome::new(claim_ref.item_id, entry.finalize)],
+                        outcomes: vec![FinalizeOutcome::new(consumed_input_id, entry.finalize)],
                     }),
-                    vec![claim_ref.item_id],
+                    vec![consumed_input_id],
                 );
                 envelopes.push(e);
 
-                // Commit the entry's envelopes under the held lock as one append batch. The epoch cannot
-                // change while we hold the lock, so either the append fences (EpochFenced, before any
-                // mutation) or all of the entry's writes commit and apply together.
-                Self::commit_locked_batch(&mut g, shard, envelopes, expected_epoch)?;
+                // Accept: fold this committed entry's effects into the in-commit overlays and collect its
+                // envelopes for the single atomic append below (NOT appended yet).
+                finalized_in_commit.insert(consumed_input_id);
+                if let Some((key, next)) = &instance {
+                    staged_fences.insert(key.clone(), *next);
+                }
+                committed_pushes.extend(entry_pushes);
+                committed_envelopes.append(&mut envelopes);
                 recovery.push(EntryRecovery {
                     consumed_input_id,
                     instance,
@@ -3809,7 +4338,52 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 });
             }
 
-            // (3) Record the whole-body recovery only AFTER success, so a later replay/explain returns it
+            // (3) Durably record the FULL per-entry outcome (committed AND rejected) for ANY request_id-bearing
+            //     commit that has >=1 REJECTED entry — MIXED and ALL-REJECTED alike (bead pqueue-db60657d
+            //     Problems 1 & 2). A rejected entry mutates and appends nothing of its own, so without this its
+            //     outcome is lost across a restart: a MIXED commit would rebuild a SHORTER vec (falling through
+            //     the `recovery.len() == entries.len()` guard to re-execution), and an ALL-REJECTED commit would
+            //     rebuild NOTHING and re-execute — and re-execution reads `now`, so a Conflict rejected before a
+            //     lease expired can re-reject StaleLease after it (a DIFFERENT structured error, not the
+            //     byte-identical replay the live in-memory record gives). We stamp the whole vec on ONE terminal
+            //     marker envelope (a no-op empty `WriteSideRecords`) carrying the caller's request_id +
+            //     whole-body fingerprint + `RequestOutcome::CommitTransition`. An ALL-COMMITTED commit needs no
+            //     marker (recovery reconstructs it exactly from its `Finalize` runs). The marker rides in the
+            //     SAME atomic append as the committed envelopes, so the outcome is durable EXACTLY when the
+            //     commit is — never a half state.
+            let mut batch = committed_envelopes;
+            if let Some(rid) = &request_id
+                && recovery
+                    .iter()
+                    .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)))
+            {
+                let outcome_entries: Vec<CommitOutcomeEntry> =
+                    recovery.iter().map(outcome_entry_from_recovery).collect();
+                let command_id = Self::next_command_id(&mut g, self.node_id);
+                batch.push(CommandEnvelope {
+                    command_id,
+                    request_id: Some(rid.clone()),
+                    request_fingerprint: Some(commit_fingerprint),
+                    request_outcome: Some(RequestOutcome::CommitTransition {
+                        entries: outcome_entries,
+                    }),
+                    item_ids: Vec::new(),
+                    command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                        records: Vec::new(),
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: now,
+                });
+            }
+            // ONE atomic append+apply for the WHOLE commit (all committed entries' envelopes + the outcome
+            // marker). The epoch cannot change while we hold the lock, so either this fences (EpochFenced,
+            // before any mutation) or the whole commit's writes commit and apply together — no crash window
+            // between committed-entry durability and outcome durability.
+            if !batch.is_empty() {
+                Self::commit_locked_batch(&mut g, shard, batch, expected_epoch)?;
+            }
+
+            // (4) Record the whole-body recovery only AFTER success, so a later replay/explain returns it
             //     verbatim with no second append.
             let outcomes = outcomes_from_recovery(&recovery);
             if let Some(rid) = request_id {
@@ -4754,6 +5328,7 @@ mod ordered_tests {
         );
 
         let mut first_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-1").unwrap(),
             max_items: 1,
@@ -4774,6 +5349,7 @@ mod ordered_tests {
         };
 
         let mut second_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-2").unwrap(),
             max_items: 1,
@@ -4854,6 +5430,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
 
         let mut paused_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer").unwrap(),
             max_items: 1,
@@ -4896,6 +5473,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
 
         let mut resumed_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-2").unwrap(),
             max_items: 2,
@@ -4934,6 +5512,7 @@ mod ordered_tests {
         drop(landed_push);
 
         let mut plain_claim = plain_backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: plain_shard.clone(),
             worker_id: WorkerId::new("claimer-3").unwrap(),
             max_items: 2,
@@ -4967,6 +5546,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
 
         let mut resumed_plain_claim = plain_backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: plain_shard,
             worker_id: WorkerId::new("claimer-4").unwrap(),
             max_items: 1,
@@ -5002,6 +5582,7 @@ mod ordered_tests {
         drop(push_one);
 
         let mut initial_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-lease").unwrap(),
             max_items: 1,
@@ -5029,6 +5610,7 @@ mod ordered_tests {
         drop(reclaim);
 
         let mut paused_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-paused").unwrap(),
             max_items: 1,
@@ -5062,6 +5644,7 @@ mod ordered_tests {
         assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
 
         let mut resumed_claim = backend.claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer-resumed").unwrap(),
             max_items: 1,

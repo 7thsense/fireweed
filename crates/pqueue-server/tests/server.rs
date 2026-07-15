@@ -312,6 +312,7 @@ async fn cached_owner_epoch_fences_real_claim_path_after_reassignment() {
     b.acquire_queue(&qkey(), ts(20)).await.unwrap();
     let err = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: qkey(),
             worker_id: WorkerId::new("stale").unwrap(),
             max_items: 1,
@@ -577,6 +578,7 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
         .unwrap();
     let claimed = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard(),
             worker_id: WorkerId::new("w").unwrap(),
             max_items: 1,
@@ -1450,6 +1452,7 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
     );
     let claimed = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: queue.clone(),
             worker_id: WorkerId::new("claimer").unwrap(),
             max_items: 1,
@@ -1712,6 +1715,7 @@ async fn change_record_sink_delivers() {
         .unwrap();
     let claim = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("worker-1").unwrap(),
             max_items: 1,
@@ -1786,6 +1790,7 @@ async fn change_record_sink_failure_isolation() {
         .unwrap();
     let claim = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("worker-1").unwrap(),
             max_items: 1,
@@ -1882,6 +1887,7 @@ async fn emit_enabled_queues_reap_terminal_items_only_after_cursor_reaches_termi
         .unwrap();
     let claim = backend
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("worker-1").unwrap(),
             max_items: 1,

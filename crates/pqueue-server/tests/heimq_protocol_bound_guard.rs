@@ -49,10 +49,8 @@ fn package_sources(lock: &str, target: &str) -> Vec<String> {
             in_block = true;
             continue;
         }
-        if in_block {
-            if let Some(rest) = line.strip_prefix("source = ") {
-                src = rest.trim_matches('"').to_string();
-            }
+        if in_block && let Some(rest) = line.strip_prefix("source = ") {
+            src = rest.trim_matches('"').to_string();
         }
     }
     if in_block {

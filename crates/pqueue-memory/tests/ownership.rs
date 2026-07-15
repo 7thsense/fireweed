@@ -1,11 +1,10 @@
 //! BQ-23 — the ownership binding primitive over a REAL backend (`MemoryBackend`) + the in-memory control
-//! plane. These prove `acquire_and_fence` advances the durable storage fence on acquire, so a write made
-//! through the raw `LogWriter::append` SEAM at a superseded epoch is rejected `EpochFenced`.
+//! plane. These prove `acquire_and_fence` advances the durable storage fence on acquire, so claims, pushes,
+//! and finalizes made through the real data-plane ports at a superseded epoch are rejected `EpochFenced`.
 //!
-//! SCOPE (do not overstate): this fences the raw append SEAM only. The REAL claim/push ports self-stamp the
-//! current epoch and are NOT yet owner-fenced — threading `fence_epoch` through them (the work that closes
-//! the BQ-20/21/22 deferral end-to-end) is the server-wiring follow-up (pqueue-c33c367e). The
-//! lease-lifecycle + C4b seam invariants are unit-tested in `pqueue-engine` (control_plane + ownership).
+//! SCOPE: bead pqueue-7bac12ce threaded `fence_epoch` through every data-plane port (claim/push/finalize/
+//! renew/reassign/purge/upsert), closing the BQ-20/21/22 deferral end-to-end. The lease-lifecycle + C4b
+//! seam invariants are unit-tested in `pqueue-engine` (control_plane + ownership).
 
 use pqueue_conformance::{envelope, qdef, shard};
 use pqueue_core::{OwnerId, UtcTimestamp};

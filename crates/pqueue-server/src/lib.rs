@@ -825,6 +825,16 @@ where
     }
 
     pub async fn acquire_queue(&self, queue: &QueueKey, now: UtcTimestamp) -> EngineResult<()> {
+        // Read prior active owner before acquire (for restart-reconciliation with ephemeral CP).
+        let prior_owner = if self.control_plane.is_ephemeral() {
+            self.control_plane
+                .lease(queue)
+                .ok()
+                .and_then(|l| l.active_owner_id)
+        } else {
+            None
+        };
+
         match self
             .cp_acquire(queue.clone(), self.owner.clone(), now)
             .await?
@@ -836,7 +846,17 @@ where
                 } else if current_epoch < lease.assignment_epoch {
                     self.backend.acquire_epoch(queue).await?
                 } else {
-                    return Err(EngineError::EpochFenced);
+                    // current_epoch > lease.assignment_epoch
+                    if prior_owner.as_ref() == Some(&self.owner) {
+                        // Same-owner re-affirm after a prior restart-reconciliation:
+                        // use current storage epoch without re-advancing.
+                        current_epoch
+                    } else if self.control_plane.is_ephemeral() {
+                        // Ephemeral CP reset on restart: catch up storage fence.
+                        self.backend.acquire_epoch(queue).await?
+                    } else {
+                        return Err(EngineError::EpochFenced);
+                    }
                 };
                 let session = OwnedSession {
                     owner: self.owner.clone(),
@@ -1010,7 +1030,7 @@ where
 
     /// (Re)establish the cached fence session for a queue this owner holds at `epoch`, returning the fence
     /// epoch passed to write commands. Reuses a still-valid cached session; otherwise reads the backend's
-    /// authoritative epoch and caches it (fencing if the backend epoch no longer matches the lease).
+    /// authoritative epoch and caches it (reconciling the restart gap for ephemeral control planes).
     async fn establish_owned_session(
         &self,
         queue: &QueueKey,
@@ -1026,9 +1046,17 @@ where
             return Ok(existing);
         }
         let fence_epoch = self.backend.current_epoch(queue).await?;
-        if fence_epoch != epoch {
+        let fence_epoch = if fence_epoch == epoch {
+            fence_epoch
+        } else if fence_epoch < epoch {
+            self.backend.acquire_epoch(queue).await?
+        } else if self.control_plane.is_ephemeral() {
+            // Ephemeral CP reset on restart: storage epoch is ahead of CP epoch.
+            // Advance storage to fence stale pre-restart writers.
+            self.backend.acquire_epoch(queue).await?
+        } else {
             return Err(EngineError::EpochFenced);
-        }
+        };
         let session = OwnedSession {
             owner: self.owner.clone(),
             queue: queue.clone(),
@@ -1642,6 +1670,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
 /// backend shared by the `objectlog/hybrid` and `objectlog/hybrid-async` profiles: open the group-commit
 /// object log at `root` + the hybrid projection store at `path`, run the ack-after-seal group-commit write
 /// path, and recover-on-open (hydrate memory from the validated SQLite image + replay the object-log tail).
+// Composition-root builder: threads the object-log + hybrid-projection knobs (strict apply, async
+// backpressure monitor) into one backend. The arity reflects the wiring surface, not incidental complexity.
+#[allow(clippy::too_many_arguments)]
 fn open_objectlog_hybrid_backend(
     root: &std::path::Path,
     path: &std::path::Path,

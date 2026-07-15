@@ -17,7 +17,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 05039d8518c9782554cf610ada22dc0eddec379c426e33f1389f9bc076683e16
+    self_hash: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -30,10 +30,10 @@ ddx:
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-      tp-governing-test-traceability: b485d8c2cb0e34424404c839913f764dffe86be59112c3d135d731aaf40378a3
-      tp-scale-substantiation: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
-      tp-verification-acceptance-criteria: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
-    reviewed_at: "2026-07-07T06:16:24Z"
+      tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
+      tp-scale-substantiation: 39792548c579ce686ad8f57017bfcd49f56fe584443ffedd29baf149ba641cb0
+      tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
+    reviewed_at: "2026-07-11T01:06:39Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence
@@ -149,7 +149,7 @@ scope.
 | B-071 | Queue density resource model | ADR-003, TD-003, TP-002 E2 | B-072, B-062 | `cargo test -p pqueue-storage queue_density_single_node_tests -- --ignored` | Bounded shared pools/sweepers and LRU handles; no one task/loop/connection per queue/shard. |
 | B-080 | Object-log durable log and SQLite projection | TD-004, TD-001, TP-003 §4 | B-072 | `cargo test -p pqueue-objectlog object_log_commit_recovery_tests`; `cargo test -p pqueue-sqlite sqlite_projection_tests` | Adds `pqueue-objectlog` and `pqueue-sqlite` workspace crates per TD-001 step 6. Implements group commit, manifest CAS/current epoch fence, Postgres manifest-pointer fallback for no-CAS stores, production rejection of one-object-per-command, config rejection/fallback for stores without required conditional-write behavior, apply-before-return, replay response, SQLite projection, and cross-shard command convergence visibility gates. |
 | B-081 | Object-log conformance parity, metrics, product smoke, and recovery | TD-004, TP-002 E3, TP-003 AC-OBS-1 and AC-TXN-1..6 object-log profiles | B-080, B-062, B-061 | `cargo test -p pqueue-storage storage_conformance_multi_shard_tests --features object-log`; `cargo test -p pqueue-objectlog object_log_commit_recovery_tests`; `PQUEUE_BACKEND_PROFILE=object_log_sqlite_projection PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows -- --ignored`; release: E3 benchmark + AC-TXN matrix | Snapshot + log-tail recovery, bounded apply lag, object-log latency/cost/recovery evidence, fallback-fence E3 row, transaction-contract crash-point matrix, multi-shard command convergence, object-log metrics ground truth, product-E2E smoke matrix extension, and parity with the shared TD-001 conformance suite. |
-| B-090 | P0 product workflow release gates | PRD, TP-003 AC-E2E-1..6, AC-E2E-8..9, INV-1..10 | B-061, B-062, B-071, B-080, B-081 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows -- --ignored`; `cargo test -p pqueue-service seventh_sense_validation_tests invariant_stress_matrix_tests -- --ignored`; release: TP-002 E0-E3, `performance_multi_shard_scale_out_tests`, `recurrence_scale_both_profiles_tests` | Scheduled action, group batching, cohort, recurring, crash recovery, noisy neighbor, generic priority, downstream pacing, Seventh-Sense-shaped subset, recurrence under scale on both backend profiles, and INV-1..10 under the TP-003 §2 stress matrix. |
+| B-090 | P0 product workflow release gates | PRD, TP-003 AC-E2E-1..6, AC-E2E-8..9, INV-1..10 | B-061, B-062, B-071, B-080, B-081 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows -- --ignored`; `cargo test -p pqueue-service seventh_sense_validation_tests invariant_stress_matrix_tests -- --ignored`; release: TP-002 E0-E3, `performance_cross_queue_scale_out_tests` (the ADR-008 replacement for the retired `performance_multi_shard_scale_out_tests`), `recurrence_scale_both_profiles_tests` | Scheduled action, group batching, cohort, recurring, crash recovery, noisy neighbor, generic priority, downstream pacing, Seventh-Sense-shaped subset, recurrence under scale on both backend profiles, and INV-1..10 under the TP-003 §2 stress matrix. |
 | B-110 | Standalone durable sqlite backend (TD-005) | TD-005, ADR-006, TP-001 TD-005 row | B-080 | `cargo test -p pqueue-sqlite`; `cargo test -p pqueue-sqlite --test shared_conformance --test embedder_delivery_conformance --test sqlite_backend_tests`; `cargo test -p pqueue-service --lib runtime` | Unified single-transaction `SqliteBackend` (atomic append+apply on one connection, one WAL fsync ack boundary, strict read-after-write), atomic `claim` (single `attempts` increment; `batch_claim` omitted from the surface), epoch bootstrap + bump-on-open fencing, single-writer ownership (second opener rejected), no-replay reopen recovery, the `sqlite` `BackendProfile` wired into the service config/readiness (config-plumbing; the service does not yet construct/serve the backend), shared conformance parity with the in-memory reference, and the embedder delivery-adapter conformance suite. `client_item_key` convergence is the embedder adapter's responsibility (pqueue converges by `item_id`). The 7snx host switch off the in-memory backend (bead pqueue-a4846118) is a deferred cross-repo follow-up (requires publishing pqueue + bumping the git rev). |
 | B-100 | API-002 operator surface | API-002, ADR-002, TP-003 AC-OP-1..9, AC-CLAIM-6 operator-fenced renewal, INV-11 | B-060, B-050..B-053, B-021 | `cargo test -p pqueue-service operator_repair_tests operator_redrive_tests operator_purge_tests operator_async_operation_tests operator_auth_denied_path_tests` | P1 operator support: pause/resume, repair, redrive, bulk purge/archive, async ops, inspection/auth, and rejection of stale/fenced lease renewals after operator mutation. |
 | B-101 | Operator product workflow gate | API-002, TP-003 AC-E2E-7 | B-100, B-061 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows operator_repair_redrive_e2e -- --ignored` | Required before claiming operator-enabled product surface verified. |
@@ -258,7 +258,7 @@ P1/operator release workflow.
 | AC-E2E-9 release downstream pacing non-goal | B-090 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_downstream_pacing_non_goal_e2e -- --ignored` |
 | Seventh-Sense-shaped product subset | B-090 | `cargo test -p pqueue-service seventh_sense_validation_tests -- --ignored` |
 | INV-1..10 stress matrix | B-090 | `cargo test -p pqueue-service invariant_stress_matrix_tests -- --ignored` |
-| TP-002 E2 single-queue scale-out | B-090 | `cargo test -p pqueue-service performance_multi_shard_scale_out_tests -- --ignored`; if the published multiple is unresolved, stop for a doc update instead of inventing it |
+| TP-002 E2 cross-queue scale-out | B-090 | `performance_cross_queue_scale_out_tests` (replaces the retired `performance_multi_shard_scale_out_tests` under the ADR-008 reframe); if the published multiple is unresolved, stop for a doc update instead of inventing it. Re-measured live post-ADR-008 on kind, 2026-07-08: `docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl` |
 | TP-002 E0-E3 aggregate evidence | B-090 | TP-002 release benchmark commands for E0, E1, E2, and E3 |
 | AC-E2E-7 operator repair/redrive | B-101 | `PQUEUE_E2E_SCALE=release cargo test -p pqueue-service --test product_workflows product_workflow_operator_repair_redrive_e2e -- --ignored` |
 
@@ -362,8 +362,9 @@ BUILD-001 is complete when:
 
 Completion evidence as of 2026-06-16:
 
-- `bash scripts/ci/verify-build-closure.sh --aggregate pqueue-fa406e7d`
-  reports live closure verified.
+- `bash scripts/ci/verify-build-closure.sh --aggregate pqueue-131eadfa`
+  reports live closure verified. (Originally the B-090 P0 aggregate pqueue-fa406e7d,
+  repointed to the release epic after that closed bead was pruned from the tracker.)
 - `bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 --tp002-e0e1-source pqueue-7e2b3132 --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4`
   passes from source-backed evidence and regenerates
   `target/pqueue-ledger/product_validation.jsonl`.
@@ -373,3 +374,12 @@ Completion evidence as of 2026-06-16:
 - Product workflow smoke validation passed for both
   `postgres_native` (seed 1701) and `object_log_sqlite_projection` (seed 1801),
   with emitted workflow ledgers validated by `pqueue-verify-ledger --strict`.
+
+Addendum as of v0.11.0 (2026-07): TP-002 E2 was reframed to cross-queue
+scale-out (ADR-008) and re-measured live on a multi-node kind cluster; the
+current E2 evidence is `docs/perf/evidence/tp002-e2-cross-queue-remeasured.jsonl`
+(validates via `pqueue-verify-ledger --strict --require-evidence E2`). The
+released runtime additionally ships the TD-004 hybrid projection profiles
+(`objectlog/hybrid`, `objectlog/hybrid-strict`, `objectlog/hybrid-async`) beyond
+the BUILD-001 committed profiles above; their gates are owned by TP-003 §4.1 and
+the hybrid implementation plan, not by this build plan.

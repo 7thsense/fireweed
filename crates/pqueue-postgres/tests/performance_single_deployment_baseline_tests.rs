@@ -137,6 +137,7 @@ async fn push_batch(b: &PostgresRelationalBackend, shard: &QueueKey, base: u64, 
 async fn claim(b: &PostgresRelationalBackend, shard: &QueueKey, n: usize) -> Vec<ItemId> {
     let claimed = b
         .claim(ClaimRequest {
+            eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("w1").unwrap(),
             max_items: n,

@@ -32,9 +32,15 @@
 #   land. This gate never claims release-tier green.
 set -euo pipefail
 
-CARGO="cargo +1.92.0"
+CARGO="rustup run 1.92.0 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+if (($# > 0)); then
+    printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
+    echo "usage: bash scripts/ci/release-gate.sh" >&2
+    exit 64
+fi
 
 echo "=== pqueue release gate (SMOKE lane) ==="
 echo "    RELEASE-tier E0-E3 headline is DEFERRED to live runs (NOT proven here):"
@@ -82,7 +88,13 @@ ${CARGO} llvm-cov --package pqueue-core --lcov \
     --output-path "${REPO_ROOT}/target/coverage/pqueue-core.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core.lcov" --crate pqueue-core --min-lines 90
-cargo +nightly llvm-cov --package pqueue-core --branch --lcov \
+# cargo-llvm-cov spawns Cargo/rustc subprocesses of its own. Pin the whole
+# subprocess tree to nightly and put the nightly binaries ahead of Homebrew's
+# standalone stable Cargo/rustc; selecting only the outer Cargo allows the
+# nested `rustc` lookup to reject llvm-cov's nightly-only `-Z` branch flags.
+NIGHTLY_BIN="$(dirname "$(rustup which --toolchain nightly rustc)")"
+PATH="${NIGHTLY_BIN}:${PATH}" RUSTUP_TOOLCHAIN=nightly \
+    rustup run nightly cargo llvm-cov --package pqueue-core --branch --lcov \
     --output-path "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov" \
@@ -97,7 +109,7 @@ bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
     --lcov "${REPO_ROOT}/target/coverage/pqueue-engine.lcov" --crate pqueue-engine --min-lines 80
 
 echo "--- build-closure integrity ---"
-bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-fa406e7d
+bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
 
 echo "=== release gate (SMOKE lane) PASSED ==="
 echo "    Smoke evidence E2,E3 present + well-formed; coverage bars met."

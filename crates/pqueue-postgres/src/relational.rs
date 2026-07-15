@@ -3553,6 +3553,10 @@ impl ClaimPort for PostgresRelationalBackend {
             }
             let seq = alloc_seq(&mut tx, &t, &q)?;
             let now_n = ts_nanos(req.now);
+            // Due-ness is resolved at the caller-resolved eligibility epoch (`ClaimRequest::eligibility_at`),
+            // which defaults to `now`. It feeds ONLY the candidate predicates (`not_before<=$3` in the CTE,
+            // the group/cohort selections); `now_n` still stamps `updated_at` and the lease.
+            let elig_n = ts_nanos(req.eligibility_at());
             let exp = ts_nanos(req.lease_expires_at);
             let hash = lease_hash(&req.lease_token);
             let seqi = seq as i64;
@@ -3562,7 +3566,7 @@ impl ClaimPort for PostgresRelationalBackend {
                 let lim = req.max_items as i64;
                 let rows = st(tx.query(
                     CLAIM_CTE,
-                    &[&t, &q, &now_n, &lim, &hash, &exp, &now_n, &seqi],
+                    &[&t, &q, &elig_n, &lim, &hash, &exp, &now_n, &seqi],
                 ))?;
                 if rows.is_empty() {
                     return Ok(Claimed::default()); // roll back — no sequence burned (sqlite parity)
@@ -3622,13 +3626,24 @@ impl ClaimPort for PostgresRelationalBackend {
                         .as_ref()
                         .map(|gb| gb.max_groups)
                         .unwrap_or(0);
-                    select_group_batching(&mut tx, &req.shard, req.now, req.max_items, max_groups)?
+                    select_group_batching(
+                        &mut tx,
+                        &req.shard,
+                        req.eligibility_at(),
+                        req.max_items,
+                        max_groups,
+                    )?
                 }
                 ClaimUnit::SameGroupKey => {
-                    select_same_group(&mut tx, &req.shard, req.now, req.max_items)?
+                    select_same_group(&mut tx, &req.shard, req.eligibility_at(), req.max_items)?
                 }
                 ClaimUnit::WholeCohort => {
-                    match select_whole_cohort(&mut tx, &req.shard, req.now, req.max_items)? {
+                    match select_whole_cohort(
+                        &mut tx,
+                        &req.shard,
+                        req.eligibility_at(),
+                        req.max_items,
+                    )? {
                         Some(selected) => {
                             selected_cohort = Some(selected.cohort_id);
                             selected.item_ids
@@ -5427,6 +5442,7 @@ mod gated_group_summary_tests {
     }
     fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
         ClaimRequest {
+            eligibility_time: None,
             shard: shard(),
             worker_id: WorkerId::new("w1").unwrap(),
             max_items: max,
@@ -5518,6 +5534,7 @@ mod gated_group_summary_tests {
         .unwrap();
         // group_batching max_groups=2 → the two oldest groups (g1, g2) leased whole (4 items); g3 stays.
         let req = ClaimRequest {
+            eligibility_time: None,
             compatibility: ClaimCompatibility {
                 group_batching: Some(pqueue_engine::GroupBatching { max_groups: 2 }),
                 ..Default::default()
@@ -5567,6 +5584,7 @@ mod gated_group_summary_tests {
         block_on(b.create_queue(def)).unwrap();
         block_on(b.push(&shard(), vec![cm(10, 3), cm(11, 3), cm(12, 3)], ts(0), None)).unwrap();
         let req = ClaimRequest {
+            eligibility_time: None,
             compatibility: ClaimCompatibility {
                 whole_cohort: true,
                 ..Default::default()
@@ -5656,6 +5674,7 @@ mod gated_group_summary_tests {
 
         // Leasing g1's whole group drops it from discovery (no eligible work left).
         let req = ClaimRequest {
+            eligibility_time: None,
             compatibility: ClaimCompatibility {
                 same_group_key: true,
                 ..Default::default()
@@ -5717,6 +5736,7 @@ mod commit_transition_tests {
 
     fn claim_req(max: usize, exp: i64, now: i64) -> pqueue_engine::ClaimRequest {
         pqueue_engine::ClaimRequest {
+            eligibility_time: None,
             shard: shard(),
             worker_id: WorkerId::new("w1").unwrap(),
             max_items: max,
@@ -5935,4 +5955,11 @@ mod commit_transition_tests {
         assert!(read_side_record(&b1, "state/stale").is_none());
         assert!(read_side_record(&b1, "state/live").is_some());
     }
+
+    // pqueue-29bef1e4 scope note: the relational recovery-poison from an in-commit duplicate unique
+    // typed-index key is SQLITE_LOG-specific (see the sqlite `composed_commit_duplicate_unique_index` test).
+    // The composed postgres-relational backend is NOT vulnerable: `PostgresRelational` does not override
+    // `supports_commit_transition` (trait default `false`), so it does not offer the vectorized commit path
+    // at all, AND its append+apply commit in ONE postgres transaction — a failed apply rolls the append back,
+    // so no durable-but-unappliable batch can exist. Hence there is no postgres analog of the sqlite fix.
 }

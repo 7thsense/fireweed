@@ -24,7 +24,7 @@ pqueue-memory = { path = "../pqueue-memory" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-projection = { path = "../pqueue-projection" }
-fjord = { git = "https://github.com/telepathdata/fjord.git", tag = "v0.1.3", package = "fjord-broker" }
+fjord = { git = "https://github.com/7thsense/fjord.git", tag = "v0.1.3", package = "fjord-broker" }
 heimq = { git = "https://github.com/easel/heimq", tag = "v0.1.2" }
 heimq-broker = { git = "https://github.com/easel/heimq", tag = "v0.1.2" }
 # Pure-Rust Kafka v2 record-batch codec, imported as `heimq_protocol`: heimq's VENDORED fork of

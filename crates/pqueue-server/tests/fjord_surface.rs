@@ -156,7 +156,7 @@ fn fjord_dependency_is_git_pinned_no_path_deps() {
             .expect("read pqueue-server Cargo.toml");
 
     assert!(
-        cargo_toml.contains(r#"fjord = { git = "https://github.com/telepathdata/fjord.git""#),
+        cargo_toml.contains(r#"fjord = { git = "https://github.com/7thsense/fjord.git""#),
         "fjord must be sourced from the git repository"
     );
     assert!(

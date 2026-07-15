@@ -7,16 +7,33 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 5695ee9c00997c12cf2df378af020ae38c2b1e095b2d7e9bc1b3083fc6fb6b65
+    self_hash: eefa6005730f6a31933ab8d9c7ddee9412a09d88d252b1b3bbb91f2d2febea06
     deps:
-      adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
+      adr-orthogonal-log-projection-composition: 46327f801156492ee0a1ad0038b730dea7fcef4ebe00641e8f7d9d5f86f8b3f2
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-      tp-verification-acceptance-criteria: 75221561ea322735e69cd1f745886e630346a322658ad3079ee0a8c810092ce8
-    reviewed_at: "2026-07-07T06:16:24Z"
+      tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
+    reviewed_at: "2026-07-11T01:06:39Z"
 ---
 
 # Hybrid SQLite + In-Memory Projection Implementation Plan
+
+> **Status (2026-07, post-v0.11.0): EXECUTED.** This plan is retained as the record of intent; the
+> "Current State" and "Goal" sections below describe the repository as it was when the plan was
+> written. What shipped since:
+>
+> - `objectlog/hybrid` landed and was released in **v0.6.0** (docs/releases/v0.6.0.md), wired through
+>   `PQUEUE_PROJECTION_BACKEND=hybrid` (`crates/pqueue-server/src/env_config.rs`) with the
+>   SQLite-first apply, projection-image hydration recovery, fail-closed poisoning, and durable
+>   request-id replay this plan specifies.
+> - Two sibling profiles followed under TD-004: `objectlog/hybrid-strict` (SQLite durable **before**
+>   memory apply on the group-commit path) and `objectlog/hybrid-async` (deferred async SQLite
+>   checkpoint with debt/backpressure admission gating, high-water withholding, and debt-gated
+>   terminal-item retention advancement), both wired in `env_config.rs`/`lib.rs` and implemented in
+>   `crates/pqueue-sqlite/src/relational.rs`, current through **v0.11.0**.
+> - Known open residual (unchanged from this plan's snapshot-authority stance): object-log
+>   **segment-object reclamation remains deferred** pending a bounded-recovery retention floor
+>   (bead `pqueue-b5cc2bc7`); segment expiry stays disabled, exactly as required below.
 
 ## Goal
 
@@ -340,4 +357,4 @@ profile is wired in the runtime contract, the release artifact is published, and
   small new composition crate. Default: `pqueue-sqlite`, because it owns
   `SqliteProjectionStore` and already depends on `pqueue-projection`.
 - The exact release version. Default: the next minor after `v0.5.0`, because this
-  adds a new supported storage profile.
+  adds a new supported storage profile. (Resolved: shipped as `v0.6.0`.)

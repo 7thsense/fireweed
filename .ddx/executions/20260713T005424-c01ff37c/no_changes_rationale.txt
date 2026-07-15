@@ -1,0 +1,1 @@
+verification_command: cargo test -p pqueue-objectlog --test segmented_s3_substrate_tests

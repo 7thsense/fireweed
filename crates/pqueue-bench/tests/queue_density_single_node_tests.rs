@@ -707,8 +707,18 @@ fn queue_density_single_node_durable_tests() {
     };
 
     // ---- Emit durable-backend E2 density evidence (REAL measured numbers) ----
-    let evidence_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/perf/evidence/tp002-e2-density-durable.jsonl");
+    // Normal test and PR-gate runs validate a disposable ledger so timing noise does not
+    // dirty the tracked evidence artifact. Opt in when intentionally refreshing evidence.
+    let update_tracked_evidence = std::env::var("PQUEUE_UPDATE_PERF_EVIDENCE")
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    let evidence_path = if update_tracked_evidence {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/perf/evidence/tp002-e2-density-durable.jsonl")
+    } else {
+        let path = durable_tmp("evidence.jsonl");
+        cleanup.push(path.clone());
+        path
+    };
     let _ = std::fs::remove_file(&evidence_path);
 
     let cmd = "cargo test --manifest-path crates/pqueue-bench/Cargo.toml --test queue_density_single_node_tests queue_density_single_node_durable_tests -- --nocapture";

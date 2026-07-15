@@ -23,16 +23,16 @@ echo "    Branch coverage deferred here: requires nightly toolchain (--branch/-Z
 
 # Clean instrumentation so artifacts from deleted crates can't contaminate the
 # reported numbers.
-cargo +1.92.0 llvm-cov clean --workspace
+rustup run 1.92.0 cargo llvm-cov clean --workspace
 
 echo "--- pqueue-core (line) ---"
-cargo +1.92.0 llvm-cov \
+rustup run 1.92.0 cargo llvm-cov \
     --package pqueue-core \
     --summary-only \
     --fail-under-lines 0
 
 echo "--- pqueue-engine (line) ---"
-cargo +1.92.0 llvm-cov \
+rustup run 1.92.0 cargo llvm-cov \
     --package pqueue-engine \
     --summary-only \
     --fail-under-lines 0

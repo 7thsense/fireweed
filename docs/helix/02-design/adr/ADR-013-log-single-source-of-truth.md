@@ -6,12 +6,12 @@ ddx:
     - adr-queue-as-shard-unit-and-projection-families
     - adr-orthogonal-log-projection-composition
   review:
-    self_hash: 66130c84cb8e5467f5192066a0446f527672dac2eea83f7eae70b66c1e3b724c
+    self_hash: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-orthogonal-log-projection-composition: 3a22605e8641a25883d6a5e9c86b631d8a01099bbb867500507adda5a50c46e2
+      adr-orthogonal-log-projection-composition: 46327f801156492ee0a1ad0038b730dea7fcef4ebe00641e8f7d9d5f86f8b3f2
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-11T00:57:07Z"
 ---
 
 # Architecture Decision Record
@@ -108,14 +108,25 @@ The losses that made null-log unacceptable are the reasons the log is mandatory:
 ## Derived implementation work
 
 The migration itself is intentionally out of scope for this ADR. The follow-up beads derived from this
-decision should be filed separately and linked back here:
+decision were filed and are now **closed** (bead `pqueue-3c5aa2e0`, "Relational family rebuild-from-log
+migration", plus its five children):
 
 - Rework the relational backend recovery path so `recovery_high_water` returns the applied position and
-  replays the log tail instead of treating `pqueue_items` as durable truth.
+  replays the log tail instead of treating `pqueue_items` as durable truth — **done**; both the Postgres
+  and sqlite relational stores implement `recovery_high_water` and describe `pqueue_items` as a
+  rebuildable cache (e.g. `crates/pqueue-postgres/src/relational.rs:995,5040`).
 - Persist the relational family applied-high-water in both Postgres and sqlite relational projection
-  implementations so they are rebuildable caches rather than authoritative stores.
+  implementations so they are rebuildable caches rather than authoritative stores — **done**.
 - Add migration coverage for branch-at-position, read-as-of-position, and change-record emission against
-  the rebuilt-from-log relational family.
+  the rebuilt-from-log relational family — **done** (relational log conformance class green,
+  bead `pqueue-219a4ee7`).
+
+One deliberately-scoped exception remains: ADR-012's decision note (2026-07-08, DDx B3.6) **retains** the
+monolithic DB-authoritative `SqliteRelationalBackend` as a differential test oracle and benchmark shape.
+That does not contradict this ADR — its only non-test construction site is the benchmark harness; it is
+not reachable through any production configuration surface (`PQUEUE_PROJECTION_BACKEND` composes every
+projection axis, including `sqlite`/`postgres` relational, with a durable log), so the mandatory-log
+invariant holds. Its eventual retirement conditions are tracked in ADR-012.
 
 ## Consequences
 
@@ -132,4 +143,5 @@ Making the append-then-apply seam (`compose.rs:1346-1366`) the sole serializatio
 relational family's "concurrency-correct by construction" story (`relational.rs:11-19`). The Postgres
 high-water guard and `MAX(seq)+1` append allocation carry a documented TOCTOU under connection pooling
 (`crates/pqueue-postgres/src/lib.rs:16-46`). **The TOCTOU fix is a hard prerequisite for this ADR to be
-safe multi-node**; it is tracked as the blocking bead `pqueue-b59f4897` in this ADR's implementation chain.
+safe multi-node**; it was tracked as the blocking bead `pqueue-b59f4897` in this ADR's implementation
+chain and is now **closed** (verified as part of the rebuild-from-log migration, bead `pqueue-3c5aa2e0`).

@@ -8,34 +8,29 @@ on:
 jobs:
   nightly-gate:
     runs-on: ubuntu-latest
+    # Keep the full-workspace test link within the ~14 GB runner disk (see ci.yml): trimmed debuginfo
+    # + no incremental, plus freeing preinstalled tooling below.
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     defaults:
       run:
         working-directory: pqueue
     steps:
+      - name: Free disk space
+        working-directory: ${{ github.workspace }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          df -h /
+
       - name: Checkout pqueue
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: pqueue
 
-      - name: Checkout fjord dependency
-        uses: actions/checkout@v4
-        with:
-          repository: telepathdata/fjord
-          path: fjord
-          ssh-key: ${{ secrets.FJORD_DEPLOY_KEY }}
-
-      - name: Checkout object-log dependency
-        uses: actions/checkout@v4
-        with:
-          repository: telepathdata/object-log
-          path: object-log
-          ssh-key: ${{ secrets.OBJECT_LOG_DEPLOY_KEY }}
-
-      - name: Checkout heimq dependency
-        uses: actions/checkout@v4
-        with:
-          repository: easel/heimq
-          path: heimq
+      # No dependency pre-checkouts: cargo resolves every git dep itself and they are all public
+      # (fjord=github.com/7thsense/fjord, heimq, axon), so they clone anonymously over HTTPS.
 
       - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview

@@ -23,30 +23,13 @@ jobs:
         working-directory: pqueue
     steps:
       - name: Checkout pqueue
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: pqueue
           fetch-depth: 0
 
-      - name: Checkout fjord dependency
-        uses: actions/checkout@v4
-        with:
-          repository: telepathdata/fjord
-          path: fjord
-          ssh-key: ${{ secrets.FJORD_DEPLOY_KEY }}
-
-      - name: Checkout object-log dependency
-        uses: actions/checkout@v4
-        with:
-          repository: telepathdata/object-log
-          path: object-log
-          ssh-key: ${{ secrets.OBJECT_LOG_DEPLOY_KEY }}
-
-      - name: Checkout heimq dependency
-        uses: actions/checkout@v4
-        with:
-          repository: easel/heimq
-          path: heimq
+      # No dependency pre-checkouts: cargo resolves every git dep itself and they are all public
+      # (fjord=github.com/7thsense/fjord, heimq, axon), so they clone anonymously over HTTPS.
 
       - name: Free runner disk space
         working-directory: /
@@ -63,12 +46,12 @@ jobs:
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
 
       - name: Install Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: v3.16.3
 
       - name: Install kubectl
-        uses: azure/setup-kubectl@v4
+        uses: azure/setup-kubectl@v5
         with:
           version: v1.31.0
 
@@ -77,11 +60,7 @@ jobs:
           curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
           sudo install -m 0755 kind /usr/local/bin/kind
 
-      - run: |
-          bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3 \
-            --tp002-e0e1-source pqueue-7e2b3132 \
-            --tp002-e2-source pqueue-9afd88cc,pqueue-76d92a33 \
-            --tp002-e3-source pqueue-b1abd895,pqueue-472a09d4
+      - run: bash scripts/ci/release-gate.sh
 
       - name: Deployment release gate
         env:
@@ -130,10 +109,10 @@ jobs:
           echo "sha_tag=${image}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -141,7 +120,7 @@ jobs:
 
       - name: Build and push pqueue service image
         id: container-build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./pqueue/target/release-image
           file: ./pqueue/target/release-image/Dockerfile

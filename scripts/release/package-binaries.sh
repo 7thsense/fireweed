@@ -30,8 +30,8 @@ if [[ -n "$PQUEUE_FEATURES" ]]; then
     SERVICE_FEATURE_ARGS=(-p pqueue-server --features "$PQUEUE_FEATURES")
 fi
 
-cargo +1.92.0 build --release --bin pqueue-verify-ledger
-cargo +1.92.0 build --release --bin pqueue-service "${SERVICE_FEATURE_ARGS[@]}"
+rustup run 1.92.0 cargo build --release --bin pqueue-verify-ledger
+rustup run 1.92.0 cargo build --release --bin pqueue-service "${SERVICE_FEATURE_ARGS[@]}"
 
 cp "target/release/pqueue-service" "$STAGE_DIR/"
 cp "target/release/pqueue-verify-ledger" "$STAGE_DIR/"
@@ -44,7 +44,7 @@ Binaries:
 - pqueue-verify-ledger: validates pqueue verification ledger JSONL files.
 
 Build command:
-cargo +1.92.0 build --release --bin pqueue-service --bin pqueue-verify-ledger
+rustup run 1.92.0 cargo build --release --bin pqueue-service --bin pqueue-verify-ledger
   (set PQUEUE_FEATURES=tls for the Lakebase / cloud-postgres native-tls service build)
 EOF
 
