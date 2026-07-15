@@ -1,0 +1,421 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde v1.0.228
+   Compiling autocfg v1.5.1
+   Compiling memchr v2.8.2
+   Compiling libc v0.2.186
+   Compiling version_check v0.9.5
+   Compiling zerocopy v0.8.52
+   Compiling getrandom v0.3.4
+   Compiling cfg-if v1.0.4
+   Compiling writeable v0.6.3
+   Compiling litemap v0.8.2
+   Compiling icu_normalizer_data v2.2.0
+   Compiling once_cell v1.21.4
+   Compiling utf8_iter v1.0.4
+   Compiling icu_properties_data v2.2.0
+   Compiling zmij v1.0.21
+   Compiling smallvec v1.15.2
+   Compiling ref-cast v1.0.25
+   Compiling serde_json v1.0.150
+   Compiling itoa v1.0.18
+   Compiling bit-vec v0.8.0
+   Compiling borrow-or-share v0.2.4
+   Compiling typenum v1.20.1
+   Compiling regex-syntax v0.8.11
+   Compiling uuid v1.23.4
+   Compiling vsimd v0.8.0
+   Compiling outref v0.5.2
+   Compiling percent-encoding v2.3.2
+   Compiling lazy_static v1.5.0
+   Compiling num-cmp v0.1.0
+   Compiling bytecount v0.6.9
+   Compiling base64 v0.22.1
+   Compiling const-oid v0.10.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling cpufeatures v0.3.0
+   Compiling shlex v2.0.1
+   Compiling pkg-config v0.3.33
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-sink v0.3.32
+   Compiling vcpkg v0.2.15
+   Compiling thiserror v2.0.18
+   Compiling futures-core v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling slab v0.4.12
+   Compiling futures-io v0.3.32
+   Compiling rustc-hash v2.1.2
+   Compiling fallible-iterator v0.3.0
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling bitflags v2.13.0
+   Compiling futures-channel v0.3.32
+   Compiling bit-set v0.8.0
+   Compiling ahash v0.8.12
+   Compiling cc v1.2.64
+   Compiling num-traits v0.2.19
+   Compiling uuid-simd v0.8.0
+   Compiling aho-corasick v1.1.4
+   Compiling hybrid-array v0.4.12
+   Compiling num-integer v0.1.46
+   Compiling num-complex v0.4.6
+   Compiling syn v2.0.117
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling num-bigint v0.4.6
+   Compiling num-iter v0.1.45
+   Compiling libsqlite3-sys v0.30.1
+   Compiling regex-automata v0.4.14
+   Compiling digest v0.11.3
+   Compiling sha2 v0.11.0
+   Compiling num-rational v0.4.2
+   Compiling num v0.4.3
+   Compiling fraction v0.15.4
+   Compiling synstructure v0.13.2
+   Compiling fancy-regex v0.14.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling ref-cast-impl v1.0.25
+   Compiling futures-macro v0.3.32
+   Compiling thiserror-impl v2.0.18
+   Compiling tokio-macros v2.7.0
+   Compiling futures-util v0.3.32
+   Compiling tokio v1.52.3
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling cobs v0.3.0
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling fluent-uri v0.3.2
+   Compiling email_address v0.2.9
+   Compiling bytes v1.11.1
+   Compiling postcard v1.1.3
+   Compiling pqueue-release v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-release)
+   Compiling hashbrown v0.14.5
+   Compiling futures-executor v0.3.32
+   Compiling futures v0.3.32
+   Compiling referencing v0.28.3
+   Compiling hashlink v0.9.1
+   Compiling rusqlite v0.32.1
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling jsonschema v0.28.3
+   Compiling axon-esf v0.3.2 (https://github.com/DocumentDrivenDX/axon?tag=v0.3.2#64d2bf60)
+   Compiling pqueue-core v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-core)
+   Compiling pqueue-engine v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-engine)
+   Compiling pqueue-projection v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-projection)
+   Compiling pqueue-conformance v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-conformance)
+   Compiling pqueue-sqlite v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-sqlite)
+   Compiling pqueue-objectlog v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-objectlog)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 19s
+     Running unittests src/lib.rs (target/debug/deps/pqueue_objectlog-78729cbbd32b7387)
+
+running 5 tests
+test segmented::list_pagination_tests::final_page_has_no_continuation_token ... ok
+test segmented::list_pagination_tests::scrape_keys_reads_every_key_on_a_page ... ok
+test segmented::list_pagination_tests::truncated_page_yields_the_continuation_token ... ok
+test segmented::fs_blob_store_tests::local_fs_blob_store_persists_across_reopen ... ok
+test segmented::fs_blob_store_tests::local_fs_blob_store_mirrors_in_memory ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+     Running tests/composed_group_commit.rs (target/debug/deps/composed_group_commit-3fa68b33b88a1148)
+
+running 5 tests
+test single_command_segment_is_only_on_distinguishable_sync_path ... ok
+test concurrent_pushes_cobuffer_into_one_sealed_segment ... ok
+test claim_and_finalize_normal_traffic_batch_before_ack ... ok
+test group_commit_reopen_recovers_projection_from_the_log ... ok
+test objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.54s
+
+     Running tests/composed_reconnect.rs (target/debug/deps/composed_reconnect-7dc9f110418ddc62)
+
+running 8 tests
+test objectlog_inmemory::reconnect_after_crash_preserves_committed_state ... ok
+test objectlog_inmemory::reconnect_after_rejected_mutation_has_no_phantom_commit ... ok
+test objectlog_inmemory::reconnect_preserves_terminal_and_pending_state ... ok
+test objectlog_inmemory::reconnect_preserves_leased_item_state ... ok
+test objectlog_sqlite_projection::reconnect_after_crash_preserves_committed_state ... ok
+test objectlog_sqlite_projection::reconnect_preserves_leased_item_state ... ok
+test objectlog_sqlite_projection::reconnect_preserves_terminal_and_pending_state ... ok
+test objectlog_sqlite_projection::reconnect_after_rejected_mutation_has_no_phantom_commit ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.16s
+
+     Running tests/composed_sqlite_projection.rs (target/debug/deps/composed_sqlite_projection-0019fc3d6f7fb78e)
+
+running 30 tests
+test claim_empty_when_nothing_eligible ... ok
+test claim_compatibility_is_resolved_and_gated ... ok
+test claim_returns_priority_ordered_rich_items ... ok
+test claimed_item_shape_reflects_update_fields_after_reclaim ... ok
+test claimed_item_shape_omits_empty_conditionals ... ok
+test claimed_item_shape_includes_payload_fields_and_gate_keys ... ok
+test claim_then_complete_lifecycle ... ok
+test upsert_is_unavailable ... ok
+test reassign_swaps_token_and_charges_attempt ... ok
+test reclaim_expired_sweeps_per_queue ... ok
+test peek_is_priority_ordered_and_nondestructive ... ok
+test pending_lists_leased_items ... ok
+test finalize_of_nonleased_item_is_rejected_without_appending ... ok
+test claimed_view_renders_leased_items ... ok
+test request_id_push_replays_once_and_conflicts_on_body_change ... ok
+test epoch_fence_closes_pre_segment_window ... ok
+test update_fields_is_unavailable ... ok
+test push_then_select_eligible_in_priority_order ... ok
+test paused_queue_yields_no_claims ... ok
+test successful_push_is_visible_before_response_returns ... ok
+test stale_epoch_append_is_fenced ... ok
+test rejected_finalize_leaves_visible_state_unchanged ... ok
+test tick_lease_boundary_is_half_open ... ok
+test fenced_lease_finalize_is_stale ... ok
+test purge_removes_present_items_and_gates_leased ... ok
+test structured_live_items_are_ordered_and_only_live ... ok
+test tick_reclaims_expired_lease_with_no_client_traffic ... ok
+test retry_with_backoff_defers_eligibility ... ok
+test renew_extends_lease_and_rejects ... ok
+test retry_beyond_max_attempts_goes_terminal ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-e61d3cc1fab5d27f)
+
+running 71 tests
+test claim_empty_when_nothing_eligible ... ok
+test claim_compatibility_is_resolved_and_gated ... ok
+test claimed_item_shape_includes_payload_fields_and_gate_keys ... ok
+test claimed_item_shape_reflects_update_fields_after_reclaim ... ok
+test claim_then_complete_lifecycle ... ok
+test claim_returns_priority_ordered_rich_items ... ok
+test claimed_item_shape_omits_empty_conditionals ... ok
+test claimed_view_renders_leased_items ... ok
+test composed::claim_empty_when_nothing_eligible ... ok
+test composed::claim_compatibility_is_resolved_and_gated ... ok
+test composed::claimed_item_shape_includes_payload_fields_and_gate_keys ... ok
+test composed::claimed_item_shape_reflects_update_fields_after_reclaim ... ok
+test composed::fenced_lease_finalize_is_stale ... ok
+test composed::claim_returns_priority_ordered_rich_items ... ok
+test composed::successful_push_is_visible_before_response_returns ... ok
+test composed::claim_then_complete_lifecycle ... ok
+test composed::claimed_item_shape_omits_empty_conditionals ... ok
+test composed::high_water_is_monotonic ... ok
+test composed::finalize_of_nonleased_item_is_rejected_without_appending ... ok
+test composed::claimed_view_renders_leased_items ... ok
+test composed::epoch_fence_closes_pre_segment_window ... ok
+test composed::high_water_advances_on_each_commit ... ok
+test composed::pending_lists_leased_items ... ok
+test composed::peek_is_priority_ordered_and_nondestructive ... ok
+test composed::push_then_select_eligible_in_priority_order ... ok
+test commit_transition_shared_scenario_declines_for_objectlog ... ok
+test composed::paused_queue_yields_no_claims ... ok
+test composed::snapshots_write_read_latest ... ok
+test composed::rejected_finalize_leaves_visible_state_unchanged ... ok
+test composed::request_id_push_replays_once_and_conflicts_on_body_change ... ok
+test composed::reassign_swaps_token_and_charges_attempt ... ok
+test composed::rejected_mutations_do_not_append_commands ... ok
+test composed::purge_removes_present_items_and_gates_leased ... ok
+test composed::reclaim_expired_sweeps_per_queue ... ok
+test rejected_finalize_leaves_visible_state_unchanged ... ok
+test reclaim_expired_sweeps_per_queue ... ok
+test rejected_mutations_do_not_append_commands ... ok
+test composed::stale_epoch_append_is_fenced ... ok
+test stale_epoch_append_is_fenced ... ok
+test composed::upsert_is_unavailable ... ok
+test composed::renew_extends_lease_and_rejects ... ok
+test high_water_advances_on_each_commit ... ok
+test finalize_of_nonleased_item_is_rejected_without_appending ... ok
+test composed::structured_live_items_are_ordered_and_only_live ... ok
+test high_water_is_monotonic ... ok
+test epoch_fence_closes_pre_segment_window ... ok
+test composed::update_fields_is_unavailable ... ok
+test composed::retry_with_backoff_defers_eligibility ... ok
+test fenced_lease_finalize_is_stale ... ok
+test composed::tick_lease_boundary_is_half_open ... ok
+test peek_is_priority_ordered_and_nondestructive ... ok
+test push_then_select_eligible_in_priority_order ... ok
+test upsert_is_unavailable ... ok
+test reassign_swaps_token_and_charges_attempt ... ok
+test update_fields_is_unavailable ... ok
+test pending_lists_leased_items ... ok
+test paused_queue_yields_no_claims ... ok
+test composed::tick_reclaims_expired_lease_with_no_client_traffic ... ok
+test tick_lease_boundary_is_half_open ... ok
+test request_id_push_replays_once_and_conflicts_on_body_change ... ok
+test pause_and_fence_reconstruct_from_log ... ok
+test purge_removes_present_items_and_gates_leased ... ok
+test renew_extends_lease_and_rejects ... ok
+test snapshots_write_read_latest ... ok
+test composed::retry_beyond_max_attempts_goes_terminal ... ok
+test retry_beyond_max_attempts_goes_terminal ... ok
+test successful_push_is_visible_before_response_returns ... ok
+test tick_reclaims_expired_lease_with_no_client_traffic ... ok
+test structured_live_items_are_ordered_and_only_live ... ok
+test composed::pause_and_fence_reconstruct_from_log ... ok
+test retry_with_backoff_defers_eligibility ... ok
+
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/durability.rs (target/debug/deps/durability-1cf44d227401ee7e)
+
+running 10 tests
+test declares_eventual_apply_class ... ok
+test replace_pending_command_is_refused_at_the_write_path ... ok
+test objectlog_segment_configuration_is_respected ... ok
+test local_object_log_rejects_stale_expected_epoch_before_append ... ok
+test local_object_log_rejects_replace_pending_before_append ... ok
+test raw_setgates_is_rejected_before_any_object_is_written ... ok
+test local_object_log_appends_reads_and_reopens_without_projection ... ok
+test torn_trailing_object_is_skipped_on_reopen ... ok
+test projection_rebuilds_from_object_log_on_reopen ... ok
+test object_log_backend_schema_validation_rejects_before_append_and_idempotency ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/hot_projection_queries.rs (target/debug/deps/hot_projection_queries-0739788b0d1c2d3d)
+
+running 2 tests
+OBJECTLOG HOT PROJECTION SKIPPED (hot_projection_capabilities_are_explicit) — set PQUEUE_OBJECTLOG_TEST_ROOT to a writable root
+OBJECTLOG HOT PROJECTION SKIPPED (hot_projection_capabilities_are_explicit) — set PQUEUE_OBJECTLOG_TEST_ROOT to a writable root
+test commit_transition_capabilities_are_explicit ... ok
+test hot_projection_capabilities_are_explicit ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hybrid_async_chaos.rs (target/debug/deps/hybrid_async_chaos-3976b19d4c22048b)
+
+running 5 tests
+test hybrid_async_chaos_crash_after_commit_replays_pushes_on_reopen ... ok
+test hybrid_async_chaos_request_id_replay_converges_and_claims_once ... ok
+test hybrid_async_chaos_crash_mid_lease_neither_loses_nor_duplicates_the_lease ... ok
+test hybrid_async_chaos_crash_after_finalize_does_not_redeliver ... ok
+test hybrid_async_chaos_disk_loss_of_sqlite_replays_object_log_from_genesis ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+     Running tests/hybrid_request_id.rs (target/debug/deps/hybrid_request_id-b2c355f239908ba6)
+
+running 1 test
+test hybrid_request_id_push_replays_after_restart_and_conflicts_on_body_change ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/object_log_commit_recovery_tests.rs (target/debug/deps/object_log_commit_recovery_tests-1e6128af2d7725f2)
+
+running 3 tests
+test object_log_e3_recovery_at_scale ... ignored, heavy recovery-at-scale measurement; run explicitly with --ignored
+test segment_counters_are_reported_for_release_rows ... ok
+
+TP-002 E3 object-log cost/ack + recovery (file-backed object log + in-memory replay projection; full-genesis recovery, NOT snapshot+tail / SQLite-materialized production form):
+  ingest throughput   : 34067 items/s
+  claim+ack throughput: 74246 items/s
+  ack latency (per-commit, NOT production group-commit): p50=8.572ms p95=10.387ms p99=14.133ms
+  recovery: rebuilt 120000 resident items from the log in 1905.49ms (62976 items/s replay)
+test object_log_e3_throughput_recovery_and_ack_latency ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 7.35s
+
+     Running tests/object_log_segment_commit_tests.rs (target/debug/deps/object_log_segment_commit_tests-ca3039bce0023ccb)
+
+running 7 tests
+test segment_manifest_cas_fences_concurrent_writers ... ok
+test segmented_commands_wait_for_manifest_commit ... ok
+test stale_writer_cannot_false_ack_after_deleted_index ... ok
+test stale_writer_attempt_garbage_unpublished ... ok
+test seal_head_cas_ack_boundary_preserves_replay_semantics ... ok
+test unique_attempt_segment_keys_do_not_clobber_live_branch_or_later_segments ... ok
+test replay_across_restart_with_head_and_deletion ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/reconnect_smoke.rs (target/debug/deps/reconnect_smoke-9bea9df73fa97a96)
+
+running 4 tests
+test reconnect_after_crash_preserves_committed_state ... ok
+test reconnect_after_rejected_mutation_has_no_phantom_commit ... ok
+test reconnect_preserves_leased_item_state ... ok
+test reconnect_preserves_terminal_and_pending_state ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/segmented_s3_substrate_tests.rs (target/debug/deps/segmented_s3_substrate_tests-7a2c0be40d141100)
+
+running 47 tests
+test ack_is_withheld_until_segment_and_manifest_commit ... ok
+test TestNoTailValidateRollbackSubstituteForCachedWriter ... ok
+test TestSealPathDoesNotListBeforeEveryFenceCheck ... ok
+test TestPermanentFenceSurvivesManifestReclaim ... ok
+test branch_gets_own_lease_no_parent_fence_change ... ok
+test ac_txn_3_fresh_log_recovers_identically_after_horizon_advance ... ok
+test backward_compat_no_horizon_object_behaves_as_before ... ok
+test branch_does_not_retry_a_rollback_cleanup_conflict ... ok
+test branch_acquire_epoch_store_failure_rolls_back_and_releases_the_pin ... ok
+test branch_manifest_copy_store_failure_rolls_back_and_releases_the_pin ... ok
+test branch_cut_below_advanced_floor_is_rejected_invalid_not_retried ... ok
+test branch_inherits_source_retention_floor_and_reads_no_missing_segment ... ok
+test branch_inherits_floor_reads_its_view_and_seed_seq_is_not_suppressed ... ok
+
+================================================================
+MINIO INTEGRATION SKIPPED (segmented_object_log_commits_through_minio)
+set PQUEUE_S3_TEST_ENDPOINT=http://<container-ip>:9000 to run it.
+(this host cannot reach docker PUBLISHED ports; use the container IP)
+================================================================
+
+test branch_pins_parent_segments_against_expiry ... ok
+test branch_object_cleanup_store_failure_retains_the_pin ... ok
+test branch_pin_ttl_expiry_releases_manifest_reclamation ... ok
+test branch_metadata_put_store_failure_rolls_back_and_releases_the_pin ... ok
+test branch_pin_delete_store_failure_retains_the_pin ... ok
+test branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segment ... ok
+test branch_suppresses_emission_by_default ... ok
+test branch_commit_is_fenced_on_the_source_epoch_and_cross_instance_gc_stays_safe ... ok
+test group_commit_seal_stamps_committed_at_as_the_batch_max_created_at ... ok
+test group_commit_seal_committed_at_is_race_free_across_an_interleaved_enqueue ... ok
+test list_counter_records_billable_list_requests_not_logical_calls ... ok
+test branch_retries_a_bounded_concurrent_floor_advance_and_succeeds ... ok
+test one_command_per_segment_config_is_rejected_unless_dev_flag ... ok
+test committed_branch_is_readable_and_protected ... ok
+test branch_shares_segments_and_diverges ... ok
+test compound_marker_and_cleanup_failure_then_ttl_and_trim_never_yields_a_missing_segment ... ok
+test gc_orphaned_branches_leaves_a_committed_branch_untouched ... ok
+test high_water_tail_replay_skips_fully_applied_segment_objects ... ok
+test segmented_object_log_commits_through_minio ... ok
+test limited_read_fetches_only_segments_needed_for_the_page ... ok
+test size_trigger_and_latency_trigger_both_seal_two_configurations ... ok
+test retention_floor_advance_is_epoch_fenced_manifest_cas_against_a_superseded_owner ... ok
+test recovery_replays_only_manifest_committed_segments ... ok
+test gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable ... ok
+test horizon_read_is_byte_identical_and_below_floor_fails_closed ... ok
+test branch_gives_up_cleanly_under_continuous_trimming ... ok
+test stale_writer_below_horizon_is_still_fenced_address_never_freed ... ok
+test counters_surface_emits_a_release_ledger_row ... ok
+test retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts ... ok
+test recover_manifest_is_correct_after_horizon_advance ... ok
+test gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_branch ... ok
+test stale_epoch_writer_is_cas_fenced_with_no_torn_segment ... ok
+test partial_expire_does_not_hide_undeleted_below_floor_segments ... ok
+test read_horizon_bounds_enumeration_to_live_and_is_monotonic ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests pqueue_objectlog
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+__EXIT_CODE__=0

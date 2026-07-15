@@ -1,0 +1,261 @@
+   Compiling libc v0.2.186
+   Compiling cmov v0.5.4
+   Compiling futures-sink v0.3.32
+   Compiling futures-core v0.3.32
+   Compiling rand_core v0.10.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling getrandom v0.4.2
+   Compiling parking_lot_core v0.9.12
+   Compiling unicode-properties v0.1.4
+   Compiling unicode-bidi v0.3.18
+   Compiling fallible-iterator v0.2.0
+   Compiling scopeguard v1.2.0
+   Compiling syn v2.0.117
+   Compiling siphasher v1.0.3
+   Compiling byteorder v1.5.0
+   Compiling log v0.4.32
+   Compiling tinyvec v1.11.0
+   Compiling lock_api v0.4.14
+   Compiling futures-channel v0.3.32
+   Compiling chacha20 v0.10.0
+   Compiling phf_shared v0.13.1
+   Compiling ctutils v0.4.2
+   Compiling phf v0.13.1
+   Compiling digest v0.11.3
+   Compiling unicode-normalization v0.1.25
+   Compiling sha2 v0.11.0
+   Compiling hmac v0.13.0
+   Compiling md-5 v0.11.0
+   Compiling stringprep v0.1.5
+   Compiling getrandom v0.3.4
+   Compiling mio v1.2.1
+   Compiling socket2 v0.6.4
+   Compiling whoami v2.1.2
+   Compiling rand v0.10.1
+   Compiling parking_lot v0.12.5
+   Compiling synstructure v0.13.2
+   Compiling serde_derive v1.0.228
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling ref-cast-impl v1.0.25
+   Compiling futures-macro v0.3.32
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling async-trait v0.1.89
+   Compiling ref-cast v1.0.25
+   Compiling futures-util v0.3.32
+   Compiling zerofrom v0.1.8
+   Compiling thiserror v2.0.18
+   Compiling yoke v0.8.3
+   Compiling cobs v0.3.0
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling serde v1.0.228
+   Compiling icu_provider v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling ahash v0.8.12
+   Compiling bytes v1.11.1
+   Compiling fluent-uri v0.3.2
+   Compiling email_address v0.2.9
+   Compiling postcard v1.1.3
+   Compiling hashbrown v0.14.5
+   Compiling futures-executor v0.3.32
+   Compiling referencing v0.28.3
+   Compiling futures v0.3.32
+   Compiling postgres-protocol v0.6.12
+   Compiling tokio v1.52.3
+   Compiling hashlink v0.9.1
+   Compiling postgres-types v0.2.14
+   Compiling rusqlite v0.32.1
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling jsonschema v0.28.3
+   Compiling axon-esf v0.3.2 (https://github.com/DocumentDrivenDX/axon?tag=v0.3.2#64d2bf60)
+   Compiling pqueue-core v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-core)
+   Compiling tokio-util v0.7.18
+   Compiling tokio-postgres v0.7.18
+   Compiling pqueue-engine v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-engine)
+   Compiling postgres v0.19.14
+   Compiling pqueue-projection v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-projection)
+   Compiling pqueue-conformance v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-conformance)
+   Compiling pqueue-postgres v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-postgres)
+   Compiling pqueue-memory v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-memory)
+   Compiling pqueue-objectlog v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-objectlog)
+   Compiling pqueue-sqlite v0.14.0 (/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/crates/pqueue-sqlite)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 45.51s
+     Running unittests src/lib.rs (target/debug/deps/pqueue_conformance-6747108a8b4e5762)
+
+running 14 tests
+test fault::evidence_jsonl_tests::extracts_recorded_at_stamp ... ok
+test fault::evidence_jsonl_tests::rejects_missing_or_unterminated_recorded_at_stamp ... ok
+test capability_gate_tests::test_composed_atomic_update_fields_executes ... ok
+test capability_gate_tests::test_capability_gate_uses_atomic_probe ... ok
+test storage_conformance::storage_conformance_no_schema_accepts_anything ... ok
+test storage_conformance::storage_conformance_schema_compile_error_on_invalid_schema ... ok
+test storage_conformance::storage_conformance_entity_schema_error_has_resp_token ... ok
+test storage_conformance::storage_conformance_entity_schema_accepts_valid_document ... ok
+test storage_conformance::storage_conformance_entity_schema_rejects_missing_required ... ok
+test scenarios::commit_transition_scenario_tests::sqlite_relational_commit_transition_rejects_bad_version ... ok
+test scenarios::commit_transition_scenario_tests::sqlite_relational_commit_transition_rejects_bad_token ... ok
+test scenarios::commit_transition_scenario_tests::sqlite_relational_commit_transition_request_id_replays ... ok
+test scenarios::commit_transition_scenario_tests::sqlite_relational_commit_transition_writes_and_recovers ... ok
+test scenarios::commit_transition_scenario_tests::sqlite_relational_commit_transition_explain_commit_recovers ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+     Running tests/external_transaction_contract_matrix_tests.rs (target/debug/deps/external_transaction_contract_matrix_tests-113fb0aff964d5ad)
+
+running 25 tests
+AC-TXN POSTGRES SKIPPED (external_transaction_contract_matrix_tests) — set PQUEUE_PG_TEST_URL to a live DB
+test ac_txn_contract_matrix_postgres ... ok
+test ac_txn_4_during_projection_apply_crash ... ok
+test ac_txn_4_after_apply_before_response_crash ... ok
+test ac_txn_4_objectlog_crash_point_matrix ... ok
+test ac_txn_5a_debt_withholds_high_water_and_retention ... ok
+test ac_txn_5a_hard_debt_fails_mutating_admission ... ok
+test ac_txn_5a_idempotent_replay_admitted_under_debt ... ok
+test ac_txn_5a_retention_advances_when_debt_clears ... ok
+test ac_txn_5a_retention_reap_does_not_resurrect_ids ... ok
+test ac_txn_5_hybrid_strict_poison_replay ... ok
+test ac_txn_5_hybrid_strict_poison_on_real_server_path ... ok
+test ac_txn_3_mid_pipeline_cut_is_request_id_bearing ... ok
+test ac_txn_1_kill_after_set_gates ... ok
+test ac_txn_2_envelope_invalid_batch_has_no_durable_effect ... ok
+test ac_txn_2_capacity_unavailable_path_has_no_durable_effect ... ok
+test ac_txn_1_kill_after_create_queue ... ok
+test ac_txn_2_commit_timeout_path_has_no_durable_effect ... ok
+test ac_txn_1_kill_after_batch_update ... ok
+test ac_txn_1_kill_after_purge_items ... ok
+test ac_txn_2_stale_lease_conflict_has_no_durable_effect ... ok
+test ac_txn_5a_hybrid_async_success_barrier ... ok
+test ac_txn_5_5a_numeric_latency_sweep_invariants_unchanged ... ok
+test ac_txn_7_invariants_unchanged_across_latency_sweep ... ok
+test ac_txn_3_request_id_replay_all_ops_all_cut_points ... ok
+AC-TXN evidence written to /home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-80bb468c-20260713T165054-2cf0838b/docs/perf/evidence/tp003-ac-txn-matrix.jsonl
+  [n/a] AC-TXN-1 => memory (0 assertions)
+  [pass] AC-TXN-2 => memory (11 assertions)
+  [pass] AC-TXN-3 => memory (6 assertions)
+  [pass] AC-TXN-1 => sqlite_log (8 assertions)
+  [pass] AC-TXN-2 => sqlite_log (12 assertions)
+  [pass] AC-TXN-3 => sqlite_log (11 assertions)
+  [pass] AC-TXN-1 => sqlite_relational (8 assertions)
+  [pass] AC-TXN-2 => sqlite_relational (11 assertions)
+  [n/a] AC-TXN-3 => sqlite_relational (0 assertions)
+  [pass] AC-TXN-1 => objectlog (8 assertions)
+  [pass] AC-TXN-2 => objectlog (12 assertions)
+  [pass] AC-TXN-3 => objectlog (6 assertions)
+  [pass] AC-TXN-1 => object_log_sqlite (8 assertions)
+  [pass] AC-TXN-2 => object_log_sqlite (12 assertions)
+  [pass] AC-TXN-3 => object_log_sqlite (6 assertions)
+  [pass] AC-TXN-4 => objectlog (8 assertions)
+  [pass] AC-TXN-5 => object_log_sqlite(hybrid-strict, real server write path) (3 assertions)
+  [pass] AC-TXN-5 => object_log_sqlite(hybrid-strict, ProjectionStore-layer) (4 assertions)
+  [pass] AC-TXN-5A => object_log_sqlite(hybrid-async) (15 assertions)
+  [pass] AC-TXN-6 => sqlite_log|object_log_sqlite (1 assertions)
+  [pass] AC-TXN-7 => objectlog(force-seal|group-commit) (32 assertions)
+test ac_txn_contract_matrix ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.15s
+
+     Running tests/fault_injection_harness_tests.rs (target/debug/deps/fault_injection_harness_tests-ce4bcffbc4d38ae1)
+
+running 14 tests
+test before_append_is_inert_memory ... ok
+test full_commit_is_visible_in_process_memory ... ok
+test objectlog_internal_before_segment_write_is_inert ... ok
+test before_append_is_inert_objectlog ... ok
+test after_append_before_apply_replays_once_objectlog ... ok
+test objectlog_internal_owner_reassignment_fence_survives_lost_ack_and_fences_stale_epoch ... ok
+test objectlog_internal_snapshot_write_failure_leaves_the_log_intact ... ok
+test objectlog_internal_after_segment_write_before_manifest_orphans_the_segment ... ok
+test objectlog_internal_after_manifest_before_ack_replays_exactly_once ... ok
+test lost_response_replays_once_objectlog_sqlite ... ok
+test after_append_before_apply_replays_once_objectlog_sqlite ... ok
+test before_append_is_inert_sqlite_log ... ok
+test lost_response_replays_once_sqlite_log ... ok
+test after_append_before_apply_replays_once_sqlite_log ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+     Running tests/objectlog_hybrid.rs (target/debug/deps/objectlog_hybrid-96c341a4af79cf4b)
+
+running 36 tests
+test claim_returns_priority_ordered_rich_items ... ok
+test paused_queue_yields_no_claims ... ok
+test claim_compatibility_is_resolved_and_gated ... ok
+test finalize_of_nonleased_item_is_rejected_without_appending ... ok
+test retry_with_backoff_defers_eligibility ... ok
+test peek_is_priority_ordered_and_nondestructive ... ok
+test claimed_item_shape_omits_empty_conditionals ... ok
+test retry_beyond_max_attempts_goes_terminal ... ok
+test reassign_swaps_token_and_charges_attempt ... ok
+test fenced_lease_finalize_is_stale ... ok
+test request_id_push_replays_once_and_conflicts_on_body_change ... ok
+test claim_empty_when_nothing_eligible ... ok
+test push_then_select_eligible_in_priority_order ... ok
+test claimed_item_shape_includes_payload_fields_and_gate_keys ... ok
+test rejected_mutations_do_not_append_commands ... ok
+test snapshots_write_read_latest ... ok
+test rejected_finalize_leaves_visible_state_unchanged ... ok
+test successful_push_is_visible_before_response_returns ... ok
+test claimed_item_shape_reflects_update_fields_after_reclaim ... ok
+test high_water_is_monotonic ... ok
+test epoch_fence_closes_pre_segment_window ... ok
+test pending_lists_leased_items ... ok
+test high_water_advances_on_each_commit ... ok
+test tick_lease_boundary_is_half_open ... ok
+test objectlog_hybrid_recovery_hydrates_replays_tail_and_rebuilds_request_id ... ok
+test claimed_view_renders_leased_items ... ok
+test renew_extends_lease_and_rejects ... ok
+test stale_epoch_append_is_fenced ... ok
+test claim_then_complete_lifecycle ... ok
+test tick_reclaims_expired_lease_with_no_client_traffic ... ok
+test reclaim_expired_sweeps_per_queue ... ok
+test purge_removes_present_items_and_gates_leased ... ok
+test structured_live_items_are_ordered_and_only_live ... ok
+test upsert_is_unavailable ... ok
+test update_fields_is_unavailable ... ok
+test pause_and_fence_reconstruct_from_log ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+     Running tests/objectlog_segment_reclamation_tests.rs (target/debug/deps/objectlog_segment_reclamation_tests-2b0ddd04ae7cfb3a)
+
+running 16 tests
+test test4_r1_hard_backpressure_replay_start_is_floored_not_genesis ... ok
+test test1_segment_reclamation_trims_expired_checkpointed_segments ... ok
+test test_bug2b_released_branch_pin_is_reclaimed_on_a_later_tick ... ok
+test test3c_commit_transition_is_capability_na_on_eventual_apply_objectlog ... ok
+test test2_trim_withheld_under_hard_debt ... ok
+test test6_pre_floor_log_recovers_from_genesis_unchanged ... ok
+test test3a_request_id_within_retention_is_retained_and_replays_across_trim_restart ... ok
+test test1b_raw_append_path_preserves_actxn3_across_trim_within_retention ... ok
+test test_bug2a_floor_zero_crash_is_finished_on_reopen ... ok
+test test3b_request_id_after_retention_is_reclaimed_and_treated_fresh_across_trim_restart ... ok
+test test5_crash_between_floor_write_and_delete_is_recoverable_and_idempotent ... ok
+test test5_crash_mid_delete_is_recoverable_and_idempotent ... ok
+test test_bug3_projection_behind_floor_fails_closed ... ok
+test test4_recovery_from_floor_matches_no_trim_control_group_commit ... ok
+test test4_recovery_from_floor_matches_no_trim_control_raw_append ... ok
+test test_behind_image_fail_closed_with_deleted_manifests ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+
+   Doc-tests pqueue_conformance
+
+running 2 tests
+test crates/pqueue-conformance/src/lib.rs - (line 10) ... ignored
+test crates/pqueue-conformance/src/lib.rs - (line 16) ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.32s; merged doctests compilation took 0.32s
+
+__EXIT_CODE__=0

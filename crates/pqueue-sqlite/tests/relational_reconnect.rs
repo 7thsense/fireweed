@@ -128,6 +128,7 @@ fn open_upgrades_existing_relational_items_table_with_metadata_column() {
 
 fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
     ClaimRequest {
+        eligibility_time: None,
         shard: shard(),
         worker_id: WorkerId::new("w1").unwrap(),
         max_items: max,

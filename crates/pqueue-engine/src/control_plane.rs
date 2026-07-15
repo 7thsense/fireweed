@@ -371,6 +371,15 @@ pub trait QueueControlPlane: Send + Sync {
     /// for the same fail-closed reason as [`resolve_queue_owner`](Self::resolve_queue_owner): a fabricated
     /// epoch-0 record on a DB error is the worst possible value to feed the append fence (BQ-23).
     fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease>;
+
+    /// Whether this control plane loses its epoch state on restart (e.g., `InMemoryControlPlane`).
+    /// A `false` return means the control plane durably binds the assignment epoch and survives restart
+    /// with its epoch state intact. Used by [`acquire_and_fence`](crate::acquire_and_fence) to decide
+    /// whether `backend.current_epoch > lease.assignment_epoch` after a successful acquire is a safe
+    /// restart-reconciliation scenario or a genuine inconsistency that must fail closed.
+    fn is_ephemeral(&self) -> bool {
+        false
+    }
 }
 
 /// Milliseconds elapsed from `a` to `b` (0 if `b <= a`), for TTL comparisons.
@@ -482,6 +491,10 @@ impl Default for InMemoryControlPlane {
 }
 
 impl QueueControlPlane for InMemoryControlPlane {
+    fn is_ephemeral(&self) -> bool {
+        true
+    }
+
     fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
         self.state
             .lock()

@@ -666,7 +666,7 @@ impl ClaimPort for PostgresBackend {
             }
             let candidates: Vec<ItemId> = {
                 let proj = g.projections.get(&req.shard).ok_or(EngineError::NotFound)?;
-                proj.eligible_candidates(req.now, req.max_items)
+                proj.eligible_candidates(req.eligibility_at(), req.max_items)
             };
             if candidates.is_empty() {
                 return Ok(Claimed::default());

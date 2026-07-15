@@ -72,6 +72,9 @@ use pqueue_engine::{
 pub mod fault;
 pub mod scenarios;
 
+#[cfg(test)]
+pub mod hybrid_async;
+
 /// The **core** conformance bound: the engine ports the substrate-independent scenarios exercise. Every
 /// projection family implements these — ordering, eligibility, claim atomicity, idempotency, lease/epoch
 /// fencing, and the per-queue progress bound (ADR-008 §2 / TD-001 capability classes). It does **not**
@@ -226,6 +229,7 @@ pub fn envelope(command: QueueCommand, item_ids: Vec<ItemId>) -> CommandEnvelope
 
 pub fn claim_req(max_items: usize, lease_expires_at: i64, now: i64) -> ClaimRequest {
     ClaimRequest {
+        eligibility_time: None,
         shard: shard(),
         worker_id: WorkerId::new("w1").unwrap(),
         max_items,
@@ -234,6 +238,21 @@ pub fn claim_req(max_items: usize, lease_expires_at: i64, now: i64) -> ClaimRequ
         now: ts(now),
         compatibility: ClaimCompatibility::default(),
         expected_epoch: None,
+    }
+}
+
+/// A claim that resolves due-ness at an explicit `eligibility_time` while `now` / `lease_expires_at` stay
+/// on the operational clock (`ClaimRequest::eligibility_at`). Selecting scheduled work at one epoch must
+/// never back-date the lease taken at another, so the two are passed separately.
+pub fn claim_req_at(
+    max_items: usize,
+    lease_expires_at: i64,
+    now: i64,
+    eligibility_time: i64,
+) -> ClaimRequest {
+    ClaimRequest {
+        eligibility_time: Some(ts(eligibility_time)),
+        ..claim_req(max_items, lease_expires_at, now)
     }
 }
 
@@ -267,6 +286,7 @@ pub async fn run_conformance<B: ConformanceBackend>(make: impl Fn() -> B) {
     scenarios::high_water_is_monotonic(&make).await;
     scenarios::claim_returns_priority_ordered_rich_items(&make).await;
     scenarios::claim_empty_when_nothing_eligible(&make).await;
+    scenarios::claim_with_explicit_eligibility_time(&make).await;
     if gate_capable {
         scenarios::claimed_item_shape_includes_payload_fields_and_gate_keys(&make).await;
     }
@@ -370,6 +390,7 @@ macro_rules! core_suite {
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
+            claim_with_explicit_eligibility_time,
             structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,
@@ -405,6 +426,7 @@ macro_rules! core_suite {
             claim_then_complete_lifecycle,
             claim_returns_priority_ordered_rich_items,
             claim_empty_when_nothing_eligible,
+            claim_with_explicit_eligibility_time,
             structured_live_items_are_ordered_and_only_live,
             tick_reclaims_expired_lease_with_no_client_traffic,
             tick_lease_boundary_is_half_open,

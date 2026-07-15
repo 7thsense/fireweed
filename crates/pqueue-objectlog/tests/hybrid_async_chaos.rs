@@ -116,6 +116,7 @@ fn spec() -> PushSpec {
 
 fn claim_one(worker: &str, lease: &str, now: i64) -> ClaimRequest {
     ClaimRequest {
+        eligibility_time: None,
         shard: shard(),
         worker_id: WorkerId::new(worker).unwrap(),
         max_items: 1,

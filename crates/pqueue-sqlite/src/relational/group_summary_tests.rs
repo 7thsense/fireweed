@@ -90,6 +90,7 @@ fn gated_grouped_not_before(priority: i64, group: &str, not_before: i64, gate: &
 }
 fn claim_req(max: usize, exp: i64, now: i64) -> ClaimRequest {
     ClaimRequest {
+        eligibility_time: None,
         shard: shard(),
         worker_id: WorkerId::new("w1").unwrap(),
         max_items: max,
@@ -107,6 +108,7 @@ fn claim_req_compat(
     compatibility: ClaimCompatibility,
 ) -> ClaimRequest {
     ClaimRequest {
+        eligibility_time: None,
         compatibility,
         ..claim_req(max, exp, now)
     }

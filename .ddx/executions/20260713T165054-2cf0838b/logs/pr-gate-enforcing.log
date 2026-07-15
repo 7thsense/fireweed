@@ -1,0 +1,7 @@
+=== pr-gate [mode=enforcing] ===
+--- fmt ---
+error: no such command: `+1.92.0`
+
+help: invoke `cargo` through `rustup` to handle `+toolchain` directives
+
+__EXIT_CODE__=101

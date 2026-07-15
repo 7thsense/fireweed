@@ -1,0 +1,2 @@
+│  No config files with names ["lefthook" ".lefthook" ".config/lefthook"] have been found in "/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-9f17b246-20260714T172554-b973bc8a"
+exit=0

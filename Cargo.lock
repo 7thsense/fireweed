@@ -633,7 +633,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2011,7 +2011,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-conformance"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "futures",
@@ -2045,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "axon-esf",
  "proptest",
@@ -2055,7 +2055,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-engine"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -2070,7 +2070,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-loadgen"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "pqueue-release",
  "serde",
@@ -2079,7 +2079,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-memory"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -2093,7 +2093,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "futures",
@@ -2112,7 +2112,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-projection"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-release"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-resp"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-server"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2196,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.13.0"
+version = "0.15.0"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -2406,9 +2406,9 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "1.2.4"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bae41a63fd0b8a5372f82b21e810e09a316f5dd7efd96bf08e678fb240fc1918"
+checksum = "3cb5358643f48330db5c78856982faf39c93ba50c60d682b43d0344a3b649769"
 dependencies = [
  "arcstr",
  "async-lock",
@@ -2581,7 +2581,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2905,10 +2905,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
