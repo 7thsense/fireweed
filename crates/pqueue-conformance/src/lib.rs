@@ -72,6 +72,9 @@ use pqueue_engine::{
 pub mod fault;
 pub mod scenarios;
 
+#[cfg(test)]
+pub mod hybrid_async;
+
 /// The **core** conformance bound: the engine ports the substrate-independent scenarios exercise. Every
 /// projection family implements these — ordering, eligibility, claim atomicity, idempotency, lease/epoch
 /// fencing, and the per-queue progress bound (ADR-008 §2 / TD-001 capability classes). It does **not**
