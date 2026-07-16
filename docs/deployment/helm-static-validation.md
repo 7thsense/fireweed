@@ -20,9 +20,14 @@ the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid-async`, the same
 `PQUEUE_HYBRID_ASYNC_*` from `storage.projection.hybridAsync`. The chart schema
 constrains every threshold to `>= 1`; a checked-in CI values profile,
 `charts/pqueue/ci/objectlog-hybrid-async-values.yaml`, renders the combination and
-is validated by `helm lint --strict` against `values.schema.json`. Only the
-object-log log axis pairs with `hybrid-async`; other pairings fail closed at
-startup.
+is included in the static gate. Its rendered-contract assertions require the
+SQLite path and persistent volume mount plus all five fail-closed controls:
+`PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS`,
+`PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES`,
+`PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX`,
+`PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS`, and
+`PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD`. Only the object-log log
+axis pairs with `hybrid-async`; other pairings fail closed at startup.
 
 The gate runs `helm lint --strict`, renders checked-in CI values for selected
 axis combinations, asserts the rendered environment variables, and validates the
@@ -36,4 +41,5 @@ Runtime smoke testing is separate:
 
 ```sh
 bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory
+bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async
 ```

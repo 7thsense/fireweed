@@ -20,7 +20,7 @@ SUPPORT_LOG="${PROOF_DIR}/supporting-artifacts.tsv"
 KIND_IMAGE_CONTEXT="${PROOF_DIR}/kind-image"
 KIND_IMAGE_DOCKERFILE="${KIND_IMAGE_CONTEXT}/Dockerfile"
 
-STORAGE_COMBINATIONS=("objectlog:inmemory" "objectlog:sqlite" "objectlog:hybrid")
+STORAGE_COMBINATIONS=("objectlog:inmemory" "objectlog:sqlite" "objectlog:hybrid" "objectlog:hybrid-async")
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
 export KIND_NODE_IMAGE
 
@@ -373,6 +373,7 @@ required_phrases = {
         "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory",
         "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite",
         "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid",
+        "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async",
     ],
 }
 for path, phrases in required_phrases.items():

@@ -1,5 +1,5 @@
-# Static render values: objectlog log with the hybrid-async projection profile (hot in-memory serving over
-# an asynchronous durable SQLite checkpoint), including the async-apply debt/backpressure/poison thresholds.
+# Static and live kind CI values: objectlog log with hot in-memory serving over an asynchronous durable
+# SQLite checkpoint, including the async-apply debt/backpressure/poison thresholds.
 storage:
   log:
     backend: objectlog

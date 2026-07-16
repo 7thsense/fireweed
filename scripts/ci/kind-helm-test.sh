@@ -45,6 +45,9 @@ STORAGE BACKENDS (runnable live smokes):
                          persisted on the chart's storage volume
   objectlog + hybrid     durable SQLite projection plus the hot in-memory serving
                          image over the object log, persisted on the chart's volume
+  objectlog + hybrid-async
+                         hot in-memory serving over an asynchronous durable SQLite
+                         checkpoint, with fail-closed debt/backpressure thresholds
   postgres  + inmemory   durable postgres command log + in-memory projection
                          (the wired managed-postgres profile). The harness stands
                          up a throwaway in-cluster postgres and injects its DSN as
@@ -117,6 +120,7 @@ values_file_for() {
         objectlog:inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
         objectlog:sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
         objectlog:hybrid) echo "${CHART_DIR}/ci/objectlog-hybrid-values.yaml" ;;
+        objectlog:hybrid-async) echo "${CHART_DIR}/ci/objectlog-hybrid-async-values.yaml" ;;
         postgres:inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
@@ -249,10 +253,11 @@ validate_config() {
         objectlog:inmemory) ;;
         objectlog:sqlite) ;;
         objectlog:hybrid) ;;
+        objectlog:hybrid-async) ;;
         postgres:inmemory) ;;
         postgres:sqlite) ;;
         postgres:postgres) ;;
-        *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite,hybrid}, and log=postgres projection={inmemory,sqlite,postgres}; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
+        *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite,hybrid,hybrid-async}, and log=postgres projection={inmemory,sqlite,postgres}; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example pqueue:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"
