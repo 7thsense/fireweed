@@ -25,7 +25,10 @@ The release image entrypoint is `pqueue-service`, the RESP server built from
 | `PQUEUE_POSTGRES_LOG_DATABASE_URL` | when log is `postgres` (Helm) | _(none)_ | The DSN the Helm postgres/Lakebase profile renders from the log-backend Secret. Takes precedence over `PQUEUE_PG_URL`. A libpq URL **or** `key=value` DSN, with a native password; `sslmode=require` selects the native-tls path. |
 | `PQUEUE_PG_URL` | when log is `postgres` (local/dev) | `postgres://postgres@127.0.0.1:5432/postgres` | libpq/postgres connection string (URL or `key=value` DSN) for the `postgres/inmemory` backend; the fallback when `PQUEUE_POSTGRES_LOG_DATABASE_URL` is unset. With `sslmode=require` (or `prefer`) the binary must be built `--features postgres,tls` to connect over native-tls; on a non-tls build an `sslmode=require` DSN fails closed at startup (no plaintext downgrade). |
 | `DATABRICKS_HOST`, `DATABRICKS_DATABASE_INSTANCE_NAME`, `DATABRICKS_CLIENT_ID`+`DATABRICKS_CLIENT_SECRET` (service principal) or `DATABRICKS_TOKEN`+`PQUEUE_DATABRICKS_POSTGRES_USER` (PAT) | when using Databricks Lakebase credentials | _(none)_ | Optional Databricks credential injection for the `postgres` backend: when `DATABRICKS_HOST` is set, a service-principal/PAT credential provider supplies the postgres user/password at connect instead of the DSN password. |
-| `PQUEUE_BOOTSTRAP_QUEUES` | no | `t1:q1` | Comma-separated `tenant:queue` bootstrap list. |
+| `PQUEUE_BOOTSTRAP_QUEUES` | no | `t1:q1` | Comma-separated `tenant:queue` bootstrap list. A non-empty value takes precedence over generated inventory settings. |
+| `PQUEUE_BOOTSTRAP_GENERATED_COUNT` | no | _(none)_ | Generate this many bootstrap queues in deterministic numeric order. Valid range: 1–10,000. When absent, generation is disabled. |
+| `PQUEUE_BOOTSTRAP_GENERATED_TENANT` | no | `t1` | Tenant for generated bootstrap queues. |
+| `PQUEUE_BOOTSTRAP_GENERATED_PREFIX` | no | `q` | Queue prefix for generated bootstrap queues (`q0`, `q1`, … with the default). |
 | `PQUEUE_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
 
 The current server composition root wires `memory/inmemory`, `sqlite/inmemory`,

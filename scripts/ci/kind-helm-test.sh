@@ -5,7 +5,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CHART_DIR="${REPO_ROOT}/charts/pqueue"
-KIND_DIR="${SCRIPT_DIR}/kind"
 
 LOG_BACKEND=""
 PROJECTION_BACKEND=""
@@ -20,6 +19,10 @@ SMOKE_PORT="18080"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-}"
 DRY_RUN=false
 KEEP_CLUSTER=false
+BOOTSTRAP_GENERATED_COUNT=0
+BOOTSTRAP_GENERATED_TENANT=t1
+BOOTSTRAP_GENERATED_PREFIX=q
+SMOKE_QUEUE=t1:q1
 PF_PID=""
 CLUSTER_CREATED=false
 
@@ -76,6 +79,12 @@ OPTIONS:
   --smoke-port <port>      Local port used for kubectl port-forward. Default: 18080.
   --kind-node-image <img>  Optional kind node image. Can also be set with
                            KIND_NODE_IMAGE.
+  --bootstrap-generated-count <n>
+                           Deterministically provision n queues (1..10000).
+  --bootstrap-generated-tenant <tenant>
+                           Tenant for generated queues. Default: t1.
+  --bootstrap-generated-prefix <prefix>
+                           Queue prefix; creates prefix0..prefixN-1. Default: q.
   --keep-cluster           Do not delete the kind cluster on exit.
   -h, --help               Show this help text and exit.
 
@@ -227,6 +236,21 @@ parse_args() {
                 KIND_NODE_IMAGE="$2"
                 shift 2
                 ;;
+            --bootstrap-generated-count)
+                [[ $# -ge 2 ]] || die "--bootstrap-generated-count requires a value"
+                BOOTSTRAP_GENERATED_COUNT="$2"
+                shift 2
+                ;;
+            --bootstrap-generated-tenant)
+                [[ $# -ge 2 ]] || die "--bootstrap-generated-tenant requires a value"
+                BOOTSTRAP_GENERATED_TENANT="$2"
+                shift 2
+                ;;
+            --bootstrap-generated-prefix)
+                [[ $# -ge 2 ]] || die "--bootstrap-generated-prefix requires a value"
+                BOOTSTRAP_GENERATED_PREFIX="$2"
+                shift 2
+                ;;
             --keep-cluster)
                 KEEP_CLUSTER=true
                 shift
@@ -260,6 +284,13 @@ validate_config() {
         die "--image-dockerfile must be an existing file: ${IMAGE_DOCKERFILE}"
     fi
     [[ "${SMOKE_PORT}" =~ ^[0-9]+$ ]] || die "--smoke-port must be a TCP port number"
+    [[ "${BOOTSTRAP_GENERATED_COUNT}" =~ ^[0-9]+$ ]] || die "--bootstrap-generated-count must be an integer"
+    ((BOOTSTRAP_GENERATED_COUNT <= 10000)) || die "--bootstrap-generated-count must not exceed 10000"
+    if ((BOOTSTRAP_GENERATED_COUNT > 0)); then
+        [[ -n "${BOOTSTRAP_GENERATED_TENANT}" ]] || die "--bootstrap-generated-tenant must not be empty"
+        [[ -n "${BOOTSTRAP_GENERATED_PREFIX}" ]] || die "--bootstrap-generated-prefix must not be empty"
+        SMOKE_QUEUE="${BOOTSTRAP_GENERATED_TENANT}:${BOOTSTRAP_GENERATED_PREFIX}0"
+    fi
     [[ -f "$(values_file_for "${LOG_BACKEND}" "${PROJECTION_BACKEND}")" ]] || die "missing values file for log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}"
 
     if [[ -z "${CLUSTER_NAME}" ]]; then
@@ -281,6 +312,8 @@ dry_run_plan() {
     echo "release:       ${RELEASE_NAME}"
     echo "image:         ${IMAGE}"
     echo "context:       ${IMAGE_CONTEXT}"
+    echo "bootstrap:     generated count=${BOOTSTRAP_GENERATED_COUNT} tenant=${BOOTSTRAP_GENERATED_TENANT} prefix=${BOOTSTRAP_GENERATED_PREFIX}"
+    echo "smoke queue:   ${SMOKE_QUEUE}"
     if [[ -n "${IMAGE_DOCKERFILE}" ]]; then
         echo "dockerfile:    ${IMAGE_DOCKERFILE}"
     fi
@@ -311,7 +344,7 @@ dry_run_plan() {
             echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} create secret generic ${PG_PROJECTION_SECRET_NAME} --from-literal=${PG_PROJECTION_SECRET_KEY}=<in-cluster DSN>"
         fi
     fi
-    print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --wait --timeout "${TIMEOUT}"
+    print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --set "bootstrap.generated.count=${BOOTSTRAP_GENERATED_COUNT}" --set-string "bootstrap.generated.tenant=${BOOTSTRAP_GENERATED_TENANT}" --set-string "bootstrap.generated.prefix=${BOOTSTRAP_GENERATED_PREFIX}" --wait --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
     echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} port-forward pod/<ready-pqueue-pod> ${SMOKE_PORT}:8080"
     echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
@@ -400,6 +433,7 @@ smoke_resp_ping() {
     local response_path="$1"
 
     echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
+    # shellcheck disable=SC2016 # RESP bulk-string length is literal protocol data.
     resp_request "${response_path}" '*1\r\n$4\r\nPING\r\n'
     if ! grep -Fq '+PONG' "${response_path}"; then
         err "RESP PING did not return PONG"
@@ -425,6 +459,7 @@ resp_request() {
     RESP_SMOKE_PORT="${SMOKE_PORT}" \
     RESP_SMOKE_RESPONSE="${response_path}" \
     RESP_SMOKE_PAYLOAD="${payload}" \
+    RESP_SMOKE_ARGS="${RESP_SMOKE_ARGS:-}" \
     python3 - <<'PY'
 import os
 import socket
@@ -434,7 +469,15 @@ from pathlib import Path
 
 port = int(os.environ["RESP_SMOKE_PORT"])
 response = Path(os.environ["RESP_SMOKE_RESPONSE"])
-payload = os.environ["RESP_SMOKE_PAYLOAD"].encode("utf-8").decode("unicode_escape").encode("latin1")
+args = os.environ.get("RESP_SMOKE_ARGS", "").splitlines()
+if args:
+    encoded = [f"*{len(args)}\r\n".encode()]
+    for arg in args:
+        value = arg.encode()
+        encoded.extend((f"${len(value)}\r\n".encode(), value, b"\r\n"))
+    payload = b"".join(encoded)
+else:
+    payload = os.environ["RESP_SMOKE_PAYLOAD"].encode("utf-8").decode("unicode_escape").encode("latin1")
 deadline = time.monotonic() + 5.0
 chunks = []
 
@@ -469,6 +512,14 @@ response.write_bytes(b"".join(chunks))
 PY
 }
 
+resp_command() {
+    local response_path="$1"
+    shift
+    local encoded_args
+    encoded_args="$(printf '%s\n' "$@")"
+    RESP_SMOKE_ARGS="$encoded_args" resp_request "$response_path" ""
+}
+
 smoke_resp() {
     local run_dir response_path
     run_dir="${REPO_ROOT}/target/kind-helm-test/${CLUSTER_NAME}"
@@ -479,7 +530,7 @@ smoke_resp() {
     smoke_resp_ping "${response_path}"
 
     echo "+ RESP XADD 127.0.0.1:${SMOKE_PORT}"
-    resp_request "${response_path}" '*5\r\n$4\r\nXADD\r\n$5\r\nt1:q1\r\n$1\r\n*\r\n$8\r\npriority\r\n$1\r\n1\r\n'
+    resp_command "${response_path}" XADD "${SMOKE_QUEUE}" '*' priority 1
     if ! grep -Eq '^\$[0-9]+' "${response_path}"; then
         err "RESP XADD did not return a bulk item id"
         sed -n '1,80p' "${response_path}" >&2 || true
@@ -487,8 +538,8 @@ smoke_resp() {
     fi
 
     echo "+ RESP XREADGROUP 127.0.0.1:${SMOKE_PORT}"
-    resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$1\r\nc\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
-    if ! grep -Fq 't1:q1' "${response_path}"; then
+    resp_command "${response_path}" XREADGROUP GROUP g c COUNT 1 STREAMS "${SMOKE_QUEUE}" '>'
+    if ! grep -Fq "${SMOKE_QUEUE}" "${response_path}"; then
         err "RESP XREADGROUP did not return the bootstrap queue"
         sed -n '1,120p' "${response_path}" >&2 || true
         return 1
@@ -511,7 +562,7 @@ smoke_durable_restart_runtime() {
     response_path="${run_dir}/durable-restart-recovery.response"
 
     echo "+ RESP XADD before restart (durable backend: ${LOG_BACKEND})"
-    resp_request "${response_path}" '*5\r\n$4\r\nXADD\r\n$5\r\nt1:q1\r\n$1\r\n*\r\n$8\r\npriority\r\n$1\r\n2\r\n'
+    resp_command "${response_path}" XADD "${SMOKE_QUEUE}" '*' priority 2
     if ! grep -Eq '^\$[0-9]+' "${response_path}"; then
         err "durable pre-restart XADD did not return a bulk item id"
         sed -n '1,80p' "${response_path}" >&2 || true
@@ -527,8 +578,8 @@ smoke_durable_restart_runtime() {
     start_resp_port_forward
     smoke_resp_ping "${response_path}"
     echo "+ RESP XREADGROUP after restart"
-    resp_request "${response_path}" '*9\r\n$10\r\nXREADGROUP\r\n$5\r\nGROUP\r\n$1\r\ng\r\n$9\r\nrestarted\r\n$5\r\nCOUNT\r\n$1\r\n1\r\n$7\r\nSTREAMS\r\n$5\r\nt1:q1\r\n$1\r\n>\r\n'
-    if ! grep -Fq 't1:q1' "${response_path}"; then
+    resp_command "${response_path}" XREADGROUP GROUP g restarted COUNT 1 STREAMS "${SMOKE_QUEUE}" '>'
+    if ! grep -Fq "${SMOKE_QUEUE}" "${response_path}"; then
         err "durable post-restart XREADGROUP did not recover queue data (${LOG_BACKEND})"
         sed -n '1,120p' "${response_path}" >&2 || true
         return 1
@@ -673,6 +724,9 @@ main() {
         --set "image.repository=${image_repository}" \
         --set "image.tag=${image_tag}" \
         --set "image.pullPolicy=IfNotPresent" \
+        --set "bootstrap.generated.count=${BOOTSTRAP_GENERATED_COUNT}" \
+        --set-string "bootstrap.generated.tenant=${BOOTSTRAP_GENERATED_TENANT}" \
+        --set-string "bootstrap.generated.prefix=${BOOTSTRAP_GENERATED_PREFIX}" \
         --wait \
         --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"

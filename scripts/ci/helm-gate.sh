@@ -248,6 +248,21 @@ assert_lakebase_postgres_contract() {
     assert_no_fixture_credentials "$rendered" "Lakebase rendered manifest"
 }
 
+assert_generated_bootstrap_contract() {
+    local rendered
+    rendered="$(mktemp)"
+    helm template pqueue-density "$CHART_DIR" \
+        --set bootstrap.generated.count=1001 \
+        --set bootstrap.generated.tenant=density \
+        --set bootstrap.generated.prefix=q >"$rendered"
+
+    assert_contains "$rendered" 'PQUEUE_BOOTSTRAP_GENERATED_COUNT: "1001"' "generated bootstrap count"
+    assert_contains "$rendered" 'PQUEUE_BOOTSTRAP_GENERATED_TENANT: "density"' "generated bootstrap tenant"
+    assert_contains "$rendered" 'PQUEUE_BOOTSTRAP_GENERATED_PREFIX: "q"' "generated bootstrap prefix"
+    assert_not_contains "$rendered" 'PQUEUE_BOOTSTRAP_QUEUES:' "explicit bootstrap list when generation is selected"
+    rm -f "$rendered"
+}
+
 assert_combination_contract() {
     local combination="$1"
     local rendered="$2"
@@ -276,6 +291,9 @@ main() {
 
     ensure_kubeconform
     assert_no_fixture_credentials "${CHART_DIR}/values.yaml" "chart default values"
+
+    echo "--- generated bootstrap inventory contract ---"
+    assert_generated_bootstrap_contract
 
     echo "--- helm package ---"
     rm -rf "$PACKAGE_DIR"

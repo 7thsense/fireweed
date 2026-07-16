@@ -374,10 +374,13 @@ fn queue_definition(tenant: &str, queue: &str) -> Result<QueueDefinition, Config
     })
 }
 
-fn parse_bootstrap_queues(
-    env: &BTreeMap<String, String>,
-) -> Result<Vec<QueueDefinition>, ConfigError> {
-    env_or(env, "PQUEUE_BOOTSTRAP_QUEUES", "t1:q1")
+/// Hard cap for generated bootstrap inventories. This bounds startup memory,
+/// queue-definition writes, and the rendered deployment contract independently
+/// of the caller or chart.
+pub const MAX_GENERATED_BOOTSTRAP_QUEUES: usize = 10_000;
+
+fn parse_explicit_bootstrap_queues(value: &str) -> Result<Vec<QueueDefinition>, ConfigError> {
+    value
         .split(',')
         .filter_map(|entry| {
             let trimmed = entry.trim();
@@ -392,6 +395,47 @@ fn parse_bootstrap_queues(
             })
         })
         .collect()
+}
+
+fn parse_bootstrap_queues(
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<QueueDefinition>, ConfigError> {
+    // An explicitly configured non-empty list always wins. This preserves the
+    // original contract and gives operators an unambiguous override when both
+    // explicit and generated settings are present.
+    if let Some(explicit) = env
+        .get("PQUEUE_BOOTSTRAP_QUEUES")
+        .filter(|value| !value.trim().is_empty())
+    {
+        return parse_explicit_bootstrap_queues(explicit);
+    }
+
+    if let Some(raw_count) = env.get("PQUEUE_BOOTSTRAP_GENERATED_COUNT") {
+        let count = raw_count.parse::<usize>().map_err(|_| {
+            ConfigError::new(format!(
+                "PQUEUE_BOOTSTRAP_GENERATED_COUNT must be an integer from 1 to {MAX_GENERATED_BOOTSTRAP_QUEUES}, got {raw_count:?}"
+            ))
+        })?;
+        if !(1..=MAX_GENERATED_BOOTSTRAP_QUEUES).contains(&count) {
+            return Err(ConfigError::new(format!(
+                "PQUEUE_BOOTSTRAP_GENERATED_COUNT must be from 1 to {MAX_GENERATED_BOOTSTRAP_QUEUES}, got {count}"
+            )));
+        }
+
+        let tenant = env_or(env, "PQUEUE_BOOTSTRAP_GENERATED_TENANT", "t1");
+        let prefix = env_or(env, "PQUEUE_BOOTSTRAP_GENERATED_PREFIX", "q");
+        if prefix.trim().is_empty() {
+            return Err(ConfigError::new(
+                "PQUEUE_BOOTSTRAP_GENERATED_PREFIX must not be empty",
+            ));
+        }
+
+        return (0..count)
+            .map(|index| queue_definition(&tenant, &format!("{prefix}{index}")))
+            .collect();
+    }
+
+    parse_explicit_bootstrap_queues("t1:q1")
 }
 
 fn embedded_fjord_config(env: &BTreeMap<String, String>) -> EmbeddedFjordConfig {
@@ -510,6 +554,86 @@ mod tests {
         assert!(config.debug_segments);
         assert_eq!(config.queues.len(), 2);
         assert_eq!(config.queues[1].queue_id.as_str(), "qb");
+    }
+
+    #[test]
+    fn generated_bootstrap_queue_inventory() {
+        let generated = map(&[
+            ("PQUEUE_BOOTSTRAP_GENERATED_COUNT", "1001"),
+            ("PQUEUE_BOOTSTRAP_GENERATED_TENANT", "density"),
+            ("PQUEUE_BOOTSTRAP_GENERATED_PREFIX", "q"),
+        ]);
+        let first = Config::from_env(&generated).expect("valid generated inventory");
+        let second = Config::from_env(&generated).expect("generated inventory is reproducible");
+
+        assert_eq!(first.queues.len(), 1001);
+        assert_eq!(first.queues[0].tenant_id.as_str(), "density");
+        assert_eq!(first.queues[0].queue_id.as_str(), "q0");
+        assert_eq!(first.queues[1000].queue_id.as_str(), "q1000");
+        let keys: std::collections::BTreeSet<_> = first
+            .queues
+            .iter()
+            .map(|queue| {
+                (
+                    queue.tenant_id.as_str().to_string(),
+                    queue.queue_id.as_str().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(keys.len(), 1001, "generated queue keys must be unique");
+        assert_eq!(
+            first
+                .queues
+                .iter()
+                .map(|queue| queue.queue_id.as_str())
+                .collect::<Vec<_>>(),
+            second
+                .queues
+                .iter()
+                .map(|queue| queue.queue_id.as_str())
+                .collect::<Vec<_>>(),
+            "the same generated contract must produce the same ordered inventory"
+        );
+
+        let explicit = Config::from_env(&map(&[
+            ("PQUEUE_BOOTSTRAP_QUEUES", "override:only"),
+            ("PQUEUE_BOOTSTRAP_GENERATED_COUNT", "1001"),
+            ("PQUEUE_BOOTSTRAP_GENERATED_TENANT", "density"),
+            ("PQUEUE_BOOTSTRAP_GENERATED_PREFIX", "q"),
+        ]))
+        .expect("explicit inventory takes precedence");
+        assert_eq!(explicit.queues.len(), 1);
+        assert_eq!(explicit.queues[0].tenant_id.as_str(), "override");
+        assert_eq!(explicit.queues[0].queue_id.as_str(), "only");
+    }
+
+    #[test]
+    fn generated_bootstrap_queue_inventory_rejects_invalid_or_unbounded_counts() {
+        for count in ["", "zero", "0", "10001", "18446744073709551616"] {
+            let result = Config::from_env(&map(&[("PQUEUE_BOOTSTRAP_GENERATED_COUNT", count)]));
+            assert!(
+                result.is_err(),
+                "generated count {count:?} must be rejected"
+            );
+        }
+
+        let empty_prefix = Config::from_env(&map(&[
+            ("PQUEUE_BOOTSTRAP_GENERATED_COUNT", "1"),
+            ("PQUEUE_BOOTSTRAP_GENERATED_PREFIX", ""),
+        ]));
+        assert!(
+            empty_prefix.is_err(),
+            "empty generated prefix must be rejected"
+        );
+
+        let invalid_tenant = Config::from_env(&map(&[
+            ("PQUEUE_BOOTSTRAP_GENERATED_COUNT", "1"),
+            ("PQUEUE_BOOTSTRAP_GENERATED_TENANT", ""),
+        ]));
+        assert!(
+            invalid_tenant.is_err(),
+            "generated tenant must satisfy TenantId validation"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@
     "resources",
     "probes",
     "config",
+    "bootstrap",
     "storage",
     "persistence"
   ],
@@ -162,6 +163,48 @@
           "items": {
             "type": "string",
             "minLength": 1
+          }
+        }
+      }
+    },
+    "bootstrap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "queues",
+        "generated"
+      ],
+      "properties": {
+        "queues": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "type": "string",
+            "pattern": "^[^:,]+:[^:,]+$"
+          }
+        },
+        "generated": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "count",
+            "tenant",
+            "prefix"
+          ],
+          "properties": {
+            "count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "tenant": {
+              "type": "string",
+              "minLength": 1
+            },
+            "prefix": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         }
       }
