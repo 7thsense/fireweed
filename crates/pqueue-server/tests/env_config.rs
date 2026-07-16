@@ -14,6 +14,7 @@ fn postgres_control_plane_env_selects_typed_shared_authority() {
     let config = Config::from_env(&env(&[
         ("PQUEUE_CONTROL_PLANE", "postgres"),
         ("PQUEUE_REPLICA_COUNT", "3"),
+        ("PQUEUE_ADVERTISE_ADDR", "10.0.0.12:8080"),
         (
             "PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL",
             "postgres://pqueue:secret@postgres.internal/pqueue",
@@ -22,6 +23,8 @@ fn postgres_control_plane_env_selects_typed_shared_authority() {
         ("PQUEUE_CONTROL_PLANE_LEASE_TTL_MS", "21000"),
     ]))
     .expect("shared Postgres control-plane config must parse");
+
+    assert_eq!(config.advertise_addr.as_deref(), Some("10.0.0.12:8080"));
 
     match config.backend.control_plane {
         ControlPlaneSpec::Postgres { url, config } => {
@@ -61,6 +64,7 @@ fn postgres_control_plane_boundary_rejects_inprocess_for_multiple_replicas() {
     let Err(error) = Config::from_env(&env(&[
         ("PQUEUE_CONTROL_PLANE", "inprocess"),
         ("PQUEUE_REPLICA_COUNT", "2"),
+        ("PQUEUE_ADVERTISE_ADDR", "10.0.0.12:8080"),
     ])) else {
         panic!("the development-only plane cannot coordinate replicas");
     };
@@ -89,5 +93,26 @@ fn postgres_control_plane_invalid_ttls_fail_closed() {
             panic!("invalid control-plane TTL must fail closed");
         };
         assert!(error.0.contains(key), "{}", error.0);
+    }
+}
+
+#[test]
+fn postgres_control_plane_multireplica_advertise_address_fails_closed() {
+    for advertise in [None, Some(""), Some("0.0.0.0:8080"), Some("not-an-address")] {
+        let mut values = env(&[
+            ("PQUEUE_CONTROL_PLANE", "postgres"),
+            ("PQUEUE_REPLICA_COUNT", "2"),
+            (
+                "PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL",
+                "postgres://localhost/pqueue",
+            ),
+        ]);
+        if let Some(advertise) = advertise {
+            values.insert("PQUEUE_ADVERTISE_ADDR".into(), advertise.into());
+        }
+        let Err(error) = Config::from_env(&values) else {
+            panic!("missing or malformed advertise address must fail closed");
+        };
+        assert!(error.0.contains("PQUEUE_ADVERTISE_ADDR"), "{}", error.0);
     }
 }

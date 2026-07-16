@@ -287,6 +287,18 @@ impl Default for ControlPlaneConfig {
     }
 }
 
+/// A control-plane advertisement mapping one live owner to its client-reachable RESP endpoint.
+/// The control plane treats the endpoint as opaque data; the server validates it before publishing and
+/// again before routing so malformed durable rows can never become redirects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerEndpointAdvertisement {
+    pub owner: OwnerId,
+    pub endpoint: String,
+    /// Heartbeat-derived liveness deadline. Consumers must not route at or beyond this instant even if
+    /// their node-level refresh loop has not run yet.
+    pub expires_at: UtcTimestamp,
+}
+
 /// The pluggable control-plane seam (TD-003 §Queue Lease Lifecycle). All lease ops are transactional: each
 /// is one atomic mutation of the authority record. The production impl is transactional-postgres (BQ-22);
 /// [`InMemoryControlPlane`] is the reference + the default for single-node / tests.
@@ -295,6 +307,28 @@ pub trait QueueControlPlane: Send + Sync {
     /// durable store (postgres) can fail the write — surfaced rather than silently swallowed (a swallowed
     /// failure would leave the owner looking dead, which is fail-safe but must not be hidden).
     fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()>;
+
+    /// Atomically register/heartbeat an owner and publish its client-reachable endpoint. A server calls
+    /// this once at startup and once per node-level ownership tick, never once per managed queue.
+    fn advertise_owner_endpoint(
+        &self,
+        owner: &OwnerId,
+        _endpoint: &str,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        // Compatibility default for third-party control planes: preserve membership but publish no
+        // redirect. The corresponding empty-list default below therefore fails closed.
+        self.register_owner(owner, now)
+    }
+
+    /// Return endpoint advertisements for the live owner set at `now`. Expired and unadvertised owners
+    /// are omitted. Callers must still validate the opaque endpoint before using it for a redirect.
+    fn live_owner_endpoints(
+        &self,
+        _now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
+        Ok(Vec::new())
+    }
 
     /// Refresh an owner's heartbeat. An owner whose heartbeat has expired leaves the live set (changing
     /// future `target_owner` computations) but its lease is reclaimed only via `lease_expires_at`.
@@ -448,6 +482,8 @@ pub struct InMemoryControlPlane {
 struct CpState {
     /// owner → last heartbeat time.
     owners: HashMap<OwnerId, UtcTimestamp>,
+    /// owner → opaque advertised endpoint; liveness is always determined by `owners` above.
+    endpoints: HashMap<OwnerId, String>,
     /// queue → authority record.
     leases: HashMap<QueueKey, QueueLease>,
 }
@@ -502,6 +538,35 @@ impl QueueControlPlane for InMemoryControlPlane {
             .owners
             .insert(owner.clone(), now);
         Ok(())
+    }
+
+    fn advertise_owner_endpoint(
+        &self,
+        owner: &OwnerId,
+        endpoint: &str,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let mut state = self.state.lock().expect("poisoned");
+        state.owners.insert(owner.clone(), now);
+        state.endpoints.insert(owner.clone(), endpoint.to_string());
+        Ok(())
+    }
+
+    fn live_owner_endpoints(
+        &self,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
+        let state = self.state.lock().expect("poisoned");
+        Ok(state
+            .endpoints
+            .iter()
+            .filter(|(owner, _)| self.is_owner_live(&state.owners, owner, now))
+            .map(|(owner, endpoint)| OwnerEndpointAdvertisement {
+                owner: owner.clone(),
+                endpoint: endpoint.clone(),
+                expires_at: add_millis(state.owners[owner], self.config.heartbeat_ttl_ms),
+            })
+            .collect())
     }
 
     fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {

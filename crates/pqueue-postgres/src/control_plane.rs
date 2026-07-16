@@ -22,10 +22,10 @@ use std::sync::Mutex;
 use postgres::Client;
 use pqueue_core::{OwnerId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseState, OwnerResolution,
-    QueueControlPlane, QueueKey, QueueLease, lease_decide_acquire, lease_decide_begin_drain,
-    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
-    resolve_target,
+    AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseState,
+    OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueKey, QueueLease,
+    lease_decide_acquire, lease_decide_begin_drain, lease_decide_release, lease_decide_renew,
+    lease_resolution, owner_heartbeat_live, resolve_target,
 };
 
 use crate::{PostgresConnectConfig, connect};
@@ -33,8 +33,10 @@ use crate::{PostgresConnectConfig, connect};
 const CONTROL_PLANE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS pqueue_workers (
     owner_id TEXT NOT NULL PRIMARY KEY,
-    heartbeat_at BIGINT NOT NULL                 -- nanoseconds since epoch
+    heartbeat_at BIGINT NOT NULL,                -- nanoseconds since epoch
+    endpoint TEXT
 );
+ALTER TABLE pqueue_workers ADD COLUMN IF NOT EXISTS endpoint TEXT;
 CREATE TABLE IF NOT EXISTS pqueue_queue_owner (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     state TEXT NOT NULL,                          -- 'unassigned' | 'assigned' | 'draining'
@@ -298,6 +300,48 @@ impl QueueControlPlane for PostgresControlPlane {
             &[&owner.as_str(), &ts_nanos(now)],
         ))?;
         Ok(())
+    }
+
+    fn advertise_owner_endpoint(
+        &self,
+        owner: &OwnerId,
+        endpoint: &str,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let mut client = self.inner.lock().expect("poisoned");
+        st(client.execute(
+            "INSERT INTO pqueue_workers (owner_id, heartbeat_at, endpoint) VALUES ($1,$2,$3) \
+             ON CONFLICT (owner_id) DO UPDATE SET heartbeat_at=EXCLUDED.heartbeat_at, endpoint=EXCLUDED.endpoint",
+            &[&owner.as_str(), &ts_nanos(now), &endpoint],
+        ))?;
+        Ok(())
+    }
+
+    fn live_owner_endpoints(
+        &self,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
+        let cutoff =
+            ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
+        let mut client = self.inner.lock().expect("poisoned");
+        let rows = st(client.query(
+            "SELECT owner_id, endpoint, heartbeat_at FROM pqueue_workers \
+             WHERE heartbeat_at > $1 AND endpoint IS NOT NULL ORDER BY owner_id",
+            &[&cutoff],
+        ))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let owner = OwnerId::new(row.get::<_, String>(0)).ok()?;
+                Some(OwnerEndpointAdvertisement {
+                    owner,
+                    endpoint: row.get(1),
+                    expires_at: nanos_ts(row.get::<_, i64>(2).saturating_add(
+                        (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000),
+                    )),
+                })
+            })
+            .collect())
     }
 
     fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {

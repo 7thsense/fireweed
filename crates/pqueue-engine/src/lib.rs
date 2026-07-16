@@ -36,10 +36,10 @@ pub use compose::{
     resolve_recovery_start,
 };
 pub use control_plane::{
-    AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState, OwnerResolution,
-    QueueControlPlane, QueueLease, lease_decide_acquire, lease_decide_begin_drain,
-    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
-    resolve_target,
+    AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState,
+    OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueLease,
+    lease_decide_acquire, lease_decide_begin_drain, lease_decide_release, lease_decide_renew,
+    lease_resolution, owner_heartbeat_live, resolve_target,
 };
 pub use density::{RenewSweep, ResidentQueues, renew_all_resident};
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
