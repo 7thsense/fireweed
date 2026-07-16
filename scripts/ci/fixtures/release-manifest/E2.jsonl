@@ -1,0 +1,1 @@
+{"suite":"fixture_e2","command":"fixture produce E2","backend_profile":"object_log_sqlite_projection","scale":"release","seed":42,"environment":"fixture","exit_status":0,"ac_ids":[],"inv_ids":[],"pass_bar":"E2 scale","evidence_tier":"release","measurements":{"tp002_evidence_ids":["E2"],"bars_met":true}}

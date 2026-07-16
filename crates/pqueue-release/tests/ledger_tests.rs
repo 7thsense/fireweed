@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use pqueue_release::{LedgerRow, Measurements, append_row, missing_evidence, verify_ledger};
+use pqueue_release::{
+    LedgerRow, Measurements, ReleaseAuthority, ReleaseManifest, append_row, missing_evidence,
+    verify_ledger, verify_release_manifest,
+};
 
 fn tmp_ledger(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
@@ -92,4 +95,240 @@ fn missing_file_is_an_error() {
     let _ = std::fs::remove_file(&path);
     let errors = verify_ledger(&path, true).expect_err("a missing ledger is an error");
     assert!(errors.iter().any(|e| e.0.contains("cannot open")));
+}
+
+fn release_manifest_dir(tag: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "pqueue-release-manifest-{tag}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn release_row(id: &str) -> LedgerRow {
+    let mut row = row(&format!("tp002_{id}_release"), 0, &[id]);
+    row.backend_profile = match id {
+        "E0" | "E1" => "postgres_native",
+        "E2" | "E3" => "object_log_sqlite_projection",
+        _ => unreachable!(),
+    }
+    .into();
+    row.measurements
+        .values
+        .insert("bars_met".into(), serde_json::json!(true));
+    row
+}
+
+fn valid_release_manifest() -> ReleaseManifest {
+    ReleaseManifest {
+        schema_version: 1,
+        authorities: ["E0", "E1", "E2", "E3"]
+            .into_iter()
+            .map(|id| ReleaseAuthority {
+                evidence_id: id.into(),
+                path: format!("{id}.jsonl"),
+            })
+            .collect(),
+    }
+}
+
+fn write_release_case(
+    dir: &std::path::Path,
+    manifest: &ReleaseManifest,
+    rows: impl IntoIterator<Item = (String, LedgerRow)>,
+) -> std::path::PathBuf {
+    for (path, row) in rows {
+        std::fs::write(dir.join(path), format!("{}\n", row.to_jsonl())).unwrap();
+    }
+    let manifest_path = dir.join("manifest.json");
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(manifest).unwrap()).unwrap();
+    manifest_path
+}
+
+fn all_release_rows() -> Vec<(String, LedgerRow)> {
+    ["E0", "E1", "E2", "E3"]
+        .into_iter()
+        .map(|id| (format!("{id}.jsonl"), release_row(id)))
+        .collect()
+}
+
+#[test]
+fn release_manifest_accepts_exact_semantic_e0_e3_authorities() {
+    let dir = release_manifest_dir("valid");
+    let path = write_release_case(&dir, &valid_release_manifest(), all_release_rows());
+    let summary = verify_release_manifest(&path).expect("governed E0-E3 fixture passes");
+    assert_eq!(summary.rows, 4);
+    assert_eq!(
+        summary.evidence_ids.into_iter().collect::<Vec<_>>(),
+        ["E0", "E1", "E2", "E3"]
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_manifest_rejects_missing_file_and_missing_id_even_with_unlisted_substitute() {
+    let dir = release_manifest_dir("missing");
+    let mut missing_file = valid_release_manifest();
+    missing_file.authorities[0].path = "absent.jsonl".into();
+    let path = write_release_case(&dir, &missing_file, all_release_rows());
+    let errors = verify_release_manifest(&path).unwrap_err();
+    assert!(errors.iter().any(|error| error.0.contains("cannot open")));
+
+    let mut missing_id = valid_release_manifest();
+    missing_id
+        .authorities
+        .retain(|authority| authority.evidence_id != "E3");
+    // E3.jsonl still exists beside the manifest, but an unlisted file cannot substitute for authority.
+    let path = write_release_case(&dir, &missing_id, all_release_rows());
+    let errors = verify_release_manifest(&path).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.0.contains("missing authority for E3"))
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_manifest_rejects_duplicate_id_and_duplicate_file_authority() {
+    let dir = release_manifest_dir("duplicate");
+    let mut manifest = valid_release_manifest();
+    manifest.authorities.push(ReleaseAuthority {
+        evidence_id: "E0".into(),
+        path: "E0-copy.jsonl".into(),
+    });
+    manifest.authorities[3].path = "E2.jsonl".into();
+    let mut rows = all_release_rows();
+    rows.push(("E0-copy.jsonl".into(), release_row("E0")));
+    let path = write_release_case(&dir, &manifest, rows);
+    let errors = verify_release_manifest(&path).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.0.contains("duplicate authority for evidence id E0"))
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.0.contains("listed more than once"))
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_manifest_rejects_smoke_unknown_tier_and_non_release_scale() {
+    for (tag, mutate, expected) in [
+        (
+            "smoke-tier",
+            ("evidence_tier", "smoke"),
+            "evidence_tier must be explicitly and exactly \"release\"",
+        ),
+        (
+            "unknown-tier",
+            ("evidence_tier", "gold"),
+            "evidence_tier must be explicitly and exactly \"release\"",
+        ),
+        (
+            "wrong-scale",
+            ("scale", "in-process-smoke"),
+            "scale must be exactly \"release\"",
+        ),
+    ] {
+        let dir = release_manifest_dir(tag);
+        let mut rows = all_release_rows();
+        let row = &mut rows[2].1;
+        match mutate.0 {
+            "evidence_tier" => row.evidence_tier = mutate.1.into(),
+            "scale" => row.scale = mutate.1.into(),
+            _ => unreachable!(),
+        }
+        let path = write_release_case(&dir, &valid_release_manifest(), rows);
+        let errors = verify_release_manifest(&path).unwrap_err();
+        assert!(
+            errors.iter().any(|error| error.0.contains(expected)),
+            "{tag}: {errors:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    let dir = release_manifest_dir("missing-tier");
+    let path = write_release_case(&dir, &valid_release_manifest(), all_release_rows());
+    let mut raw = serde_json::to_value(release_row("E2")).unwrap();
+    raw.as_object_mut().unwrap().remove("evidence_tier");
+    std::fs::write(dir.join("E2.jsonl"), format!("{raw}\n")).unwrap();
+    let errors = verify_release_manifest(&path).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error
+            .0
+            .contains("evidence_tier must be explicitly and exactly \"release\"")
+    }));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_manifest_rejects_false_or_missing_bars_met() {
+    for (tag, value, expected) in [
+        ("bars-false", Some(serde_json::json!(false)), "boolean true"),
+        ("bars-missing", None, "bars_met is required"),
+    ] {
+        let dir = release_manifest_dir(tag);
+        let mut rows = all_release_rows();
+        match value {
+            Some(value) => {
+                rows[1]
+                    .1
+                    .measurements
+                    .values
+                    .insert("bars_met".into(), value);
+            }
+            None => {
+                rows[1].1.measurements.values.remove("bars_met");
+            }
+        }
+        let path = write_release_case(&dir, &valid_release_manifest(), rows);
+        let errors = verify_release_manifest(&path).unwrap_err();
+        assert!(
+            errors.iter().any(|error| error.0.contains(expected)),
+            "{tag}: {errors:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn release_manifest_rejects_wrong_profile_and_unlisted_id_substitution() {
+    let dir = release_manifest_dir("semantics");
+    let mut rows = all_release_rows();
+    rows[2].1.backend_profile = "postgres_native".into();
+    rows[3].1.measurements.tp002_evidence_ids = vec!["E2".into()];
+    let path = write_release_case(&dir, &valid_release_manifest(), rows);
+    let errors = verify_release_manifest(&path).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error
+            .0
+            .contains("backend_profile \"postgres_native\" is not governed for E2")
+    }));
+    assert!(errors.iter().any(|error| {
+        error
+            .0
+            .contains("row evidence ids [\"E2\"] do not exactly match listed authority E3")
+    }));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_manifest_rejects_parent_path_traversal() {
+    let dir = release_manifest_dir("traversal");
+    let mut manifest = valid_release_manifest();
+    manifest.authorities[0].path = "../E0.jsonl".into();
+    let path = write_release_case(&dir, &manifest, all_release_rows());
+    let errors = verify_release_manifest(&path).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.0.contains("not a safe manifest-relative path"))
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }

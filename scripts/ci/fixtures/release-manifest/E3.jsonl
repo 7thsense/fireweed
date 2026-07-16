@@ -1,0 +1,1 @@
+{"suite":"fixture_e3","command":"fixture produce E3","backend_profile":"object_log_sqlite_projection","scale":"release","seed":42,"environment":"fixture","exit_status":0,"ac_ids":[],"inv_ids":[],"pass_bar":"E3 latency cost recovery","evidence_tier":"release","measurements":{"tp002_evidence_ids":["E3"],"bars_met":true}}

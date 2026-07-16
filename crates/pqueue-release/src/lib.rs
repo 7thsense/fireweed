@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +136,22 @@ pub struct LedgerSummary {
     pub rows: usize,
     pub evidence_ids: std::collections::BTreeSet<String>,
     pub smoke_evidence_ids: std::collections::BTreeSet<String>,
+}
+
+/// A governed TP-002 manifest names the exact ledger file authoritative for each evidence ID.
+/// Broad directory scans are intentionally not supported by this format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseManifest {
+    pub schema_version: u32,
+    pub authorities: Vec<ReleaseAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseAuthority {
+    pub evidence_id: String,
+    pub path: String,
 }
 
 /// Validate a ledger file. In `strict` mode each row must be well-formed AND acceptable evidence (exit 0,
@@ -269,6 +285,200 @@ pub fn verify_ledger_dir(dir: &Path, strict: bool) -> Result<LedgerSummary, Vec<
     } else {
         Err(errors)
     }
+}
+
+/// Verify the exact TP-002 authority files listed by a governed release manifest.
+///
+/// Each authority must be one strict-valid ledger containing exactly one row. The row must claim only
+/// the listed E-ID, be release-tier at release scale, report `bars_met: true`, and use the profile governed
+/// for that E-ID. Manifest paths are relative to the manifest and cannot escape its directory.
+pub fn verify_release_manifest(path: &Path) -> Result<LedgerSummary, Vec<LedgerError>> {
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            return Err(vec![LedgerError(format!(
+                "cannot read release manifest {}: {error}",
+                path.display()
+            ))]);
+        }
+    };
+    let manifest: ReleaseManifest = match serde_json::from_slice(&contents) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Err(vec![LedgerError(format!(
+                "malformed release manifest {}: {error}",
+                path.display()
+            ))]);
+        }
+    };
+
+    let mut errors = Vec::new();
+    if manifest.schema_version != 1 {
+        errors.push(LedgerError(format!(
+            "unsupported release manifest schema_version {}; expected 1",
+            manifest.schema_version
+        )));
+    }
+    if manifest.authorities.is_empty() {
+        errors.push(LedgerError(
+            "release manifest has no authority entries".into(),
+        ));
+    }
+
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut evidence_ids = std::collections::BTreeSet::new();
+    let mut authority_paths = std::collections::BTreeSet::new();
+    let mut rows = 0;
+    for authority in manifest.authorities {
+        let id = authority.evidence_id.as_str();
+        if !matches!(id, "E0" | "E1" | "E2" | "E3") {
+            errors.push(LedgerError(format!(
+                "unknown TP-002 evidence id {:?}",
+                authority.evidence_id
+            )));
+            continue;
+        }
+        if !evidence_ids.insert(authority.evidence_id.clone()) {
+            errors.push(LedgerError(format!(
+                "duplicate authority for evidence id {id}"
+            )));
+            continue;
+        }
+        if !safe_manifest_path(&authority.path) {
+            errors.push(LedgerError(format!(
+                "authority path {:?} is not a safe manifest-relative path",
+                authority.path
+            )));
+            continue;
+        }
+        if !authority_paths.insert(authority.path.clone()) {
+            errors.push(LedgerError(format!(
+                "authority file {:?} is listed more than once",
+                authority.path
+            )));
+            continue;
+        }
+
+        let ledger_path = base.join(&authority.path);
+        match verify_ledger(&ledger_path, true) {
+            Ok(summary) if summary.rows != 1 => {
+                errors.push(LedgerError(format!(
+                    "authority {id} file {:?} contains {} rows; expected exactly one",
+                    authority.path, summary.rows
+                )));
+                continue;
+            }
+            Ok(_) => {}
+            Err(file_errors) => {
+                errors.extend(file_errors.into_iter().map(|error| {
+                    LedgerError(format!(
+                        "authority {id} file {:?}: {}",
+                        authority.path, error.0
+                    ))
+                }));
+                continue;
+            }
+        }
+
+        let (row, raw_row) = match read_single_ledger_row(&ledger_path) {
+            Ok(row) => row,
+            Err(error) => {
+                errors.push(LedgerError(format!(
+                    "authority {id} file {:?}: {error}",
+                    authority.path
+                )));
+                continue;
+            }
+        };
+        rows += 1;
+        for error in release_authority_errors(id, &row, &raw_row) {
+            errors.push(LedgerError(format!(
+                "authority {id} file {:?}: {error}",
+                authority.path
+            )));
+        }
+    }
+    for required in ["E0", "E1", "E2", "E3"] {
+        if !evidence_ids.contains(required) {
+            errors.push(LedgerError(format!(
+                "release manifest is missing authority for {required}"
+            )));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(LedgerSummary {
+            rows,
+            evidence_ids,
+            smoke_evidence_ids: Default::default(),
+        })
+    } else {
+        Err(errors)
+    }
+}
+
+fn safe_manifest_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn read_single_ledger_row(path: &Path) -> Result<(LedgerRow, serde_json::Value), String> {
+    let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut rows = contents.lines().filter(|line| !line.trim().is_empty());
+    let line = rows
+        .next()
+        .ok_or_else(|| "authority ledger is empty".to_string())?;
+    let raw: serde_json::Value = serde_json::from_str(line).map_err(|error| error.to_string())?;
+    let row = serde_json::from_value(raw.clone()).map_err(|error| error.to_string())?;
+    Ok((row, raw))
+}
+
+fn release_authority_errors(id: &str, row: &LedgerRow, raw_row: &serde_json::Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    let explicit_tier = raw_row
+        .get("evidence_tier")
+        .and_then(serde_json::Value::as_str);
+    if explicit_tier != Some("release") {
+        errors.push(format!(
+            "evidence_tier must be explicitly and exactly \"release\", got {explicit_tier:?}"
+        ));
+    }
+    if row.scale != "release" {
+        errors.push(format!(
+            "scale must be exactly \"release\", got {:?}",
+            row.scale
+        ));
+    }
+    if row.measurements.tp002_evidence_ids.as_slice() != [id] {
+        errors.push(format!(
+            "row evidence ids {:?} do not exactly match listed authority {id}",
+            row.measurements.tp002_evidence_ids
+        ));
+    }
+    match row.measurements.values.get("bars_met") {
+        Some(serde_json::Value::Bool(true)) => {}
+        Some(value) => errors.push(format!("bars_met must be boolean true, got {value}")),
+        None => errors.push("bars_met is required and must be boolean true".into()),
+    }
+    let profile_allowed = match id {
+        "E0" | "E1" => row.backend_profile == "postgres_native",
+        "E2" | "E3" => matches!(
+            row.backend_profile.as_str(),
+            "object_log_inmemory_projection" | "object_log_sqlite_projection"
+        ),
+        _ => false,
+    };
+    if !profile_allowed {
+        errors.push(format!(
+            "backend_profile {:?} is not governed for {id}",
+            row.backend_profile
+        ));
+    }
+    errors
 }
 
 /// Assert every id in `required` (e.g. `["E0","E1","E2","E3"]`) appears in some RELEASE-tier row's

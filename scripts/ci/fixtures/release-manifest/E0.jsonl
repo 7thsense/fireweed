@@ -1,0 +1,1 @@
+{"suite":"fixture_e0","command":"fixture produce E0","backend_profile":"postgres_native","scale":"release","seed":42,"environment":"fixture","exit_status":0,"ac_ids":[],"inv_ids":[],"pass_bar":"E0 floor","evidence_tier":"release","measurements":{"tp002_evidence_ids":["E0"],"bars_met":true}}
