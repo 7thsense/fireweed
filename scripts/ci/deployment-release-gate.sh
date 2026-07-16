@@ -20,7 +20,7 @@ SUPPORT_LOG="${PROOF_DIR}/supporting-artifacts.tsv"
 KIND_IMAGE_CONTEXT="${PROOF_DIR}/kind-image"
 KIND_IMAGE_DOCKERFILE="${KIND_IMAGE_CONTEXT}/Dockerfile"
 
-STORAGE_COMBINATIONS=("objectlog:inmemory")
+STORAGE_COMBINATIONS=("objectlog:inmemory" "objectlog:sqlite")
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
 export KIND_NODE_IMAGE
 
@@ -371,6 +371,7 @@ required_phrases = {
     ],
     Path("docs/deployment/kind-helm-integration.md"): [
         "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory",
+        "bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite",
     ],
 }
 for path, phrases in required_phrases.items():
