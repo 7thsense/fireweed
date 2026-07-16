@@ -1009,24 +1009,77 @@ where
             .await?
         {
             AcquireOutcome::Acquired(lease) => {
-                let current_epoch = self.backend.current_epoch(queue).await?;
-                let fence_epoch = if current_epoch == lease.assignment_epoch {
-                    current_epoch
-                } else if current_epoch < lease.assignment_epoch {
-                    self.backend.acquire_epoch(queue).await?
+                let current_epoch = match self.backend.current_epoch(queue).await {
+                    Ok(epoch) => epoch,
+                    Err(fence_error) => {
+                        self.sessions.lock().expect("poisoned").remove(queue);
+                        let _ = self
+                            .cp_release(
+                                queue.clone(),
+                                self.owner.clone(),
+                                lease.assignment_epoch,
+                                now,
+                            )
+                            .await;
+                        return Err(fence_error);
+                    }
+                };
+                let fence_result = if current_epoch <= lease.assignment_epoch {
+                    self.backend
+                        .fence_epoch(queue, lease.assignment_epoch)
+                        .await
                 } else {
                     // current_epoch > lease.assignment_epoch
                     if prior_owner.as_ref() == Some(&self.owner) {
                         // Same-owner re-affirm after a prior restart-reconciliation:
                         // use current storage epoch without re-advancing.
-                        current_epoch
+                        Ok(current_epoch)
                     } else if self.control_plane.is_ephemeral() {
                         // Ephemeral CP reset on restart: catch up storage fence.
-                        self.backend.acquire_epoch(queue).await?
+                        self.backend.acquire_epoch(queue).await
                     } else {
-                        return Err(EngineError::EpochFenced);
+                        Err(EngineError::EpochFenced)
                     }
                 };
+                let fence_epoch = match fence_result {
+                    Ok(epoch) => epoch,
+                    Err(fence_error) => {
+                        self.sessions.lock().expect("poisoned").remove(queue);
+                        // Best-effort immediate compensation. Safety does not depend on it: a failed
+                        // release leaves the durable lease PendingFence, which cannot route or renew and
+                        // whose same-epoch reacquire is rejected until expiry.
+                        let _ = self
+                            .cp_release(
+                                queue.clone(),
+                                self.owner.clone(),
+                                lease.assignment_epoch,
+                                now,
+                            )
+                            .await;
+                        return Err(fence_error);
+                    }
+                };
+                if lease.state == LeaseState::PendingFence
+                    && let Err(confirm_error) = self
+                        .cp_confirm(
+                            queue.clone(),
+                            self.owner.clone(),
+                            lease.assignment_epoch,
+                            now,
+                        )
+                        .await
+                {
+                    self.sessions.lock().expect("poisoned").remove(queue);
+                    let _ = self
+                        .cp_release(
+                            queue.clone(),
+                            self.owner.clone(),
+                            lease.assignment_epoch,
+                            now,
+                        )
+                        .await;
+                    return Err(confirm_error);
+                }
                 let session = OwnedSession {
                     owner: self.owner.clone(),
                     queue: queue.clone(),
@@ -1158,7 +1211,7 @@ where
                     .assignment_epoch
                     .ok_or(EngineError::Unavailable)?;
                 // Hot path: already own this queue → no gate, just (re)validate the cached session.
-                self.establish_owned_session(queue, epoch).await
+                self.establish_owned_session(queue, epoch, now).await
             }
             (_, Some(_)) => Err(EngineError::Unavailable),
             (LeaseState::Unassigned, None)
@@ -1180,7 +1233,7 @@ where
                         let epoch = resolution
                             .assignment_epoch
                             .ok_or(EngineError::Unavailable)?;
-                        self.establish_owned_session(queue, epoch).await
+                        self.establish_owned_session(queue, epoch, now).await
                     }
                     (_, Some(_)) => Err(EngineError::Unavailable),
                     (LeaseState::Unassigned, None)
@@ -1204,6 +1257,7 @@ where
         &self,
         queue: &QueueKey,
         epoch: u64,
+        now: UtcTimestamp,
     ) -> EngineResult<Option<u64>> {
         let existing = {
             let sessions = self.sessions.lock().expect("poisoned");
@@ -1214,17 +1268,36 @@ where
         if existing.is_some() {
             return Ok(existing);
         }
-        let fence_epoch = self.backend.current_epoch(queue).await?;
-        let fence_epoch = if fence_epoch == epoch {
-            fence_epoch
-        } else if fence_epoch < epoch {
-            self.backend.acquire_epoch(queue).await?
+        let current_epoch = match self.backend.current_epoch(queue).await {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                self.sessions.lock().expect("poisoned").remove(queue);
+                let _ = self
+                    .cp_release(queue.clone(), self.owner.clone(), epoch, now)
+                    .await;
+                return Err(error);
+            }
+        };
+        let fence_result = if current_epoch == epoch {
+            Ok(current_epoch)
+        } else if current_epoch < epoch {
+            self.backend.fence_epoch(queue, epoch).await
         } else if self.control_plane.is_ephemeral() {
             // Ephemeral CP reset on restart: storage epoch is ahead of CP epoch.
             // Advance storage to fence stale pre-restart writers.
-            self.backend.acquire_epoch(queue).await?
+            self.backend.acquire_epoch(queue).await
         } else {
-            return Err(EngineError::EpochFenced);
+            Err(EngineError::EpochFenced)
+        };
+        let fence_epoch = match fence_result {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                self.sessions.lock().expect("poisoned").remove(queue);
+                let _ = self
+                    .cp_release(queue.clone(), self.owner.clone(), epoch, now)
+                    .await;
+                return Err(error);
+            }
         };
         let session = OwnedSession {
             owner: self.owner.clone(),
@@ -1335,6 +1408,20 @@ where
         let cp = self.control_plane.clone();
         blocking_control_plane(move || cp.renew_queue_lease(&queue, &owner, expected_epoch, now))
             .await
+    }
+
+    async fn cp_confirm(
+        &self,
+        queue: QueueKey,
+        owner: OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<pqueue_engine::QueueLease> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || {
+            cp.confirm_queue_lease_fence(&queue, &owner, expected_epoch, now)
+        })
+        .await
     }
 
     async fn cp_begin_drain(

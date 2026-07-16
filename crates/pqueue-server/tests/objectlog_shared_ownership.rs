@@ -1,0 +1,495 @@
+//! Live shared-control-plane/object-log ownership conformance (TD-003 + TD-004).
+//! Tests loud-skip unless both disposable Postgres and MinIO endpoints are configured.
+
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Barrier};
+
+use bytes::Bytes;
+use pqueue_core::{
+    EligibilityPolicy, Metadata, OrderingMode, OwnerId, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
+    TenantId, UtcTimestamp,
+};
+use pqueue_engine::{
+    AcquireOutcome, ControlPlaneConfig, ControlPlaneStore, EngineError, EngineResult, LeaseState,
+    OwnerEndpointAdvertisement, OwnerResolution, ProjectionRead, PushPort, PushSpec,
+    QueueControlPlane, QueueKey, QueueLease,
+};
+use pqueue_objectlog::segmented::{FaultCutPoint, FaultHook, S3BlobStore};
+use pqueue_postgres::PostgresControlPlane;
+use pqueue_resp::{RespHooks, RouteDecision};
+use pqueue_server::{OwnershipRuntime, SegmentConfig, SegmentedObjectLogSqliteBackend};
+
+static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+fn live_env(label: &str) -> Option<(String, Arc<S3BlobStore>)> {
+    let Ok(pg) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!("{label} SKIPPED — set PQUEUE_PG_TEST_URL and PQUEUE_S3_TEST_ENDPOINT");
+        return None;
+    };
+    let Ok(endpoint) = std::env::var("PQUEUE_S3_TEST_ENDPOINT") else {
+        eprintln!("{label} SKIPPED — set PQUEUE_PG_TEST_URL and PQUEUE_S3_TEST_ENDPOINT");
+        return None;
+    };
+    let bucket = std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into());
+    let access = std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let secret = std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let store = S3BlobStore::new(&endpoint, &bucket, &access, &secret, "us-east-1")
+        .expect("construct MinIO client");
+    Some((pg, Arc::new(store)))
+}
+
+fn unique(label: &str) -> (String, QueueDefinition, QueueKey) {
+    let n = UNIQUE.fetch_add(1, Ordering::SeqCst);
+    let tenant = TenantId::new(format!("own-{label}-{}-{n}", std::process::id())).unwrap();
+    let queue_id = QueueId::new(format!("queue-{label}-{}-{n}", std::process::id())).unwrap();
+    let definition = QueueDefinition {
+        tenant_id: tenant.clone(),
+        queue_id: queue_id.clone(),
+        priority_model: PriorityModel {
+            kind: PriorityModelKind::Int64,
+            direction: PriorityDirection::Ascending,
+            tie_breaker: PriorityTieBreaker::CreatedSequence,
+        },
+        ordering_mode: OrderingMode::Strict,
+        max_rank_error: 0,
+        progress_bound_ms: 60_000,
+        eligibility_policy: EligibilityPolicy::default(),
+        cohort_policy: None,
+        recurrence: RecurrencePolicy::default(),
+        request_id_retention_ms: 60_000,
+        client_item_key_retention_ms: 60_000,
+        terminal_retention_ms: 60_000,
+        max_lease_duration_ms: 60_000,
+        retry_policy: RetryPolicy { max_attempts: 3 },
+        max_push_batch_size: 100,
+        max_claim_batch_size: 100,
+        max_eligible_group_size: None,
+        secondary_indexes: vec![],
+        entity_schema: None,
+        typed_indexes: vec![],
+        emit_change_records: false,
+    };
+    let key = QueueKey::new(tenant, queue_id);
+    (
+        format!("pq_own_{label}_{}_{}", std::process::id(), n),
+        definition,
+        key,
+    )
+}
+
+fn owner(name: &str) -> OwnerId {
+    OwnerId::new(name).unwrap()
+}
+
+fn ts(seconds: i64) -> UtcTimestamp {
+    UtcTimestamp::new(seconds, 0).unwrap()
+}
+
+fn projection_path(label: &str) -> String {
+    let n = UNIQUE.fetch_add(1, Ordering::SeqCst);
+    std::env::temp_dir()
+        .join(format!(
+            "pqueue-own-{label}-{}-{n}.sqlite",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn backend(store: Arc<S3BlobStore>, label: &str) -> Arc<SegmentedObjectLogSqliteBackend> {
+    Arc::new(
+        SegmentedObjectLogSqliteBackend::open_with_blob_store(
+            store,
+            &projection_path(label),
+            SegmentConfig::new(262_144, 5).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+fn test_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+fn spec(payload: &str) -> PushSpec {
+    PushSpec {
+        client_item_key: None,
+        priority: None,
+        not_before: None,
+        group_key: None,
+        payload: Some(Bytes::from(payload.to_owned())),
+        fields: BTreeMap::new(),
+        metadata: Metadata::default(),
+        cohort_size: None,
+        gate_keys: Vec::new(),
+        entity: None,
+    }
+}
+
+struct PauseOnce {
+    cut: FaultCutPoint,
+    entered: Arc<Barrier>,
+    resume: Arc<Barrier>,
+    fired: AtomicBool,
+}
+
+impl FaultHook for PauseOnce {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == self.cut && !self.fired.swap(true, Ordering::SeqCst) {
+            self.entered.wait();
+            self.resume.wait();
+        }
+        Ok(())
+    }
+}
+
+struct FailOnce {
+    cut: FaultCutPoint,
+    fired: AtomicBool,
+}
+
+impl FaultHook for FailOnce {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == self.cut && !self.fired.swap(true, Ordering::SeqCst) {
+            return Err(EngineError::Storage(format!("fault at {cut:?}")));
+        }
+        Ok(())
+    }
+}
+
+/// Delegating live Postgres control plane whose first compensation release fails. The underlying acquired
+/// row remains durably PendingFence, which is the state restart safety must rely on.
+struct FailReleaseControlPlane {
+    inner: PostgresControlPlane,
+    fail_release: AtomicBool,
+}
+
+impl QueueControlPlane for FailReleaseControlPlane {
+    fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        self.inner.register_owner(owner, now)
+    }
+    fn advertise_owner_endpoint(
+        &self,
+        owner: &OwnerId,
+        endpoint: &str,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.inner.advertise_owner_endpoint(owner, endpoint, now)
+    }
+    fn live_owner_endpoints(
+        &self,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
+        self.inner.live_owner_endpoints(now)
+    }
+    fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        self.inner.heartbeat(owner, now)
+    }
+    fn resolve_queue_owner(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<OwnerResolution> {
+        self.inner.resolve_queue_owner(queue, now)
+    }
+    fn acquire_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<AcquireOutcome> {
+        self.inner.acquire_queue_lease(queue, owner, now)
+    }
+    fn confirm_queue_lease_fence(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.inner
+            .confirm_queue_lease_fence(queue, owner, expected_epoch, now)
+    }
+    fn renew_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.inner
+            .renew_queue_lease(queue, owner, expected_epoch, now)
+    }
+    fn begin_drain(
+        &self,
+        queue: &QueueKey,
+        expected_epoch: u64,
+        target_owner: &OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.inner
+            .begin_drain(queue, expected_epoch, target_owner, now)
+    }
+    fn release_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        if !self.fail_release.swap(true, Ordering::SeqCst) {
+            return Err(EngineError::Storage("injected PG release failure".into()));
+        }
+        self.inner
+            .release_queue_lease(queue, owner, expected_epoch, now)
+    }
+    fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
+        self.inner.lease(queue)
+    }
+}
+
+#[test]
+fn acquire_fences_manifest_before_serving() {
+    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP ACQUIRE") else {
+        return;
+    };
+    let (schema, definition, queue) = unique("acquire");
+    let config = ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 10_000,
+    };
+    let cp = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let backend = backend(store, "acquire");
+    let runtime = OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("owner-a"),
+        "127.0.0.1:7101".into(),
+    );
+    runtime.register_owner(ts(0)).unwrap();
+    let rt = test_runtime();
+    rt.block_on(async {
+        backend.create_queue(definition).await.unwrap();
+        backend.fence_epoch(&queue, 0).await.unwrap();
+        runtime.acquire_queue(&queue, ts(0)).await.unwrap();
+        assert_eq!(backend.current_epoch(&queue).await.unwrap(), 1);
+        assert_eq!(
+            runtime
+                .expected_epoch_for_write(&queue, ts(1), false)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(backend.fence_epoch(&queue, 1).await.unwrap(), 1);
+        assert_eq!(
+            backend.fence_epoch(&queue, 0).await,
+            Err(EngineError::EpochFenced)
+        );
+    });
+    let lease = cp.lease(&queue).unwrap();
+    assert_eq!(lease.state, LeaseState::Assigned);
+    assert_eq!(lease.assignment_epoch, 1);
+}
+
+#[test]
+fn concurrent_acquires_publish_exactly_one_usable_owner() {
+    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP CONCURRENT ACQUIRE") else {
+        return;
+    };
+    let (schema, definition, queue) = unique("concurrent");
+    let config = ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 10_000,
+    };
+    let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
+    let backend = backend(store, "concurrent");
+    let a = Arc::new(OwnershipRuntime::new(
+        backend.clone(),
+        cp_a,
+        owner("owner-a"),
+        "127.0.0.1:7101".into(),
+    ));
+    let b = Arc::new(OwnershipRuntime::new(
+        backend.clone(),
+        cp_b,
+        owner("owner-b"),
+        "127.0.0.1:7102".into(),
+    ));
+    a.register_owner(ts(0)).unwrap();
+    b.register_owner(ts(0)).unwrap();
+    let rt = test_runtime();
+    rt.block_on(async {
+        backend.create_queue(definition).await.unwrap();
+        backend.fence_epoch(&queue, 0).await.unwrap();
+        let (a_result, b_result) = tokio::join!(
+            a.acquire_queue(&queue, ts(0)),
+            b.acquire_queue(&queue, ts(0))
+        );
+        assert_ne!(a_result.is_ok(), b_result.is_ok());
+        assert_eq!(backend.current_epoch(&queue).await.unwrap(), 1);
+    });
+    let lease = observer.lease(&queue).unwrap();
+    assert_eq!(lease.state, LeaseState::Assigned);
+    assert_eq!(lease.assignment_epoch, 1);
+}
+
+#[test]
+fn stale_append_paused_before_authority_cannot_survive_handoff() {
+    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP STALE APPEND RACE") else {
+        return;
+    };
+    let (schema, definition, queue) = unique("race");
+    let config = ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 10_000,
+    };
+    let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let a_backend = backend(store.clone(), "race-a");
+    let b_backend = backend(store.clone(), "race-b");
+    let a = Arc::new(OwnershipRuntime::new(
+        a_backend.clone(),
+        cp_a,
+        owner("owner-a"),
+        "127.0.0.1:7101".into(),
+    ));
+    a.register_owner(ts(0)).unwrap();
+    let b = OwnershipRuntime::new(
+        b_backend.clone(),
+        cp_b,
+        owner("owner-b"),
+        "127.0.0.1:7102".into(),
+    );
+    b.register_owner(ts(20)).unwrap();
+
+    let entered = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    a_backend.set_object_log_fault_hook(Some(Arc::new(PauseOnce {
+        cut: FaultCutPoint::AfterManifestCandidateBeforeHead,
+        entered: entered.clone(),
+        resume: resume.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let reopened = backend(store, "race-reopen");
+    test_runtime().block_on(async {
+        a_backend.create_queue(definition.clone()).await.unwrap();
+        b_backend.create_queue(definition.clone()).await.unwrap();
+        a_backend.fence_epoch(&queue, 0).await.unwrap();
+        a.acquire_queue(&queue, ts(0)).await.unwrap();
+        let flusher_a = a_backend.spawn_flusher();
+        let stale_push = {
+            let backend = a_backend.clone();
+            let queue = queue.clone();
+            tokio::spawn(async move {
+                backend
+                    .push(&queue, vec![spec("stale")], ts(1), Some(1))
+                    .await
+            })
+        };
+        tokio::task::spawn_blocking(move || entered.wait())
+            .await
+            .unwrap();
+        b.acquire_queue(&queue, ts(20)).await.unwrap();
+        tokio::task::spawn_blocking(move || resume.wait())
+            .await
+            .unwrap();
+        let stale = tokio::time::timeout(std::time::Duration::from_secs(5), stale_push)
+            .await
+            .expect("stale waiter must not hang")
+            .unwrap();
+        assert_eq!(stale, Err(EngineError::EpochFenced));
+        flusher_a.abort();
+
+        let flusher_b = b_backend.spawn_flusher();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            b_backend.push(&queue, vec![spec("fresh")], ts(21), Some(2)),
+        )
+        .await
+        .expect("new owner acknowledgement must not hang")
+        .unwrap();
+        flusher_b.abort();
+        reopened.create_queue(definition).await.unwrap();
+        assert_eq!(reopened.metrics(&queue).await.unwrap().pending, 1);
+    });
+}
+
+#[test]
+fn failed_fence_and_failed_compensation_remain_non_serving_across_restart() {
+    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP FAILURE RECOVERY") else {
+        return;
+    };
+    let (schema, definition, queue) = unique("failure");
+    let config = ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 10_000,
+    };
+    let backend = backend(store, "failure");
+    let failing_cp = Arc::new(FailReleaseControlPlane {
+        inner: PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap(),
+        fail_release: AtomicBool::new(false),
+    });
+    let first = OwnershipRuntime::new(
+        backend.clone(),
+        failing_cp,
+        owner("stable-owner"),
+        "127.0.0.1:7101".into(),
+    );
+    first.register_owner(ts(0)).unwrap();
+    let restarted_cp =
+        Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let restarted = OwnershipRuntime::new(
+        backend.clone(),
+        restarted_cp.clone(),
+        owner("stable-owner"),
+        "127.0.0.1:7101".into(),
+    );
+    restarted.register_owner(ts(1)).unwrap();
+    let rt = test_runtime();
+    rt.block_on(async {
+        backend.create_queue(definition).await.unwrap();
+        backend.fence_epoch(&queue, 0).await.unwrap();
+        backend.set_object_log_fault_hook(Some(Arc::new(FailOnce {
+            cut: FaultCutPoint::BeforeAuthorityHeadUpdate,
+            fired: AtomicBool::new(false),
+        })));
+        assert!(matches!(
+            first.acquire_queue(&queue, ts(0)).await,
+            Err(EngineError::Storage(_))
+        ));
+    });
+
+    let pending = restarted_cp.lease(&queue).unwrap();
+    assert_eq!(pending.state, LeaseState::PendingFence);
+    assert_eq!(pending.assignment_epoch, 1);
+    let routing_key = format!("{}:{}", queue.tenant_id.as_str(), queue.queue_id.as_str());
+    rt.block_on(async {
+        assert_eq!(
+            restarted
+                .route_command("GET", &[], routing_key.as_bytes(), ts(1), false)
+                .await
+                .unwrap(),
+            RouteDecision::Unavailable
+        );
+        assert_eq!(
+            restarted.acquire_queue(&queue, ts(1)).await,
+            Err(EngineError::Unavailable)
+        );
+    });
+    restarted.register_owner(ts(20)).unwrap();
+    rt.block_on(async {
+        restarted.acquire_queue(&queue, ts(20)).await.unwrap();
+        assert_eq!(backend.current_epoch(&queue).await.unwrap(), 2);
+    });
+    let recovered = restarted_cp.lease(&queue).unwrap();
+    assert_eq!(recovered.state, LeaseState::Assigned);
+    assert_eq!(recovered.assignment_epoch, 2);
+}

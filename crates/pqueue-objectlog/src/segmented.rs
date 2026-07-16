@@ -918,6 +918,9 @@ pub enum FaultCutPoint {
     /// Pause after the irreversible authority-protocol marker is durable but before the genesis head CAS.
     /// Concurrent data commits must fail closed throughout this initialization window.
     BeforeAuthorityHeadInitialize,
+    /// Fail immediately before the conditional authoritative-head update for an already initialized queue.
+    /// Used to prove a control-plane lease remains non-serving when storage fencing cannot commit.
+    BeforeAuthorityHeadUpdate,
     /// Kill after the manifest CAS durably commits (the TD-004 ack boundary — the manifest entry names the
     /// segment and is now the durable source of truth) but before the caller receives the acked positions.
     /// This is strictly before the composed backend's projection apply, since `ComposedBackend` only
@@ -1893,8 +1896,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 }
             };
             if !self
-                .store
-                .update_manifest_head_if_version(&prefix, expected_version, &next_head)?
+                .fault(FaultCutPoint::BeforeAuthorityHeadUpdate)
+                .and_then(|()| {
+                    self.store.update_manifest_head_if_version(
+                        &prefix,
+                        expected_version,
+                        &next_head,
+                    )
+                })?
             {
                 continue;
             }

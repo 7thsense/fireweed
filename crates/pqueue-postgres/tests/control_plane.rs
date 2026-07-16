@@ -71,9 +71,11 @@ fn full_lifecycle_acquire_renew_drain_release_reacquire() {
             panic!("expected Acquired");
         };
         assert_eq!(l1.assignment_epoch, 1);
-        assert_eq!(l1.state, LeaseState::Assigned);
+        assert_eq!(l1.state, LeaseState::PendingFence);
         assert_eq!(l1.active_owner_id.as_ref(), Some(&a));
         assert_eq!(l1.lease_expires_at, Some(ts(15)));
+        let l1 = cp.confirm_queue_lease_fence(&q, &a, 1, ts(0)).unwrap();
+        assert_eq!(l1.state, LeaseState::Assigned);
 
         let l2 = cp.renew_queue_lease(&q, &a, 1, ts(10)).unwrap();
         assert_eq!(l2.assignment_epoch, 1, "renew never changes the epoch");
@@ -207,7 +209,12 @@ fn resolve_reports_deterministic_target_and_durable_epoch() {
         let r3 = cp.resolve_queue_owner(&q, ts(0)).unwrap();
         assert_eq!(r3.assignment_epoch, Some(1));
         assert_eq!(r3.active_owner.as_ref(), Some(&target));
-        assert_eq!(r3.state, LeaseState::Assigned);
+        assert_eq!(r3.state, LeaseState::PendingFence);
+        cp.confirm_queue_lease_fence(&q, &target, 1, ts(0)).unwrap();
+        assert_eq!(
+            cp.resolve_queue_owner(&q, ts(0)).unwrap().state,
+            LeaseState::Assigned
+        );
     });
 }
 

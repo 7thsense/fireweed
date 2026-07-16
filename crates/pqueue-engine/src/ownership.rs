@@ -125,24 +125,46 @@ where
             // inside the acquire transaction, so the current storage epoch may already equal the lease
             // epoch. Reference/in-memory control planes still need the explicit storage advance.
             let current_epoch = storage.current_epoch(queue).await?;
-            let fence_epoch = if current_epoch == lease.assignment_epoch {
-                current_epoch
-            } else if current_epoch < lease.assignment_epoch {
-                storage.acquire_epoch(queue).await?
+            let fence_result = if current_epoch <= lease.assignment_epoch {
+                storage.fence_epoch(queue, lease.assignment_epoch).await
             } else {
                 // current_epoch > lease.assignment_epoch
                 if prior_owner.as_ref() == Some(owner) {
                     // Same-owner re-affirm after a prior restart-reconciliation advanced the storage.
                     // CP preserved the epoch; re-advancing would self-fence in-flight writes.
-                    current_epoch
+                    Ok(current_epoch)
                 } else if control_plane.is_ephemeral() {
                     // Ephemeral CP was reset on restart: storage epoch is ahead of the fresh CP.
                     // Advance storage to fence stale pre-restart writers.
-                    storage.acquire_epoch(queue).await?
+                    storage.acquire_epoch(queue).await
                 } else {
-                    return Err(crate::error::EngineError::EpochFenced);
+                    Err(crate::error::EngineError::EpochFenced)
                 }
             };
+            let fence_epoch = match fence_result {
+                Ok(epoch) => epoch,
+                Err(error) => {
+                    let _ = control_plane.release_queue_lease(
+                        queue,
+                        owner,
+                        lease.assignment_epoch,
+                        now,
+                    );
+                    return Err(error);
+                }
+            };
+            if lease.state == LeaseState::PendingFence
+                && let Err(error) = control_plane.confirm_queue_lease_fence(
+                    queue,
+                    owner,
+                    lease.assignment_epoch,
+                    now,
+                )
+            {
+                let _ =
+                    control_plane.release_queue_lease(queue, owner, lease.assignment_epoch, now);
+                return Err(error);
+            }
             Ok(OwnershipOutcome::Owned(OwnedSession {
                 owner: owner.clone(),
                 queue: queue.clone(),
@@ -173,7 +195,7 @@ pub fn owner_liveness_violation(
     };
     let unserved = match resolution.state {
         LeaseState::Assigned => false,
-        LeaseState::Unassigned | LeaseState::Draining => true,
+        LeaseState::Unassigned | LeaseState::PendingFence | LeaseState::Draining => true,
     };
     unserved && age >= progress_bound_ms
 }
@@ -197,6 +219,7 @@ mod tests {
     fn no_eligible_work_is_never_a_violation() {
         for state in [
             LeaseState::Unassigned,
+            LeaseState::PendingFence,
             LeaseState::Assigned,
             LeaseState::Draining,
         ] {

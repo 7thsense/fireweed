@@ -38,8 +38,9 @@ pub use compose::{
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState,
     OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueLease,
-    lease_decide_acquire, lease_decide_begin_drain, lease_decide_release, lease_decide_renew,
-    lease_resolution, owner_heartbeat_live, resolve_target,
+    lease_decide_acquire, lease_decide_begin_drain, lease_decide_confirm_fence,
+    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
+    resolve_target,
 };
 pub use density::{RenewSweep, ResidentQueues, renew_all_resident};
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
