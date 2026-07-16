@@ -1,11 +1,12 @@
 //! `pqueue-verify-ledger` — strict-validate a verification ledger and assert required evidence is present.
 //!
 //! Usage:
-//!   pqueue-verify-ledger (--ledger <path> | --ledger-dir <dir>) [--strict]
+//!   pqueue-verify-ledger (--ledger <path> | --ledger-dir <dir> | --manifest <path>) [--strict]
 //!       [--require-evidence E0,E1,E2,E3]        # RELEASE-tier evidence ids (the headline)
 //!       [--require-smoke-evidence E2,E3]        # SMOKE-tier evidence ids (the in-process lane)
 //!
-//! `--ledger-dir` validates + aggregates every `*.jsonl` in the dir (the gate emits one file per suite).
+//! `--manifest` is the governed TP-002 release path and validates only its exact authority files.
+//! `--ledger-dir` remains available for generated smoke/gate output, not governed repository evidence.
 //! `--require-evidence` counts only RELEASE-tier rows; `--require-smoke-evidence` counts SMOKE-tier rows.
 //! Exit 0 if the ledger validates and every required id is present; non-zero with diagnostics otherwise.
 //! This is the CI gate's evidence check; it rebuilds the binary removed with pqueue-service.
@@ -15,11 +16,13 @@ use std::process::ExitCode;
 
 use pqueue_release::{
     LedgerSummary, missing_evidence, missing_smoke_evidence, verify_ledger, verify_ledger_dir,
+    verify_release_manifest,
 };
 
 fn main() -> ExitCode {
     let mut ledger: Option<PathBuf> = None;
     let mut ledger_dir: Option<PathBuf> = None;
+    let mut manifest: Option<PathBuf> = None;
     let mut strict = false;
     let mut require: Vec<String> = Vec::new();
     let mut require_smoke: Vec<String> = Vec::new();
@@ -41,6 +44,10 @@ fn main() -> ExitCode {
             "--ledger-dir" => match args.next() {
                 Some(p) => ledger_dir = Some(PathBuf::from(p)),
                 None => return fail("--ledger-dir requires a path"),
+            },
+            "--manifest" => match args.next() {
+                Some(p) => manifest = Some(PathBuf::from(p)),
+                None => return fail("--manifest requires a path"),
             },
             "--strict" => strict = true,
             "--require-evidence" => match args.next() {
@@ -65,13 +72,16 @@ fn main() -> ExitCode {
     }
 
     let result: Result<LedgerSummary, Vec<pqueue_release::LedgerError>> =
-        match (&ledger, &ledger_dir) {
-            (Some(p), None) => verify_ledger(p, strict),
-            (None, Some(d)) => verify_ledger_dir(d, strict),
-            (None, None) => {
-                return fail("one of --ledger <path> or --ledger-dir <dir> is required");
+        match (&ledger, &ledger_dir, &manifest) {
+            (Some(p), None, None) => verify_ledger(p, strict),
+            (None, Some(d), None) => verify_ledger_dir(d, strict),
+            (None, None, Some(m)) => verify_release_manifest(m),
+            (None, None, None) => {
+                return fail(
+                    "one of --ledger <path>, --ledger-dir <dir>, or --manifest <path> is required",
+                );
             }
-            (Some(_), Some(_)) => return fail("--ledger and --ledger-dir are mutually exclusive"),
+            _ => return fail("--ledger, --ledger-dir, and --manifest are mutually exclusive"),
         };
 
     match result {
@@ -117,7 +127,7 @@ fn set_str(s: &std::collections::BTreeSet<String>) -> String {
 fn fail(msg: &str) -> ExitCode {
     eprintln!("pqueue-verify-ledger: {msg}");
     eprintln!(
-        "usage: pqueue-verify-ledger (--ledger <path> | --ledger-dir <dir>) [--strict] [--require-evidence E0,E1,E2,E3] [--require-smoke-evidence E2,E3]"
+        "usage: pqueue-verify-ledger (--ledger <path> | --ledger-dir <dir> | --manifest <path>) [--strict] [--require-evidence E0,E1,E2,E3] [--require-smoke-evidence E2,E3]"
     );
     ExitCode::FAILURE
 }
