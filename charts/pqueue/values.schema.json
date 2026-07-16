@@ -328,6 +328,50 @@
             }
           }
         },
+        "controlPlane": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "backend",
+            "postgres"
+          ],
+          "properties": {
+            "backend": {
+              "type": "string",
+              "enum": [
+                "inprocess",
+                "postgres"
+              ]
+            },
+            "postgres": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "existingSecret",
+                "databaseUrlKey",
+                "heartbeatTtlMs",
+                "leaseTtlMs"
+              ],
+              "properties": {
+                "existingSecret": {
+                  "type": "string"
+                },
+                "databaseUrlKey": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "heartbeatTtlMs": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "leaseTtlMs": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
         "log": {
           "type": "object",
           "additionalProperties": false,
@@ -348,12 +392,67 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
+                "store",
                 "root"
               ],
               "properties": {
+                "store": {
+                  "type": "string",
+                  "enum": [
+                    "local",
+                    "s3"
+                  ]
+                },
                 "root": {
                   "type": "string",
                   "minLength": 1
+                },
+                "s3": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "endpoint",
+                    "bucket",
+                    "region",
+                    "allowInsecureHttp",
+                    "credentials"
+                  ],
+                  "properties": {
+                    "endpoint": {
+                      "type": "string"
+                    },
+                    "bucket": {
+                      "type": "string"
+                    },
+                    "region": {
+                      "type": "string"
+                    },
+                    "allowInsecureHttp": {
+                      "type": "boolean"
+                    },
+                    "credentials": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "existingSecret",
+                        "accessKeyIdKey",
+                        "secretAccessKeyKey"
+                      ],
+                      "properties": {
+                        "existingSecret": {
+                          "type": "string"
+                        },
+                        "accessKeyIdKey": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "secretAccessKeyKey": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  }
                 }
               }
             },

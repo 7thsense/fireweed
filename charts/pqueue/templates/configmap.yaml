@@ -6,8 +6,10 @@ metadata:
     {{- include "pqueue.labels" . | nindent 4 }}
 data:
   PQUEUE_LISTEN_ADDR: {{ .Values.config.listenAddr | quote }}
+  PQUEUE_REPLICA_COUNT: {{ .Values.replicaCount | quote }}
   PQUEUE_LOG_BACKEND: {{ .Values.storage.log.backend | quote }}
   PQUEUE_PROJECTION_BACKEND: {{ .Values.storage.projection.backend | quote }}
+  PQUEUE_CONTROL_PLANE: {{ .Values.storage.controlPlane.backend | quote }}
   PQUEUE_PRINCIPAL_ID: {{ .Values.config.principalId | quote }}
   PQUEUE_TENANTS: {{ join "," .Values.config.tenants | quote }}
   {{- if gt (len .Values.bootstrap.queues) 0 }}
@@ -19,8 +21,19 @@ data:
   {{- end }}
   PQUEUE_SHARD_COUNT_MIN: {{ .Values.storage.shardCount.min | quote }}
   PQUEUE_SHARD_COUNT_MAX: {{ .Values.storage.shardCount.max | quote }}
-  {{- if eq .Values.storage.log.backend "objectlog" }}
+  {{- if eq .Values.storage.controlPlane.backend "postgres" }}
+  PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS: {{ .Values.storage.controlPlane.postgres.heartbeatTtlMs | int64 | quote }}
+  PQUEUE_CONTROL_PLANE_LEASE_TTL_MS: {{ .Values.storage.controlPlane.postgres.leaseTtlMs | int64 | quote }}
+  {{- end }}
+  {{- if and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "local") }}
   PQUEUE_OBJECT_LOG_ROOT: {{ .Values.storage.log.objectLog.root | quote }}
+  {{- end }}
+  {{- if and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3") }}
+  PQUEUE_OBJECT_LOG_S3_ENDPOINT: {{ .Values.storage.log.objectLog.s3.endpoint | quote }}
+  PQUEUE_OBJECT_LOG_S3_BUCKET: {{ .Values.storage.log.objectLog.s3.bucket | quote }}
+  PQUEUE_OBJECT_LOG_S3_REGION: {{ .Values.storage.log.objectLog.s3.region | quote }}
+  PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE: "static"
+  PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP: {{ .Values.storage.log.objectLog.s3.allowInsecureHttp | quote }}
   {{- end }}
   {{- if or (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") }}
   PQUEUE_SQLITE_PROJECTION_PATH: {{ .Values.storage.projection.sqlite.path | quote }}

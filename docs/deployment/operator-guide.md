@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD013 -->
 
 This guide covers the v0.9.0 release packaging. The Helm chart configures
-storage as separate log and projection axes.
+storage as separate log, projection, and control-plane axes.
 
 ## Release Artifacts
 
@@ -19,12 +19,16 @@ storage as separate log and projection axes.
 | Axis | Helm value | Values |
 |------|------------|--------|
 | Log backend | `storage.log.backend` | `objectlog`, `postgres` |
+| Object-log store | `storage.log.objectLog.store` | `local`, `s3` |
 | Projection backend | `storage.projection.backend` | `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, `postgres` |
+| Control plane | `storage.controlPlane.backend` | `inprocess`, `postgres` |
 
 The current `pqueue-server` release smoke paths include `objectlog/inmemory`,
-`objectlog/sqlite`, `objectlog/hybrid`, and `objectlog/hybrid-async`. Unsupported
-chart combinations render statically and fail loudly at server startup until their
-composition roots are wired.
+`objectlog/sqlite`, `objectlog/hybrid`, and `objectlog/hybrid-async`. The chart
+also exposes a replica-safe shared profile that combines `objectlog` + `s3`
+with `storage.controlPlane.backend=postgres` and `storage.projection.backend=sqlite`.
+Unsupported chart combinations render statically and fail loudly at server startup
+until their composition roots are wired.
 
 `objectlog/hybrid` is the SQLite-first plus hot-memory object-log profile. It
 uses `PQUEUE_SQLITE_PROJECTION_PATH`, treats the object log as the
@@ -32,6 +36,17 @@ authority, hydrates memory from SQLite `ProjectionImage` before serving from a
 SQLite high-water, and fails closed on memory-apply poisoning. Non-objectlog
 hybrid pairings are unsupported unless a future release explicitly documents and
 tests them.
+
+`storage.log.objectLog.store=local` is the legacy filesystem-backed profile.
+It stays single-replica only. The chart fails closed if you scale it beyond one
+pod because its log and projection persistence are not shared.
+
+`storage.log.objectLog.store=s3` selects the shared S3 object-log profile. Use
+it with `storage.controlPlane.backend=postgres`,
+`storage.projection.backend=sqlite`, `replicaCount > 1`, and
+`persistence.enabled=false`. The chart renders pod-reachable `PQUEUE_ADVERTISE_ADDR`
+from the pod IP, uses `emptyDir` for the rebuildable SQLite projection, and does
+not render the local object-log path or a shared RWO projection PVC.
 
 `objectlog/hybrid-async` (`storage.projection.backend: hybrid-async`) runs the
 same object-log + hybrid substrate under its canonical profile name: manifest
@@ -59,8 +74,50 @@ helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
   --set image.repository="$IMAGE" \
   --set image.tag="$VERSION" \
   --set storage.log.backend=objectlog \
+  --set storage.log.objectLog.store=local \
   --set storage.projection.backend=inmemory
 ```
+
+Replica-safe shared profile:
+
+```sh
+helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
+  --namespace "$NAMESPACE" \
+  --set image.repository="$IMAGE" \
+  --set image.tag="$VERSION" \
+  --set replicaCount=3 \
+  --set storage.log.backend=objectlog \
+  --set storage.log.objectLog.store=s3 \
+  --set storage.controlPlane.backend=postgres \
+  --set storage.projection.backend=sqlite
+```
+
+### Shared-profile operating boundary
+
+Create the S3 and Postgres credentials before installing the shared profile.
+`storage.log.objectLog.s3.credentials.existingSecret` must name a Secret with
+the configured access-key and secret-key fields (the defaults are
+`access-key-id` and `secret-access-key`).
+`storage.controlPlane.postgres.existingSecret` must name a Secret whose
+configured `databaseUrlKey` (default `database-url`) contains the control-plane
+Postgres DSN. Keep credentials out of values files and rendered manifests; the
+chart only renders Secret references.
+
+The profile spans three failure domains: S3 is the durable log authority,
+Postgres owns shared leases and fencing, and each pod holds only a rebuildable
+SQLite projection in `emptyDir`. Losing a pod or its local volume triggers a
+projection rebuild. Losing access to S3 or Postgres is an availability event
+and must fail closed; neither another pod nor its local SQLite file substitutes
+for those shared authorities. Spread replicas across nodes or zones according
+to the availability policy of the S3 and Postgres services.
+
+Switching from the local filesystem profile to the shared profile is an
+explicit migration boundary, not an in-place Helm upgrade. The chart does not
+copy the local object log into S3, migrate projection PVC contents, or create
+the Postgres control-plane schema and credentials. Plan and validate those
+steps separately before changing profiles. Rolling upgrades within the shared
+profile must retain compatible S3 configuration, Postgres schema, Secret keys,
+and fencing/lease settings until every replica runs the new image.
 
 ## Bootstrap Queue Inventories
 

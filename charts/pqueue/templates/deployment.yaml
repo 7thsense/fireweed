@@ -21,6 +21,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
+      {{- include "pqueue.validateReplicaProfile" . }}
       serviceAccountName: {{ include "pqueue.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -41,8 +42,28 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "pqueue.fullname" . }}-config
-          {{- if or (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") .Values.storage.lakebase.enabled }}
+          {{- if or (gt (int .Values.replicaCount) 1) (and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3")) (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") .Values.storage.lakebase.enabled (eq .Values.storage.controlPlane.backend "postgres") }}
           env:
+            {{- if gt (int .Values.replicaCount) 1 }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: PQUEUE_ADVERTISE_ADDR
+              value: "$(POD_IP):{{ .Values.containerPort }}"
+            {{- end }}
+            {{- if and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3") }}
+            - name: PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.log.objectLog.s3.credentials.existingSecret | quote }}
+                  key: {{ .Values.storage.log.objectLog.s3.credentials.accessKeyIdKey | quote }}
+            - name: PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.log.objectLog.s3.credentials.existingSecret | quote }}
+                  key: {{ .Values.storage.log.objectLog.s3.credentials.secretAccessKeyKey | quote }}
+            {{- end }}
             {{- if eq .Values.storage.log.backend "postgres" }}
             {{- /* Self-sufficient libpq DSN (host/port/db + sslmode=require). The binary connects from
                    this DSN alone; it does not read the lakebase.* metadata. Preferred over PQUEUE_PG_URL. */}}
@@ -61,6 +82,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.storage.projection.postgres.existingSecret | quote }}
                   key: {{ .Values.storage.projection.postgres.databaseUrlKey | quote }}
+            {{- end }}
+            {{- if eq .Values.storage.controlPlane.backend "postgres" }}
+            - name: PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.storage.controlPlane.postgres.existingSecret | quote }}
+                  key: {{ .Values.storage.controlPlane.postgres.databaseUrlKey | quote }}
             {{- end }}
             {{- if .Values.storage.lakebase.enabled }}
             {{- if or (eq .Values.storage.lakebase.auth.mode "service-principal-oauth") (eq .Values.storage.lakebase.auth.mode "pat-oauth") }}
@@ -117,12 +145,12 @@ spec:
             failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") }}
+          {{- if or (eq .Values.storage.log.objectLog.store "local") (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") }}
           volumeMounts:
             - name: storage
               mountPath: {{ .Values.storage.volume.mountPath | quote }}
           {{- end }}
-      {{- if or (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") }}
+      {{- if or (eq .Values.storage.log.objectLog.store "local") (eq .Values.storage.projection.backend "sqlite") (eq .Values.storage.projection.backend "hybrid") (eq .Values.storage.projection.backend "hybrid-async") }}
       volumes:
         - name: storage
           {{- if .Values.persistence.enabled }}
