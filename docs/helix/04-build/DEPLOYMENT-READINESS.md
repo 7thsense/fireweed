@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 98efe54ec5712805283fcef2b3a7c4ede446857da3df15c00b6a79a0f9e2aa34
+    self_hash: 5bcc95c3d0ec47e33743200264535224f126ff8bb8efb70a3ac85a6a765c1e76
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: 39792548c579ce686ad8f57017bfcd49f56fe584443ffedd29baf149ba641cb0
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-15T22:53:27Z"
+    reviewed_at: "2026-07-16T16:40:01Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -50,7 +50,7 @@ executable combinations:
 | Log backend | Projection backend | Runtime status |
 |-------------|--------------------|----------------|
 | `objectlog` | `inmemory` | Live container and Helm smoke path (in the CI kind matrix). |
-| `objectlog` | `sqlite` | Wired (durable SQLite projection over the object log). |
+| `objectlog` | `sqlite` | Wired (durable SQLite projection over the object log; in the CI kind matrix). |
 | `objectlog` | `hybrid` | Wired (TD-004 hot-memory-over-durable-SQLite; shipped v0.6.0). |
 | `objectlog` | `hybrid-strict` | Wired (SQLite durable before memory apply). Env-only: not yet chart-selectable (the chart schema's projection enum omits `hybrid-strict`). |
 | `objectlog` | `hybrid-async` | Wired (deferred async SQLite checkpoint with `PQUEUE_HYBRID_ASYNC_*` debt/backpressure thresholds). |
@@ -66,7 +66,7 @@ combinations:
 | Log backend | Projection backend | Gate |
 |-------------|--------------------|------|
 | `objectlog` | `inmemory` | Helm render/lint and live `kind` smoke (CI matrix). |
-| `objectlog` | `sqlite` | Runtime wired and Helm render/lint (`scripts/ci/helm-gate.sh` `objectlog-sqlite`); not yet in the CI live-`kind` matrix. |
+| `objectlog` | `sqlite` | Runtime wired, Helm render/lint, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite`). |
 | `objectlog` | `hybrid` | Runtime wired and Helm render/lint (`helm-gate.sh` `objectlog-hybrid`); not yet in the CI live-`kind` matrix. |
 | `objectlog` | `hybrid-async` | Runtime wired; chart-schema-selectable with a CI values file (`charts/pqueue/ci/objectlog-hybrid-async-values.yaml`), but not yet in the `helm-gate.sh` static-combination list or the live-`kind` matrix. |
 | `objectlog` | `hybrid-strict` | Runtime wired via env only; **not** chart-selectable (projection enum omits it). |
@@ -135,8 +135,9 @@ The release CI surface must include:
   chart CI values;
 - a negative check that `PQUEUE_BACKEND_PROFILE` is absent from rendered Helm
   output;
-- a live `kind` Helm smoke for `objectlog` + `inmemory`, including RESP `PING`,
-  `XADD`, `XREADGROUP`, rollout restart, and post-restart readback;
+- live `kind` Helm smokes for `objectlog` + `inmemory` and `objectlog` +
+  `sqlite`, including RESP `PING`, `XADD`, `XREADGROUP`, rollout restart, and
+  post-restart readback;
 - the TP-003 `AC-TXN-*` transaction-contract matrix for every production-claimed
   storage combination, including object-log crash points around segment write,
   manifest commit, projection apply, response delivery, snapshot, and owner
@@ -147,9 +148,10 @@ The release CI surface must include:
 
 As more runtime adapters are wired, the live `kind` matrix must grow by storage
 combination. Do not introduce single-name shortcuts for that matrix. The current
-CI live-`kind` matrix covers `objectlog-inmemory`, `postgres-inmemory`,
-`postgres-sqlite`, and `postgres-postgres`; the `objectlog` sqlite/hybrid
-projection combinations are static-render-gated only (see the table above).
+CI live-`kind` matrix covers `objectlog-inmemory`, `objectlog-sqlite`,
+`postgres-inmemory`, `postgres-sqlite`, and `postgres-postgres`; the
+`objectlog` hybrid projection combinations remain static-render-gated only
+(see the table above).
 
 Current CI state (v0.15.1): the `ci` workflow is green on `main`; all GitHub
 Actions are on their current (Node 24) action majors (`actions/checkout@v5`,
