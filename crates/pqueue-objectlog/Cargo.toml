@@ -29,6 +29,11 @@ postcard = { version = "1", default-features = false, features = ["alloc"] }
 # relational projection crates; HMAC-SHA256 / canonical-request / HTTP/1.1 framing are hand-rolled on top so
 # no async HTTP/S3 SDK (reqwest/hyper/object_store) is pulled — keeping the adapter's dependency surface lean.
 sha2 = "0.11"
+# Production S3 endpoints are HTTPS. The hand-rolled SigV4 client keeps its
+# dependency-light HTTP framing but uses rustls + the public WebPKI roots for
+# the transport instead of silently downgrading shared object-log traffic.
+rustls = "0.23"
+webpki-roots = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

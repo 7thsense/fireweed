@@ -23,7 +23,9 @@ use pqueue_engine::{
 };
 use pqueue_projection::InMemoryProjection;
 
-use crate::segmented::{LocalFsBlobStore, SegmentConfig, SegmentedObjectLog};
+use std::sync::Arc;
+
+use crate::segmented::{BlobStore, LocalFsBlobStore, SegmentConfig, SegmentedObjectLog};
 
 /// Convert a command envelope's `created_at` to epoch-milliseconds (bead pqueue-b5cc2bc7 bug 1): the raw
 /// append path stamps a segment's `committed_at_ms` from the max of these so `created_at <= committed_at_ms`
@@ -43,7 +45,7 @@ const APPEND_MAX_LATENCY_MS: u64 = u64::MAX;
 /// The segmented object-log command-log axis (ADR-012): the production group-commit substrate over a local
 /// filesystem blob store, surfaced as a [`LogStore`].
 pub struct ObjectLog {
-    log: SegmentedObjectLog<LocalFsBlobStore>,
+    log: SegmentedObjectLog<Arc<dyn BlobStore>>,
     config: SegmentConfig,
     /// Whether this axis exposes the [`LogStore`] group-commit facet (ack-after-seal co-buffering). `false`
     /// for [`ObjectLog::open`] — the synchronous force-seal-per-`append` path (every conformance/durability/
@@ -57,7 +59,17 @@ impl ObjectLog {
     /// (group-commit facet OFF): a large segment target so `enqueue` never auto-seals mid-`append` and a
     /// huge latency budget so the time trigger never fires — `append` force-seals exactly one segment per call.
     pub fn open(root: impl Into<std::path::PathBuf>) -> EngineResult<Self> {
-        let store = LocalFsBlobStore::open(root)?;
+        let store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::open(root)?);
+        let config = SegmentConfig::new(APPEND_TARGET_BYTES, APPEND_MAX_LATENCY_MS)?;
+        Ok(Self {
+            log: SegmentedObjectLog::open(store, config),
+            config,
+            group_commit: false,
+        })
+    }
+
+    /// Open the synchronous force-seal path over a caller-selected production blob store.
+    pub fn open_with_blob_store(store: Arc<dyn BlobStore>) -> EngineResult<Self> {
         let config = SegmentConfig::new(APPEND_TARGET_BYTES, APPEND_MAX_LATENCY_MS)?;
         Ok(Self {
             log: SegmentedObjectLog::open(store, config),
@@ -74,7 +86,15 @@ impl ObjectLog {
         root: impl Into<std::path::PathBuf>,
         config: SegmentConfig,
     ) -> EngineResult<Self> {
-        let store = LocalFsBlobStore::open(root)?;
+        let store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::open(root)?);
+        Self::open_group_commit_with_blob_store(store, config)
+    }
+
+    /// Open the group-commit path over a caller-selected production blob store.
+    pub fn open_group_commit_with_blob_store(
+        store: Arc<dyn BlobStore>,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
         Ok(Self {
             log: SegmentedObjectLog::open(store, config),
             config,

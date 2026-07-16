@@ -1632,6 +1632,14 @@ impl SegmentedObjectLogInMemoryBackend {
     /// projections. Recovery replays committed segments into each queue's `ProjectionData` in `create_queue`.
     pub fn open(object_root: impl Into<PathBuf>, config: SegmentConfig) -> EngineResult<Self> {
         let store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::open(object_root)?);
+        Self::open_with_blob_store(store, config)
+    }
+
+    /// Open over a caller-selected production blob store.
+    pub fn open_with_blob_store(
+        store: Arc<dyn BlobStore>,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
         let log = Arc::new(SegmentedObjectLog::open(store, config));
         let flush_ms = (config.max_latency_ms / 4).max(1);
         Ok(Self {

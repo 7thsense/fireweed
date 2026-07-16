@@ -21,8 +21,8 @@ use pqueue_objectlog::ObjectLog;
 use pqueue_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
 use pqueue_server::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, LogSpec,
-    NiflheimChangeRecordSink, OwnershipRuntime, ProjectionSpec, emit_change_record_tick, start,
-    start_with,
+    NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, SegmentConfig,
+    emit_change_record_tick, start, start_with,
 };
 use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend_in_memory};
 
@@ -30,7 +30,10 @@ use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend_in_memory};
 /// `Backend::SegmentedObjectLogSqlite` variants — both are now this one composition).
 fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
     BackendSpec {
-        log: LogSpec::ObjectLog { root },
+        log: LogSpec::ObjectLog(ObjectLogSpec::local(
+            root,
+            SegmentConfig::new(262_144, 20).unwrap(),
+        )),
         projection: ProjectionSpec::Sqlite { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
     }
@@ -38,7 +41,10 @@ fn objectlog_sqlite_spec(root: std::path::PathBuf, projection: std::path::PathBu
 
 fn objectlog_hybrid_spec(root: std::path::PathBuf, projection: std::path::PathBuf) -> BackendSpec {
     BackendSpec {
-        log: LogSpec::ObjectLog { root },
+        log: LogSpec::ObjectLog(ObjectLogSpec::local(
+            root,
+            SegmentConfig::new(262_144, 20).unwrap(),
+        )),
         projection: ProjectionSpec::Hybrid { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
     }
@@ -49,10 +55,20 @@ fn objectlog_hybrid_async_spec(
     projection: std::path::PathBuf,
 ) -> BackendSpec {
     BackendSpec {
-        log: LogSpec::ObjectLog { root },
+        log: LogSpec::ObjectLog(ObjectLogSpec::local(
+            root,
+            SegmentConfig::new(262_144, 20).unwrap(),
+        )),
         projection: ProjectionSpec::HybridAsync { path: projection },
         control_plane: ControlPlaneSpec::InProcess,
     }
+}
+
+fn set_segment_config(config: &mut Config, segment_config: SegmentConfig) {
+    let LogSpec::ObjectLog(spec) = &mut config.backend.log else {
+        panic!("expected object-log config");
+    };
+    spec.set_segment_config(segment_config);
 }
 use redis::streams::StreamReadReply;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -921,8 +937,10 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
             Duration::from_secs(60),
             vec![qdef()],
         );
-        config.segment_config =
-            pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+        set_segment_config(
+            &mut config,
+            SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
+        );
         let server = start(config).await.unwrap();
         let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
         let mut con = client.get_multiplexed_async_connection().await.unwrap();
@@ -1014,8 +1032,10 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
             Duration::from_secs(60),
             vec![qdef()],
         );
-        config.segment_config =
-            pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+        set_segment_config(
+            &mut config,
+            SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
+        );
         // A non-default threshold config the async profile carries into `start`.
         config.hybrid_async =
             pqueue_server::HybridAsyncThresholds::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
@@ -1110,8 +1130,10 @@ fn objectlog_hybrid_async_config(
         Duration::from_secs(60),
         vec![qdef()],
     );
-    config.segment_config =
-        pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+    set_segment_config(
+        &mut config,
+        SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
+    );
     config.hybrid_async =
         pqueue_server::HybridAsyncThresholds::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
             .expect("valid hybrid-async thresholds");
@@ -1297,8 +1319,10 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
             Duration::from_secs(60),
             vec![qdef()],
         );
-        config.segment_config =
-            pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+        set_segment_config(
+            &mut config,
+            SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
+        );
         let server = start(config).await.unwrap();
         let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
         let mut con = client.get_multiplexed_async_connection().await.unwrap();
@@ -1396,8 +1420,10 @@ async fn change_record_sink_rejected_without_durable_cursor_store() {
         Duration::from_secs(60),
         vec![qdef()],
     );
-    config.segment_config =
-        pqueue_server::SegmentConfig::new(1024 * 1024, 5).expect("valid segment config");
+    set_segment_config(
+        &mut config,
+        SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
+    );
     config.change_record_sink = ChangeRecordSinkConfig {
         enabled: true,
         endpoint: Some("kafka://127.0.0.1:9092".to_string()),

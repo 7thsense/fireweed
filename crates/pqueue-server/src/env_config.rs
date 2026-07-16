@@ -21,7 +21,8 @@ use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
-    EmbeddedFjordConfig, LogSpec, ProjectionSpec, SegmentConfig, resolve_node_id,
+    EmbeddedFjordConfig, LogSpec, ObjectLogSpec, ProjectionSpec, S3CredentialSource, SegmentConfig,
+    resolve_node_id,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -271,7 +272,90 @@ fn unsupported_storage(log: &str, projection: &str, reason: &str) -> ConfigError
 /// [`BackendSpec`] (ADR-012). Each axis is parsed independently, then the pairing is validated against the
 /// set pqueue-server actually wires. The `PQUEUE_OBJECT_LOG_MODE` pseudo-axis is retired — the object log's
 /// only production form is the segmented group-commit substrate, which the composed `ObjectLog` axis is.
-fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigError> {
+fn required_nonempty(env: &BTreeMap<String, String>, key: &str) -> Result<String, ConfigError> {
+    env.get(key)
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| ConfigError::new(format!("{key} is required and must not be empty")))
+}
+
+fn object_log_spec(
+    env: &BTreeMap<String, String>,
+    segments: SegmentConfig,
+) -> Result<ObjectLogSpec, ConfigError> {
+    const S3_PREFIX: &str = "PQUEUE_OBJECT_LOG_S3_";
+    let profile = env_or(env, "PQUEUE_OBJECT_LOG_STORE", "local");
+    match profile.as_str() {
+        "local" => {
+            if let Some((key, _)) = env.iter().find(|(key, _)| key.starts_with(S3_PREFIX)) {
+                return Err(ConfigError::new(format!(
+                    "{key} is set while PQUEUE_OBJECT_LOG_STORE=local; refusing to ignore shared S3 configuration and fall back to node-local storage"
+                )));
+            }
+            Ok(ObjectLogSpec::local(
+                PathBuf::from(env_or(
+                    env,
+                    "PQUEUE_OBJECT_LOG_ROOT",
+                    "/var/lib/pqueue/object-log",
+                )),
+                segments,
+            ))
+        }
+        "s3" => {
+            if env.contains_key("PQUEUE_OBJECT_LOG_ROOT") {
+                return Err(ConfigError::new(
+                    "PQUEUE_OBJECT_LOG_ROOT is local-only and must not be set when PQUEUE_OBJECT_LOG_STORE=s3",
+                ));
+            }
+            let endpoint = required_nonempty(env, "PQUEUE_OBJECT_LOG_S3_ENDPOINT")?;
+            let bucket = required_nonempty(env, "PQUEUE_OBJECT_LOG_S3_BUCKET")?;
+            let region = required_nonempty(env, "PQUEUE_OBJECT_LOG_S3_REGION")?;
+            let credential_source =
+                required_nonempty(env, "PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE")?;
+            if credential_source != "static" {
+                return Err(ConfigError::new(format!(
+                    "unsupported PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE={credential_source:?}; expected static"
+                )));
+            }
+            let access_key_id = required_nonempty(env, "PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID")?;
+            let secret_access_key =
+                required_nonempty(env, "PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY")?;
+            let allow_insecure_http = match env.get("PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP") {
+                None => false,
+                Some(value) if matches!(value.as_str(), "1" | "true") => true,
+                Some(value) if matches!(value.as_str(), "0" | "false") => false,
+                Some(value) => {
+                    return Err(ConfigError::new(format!(
+                        "PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP must be true|false|1|0, got {value:?}"
+                    )));
+                }
+            };
+            let spec = ObjectLogSpec::S3 {
+                endpoint,
+                bucket,
+                region,
+                credentials: S3CredentialSource::Static {
+                    access_key_id,
+                    secret_access_key,
+                },
+                segment_config: segments,
+                allow_insecure_http,
+            };
+            spec.validate().map_err(|error| {
+                ConfigError::new(format!("invalid S3 object-log configuration: {error}"))
+            })?;
+            Ok(spec)
+        }
+        other => Err(ConfigError::new(format!(
+            "unknown PQUEUE_OBJECT_LOG_STORE={other:?}; expected local|s3"
+        ))),
+    }
+}
+
+fn parse_backend(
+    env: &BTreeMap<String, String>,
+    segments: SegmentConfig,
+) -> Result<BackendSpec, ConfigError> {
     let log = env_or(env, "PQUEUE_LOG_BACKEND", "objectlog");
     let projection = env_or(env, "PQUEUE_PROJECTION_BACKEND", "inmemory");
 
@@ -284,13 +368,7 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
                 "/var/lib/pqueue/pqueue-log.db",
             )),
         },
-        "objectlog" => LogSpec::ObjectLog {
-            root: PathBuf::from(env_or(
-                env,
-                "PQUEUE_OBJECT_LOG_ROOT",
-                "/var/lib/pqueue/object-log",
-            )),
-        },
+        "objectlog" => LogSpec::ObjectLog(object_log_spec(env, segments)?),
         #[cfg(feature = "postgres")]
         "postgres" => {
             // Resolve the DSN + optional Databricks credentials from the env names the Helm Lakebase
@@ -393,11 +471,11 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
     let wired = match (&log_spec, &projection_spec) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => true,
         (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
-        (LogSpec::ObjectLog { .. }, ProjectionSpec::InMemory) => true,
-        (LogSpec::ObjectLog { .. }, ProjectionSpec::Sqlite { .. }) => true,
-        (LogSpec::ObjectLog { .. }, ProjectionSpec::Hybrid { .. }) => true,
-        (LogSpec::ObjectLog { .. }, ProjectionSpec::HybridStrict { .. }) => true,
-        (LogSpec::ObjectLog { .. }, ProjectionSpec::HybridAsync { .. }) => true,
+        (LogSpec::ObjectLog(_), ProjectionSpec::InMemory) => true,
+        (LogSpec::ObjectLog(_), ProjectionSpec::Sqlite { .. }) => true,
+        (LogSpec::ObjectLog(_), ProjectionSpec::Hybrid { .. }) => true,
+        (LogSpec::ObjectLog(_), ProjectionSpec::HybridStrict { .. }) => true,
+        (LogSpec::ObjectLog(_), ProjectionSpec::HybridAsync { .. }) => true,
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { .. }, ProjectionSpec::InMemory) => true,
         #[cfg(feature = "postgres")]
@@ -543,14 +621,14 @@ impl Config {
     /// (the bin's `main` collects `std::env::vars()` and passes the map in). Available only with the
     /// `env-config` feature (default-on for the bin); a library embedder can drop it via `default-features = false`.
     pub fn from_env(env: &BTreeMap<String, String>) -> Result<Config, ConfigError> {
+        let segments = segment_config(env)?;
         Ok(Config {
-            backend: parse_backend(env)?,
+            backend: parse_backend(env, segments)?,
             embedded_fjord: embedded_fjord_config(env),
             node_id: resolve_node_id(&env_or(env, "PQUEUE_NODE_ID", "0")),
             listen: env_or(env, "PQUEUE_LISTEN_ADDR", "0.0.0.0:8080"),
             reclaim_interval: parse_duration_ms(env, "PQUEUE_RECLAIM_INTERVAL_MS", 1_000),
             queues: parse_bootstrap_queues(env)?,
-            segment_config: segment_config(env)?,
             recovery_max_tail: parse_u64(
                 env,
                 "PQUEUE_RECOVERY_MAX_TAIL_COMMANDS",
@@ -588,7 +666,7 @@ mod tests {
     #[test]
     fn defaults_when_env_is_empty() {
         let config = Config::from_env(&BTreeMap::new()).expect("empty env yields defaults");
-        assert!(matches!(config.backend.log, LogSpec::ObjectLog { .. }));
+        assert!(matches!(config.backend.log, LogSpec::ObjectLog(_)));
         assert!(matches!(
             config.backend.projection,
             ProjectionSpec::InMemory
@@ -748,12 +826,18 @@ mod tests {
             ("PQUEUE_SEGMENT_MAX_LATENCY_MS", "5"),
         ]))
         .expect("valid env");
-        assert_eq!(config.segment_config.target_bytes, 131_072);
-        assert_eq!(config.segment_config.max_latency_ms, 5);
         match (config.backend.log, config.backend.projection) {
-            (LogSpec::ObjectLog { root }, ProjectionSpec::Sqlite { path }) => {
+            (
+                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
+                    root,
+                    segment_config,
+                }),
+                ProjectionSpec::Sqlite { path },
+            ) => {
                 assert_eq!(root, PathBuf::from("/data/olog"));
                 assert_eq!(path, PathBuf::from("/data/proj.db"));
+                assert_eq!(segment_config.target_bytes, 131_072);
+                assert_eq!(segment_config.max_latency_ms, 5);
             }
             _ => panic!("expected objectlog log × sqlite projection"),
         }
@@ -770,12 +854,18 @@ mod tests {
             ("PQUEUE_SEGMENT_MAX_LATENCY_MS", "7"),
         ]))
         .expect("valid hybrid env");
-        assert_eq!(config.segment_config.target_bytes, 65_536);
-        assert_eq!(config.segment_config.max_latency_ms, 7);
         match (config.backend.log, config.backend.projection) {
-            (LogSpec::ObjectLog { root }, ProjectionSpec::Hybrid { path }) => {
+            (
+                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
+                    root,
+                    segment_config,
+                }),
+                ProjectionSpec::Hybrid { path },
+            ) => {
                 assert_eq!(root, PathBuf::from("/data/olog"));
                 assert_eq!(path, PathBuf::from("/data/hybrid.db"));
+                assert_eq!(segment_config.target_bytes, 65_536);
+                assert_eq!(segment_config.max_latency_ms, 7);
             }
             _ => panic!("expected objectlog log × hybrid projection"),
         }
@@ -809,12 +899,18 @@ mod tests {
             ("PQUEUE_SEGMENT_MAX_LATENCY_MS", "9"),
         ]))
         .expect("valid hybrid-strict env");
-        assert_eq!(config.segment_config.target_bytes, 65_536);
-        assert_eq!(config.segment_config.max_latency_ms, 9);
         match (config.backend.log, config.backend.projection) {
-            (LogSpec::ObjectLog { root }, ProjectionSpec::HybridStrict { path }) => {
+            (
+                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem {
+                    root,
+                    segment_config,
+                }),
+                ProjectionSpec::HybridStrict { path },
+            ) => {
                 assert_eq!(root, PathBuf::from("/data/olog"));
                 assert_eq!(path, PathBuf::from("/data/hybrid-strict.db"));
+                assert_eq!(segment_config.target_bytes, 65_536);
+                assert_eq!(segment_config.max_latency_ms, 9);
             }
             _ => panic!("expected objectlog log × hybrid-strict projection"),
         }
@@ -855,7 +951,10 @@ mod tests {
         assert_eq!(config.hybrid_async.apply_lag_max_commands, 4096);
         assert_eq!(config.hybrid_async.apply_poison_retry_threshold, 9);
         match (config.backend.log, config.backend.projection) {
-            (LogSpec::ObjectLog { root }, ProjectionSpec::HybridAsync { path }) => {
+            (
+                LogSpec::ObjectLog(ObjectLogSpec::LocalFilesystem { root, .. }),
+                ProjectionSpec::HybridAsync { path },
+            ) => {
                 assert_eq!(root, PathBuf::from("/data/olog"));
                 assert_eq!(path, PathBuf::from("/data/hybrid-async.db"));
             }

@@ -29,6 +29,7 @@ use pqueue_engine::{
 };
 use pqueue_memory::composed_memory_backend;
 use pqueue_objectlog::ObjectLog;
+use pqueue_objectlog::segmented::{BlobStore, LocalFsBlobStore, S3BlobStore};
 use pqueue_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
@@ -72,10 +73,8 @@ pub enum LogSpec {
     Memory,
     /// Durable sqlite command log at `path` (atomic class).
     Sqlite { path: PathBuf },
-    /// Segmented group-commit object log (`SegmentedObjectLog<LocalFsBlobStore>`) rooted at `root` over the
-    /// local filesystem (eventual-apply class). This is the object log's ONLY production form — the
-    /// per-command-file mode and the `PQUEUE_OBJECT_LOG_MODE` pseudo-axis are retired (ADR-012 P2).
-    ObjectLog { root: PathBuf },
+    /// Segmented group-commit object log over the explicitly selected local or shared object-store profile.
+    ObjectLog(ObjectLogSpec),
     /// SYNC postgres durable-log adapter (atomic class), driven through the blocking-safe
     /// [`PostgresNativeBackend`] wrapper so no sync postgres client call runs on a Tokio worker thread.
     /// `url` is a libpq/postgres connection string (URL or `key=value` DSN, with a native password); with the
@@ -94,9 +93,162 @@ impl LogSpec {
         match self {
             LogSpec::Memory => "memory",
             LogSpec::Sqlite { .. } => "sqlite",
-            LogSpec::ObjectLog { .. } => "objectlog",
+            LogSpec::ObjectLog(_) => "objectlog",
             #[cfg(feature = "postgres")]
             LogSpec::Postgres { .. } => "postgres",
+        }
+    }
+}
+
+/// How S3 credentials are supplied to the production object-log client.
+///
+/// Only explicit static credentials are wired today. The enum keeps credential acquisition typed so a
+/// future workload-identity provider cannot be confused with a partially populated static pair.
+#[derive(Clone, PartialEq, Eq)]
+pub enum S3CredentialSource {
+    Static {
+        access_key_id: String,
+        secret_access_key: String,
+    },
+}
+
+impl std::fmt::Debug for S3CredentialSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static { access_key_id, .. } => formatter
+                .debug_struct("Static")
+                .field("access_key_id", access_key_id)
+                .field("secret_access_key", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+/// Typed segmented object-log configuration. The variants are the deployment boundary:
+/// [`LocalFilesystem`](Self::LocalFilesystem) is supported only for a single replica/local process, while
+/// [`S3`](Self::S3) is a shared store suitable for multiple replicas (subject to the separate ownership
+/// lease contract). Both carry the exact segment seal settings used by the runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectLogSpec {
+    LocalFilesystem {
+        root: PathBuf,
+        segment_config: SegmentConfig,
+    },
+    S3 {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        credentials: S3CredentialSource,
+        segment_config: SegmentConfig,
+        /// Plain HTTP is rejected unless this is explicitly true. It exists for local MinIO and must not
+        /// be enabled for production shared-store traffic.
+        allow_insecure_http: bool,
+    },
+}
+
+impl ObjectLogSpec {
+    pub fn local(root: impl Into<PathBuf>, segment_config: SegmentConfig) -> Self {
+        Self::LocalFilesystem {
+            root: root.into(),
+            segment_config,
+        }
+    }
+
+    /// Whether the selected profile is backed by a shared object store rather than node-local files.
+    pub fn is_shared(&self) -> bool {
+        matches!(self, Self::S3 { .. })
+    }
+
+    pub fn segment_config(&self) -> SegmentConfig {
+        match self {
+            Self::LocalFilesystem { segment_config, .. } | Self::S3 { segment_config, .. } => {
+                *segment_config
+            }
+        }
+    }
+
+    /// Replace the segment seal settings while preserving the selected local/shared storage profile.
+    pub fn set_segment_config(&mut self, config: SegmentConfig) {
+        match self {
+            Self::LocalFilesystem { segment_config, .. } | Self::S3 { segment_config, .. } => {
+                *segment_config = config;
+            }
+        }
+    }
+
+    fn validate(&self) -> EngineResult<()> {
+        match self {
+            Self::LocalFilesystem { root, .. } => {
+                if root.as_os_str().is_empty() {
+                    return Err(EngineError::Invalid(
+                        "local object-log root must not be empty",
+                    ));
+                }
+            }
+            Self::S3 {
+                endpoint,
+                bucket,
+                region,
+                credentials,
+                allow_insecure_http,
+                ..
+            } => {
+                if endpoint.starts_with("http://") && !allow_insecure_http {
+                    return Err(EngineError::Invalid(
+                        "plaintext S3 endpoint requires explicit allow_insecure_http=true (local MinIO only)",
+                    ));
+                }
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    return Err(EngineError::Invalid(
+                        "S3 endpoint must use https:// (or explicitly allowed http:// for local MinIO)",
+                    ));
+                }
+                if bucket.trim().is_empty() || bucket.contains('/') {
+                    return Err(EngineError::Invalid(
+                        "S3 bucket must be a non-empty bucket name",
+                    ));
+                }
+                if region.trim().is_empty() {
+                    return Err(EngineError::Invalid("S3 region must not be empty"));
+                }
+                let S3CredentialSource::Static {
+                    access_key_id,
+                    secret_access_key,
+                } = credentials;
+                if access_key_id.trim().is_empty() || secret_access_key.trim().is_empty() {
+                    return Err(EngineError::Invalid(
+                        "static S3 credentials require both access key id and secret access key",
+                    ));
+                }
+                S3BlobStore::new(endpoint, bucket, access_key_id, secret_access_key, region)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn open_blob_store(&self) -> EngineResult<Arc<dyn BlobStore>> {
+        self.validate()?;
+        match self {
+            Self::LocalFilesystem { root, .. } => Ok(Arc::new(LocalFsBlobStore::open(root)?)),
+            Self::S3 {
+                endpoint,
+                bucket,
+                region,
+                credentials,
+                ..
+            } => {
+                let S3CredentialSource::Static {
+                    access_key_id,
+                    secret_access_key,
+                } = credentials;
+                Ok(Arc::new(S3BlobStore::new(
+                    endpoint,
+                    bucket,
+                    access_key_id,
+                    secret_access_key,
+                    region,
+                )?))
+            }
         }
     }
 }
@@ -164,15 +316,9 @@ pub enum ControlPlaneSpec {
 fn change_record_sink_profile_is_wired(log: &LogSpec, projection: &ProjectionSpec) -> bool {
     matches!(
         (log, projection),
-        (LogSpec::ObjectLog { .. }, ProjectionSpec::Hybrid { .. })
-            | (
-                LogSpec::ObjectLog { .. },
-                ProjectionSpec::HybridStrict { .. }
-            )
-            | (
-                LogSpec::ObjectLog { .. },
-                ProjectionSpec::HybridAsync { .. }
-            )
+        (LogSpec::ObjectLog(_), ProjectionSpec::Hybrid { .. })
+            | (LogSpec::ObjectLog(_), ProjectionSpec::HybridStrict { .. })
+            | (LogSpec::ObjectLog(_), ProjectionSpec::HybridAsync { .. })
     )
 }
 
@@ -713,10 +859,6 @@ pub struct Config {
     /// with no queues here (and no out-of-band creation) would reject every request with `no such
     /// queue` — provision them up front.
     pub queues: Vec<QueueDefinition>,
-    /// Group-commit segment configuration (byte-size + latency seal triggers) for the segmented object-log
-    /// families. The typed form of `PQUEUE_SEGMENT_TARGET_BYTES` / `PQUEUE_SEGMENT_MAX_LATENCY_MS`; applied by
-    /// [`start`] when the [`LogSpec::ObjectLog`] log axis is selected.
-    pub segment_config: SegmentConfig,
     /// Recovery-window budget (max object-log tail commands) before an object-log+SQLite reopen logs a
     /// recovery-window warning. Parsed from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` (default
     /// [`DEFAULT_RECOVERY_MAX_TAIL`]); applied by [`start`] to the objectlog+sqlite backend.
@@ -763,7 +905,6 @@ impl Config {
             listen,
             reclaim_interval,
             queues,
-            segment_config: SegmentConfig::new(262_144, 20).expect("valid default segment config"),
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             debug_segments: false,
             worker_threads: None,
@@ -1397,7 +1538,6 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let listen = config.listen.clone();
     let interval = config.reclaim_interval;
     let queues = config.queues.clone();
-    let segment_config = config.segment_config;
     let recovery_max_tail = config.recovery_max_tail;
     let debug_segments = config.debug_segments;
     let hybrid_async = config.hybrid_async;
@@ -1468,11 +1608,13 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog { root }, ProjectionSpec::InMemory) => {
+        (LogSpec::ObjectLog(spec), ProjectionSpec::InMemory) => {
             // The segmented group-commit object log (the object log's only production form) over an in-memory
             // projection rebuilt by `read_all` replay on open.
+            let segment_config = spec.segment_config();
+            let store = spec.open_blob_store()?;
             let backend = Arc::new(
-                SegmentedObjectLogInMemoryBackend::open(root, segment_config)?
+                SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, segment_config)?
                     .with_node_id(node_id),
             );
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
@@ -1488,15 +1630,17 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog { root }, ProjectionSpec::Sqlite { path }) => {
+        (LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite { path }) => {
             // The segmented group-commit object log driving the derived SQLite projection: concurrent pushes
             // co-buffer into one sealed segment (one durable object + one manifest-CAS + one batched SQLite
             // apply), and a reopen replays the object-log tail beyond the projection snapshot high-water.
             let p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
+            let segment_config = spec.segment_config();
+            let store = spec.open_blob_store()?;
             let backend = Arc::new(
-                SegmentedObjectLogSqliteBackend::open(root, p, segment_config)?
+                SegmentedObjectLogSqliteBackend::open_with_blob_store(store, p, segment_config)?
                     .with_node_id(node_id)
                     .with_recovery_max_tail(recovery_max_tail)
                     .with_debug_segments(debug_segments),
@@ -1513,9 +1657,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog { root }, ProjectionSpec::Hybrid { path }) => {
+        (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
+            let segment_config = spec.segment_config();
+            let store = spec.open_blob_store()?;
             let backend = open_objectlog_hybrid_backend(
-                &root,
+                store,
                 &path,
                 segment_config,
                 recovery_max_tail,
@@ -1551,7 +1697,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog { root }, ProjectionSpec::HybridStrict { path }) => {
+        (LogSpec::ObjectLog(spec), ProjectionSpec::HybridStrict { path }) => {
             // The `objectlog/hybrid-strict` profile (TD-004): the same object-log group-commit substrate as
             // `objectlog/hybrid`, but the projection commits every sealed batch DURABLY to SQLite BEFORE
             // applying it to hot memory (`apply_durable_then_memory`, selected by `with_strict_apply(true)`).
@@ -1559,8 +1705,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // poison cut on the real server write pipeline: a SQLite failure returns no success and replays
             // the object-log tail, and a poisoned store fails closed until a restart rehydrates memory from
             // the durable SQLite `ProjectionImage`.
+            let segment_config = spec.segment_config();
+            let store = spec.open_blob_store()?;
             let backend = open_objectlog_hybrid_backend(
-                &root,
+                store,
                 &path,
                 segment_config,
                 recovery_max_tail,
@@ -1596,7 +1744,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
-        (LogSpec::ObjectLog { root }, ProjectionSpec::HybridAsync { path }) => {
+        (LogSpec::ObjectLog(spec), ProjectionSpec::HybridAsync { path }) => {
             // The `objectlog/hybrid-async` profile runs the same object-log + hybrid (hot-memory serving,
             // durable SQLite checkpoint) substrate as `objectlog/hybrid`; the distinction is the profile's
             // async-apply debt/backpressure/poison threshold config, validated fail-closed at config time
@@ -1614,8 +1762,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 hybrid_async.oldest_unapplied_max_ms,
                 hybrid_async.apply_poison_retry_threshold,
             );
+            let segment_config = spec.segment_config();
+            let store = spec.open_blob_store()?;
             let backend = open_objectlog_hybrid_backend(
-                &root,
+                store,
                 &path,
                 segment_config,
                 recovery_max_tail,
@@ -1779,7 +1929,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
 // backpressure monitor) into one backend. The arity reflects the wiring surface, not incidental complexity.
 #[allow(clippy::too_many_arguments)]
 fn open_objectlog_hybrid_backend(
-    root: &std::path::Path,
+    store: Arc<dyn BlobStore>,
     path: &std::path::Path,
     segment_config: SegmentConfig,
     recovery_max_tail: u64,
@@ -1803,7 +1953,7 @@ fn open_objectlog_hybrid_backend(
     }
     Ok(Arc::new(
         ComposedBackend::new(
-            ObjectLog::open_group_commit(root, segment_config)?,
+            ObjectLog::open_group_commit_with_blob_store(store, segment_config)?,
             projection,
             InProcessControlPlane::new(),
         )

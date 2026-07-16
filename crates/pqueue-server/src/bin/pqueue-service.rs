@@ -18,6 +18,8 @@ const HELP: &str = "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0
   PQUEUE_CHANGE_RECORD_SINK_HEADER_X_API_KEY=...
   PQUEUE_RECLAIM_INTERVAL_MS=1000";
 
+const OBJECT_LOG_HELP: &str = "Object-log storage profiles:\n  PQUEUE_OBJECT_LOG_STORE=local|s3   (local is single-replica only; s3 is shared)\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log   (local only)\n  PQUEUE_OBJECT_LOG_S3_ENDPOINT=https://s3.example.com\n  PQUEUE_OBJECT_LOG_S3_BUCKET=pqueue\n  PQUEUE_OBJECT_LOG_S3_REGION=us-east-1\n  PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE=static\n  PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID=...\n  PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY=...\n  PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP=false   (local MinIO only)";
+
 // Multi-threaded runtime: blocking durable work (segment seal I/O + the batched SQLite apply) runs on a
 // worker thread without stalling the network accept/read path on the others, so concurrent pushes from many
 // RESP connections keep co-buffering into the next segment while one is sealing (the group-commit win).
@@ -32,7 +34,7 @@ fn main() {
         return;
     }
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{HELP}");
+        println!("{HELP}\n\n{OBJECT_LOG_HELP}");
         return;
     }
 

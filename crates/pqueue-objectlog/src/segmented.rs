@@ -34,7 +34,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::fs::OpenOptions;
-use std::io::{ErrorKind, Read, Write as _};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -464,7 +464,7 @@ impl BlobStore for LocalFsBlobStore {
 /// a byte-size threshold (`target_bytes`) AND a latency cap (`max_latency_ms`); a segment seals on
 /// whichever fires first. `>= 2` distinct configurations are therefore expressible (e.g. a small-latency
 /// profile and a large-batch profile), satisfying the substrate's "configurable segment sizing" contract.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentConfig {
     /// Seal when the buffered serialized byte size reaches this value (TD-004 `segment_target_bytes`).
     pub target_bytes: usize,
@@ -3266,15 +3266,16 @@ struct SnapshotBlob {
 // Minimal hand-rolled S3 client (SigV4 PUT/GET/LIST + create-only conditional PUT)
 // ---------------------------------------------------------------------------
 
-/// A minimal S3-compatible [`BlobStore`] over plain HTTP/1.1 + SigV4. Deliberately dependency-light: the
-/// only crate it pulls beyond the workspace baseline is `sha2` (already in-tree for the relational
+/// A minimal S3-compatible [`BlobStore`] over HTTP/1.1 + SigV4. Deliberately dependency-light: the
+/// signing dependency it pulls beyond the workspace baseline is `sha2` (already in-tree for the relational
 /// projection); HMAC-SHA256, the SigV4 canonical request, the HTTP/1.1 framing, and the (small) ListObjects
-/// XML scrape are hand-rolled. Targets MinIO / any S3-compatible store over `http://host:port` (path-style
-/// addressing). The manifest CAS uses `If-None-Match: *` (create-only conditional PUT), which MinIO and S3
-/// both support and which needs no ETag round-trip.
+/// XML scrape are hand-rolled. Production endpoints use HTTPS via rustls; local MinIO may use HTTP. Both
+/// use path-style addressing. The manifest CAS uses `If-None-Match: *` (create-only conditional PUT), which
+/// MinIO and S3 support and which needs no ETag round-trip.
 pub struct S3BlobStore {
     host: String,
     port: u16,
+    tls: bool,
     bucket: String,
     access_key: String,
     secret_key: String,
@@ -3282,8 +3283,9 @@ pub struct S3BlobStore {
 }
 
 impl S3BlobStore {
-    /// Build a client. `endpoint` is `http://host:port` (the orbstack container IP form). The bucket must
-    /// exist (or call [`S3BlobStore::create_bucket`]).
+    /// Build a client. `endpoint` is `https://host[:port]` for production S3 or
+    /// `http://host[:port]` for an explicitly permitted local S3-compatible fixture. The bucket must exist
+    /// (or call [`S3BlobStore::create_bucket`]).
     pub fn new(
         endpoint: &str,
         bucket: &str,
@@ -3291,9 +3293,15 @@ impl S3BlobStore {
         secret_key: &str,
         region: &str,
     ) -> EngineResult<Self> {
-        let rest = endpoint
-            .strip_prefix("http://")
-            .ok_or(EngineError::Invalid("endpoint must be http://host:port"))?;
+        let (rest, tls, default_port) = if let Some(rest) = endpoint.strip_prefix("https://") {
+            (rest, true, 443)
+        } else if let Some(rest) = endpoint.strip_prefix("http://") {
+            (rest, false, 80)
+        } else {
+            return Err(EngineError::Invalid(
+                "endpoint must be https://host[:port] or http://host[:port]",
+            ));
+        };
         let (host, port) = match rest.split_once(':') {
             Some((h, p)) => (
                 h.to_string(),
@@ -3301,11 +3309,15 @@ impl S3BlobStore {
                     .parse::<u16>()
                     .map_err(|_| EngineError::Invalid("bad endpoint port"))?,
             ),
-            None => (rest.trim_end_matches('/').to_string(), 80),
+            None => (rest.trim_end_matches('/').to_string(), default_port),
         };
+        if host.is_empty() || host.contains('/') {
+            return Err(EngineError::Invalid("bad endpoint host"));
+        }
         Ok(Self {
             host,
             port,
+            tls,
             bucket: bucket.to_string(),
             access_key: access_key.to_string(),
             secret_key: secret_key.to_string(),
@@ -3406,11 +3418,23 @@ impl S3BlobStore {
         req.push_str(&format!("Content-Length: {}\r\n", body.len()));
         req.push_str("Connection: close\r\n\r\n");
 
-        let mut stream = TcpStream::connect((self.host.as_str(), self.port)).map_err(store_err)?;
-        stream.write_all(req.as_bytes()).map_err(store_err)?;
-        stream.write_all(body).map_err(store_err)?;
-        let mut raw = Vec::new();
-        stream.read_to_end(&mut raw).map_err(store_err)?;
+        let tcp = TcpStream::connect((self.host.as_str(), self.port)).map_err(store_err)?;
+        let raw = if self.tls {
+            let roots =
+                rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let config = rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            let server_name = rustls::pki_types::ServerName::try_from(self.host.clone())
+                .map_err(|_| EngineError::Invalid("bad TLS endpoint host"))?;
+            let connection =
+                rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+                    .map_err(store_err)?;
+            let stream = rustls::StreamOwned::new(connection, tcp);
+            send_http_request(stream, req.as_bytes(), body)?
+        } else {
+            send_http_request(tcp, req.as_bytes(), body)?
+        };
         parse_http_response(&raw)
     }
 
@@ -3423,6 +3447,18 @@ impl S3BlobStore {
         let k_service = hmac_sha256(&k_region, b"s3");
         hmac_sha256(&k_service, b"aws4_request")
     }
+}
+
+fn send_http_request(
+    mut stream: impl Read + Write,
+    headers: &[u8],
+    body: &[u8],
+) -> EngineResult<Vec<u8>> {
+    stream.write_all(headers).map_err(store_err)?;
+    stream.write_all(body).map_err(store_err)?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).map_err(store_err)?;
+    Ok(raw)
 }
 
 impl BlobStore for S3BlobStore {
