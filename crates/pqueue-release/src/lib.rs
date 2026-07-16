@@ -838,6 +838,244 @@ pub mod e2 {
     }
 }
 
+/// TP-002 E2 single-node queue-density release evidence.
+pub mod density {
+    use super::{LedgerRow, Measurements};
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    pub const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
+    pub const MIN_TOTAL_QUEUES: usize = 1001;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DensityMeasurement {
+        pub total_queues: usize,
+        pub cold_queues_active: usize,
+        pub cold_queues_progress_eligible: usize,
+        pub hot_ingest_per_s: f64,
+        pub hot_claim_finalize_per_s: f64,
+        pub progress_bound_violations: usize,
+        pub noisy_neighbor_ingest_retention_pct: f64,
+        pub noisy_neighbor_claim_retention_pct: f64,
+        pub shared_worker_count: usize,
+        pub shared_worker_limit: usize,
+        pub connection_count: usize,
+        pub connection_limit: usize,
+        pub task_count: usize,
+        pub task_limit: usize,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DensityMetadata {
+        pub command: String,
+        pub revision: String,
+        pub topology: String,
+        pub hardware: String,
+        pub seed: u64,
+        pub duration_seconds: u64,
+        pub queue_activity_definition: String,
+    }
+
+    pub fn bars_met(m: &DensityMeasurement) -> bool {
+        let cold = m.total_queues.saturating_sub(1);
+        m.total_queues >= MIN_TOTAL_QUEUES
+            && m.cold_queues_active == cold
+            && m.cold_queues_progress_eligible == cold
+            && m.hot_ingest_per_s >= FLOOR_ITEMS_PER_SEC
+            && m.hot_claim_finalize_per_s >= FLOOR_ITEMS_PER_SEC
+            && m.progress_bound_violations == 0
+            && m.noisy_neighbor_ingest_retention_pct.is_finite()
+            && m.noisy_neighbor_ingest_retention_pct > 0.0
+            && m.noisy_neighbor_claim_retention_pct.is_finite()
+            && m.noisy_neighbor_claim_retention_pct > 0.0
+            && m.shared_worker_count <= m.shared_worker_limit
+            && m.connection_count <= m.connection_limit
+            && m.task_count <= m.task_limit
+    }
+
+    pub fn build_release_row(m: &DensityMeasurement, meta: &DensityMetadata) -> LedgerRow {
+        let pass = bars_met(m);
+        let tier = if pass { "release" } else { "smoke" };
+        let values = BTreeMap::from([
+            ("bars_met".into(), serde_json::json!(pass)),
+            ("total_queues".into(), serde_json::json!(m.total_queues)),
+            (
+                "cold_queues_active".into(),
+                serde_json::json!(m.cold_queues_active),
+            ),
+            (
+                "cold_queues_progress_eligible".into(),
+                serde_json::json!(m.cold_queues_progress_eligible),
+            ),
+            (
+                "hot_ingest_per_s".into(),
+                serde_json::json!(m.hot_ingest_per_s),
+            ),
+            (
+                "hot_claim_finalize_per_s".into(),
+                serde_json::json!(m.hot_claim_finalize_per_s),
+            ),
+            (
+                "e0_floor_per_s".into(),
+                serde_json::json!(FLOOR_ITEMS_PER_SEC),
+            ),
+            (
+                "progress_bound_violations".into(),
+                serde_json::json!(m.progress_bound_violations),
+            ),
+            (
+                "noisy_neighbor_ingest_retention_pct".into(),
+                serde_json::json!(m.noisy_neighbor_ingest_retention_pct),
+            ),
+            (
+                "noisy_neighbor_claim_retention_pct".into(),
+                serde_json::json!(m.noisy_neighbor_claim_retention_pct),
+            ),
+            (
+                "shared_worker_count".into(),
+                serde_json::json!(m.shared_worker_count),
+            ),
+            (
+                "shared_worker_limit".into(),
+                serde_json::json!(m.shared_worker_limit),
+            ),
+            (
+                "connection_count".into(),
+                serde_json::json!(m.connection_count),
+            ),
+            (
+                "connection_limit".into(),
+                serde_json::json!(m.connection_limit),
+            ),
+            ("task_count".into(), serde_json::json!(m.task_count)),
+            ("task_limit".into(), serde_json::json!(m.task_limit)),
+            ("revision".into(), serde_json::json!(meta.revision)),
+            (
+                "duration_seconds".into(),
+                serde_json::json!(meta.duration_seconds),
+            ),
+            (
+                "queue_activity_definition".into(),
+                serde_json::json!(meta.queue_activity_definition),
+            ),
+            ("failover_excluded".into(), serde_json::json!(true)),
+            (
+                "failover_reference".into(),
+                serde_json::json!("pqueue-0a1d4386"),
+            ),
+        ]);
+        LedgerRow {
+            suite: "queue_density_live_objectlog_sqlite_release".into(),
+            command: meta.command.clone(),
+            backend_profile: "object_log_sqlite_projection".into(),
+            scale: tier.into(),
+            seed: meta.seed,
+            environment: format!("{}; hardware={}", meta.topology, meta.hardware),
+            exit_status: 0,
+            ac_ids: vec![],
+            inv_ids: vec![],
+            pass_bar: ">=1001 generated active queues on one live objectlog/sqlite node; hot ingest and claim+finalize >=2777.78/s; zero progress-bound violations; bounded shared resources; numeric noisy-neighbor retention; failover excluded (pqueue-0a1d4386)".into(),
+            evidence_tier: tier.into(),
+            measurements: Measurements { tp002_evidence_ids: vec!["E2".into()], values },
+        }
+    }
+
+    pub fn validate_release_row(row: &LedgerRow) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if row.suite != "queue_density_live_objectlog_sqlite_release" {
+            errors.push("suite must be queue_density_live_objectlog_sqlite_release".into());
+        }
+        if row.backend_profile != "object_log_sqlite_projection" {
+            errors.push("backend_profile must be object_log_sqlite_projection".into());
+        }
+        if row.scale != "release" || row.evidence_tier != "release" {
+            errors.push("density row must be release tier and scale".into());
+        }
+        if row.measurements.tp002_evidence_ids.as_slice() != ["E2"] {
+            errors.push("density row must carry exactly E2".into());
+        }
+        let values = &row.measurements.values;
+        let number = |key: &str| values.get(key).and_then(serde_json::Value::as_f64);
+        let integer = |key: &str| values.get(key).and_then(serde_json::Value::as_u64);
+        let require_nonempty = |key: &str, errors: &mut Vec<String>| {
+            if values
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                errors.push(format!("{key} is required"));
+            }
+        };
+        if values.get("bars_met") != Some(&serde_json::Value::Bool(true)) {
+            errors.push("bars_met must be true".into());
+        }
+        let total = integer("total_queues").unwrap_or(0);
+        if total < MIN_TOTAL_QUEUES as u64 {
+            errors.push("total_queues must be at least 1001".into());
+        }
+        let cold = total.saturating_sub(1);
+        if integer("cold_queues_active") != Some(cold) {
+            errors.push("all cold queues must be active".into());
+        }
+        if integer("cold_queues_progress_eligible") != Some(cold) {
+            errors.push("all cold queues must be progress eligible".into());
+        }
+        if number("hot_ingest_per_s").is_none_or(|v| v < FLOOR_ITEMS_PER_SEC) {
+            errors.push("hot_ingest_per_s is below the E0 floor".into());
+        }
+        if number("hot_claim_finalize_per_s").is_none_or(|v| v < FLOOR_ITEMS_PER_SEC) {
+            errors.push("hot_claim_finalize_per_s is below the E0 floor".into());
+        }
+        if integer("progress_bound_violations") != Some(0) {
+            errors.push("progress_bound_violations must be zero".into());
+        }
+        for key in [
+            "noisy_neighbor_ingest_retention_pct",
+            "noisy_neighbor_claim_retention_pct",
+        ] {
+            if number(key).is_none_or(|v| !v.is_finite() || v <= 0.0) {
+                errors.push(format!("{key} must be numeric and positive"));
+            }
+        }
+        for (count, limit) in [
+            ("shared_worker_count", "shared_worker_limit"),
+            ("connection_count", "connection_limit"),
+            ("task_count", "task_limit"),
+        ] {
+            match (integer(count), integer(limit)) {
+                (Some(c), Some(l)) if c <= l => {}
+                _ => errors.push(format!("{count} must be bounded by {limit}")),
+            }
+        }
+        require_nonempty("revision", &mut errors);
+        require_nonempty("queue_activity_definition", &mut errors);
+        if integer("duration_seconds").is_none_or(|v| v == 0) {
+            errors.push("duration_seconds must be positive".into());
+        }
+        if values.get("failover_excluded") != Some(&serde_json::Value::Bool(true)) {
+            errors.push("failover_excluded must be true".into());
+        }
+        if values
+            .get("failover_reference")
+            .and_then(serde_json::Value::as_str)
+            != Some("pqueue-0a1d4386")
+        {
+            errors.push("failover_reference must be pqueue-0a1d4386".into());
+        }
+        if row.command.trim().is_empty() {
+            errors.push("command is required".into());
+        }
+        if row.environment.trim().is_empty() {
+            errors.push("topology and hardware environment are required".into());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+}
+
 /// TP-002 **E3 cost model** (ADR-001 "Napkin Cost Comparison" → release evidence).
 ///
 /// ADR-001 asserts, *directionally*, that the `object_log_sqlite_projection` backend has a lower
