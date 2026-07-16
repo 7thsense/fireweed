@@ -92,6 +92,33 @@ helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
   --set storage.projection.backend=sqlite
 ```
 
+### Shared-profile operating boundary
+
+Create the S3 and Postgres credentials before installing the shared profile.
+`storage.log.objectLog.s3.credentials.existingSecret` must name a Secret with
+the configured access-key and secret-key fields (the defaults are
+`access-key-id` and `secret-access-key`).
+`storage.controlPlane.postgres.existingSecret` must name a Secret whose
+configured `databaseUrlKey` (default `database-url`) contains the control-plane
+Postgres DSN. Keep credentials out of values files and rendered manifests; the
+chart only renders Secret references.
+
+The profile spans three failure domains: S3 is the durable log authority,
+Postgres owns shared leases and fencing, and each pod holds only a rebuildable
+SQLite projection in `emptyDir`. Losing a pod or its local volume triggers a
+projection rebuild. Losing access to S3 or Postgres is an availability event
+and must fail closed; neither another pod nor its local SQLite file substitutes
+for those shared authorities. Spread replicas across nodes or zones according
+to the availability policy of the S3 and Postgres services.
+
+Switching from the local filesystem profile to the shared profile is an
+explicit migration boundary, not an in-place Helm upgrade. The chart does not
+copy the local object log into S3, migrate projection PVC contents, or create
+the Postgres control-plane schema and credentials. Plan and validate those
+steps separately before changing profiles. Rolling upgrades within the shared
+profile must retain compatible S3 configuration, Postgres schema, Secret keys,
+and fencing/lease settings until every replica runs the new image.
+
 ## Bootstrap Queue Inventories
 
 The service provisions bootstrap queues before its RESP listener becomes ready.
