@@ -49,6 +49,9 @@ use crate::types::QueueKey;
 pub enum LeaseState {
     /// No live active owner; the `target_owner` SHOULD acquire.
     Unassigned,
+    /// An owner has durably allocated this epoch, but storage has not yet confirmed the exact fence. This
+    /// lease excludes competing acquisition but is non-serving across process restarts.
+    PendingFence,
     /// An active owner holds a non-expired lease for the current epoch.
     Assigned,
     /// The active owner is finishing in-flight work (handing off to a recorded `target_owner`); it MUST
@@ -89,8 +92,10 @@ impl QueueLease {
     /// Whether this lease is currently held by a live (non-expired) owner at `now`. An expired
     /// `lease_expires_at` makes the queue reclaimable regardless of recorded `state`.
     pub fn is_live(&self, now: UtcTimestamp) -> bool {
-        matches!(self.state, LeaseState::Assigned | LeaseState::Draining)
-            && self.lease_expires_at.is_some_and(|exp| now < exp)
+        matches!(
+            self.state,
+            LeaseState::PendingFence | LeaseState::Assigned | LeaseState::Draining
+        ) && self.lease_expires_at.is_some_and(|exp| now < exp)
     }
 }
 
@@ -130,22 +135,54 @@ pub fn lease_decide_acquire(
     now: UtcTimestamp,
     lease_ttl_ms: u64,
 ) -> AcquireOutcome {
-    if current.is_live(now) && current.active_owner_id.as_ref() != Some(owner) {
+    if current.is_live(now)
+        && (current.active_owner_id.as_ref() != Some(owner)
+            || current.state == LeaseState::PendingFence)
+    {
         return AcquireOutcome::Rejected(current.clone());
     }
     // Re-affirming OUR OWN (still-recorded) lease preserves the epoch; a takeover/cold-start advances it.
-    let same_owner = current.active_owner_id.as_ref() == Some(owner);
+    let same_owner = current.active_owner_id.as_ref() == Some(owner)
+        && current.state != LeaseState::PendingFence;
     let assignment_epoch = if same_owner {
         current.assignment_epoch
     } else {
         current.assignment_epoch + 1
     };
     AcquireOutcome::Acquired(QueueLease {
-        state: LeaseState::Assigned,
+        state: if same_owner {
+            LeaseState::Assigned
+        } else {
+            LeaseState::PendingFence
+        },
         active_owner_id: Some(owner.clone()),
         target_owner_id: Some(owner.clone()),
         assignment_epoch,
         lease_expires_at: Some(add_millis(now, lease_ttl_ms)),
+    })
+}
+
+/// Mark an acquired lease serving only after its exact storage fence is durable. Idempotent for the same
+/// owner/epoch, and rejected after expiry or takeover.
+pub fn lease_decide_confirm_fence(
+    current: &QueueLease,
+    owner: &OwnerId,
+    expected_epoch: u64,
+    now: UtcTimestamp,
+) -> EngineResult<QueueLease> {
+    if current.active_owner_id.as_ref() != Some(owner)
+        || current.assignment_epoch != expected_epoch
+        || !current.is_live(now)
+        || !matches!(
+            current.state,
+            LeaseState::PendingFence | LeaseState::Assigned
+        )
+    {
+        return Err(EngineError::EpochFenced);
+    }
+    Ok(QueueLease {
+        state: LeaseState::Assigned,
+        ..current.clone()
     })
 }
 
@@ -160,6 +197,7 @@ pub fn lease_decide_renew(
 ) -> EngineResult<QueueLease> {
     if current.active_owner_id.as_ref() != Some(owner)
         || current.assignment_epoch != expected_epoch
+        || !matches!(current.state, LeaseState::Assigned | LeaseState::Draining)
         || !current.is_live(now)
     {
         return Err(EngineError::EpochFenced);
@@ -204,7 +242,10 @@ pub fn lease_decide_release(
 ) -> EngineResult<QueueLease> {
     if current.active_owner_id.as_ref() != Some(owner)
         || current.assignment_epoch != expected_epoch
-        || !matches!(current.state, LeaseState::Assigned | LeaseState::Draining)
+        || !matches!(
+            current.state,
+            LeaseState::PendingFence | LeaseState::Assigned | LeaseState::Draining
+        )
     {
         return Err(EngineError::EpochFenced);
     }
@@ -364,6 +405,18 @@ pub trait QueueControlPlane: Send + Sync {
         owner: &OwnerId,
         now: UtcTimestamp,
     ) -> EngineResult<AcquireOutcome>;
+
+    /// Durably mark a newly acquired epoch serving after its exact storage fence succeeds. Implementations
+    /// that cannot persist this transition fail closed.
+    fn confirm_queue_lease_fence(
+        &self,
+        _queue: &QueueKey,
+        _owner: &OwnerId,
+        _expected_epoch: u64,
+        _now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        Err(EngineError::Unavailable)
+    }
 
     /// Renew the active owner's lease (TD-003 renewal). MUST NOT change the epoch. A renewal whose
     /// `expected_epoch` mismatches, or whose `owner` is not the `active_owner`, fails `queue-epoch-stale`
@@ -620,6 +673,24 @@ impl QueueControlPlane for InMemoryControlPlane {
         Ok(outcome)
     }
 
+    fn confirm_queue_lease_fence(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        let mut g = self.state.lock().expect("poisoned");
+        let current = g
+            .leases
+            .get(queue)
+            .cloned()
+            .unwrap_or_else(QueueLease::unassigned);
+        let confirmed = lease_decide_confirm_fence(&current, owner, expected_epoch, now)?;
+        g.leases.insert(queue.clone(), confirmed.clone());
+        Ok(confirmed)
+    }
+
     fn renew_queue_lease(
         &self,
         queue: &QueueKey,
@@ -714,6 +785,10 @@ mod tests {
     fn qk(q: &str) -> QueueKey {
         QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new(q).unwrap())
     }
+    fn confirm(cp: &InMemoryControlPlane, queue: &QueueKey, owner: &OwnerId, epoch: u64, at: i64) {
+        cp.confirm_queue_lease_fence(queue, owner, epoch, ts(at))
+            .unwrap();
+    }
 
     // ----- lifecycle -----
 
@@ -725,14 +800,16 @@ mod tests {
         let q = qk("q1");
         cp.register_owner(&a, ts(0)).unwrap();
 
-        // Acquire: epoch 1, assigned, active=target=a, deadline now+15s.
+        // Acquire allocates epoch 1 in a durable non-serving state; storage confirmation promotes it.
         let AcquireOutcome::Acquired(l1) = cp.acquire_queue_lease(&q, &a, ts(0)).unwrap() else {
             panic!("expected Acquired");
         };
         assert_eq!(l1.assignment_epoch, 1);
-        assert_eq!(l1.state, LeaseState::Assigned);
+        assert_eq!(l1.state, LeaseState::PendingFence);
         assert_eq!(l1.active_owner_id.as_ref(), Some(&a));
         assert_eq!(l1.lease_expires_at, Some(ts(15)));
+        let l1 = cp.confirm_queue_lease_fence(&q, &a, 1, ts(0)).unwrap();
+        assert_eq!(l1.state, LeaseState::Assigned);
 
         // Renew before expiry: same epoch, extended deadline.
         let l2 = cp.renew_queue_lease(&q, &a, 1, ts(10)).unwrap();
@@ -803,6 +880,7 @@ mod tests {
             panic!("expected Acquired");
         };
         assert_eq!(l1.assignment_epoch, 1);
+        confirm(&cp, &q, &a, 1, 0);
         // Re-acquire while still live: same epoch, deadline pushed out from ts(1).
         let AcquireOutcome::Acquired(l2) = cp.acquire_queue_lease(&q, &a, ts(1)).unwrap() else {
             panic!("expected Acquired");
@@ -825,6 +903,7 @@ mod tests {
         let q = qk("q1");
         cp.register_owner(&a, ts(0)).unwrap();
         cp.acquire_queue_lease(&q, &a, ts(0)).unwrap(); // epoch 1, expires ts(15)
+        confirm(&cp, &q, &a, 1, 0);
         // Keep the owner heartbeat-live, but re-acquire only AFTER the lease has lapsed (ts(100) > ts(15)).
         cp.heartbeat(&a, ts(100)).unwrap();
         let lease_before = cp.lease(&q).unwrap();
@@ -934,6 +1013,7 @@ mod tests {
         let q = qk("q1");
         cp.register_owner(&a, ts(0)).unwrap();
         cp.acquire_queue_lease(&q, &a, ts(0)).unwrap(); // epoch 1
+        confirm(&cp, &q, &a, 1, 0);
 
         // Wrong expected epoch.
         assert_eq!(

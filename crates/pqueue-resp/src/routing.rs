@@ -75,6 +75,8 @@ pub fn route(
     // a fresh `resolve_queue_owner` per write command (writes are also backstopped by the BQ-20 epoch fence;
     // reads are bounded-stale by design, TD-006 §Staleness).
     match (resolution.state, resolution.active_owner.as_ref()) {
+        // Epoch allocated but storage fence not durably confirmed: nobody may serve or redirect to it.
+        (LeaseState::PendingFence, _) => RouteDecision::Unavailable,
         // This node is the live assigned owner → serve.
         (LeaseState::Assigned, Some(owner)) if owner == this_owner => RouteDecision::Serve,
         // This node is the draining owner → serve in-flight, refuse a NEW claim (drain split).
@@ -166,6 +168,23 @@ mod tests {
                 false
             ),
             RouteDecision::Serve
+        );
+    }
+
+    #[test]
+    fn pending_fence_owner_never_serves_or_redirects_to_itself() {
+        let res = resolution(LeaseState::PendingFence, Some("nodeA"));
+        assert_eq!(
+            route(
+                &owner("nodeA"),
+                &shard("t1", "q1"),
+                b"t1:q1",
+                &auth_for("t1"),
+                &res,
+                endpoints,
+                false
+            ),
+            RouteDecision::Unavailable
         );
     }
 

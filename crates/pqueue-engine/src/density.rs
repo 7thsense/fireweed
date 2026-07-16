@@ -279,6 +279,8 @@ mod tests {
         let AcquireOutcome::Acquired(lease) = cp.acquire_queue_lease(q, o, now).unwrap() else {
             panic!("acquire {}", q.queue_id.as_str());
         };
+        cp.confirm_queue_lease_fence(q, o, lease.assignment_epoch, now)
+            .unwrap();
         OwnedSession {
             owner: o.clone(),
             queue: q.clone(),

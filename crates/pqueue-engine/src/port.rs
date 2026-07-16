@@ -1158,6 +1158,29 @@ pub trait ControlPlaneStore: Send + Sync {
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
+
+    /// Durably fence storage to the exact control-plane target epoch. Shared object-log implementations
+    /// override this with one authoritative conditional-head transition. The compatibility default advances
+    /// monotonically and fails if a concurrent writer skips beyond the requested target.
+    fn fence_epoch(
+        &self,
+        shard: &QueueKey,
+        target_epoch: u64,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        async move {
+            let mut current = self.current_epoch(shard).await?;
+            if current > target_epoch {
+                return Err(crate::EngineError::EpochFenced);
+            }
+            while current < target_epoch {
+                current = self.acquire_epoch(shard).await?;
+                if current > target_epoch {
+                    return Err(crate::EngineError::EpochFenced);
+                }
+            }
+            Ok(current)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

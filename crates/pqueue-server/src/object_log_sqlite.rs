@@ -29,7 +29,7 @@ use pqueue_engine::{
 };
 use pqueue_objectlog::LocalObjectLog;
 use pqueue_objectlog::segmented::{
-    BlobStore, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
+    BlobStore, FaultHook, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use pqueue_projection::ProjectionData;
 use pqueue_sqlite::SqliteProjectionStore;
@@ -783,6 +783,10 @@ fn system_now_ms() -> i64 {
 }
 
 impl SegmentedObjectLogSqliteBackend {
+    /// Install the deterministic object-log fault seam used by ownership/fencing conformance tests.
+    pub fn set_object_log_fault_hook(&self, hook: Option<Arc<dyn FaultHook>>) {
+        self.log.set_fault_hook(hook);
+    }
     /// Open (or recover) a segmented object log rooted at `object_root` with `config`, plus the SQLite
     /// projection at `projection_path`. Recovery (replay of committed segments into the projection) happens
     /// per-queue in `create_queue` as the bootstrap queues are provisioned.
@@ -1248,6 +1252,18 @@ impl ControlPlaneStore for SegmentedObjectLogSqliteBackend {
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = self.log.acquire_epoch(shard, system_now_ms());
+        if let Ok(epoch) = result {
+            self.set_epoch(shard, epoch);
+        }
+        std::future::ready(result)
+    }
+
+    fn fence_epoch(
+        &self,
+        shard: &QueueKey,
+        target_epoch: u64,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = self.log.fence_epoch(shard, target_epoch, system_now_ms());
         if let Ok(epoch) = result {
             self.set_epoch(shard, epoch);
         }
@@ -2008,6 +2024,18 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let result = self.log.acquire_epoch(shard, system_now_ms());
+        if let Ok(epoch) = result {
+            self.set_epoch(shard, epoch);
+        }
+        std::future::ready(result)
+    }
+
+    fn fence_epoch(
+        &self,
+        shard: &QueueKey,
+        target_epoch: u64,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = self.log.fence_epoch(shard, target_epoch, system_now_ms());
         if let Ok(epoch) = result {
             self.set_epoch(shard, epoch);
         }

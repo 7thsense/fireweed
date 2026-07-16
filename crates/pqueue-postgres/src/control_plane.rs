@@ -24,8 +24,9 @@ use pqueue_core::{OwnerId, UtcTimestamp};
 use pqueue_engine::{
     AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseState,
     OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueKey, QueueLease,
-    lease_decide_acquire, lease_decide_begin_drain, lease_decide_release, lease_decide_renew,
-    lease_resolution, owner_heartbeat_live, resolve_target,
+    lease_decide_acquire, lease_decide_begin_drain, lease_decide_confirm_fence,
+    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
+    resolve_target,
 };
 
 use crate::{PostgresConnectConfig, connect};
@@ -39,7 +40,7 @@ CREATE TABLE IF NOT EXISTS pqueue_workers (
 ALTER TABLE pqueue_workers ADD COLUMN IF NOT EXISTS endpoint TEXT;
 CREATE TABLE IF NOT EXISTS pqueue_queue_owner (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
-    state TEXT NOT NULL,                          -- 'unassigned' | 'assigned' | 'draining'
+    state TEXT NOT NULL,                          -- 'unassigned' | 'pending_fence' | 'assigned' | 'draining'
     active_owner_id TEXT,                         -- NULL while unassigned
     target_owner_id TEXT,
     assignment_epoch BIGINT NOT NULL,            -- TD-003 fence authority; strictly-monotonic per queue
@@ -76,6 +77,7 @@ fn nanos_ts(v: i64) -> UtcTimestamp {
 fn state_str(state: LeaseState) -> &'static str {
     match state {
         LeaseState::Unassigned => "unassigned",
+        LeaseState::PendingFence => "pending_fence",
         LeaseState::Assigned => "assigned",
         LeaseState::Draining => "draining",
     }
@@ -84,6 +86,7 @@ fn state_str(state: LeaseState) -> &'static str {
 fn parse_state(s: &str) -> EngineResult<LeaseState> {
     match s {
         "unassigned" => Ok(LeaseState::Unassigned),
+        "pending_fence" => Ok(LeaseState::PendingFence),
         "assigned" => Ok(LeaseState::Assigned),
         "draining" => Ok(LeaseState::Draining),
         other => Err(EngineError::Storage(format!("bad lease state {other:?}"))),
@@ -172,8 +175,9 @@ fn bind_storage_epoch_if_present(
     t: &str,
     q: &str,
     epoch: u64,
-) -> EngineResult<()> {
+) -> EngineResult<bool> {
     let epoch = epoch as i64;
+    let mut bound = false;
     if column_exists(tx, "queues", "assignment_epoch")? {
         let updated = st(tx.execute(
             "UPDATE queues SET assignment_epoch=$3 WHERE tenant=$1 AND queue=$2",
@@ -182,6 +186,7 @@ fn bind_storage_epoch_if_present(
         if updated == 0 {
             return Err(EngineError::NotFound);
         }
+        bound = true;
     }
     if column_exists(tx, "relational_cursor", "assignment_epoch")? {
         let updated = st(tx.execute(
@@ -191,8 +196,9 @@ fn bind_storage_epoch_if_present(
         if updated == 0 {
             return Err(EngineError::NotFound);
         }
+        bound = true;
     }
-    Ok(())
+    Ok(bound)
 }
 
 /// The transactional postgres control plane. One blocking `postgres::Client` behind a `Mutex` (mirroring
@@ -399,16 +405,35 @@ impl QueueControlPlane for PostgresControlPlane {
         }
         let mut tx = st(client.transaction())?;
         let current = Self::lease_for_update(&mut tx, &t, &q)?;
-        let outcome = lease_decide_acquire(&current, owner, now, self.config.lease_ttl_ms);
-        if let AcquireOutcome::Acquired(ref acquired) = outcome {
+        let mut outcome = lease_decide_acquire(&current, owner, now, self.config.lease_ttl_ms);
+        if let AcquireOutcome::Acquired(ref mut acquired) = outcome {
             // Postgres-native TD-003 binding: when a paired postgres storage schema is available in this
             // transaction's search_path, the acquire transaction is also the durable append fence. CP-only
             // tests that create no storage schema still exercise the lease state machine without a bind.
-            bind_storage_epoch_if_present(&mut tx, &t, &q, acquired.assignment_epoch)?;
+            if bind_storage_epoch_if_present(&mut tx, &t, &q, acquired.assignment_epoch)? {
+                acquired.state = LeaseState::Assigned;
+            }
             upsert_lease(&mut tx, &t, &q, acquired)?;
         }
         st(tx.commit())?;
         Ok(outcome)
+    }
+
+    fn confirm_queue_lease_fence(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        let (t, q) = parts(queue);
+        let mut client = self.inner.lock().expect("poisoned");
+        let mut tx = st(client.transaction())?;
+        let current = Self::lease_for_update(&mut tx, &t, &q)?;
+        let confirmed = lease_decide_confirm_fence(&current, owner, expected_epoch, now)?;
+        upsert_lease(&mut tx, &t, &q, &confirmed)?;
+        st(tx.commit())?;
+        Ok(confirmed)
     }
 
     fn renew_queue_lease(
@@ -526,6 +551,7 @@ mod sql_shape_tests {
     fn lease_state_round_trips_through_text() {
         for s in [
             LeaseState::Unassigned,
+            LeaseState::PendingFence,
             LeaseState::Assigned,
             LeaseState::Draining,
         ] {
