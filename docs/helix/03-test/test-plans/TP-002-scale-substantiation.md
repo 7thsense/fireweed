@@ -238,12 +238,16 @@ Mechanism: per-queue ownership (TD-003) + cross-queue distribution (ADR-008) —
 many queues spread across many owner nodes; each queue is a single-owner,
 single-hop claim (no intra-queue sharding, no scatter-gather).
 **Backend: object-log local projection (TD-004) is REQUIRED** for the headline
-horizontal evidence. The release matrix MUST include both
-`object_log_inmemory_projection` and `object_log_sqlite_projection` unless one is
-explicitly marked unsupported by the implementation phase; **`postgres_native`
-MAY additionally be run as a comparator** but does not on its own satisfy E2 (per
-ADR-001 "Scale Claim Scoping", `postgres_native` alone is not evidence for the
-horizontal envelope).
+horizontal evidence. This release matrix is resolved to
+`object_log_sqlite_projection` only: the released E2 authority is the durable
+SQLite projection profile, while `object_log_inmemory_projection` remains a
+non-authoritative comparator for hot-path analysis and hybrid benchmarking.
+Revisit the comparator exclusion only if a release-tier, strict-validated
+`object_log_inmemory_projection` E2 row is produced under the same bars and
+reviewed into the governed release manifest. **`postgres_native` MAY additionally
+be run as a comparator** but does not on its own satisfy E2 (per ADR-001 "Scale
+Claim Scoping", `postgres_native` alone is not evidence for the horizontal
+envelope).
 
 | Parameter | Value |
 |-----------|-------|

@@ -111,7 +111,8 @@ fn release_row(id: &str) -> LedgerRow {
     let mut row = row(&format!("tp002_{id}_release"), 0, &[id]);
     row.backend_profile = match id {
         "E0" | "E1" => "postgres_native",
-        "E2" | "E3" => "object_log_sqlite_projection",
+        "E2" => pqueue_release::e2::RELEASE_BACKEND_PROFILE,
+        "E3" => "object_log_sqlite_projection",
         _ => unreachable!(),
     }
     .into();
@@ -301,14 +302,19 @@ fn release_manifest_rejects_false_or_missing_bars_met() {
 fn release_manifest_rejects_wrong_profile_and_unlisted_id_substitution() {
     let dir = release_manifest_dir("semantics");
     let mut rows = all_release_rows();
-    rows[2].1.backend_profile = "postgres_native".into();
+    rows[2].1.backend_profile = "object_log_inmemory_projection".into();
     rows[3].1.measurements.tp002_evidence_ids = vec!["E2".into()];
     let path = write_release_case(&dir, &valid_release_manifest(), rows);
     let errors = verify_release_manifest(&path).unwrap_err();
     assert!(errors.iter().any(|error| {
         error
             .0
-            .contains("backend_profile \"postgres_native\" is not governed for E2")
+            .contains("backend_profile \"object_log_inmemory_projection\" is not governed for E2; required E2 profile set is [\"object_log_sqlite_projection\"]")
+    }));
+    assert!(errors.iter().any(|error| {
+        error
+            .0
+            .contains("required E2 profile set is [\"object_log_sqlite_projection\"]")
     }));
     assert!(errors.iter().any(|error| {
         error

@@ -467,7 +467,8 @@ fn release_authority_errors(id: &str, row: &LedgerRow, raw_row: &serde_json::Val
     }
     let profile_allowed = match id {
         "E0" | "E1" => row.backend_profile == "postgres_native",
-        "E2" | "E3" => matches!(
+        "E2" => row.backend_profile == e2::RELEASE_BACKEND_PROFILE,
+        "E3" => matches!(
             row.backend_profile.as_str(),
             "object_log_inmemory_projection" | "object_log_sqlite_projection"
         ),
@@ -475,8 +476,9 @@ fn release_authority_errors(id: &str, row: &LedgerRow, raw_row: &serde_json::Val
     };
     if !profile_allowed {
         errors.push(format!(
-            "backend_profile {:?} is not governed for {id}",
-            row.backend_profile
+            "backend_profile {:?} is not governed for {id}; required E2 profile set is {:?}",
+            row.backend_profile,
+            [e2::RELEASE_BACKEND_PROFILE]
         ));
     }
     errors
@@ -522,6 +524,12 @@ pub mod e2 {
     use super::{LedgerRow, Measurements};
     use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
+
+    /// The resolved release-authority backend profile for TP-002 E2.
+    ///
+    /// `object_log_inmemory_projection` remains a comparator profile in the plan,
+    /// but it is not a release authority for the headline E2 matrix.
+    pub const RELEASE_BACKEND_PROFILE: &str = "object_log_sqlite_projection";
 
     /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
     pub const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;

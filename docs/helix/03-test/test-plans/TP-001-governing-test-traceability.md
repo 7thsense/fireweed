@@ -34,8 +34,8 @@ ddx:
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-      tp-scale-substantiation: eb42f16b7dc36a9316cdafa06921e2d089246ed79f6155212022c533acfc4ae9
-    reviewed_at: "2026-07-16T16:38:29Z"
+      tp-scale-substantiation: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
+    reviewed_at: "2026-07-16T22:35:21Z"
 ---
 
 # Test Plan: TP-001 Governing Test Traceability
