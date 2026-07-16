@@ -1,9 +1,14 @@
 use pqueue_release::density::{
-    DensityMeasurement, DensityMetadata, build_release_row, validate_release_row,
+    DensityMeasurement, DensityMetadata, QUEUE_ACTIVITY_DEFINITION, build_release_row,
+    validate_release_row,
 };
 
 fn measurement() -> DensityMeasurement {
     DensityMeasurement {
+        hot_items: 300_000,
+        hot_connections: 8,
+        cold_worker_count: 8,
+        configured_server_workers: 4,
         total_queues: 1001,
         cold_queues_active: 1000,
         cold_queues_progress_eligible: 1000,
@@ -14,12 +19,17 @@ fn measurement() -> DensityMeasurement {
         progress_bound_ms: 60_000,
         noisy_neighbor_ingest_retention_pct: 102.5,
         noisy_neighbor_claim_retention_pct: 101.0,
-        shared_worker_count: 8,
-        shared_worker_limit: 64,
+        shared_worker_count: 4,
+        shared_worker_limit: 4,
         connection_count: 16,
         connection_limit: 32,
         task_count: 17,
-        task_limit: 256,
+        task_limit: 64,
+        hot_phase_resource_samples: 5,
+        first_hot_resource_sample_unix_ms: 1_700_000_001_000,
+        last_hot_resource_sample_unix_ms: 1_700_000_059_000,
+        hot_phase_started_unix_ms: 1_700_000_000_000,
+        hot_phase_ended_unix_ms: 1_700_000_060_000,
     }
 }
 
@@ -31,8 +41,9 @@ fn metadata() -> DensityMetadata {
         hardware: "8 cores; 32 GiB RAM; kindest/node:v1.31.0".into(),
         seed: 42,
         duration_seconds: 60,
-        queue_activity_definition: "cold queue completed claim/finalize and retained one eligible item while the hot queue ran".into(),
-        image_digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+        queue_activity_definition: QUEUE_ACTIVITY_DEFINITION.into(),
+        image_digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            .into(),
         clean_revision: true,
     }
 }
@@ -73,15 +84,78 @@ fn density_validator_rejects_unbound_provenance_and_wrong_topology() {
 #[test]
 fn density_validator_rejects_self_selected_resource_limits() {
     let mut measured = measurement();
-    measured.shared_worker_limit = measured.shared_worker_count;
-    measured.connection_limit = measured.connection_count;
-    measured.task_limit = measured.task_count;
+    measured.shared_worker_limit = 8;
+    measured.connection_limit = 16;
+    measured.task_limit = 17;
     let row = build_release_row(&measured, &metadata());
     assert_eq!(row.evidence_tier, "smoke");
     let errors = validate_release_row(&row).unwrap_err().join("\n");
-    assert!(errors.contains("governed shared_worker_limit=64"));
+    assert!(errors.contains("governed shared_worker_limit=4"));
     assert!(errors.contains("governed connection_limit=32"));
-    assert!(errors.contains("governed task_limit=256"));
+    assert!(errors.contains("governed task_limit=64"));
+}
+
+#[test]
+fn density_validator_rejects_every_noncanonical_run_parameter() {
+    let mutations: Vec<(&str, Box<dyn Fn(&mut DensityMeasurement)>)> = vec![
+        ("hot_items", Box::new(|m| m.hot_items = 299_999)),
+        ("hot_connections", Box::new(|m| m.hot_connections = 7)),
+        ("cold_worker_count", Box::new(|m| m.cold_worker_count = 7)),
+        (
+            "configured_server_workers",
+            Box::new(|m| m.configured_server_workers = 3),
+        ),
+        (
+            "progress_bound_ms",
+            Box::new(|m| m.progress_bound_ms = 60_001),
+        ),
+        (
+            "total_queues",
+            Box::new(|m| {
+                m.total_queues = 1002;
+                m.cold_queues_active = 1001;
+                m.cold_queues_progress_eligible = 1001;
+            }),
+        ),
+    ];
+    for (name, mutate) in mutations {
+        let mut measured = measurement();
+        mutate(&mut measured);
+        let row = build_release_row(&measured, &metadata());
+        assert_eq!(row.evidence_tier, "smoke", "{name}");
+        assert!(validate_release_row(&row).is_err(), "{name}");
+    }
+
+    let mut meta = metadata();
+    meta.seed = 41;
+    let row = build_release_row(&measurement(), &meta);
+    assert!(validate_release_row(&row).is_err());
+}
+
+#[test]
+fn density_validator_requires_a_resource_sample_inside_the_hot_phase() {
+    let mut measured = measurement();
+    measured.hot_phase_resource_samples = 0;
+    let row = build_release_row(&measured, &metadata());
+    assert_eq!(row.evidence_tier, "smoke");
+    assert!(validate_release_row(&row).is_err());
+
+    let mut outside = measurement();
+    outside.first_hot_resource_sample_unix_ms = outside.hot_phase_started_unix_ms - 1;
+    let row = build_release_row(&outside, &metadata());
+    assert_eq!(row.evidence_tier, "smoke");
+    assert!(validate_release_row(&row).is_err());
+}
+
+#[test]
+fn density_validator_rejects_progress_semantics_substitution() {
+    let mut meta = metadata();
+    meta.queue_activity_definition =
+        "claim completed after HOT_START, regardless of when it began".into();
+    let row = build_release_row(&measurement(), &meta);
+    assert_eq!(row.evidence_tier, "smoke");
+    let errors = validate_release_row(&row).unwrap_err().join("\n");
+    assert!(errors.contains("HOT_START claim-start semantics"));
 }
 
 #[test]

@@ -846,12 +846,23 @@ pub mod density {
 
     pub const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
     pub const MIN_TOTAL_QUEUES: usize = 1001;
-    pub const MAX_SERVER_THREADS: usize = 64;
+    pub const CANONICAL_HOT_ITEMS: u64 = 300_000;
+    pub const CANONICAL_HOT_CONNECTIONS: usize = 8;
+    pub const CANONICAL_COLD_WORKERS: usize = 8;
+    pub const CANONICAL_SERVER_WORKERS: usize = 4;
+    pub const CANONICAL_SEED: u64 = 42;
+    pub const CANONICAL_PROGRESS_BOUND_MS: u64 = 60_000;
+    pub const MAX_SERVER_THREADS: usize = CANONICAL_SERVER_WORKERS;
     pub const MAX_SERVER_CONNECTIONS: usize = 32;
-    pub const MAX_SERVER_FDS: usize = 256;
+    pub const MAX_SERVER_TASKS: usize = 64;
+    pub const QUEUE_ACTIVITY_DEFINITION: &str = "a cold queue is active only when final XLEN is >0, and progress-eligible only when a claim/finalize operation started after HOT_START, completed before HOT_END, and completed within progress_bound_ms before the item was reseeded";
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DensityMeasurement {
+        pub hot_items: u64,
+        pub hot_connections: usize,
+        pub cold_worker_count: usize,
+        pub configured_server_workers: usize,
         pub total_queues: usize,
         pub cold_queues_active: usize,
         pub cold_queues_progress_eligible: usize,
@@ -868,6 +879,11 @@ pub mod density {
         pub connection_limit: usize,
         pub task_count: usize,
         pub task_limit: usize,
+        pub hot_phase_resource_samples: usize,
+        pub first_hot_resource_sample_unix_ms: u64,
+        pub last_hot_resource_sample_unix_ms: u64,
+        pub hot_phase_started_unix_ms: u64,
+        pub hot_phase_ended_unix_ms: u64,
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -885,13 +901,17 @@ pub mod density {
 
     pub fn bars_met(m: &DensityMeasurement) -> bool {
         let cold = m.total_queues.saturating_sub(1);
-        m.total_queues >= MIN_TOTAL_QUEUES
+        m.hot_items == CANONICAL_HOT_ITEMS
+            && m.hot_connections == CANONICAL_HOT_CONNECTIONS
+            && m.cold_worker_count == CANONICAL_COLD_WORKERS
+            && m.configured_server_workers == CANONICAL_SERVER_WORKERS
+            && m.total_queues == MIN_TOTAL_QUEUES
             && m.cold_queues_active == cold
             && m.cold_queues_progress_eligible == cold
             && m.hot_ingest_per_s >= FLOOR_ITEMS_PER_SEC
             && m.hot_claim_finalize_per_s >= FLOOR_ITEMS_PER_SEC
             && m.progress_bound_violations == 0
-            && m.progress_bound_ms > 0
+            && m.progress_bound_ms == CANONICAL_PROGRESS_BOUND_MS
             && m.max_progress_latency_ms <= m.progress_bound_ms
             && m.noisy_neighbor_ingest_retention_pct.is_finite()
             && m.noisy_neighbor_ingest_retention_pct >= 100.0
@@ -901,15 +921,37 @@ pub mod density {
             && m.shared_worker_count <= m.shared_worker_limit
             && m.connection_limit == MAX_SERVER_CONNECTIONS
             && m.connection_count <= m.connection_limit
-            && m.task_limit == MAX_SERVER_FDS
+            && m.task_limit == MAX_SERVER_TASKS
             && m.task_count <= m.task_limit
+            && m.hot_phase_resource_samples > 0
+            && m.hot_phase_started_unix_ms > 0
+            && m.hot_phase_ended_unix_ms > m.hot_phase_started_unix_ms
+            && m.first_hot_resource_sample_unix_ms >= m.hot_phase_started_unix_ms
+            && m.last_hot_resource_sample_unix_ms >= m.first_hot_resource_sample_unix_ms
+            && m.last_hot_resource_sample_unix_ms <= m.hot_phase_ended_unix_ms
     }
 
     pub fn build_release_row(m: &DensityMeasurement, meta: &DensityMetadata) -> LedgerRow {
-        let pass = bars_met(m);
+        let pass = bars_met(m)
+            && meta.seed == CANONICAL_SEED
+            && meta.queue_activity_definition == QUEUE_ACTIVITY_DEFINITION
+            && meta.clean_revision;
         let tier = if pass { "release" } else { "smoke" };
         let values = BTreeMap::from([
             ("bars_met".into(), serde_json::json!(pass)),
+            ("hot_items".into(), serde_json::json!(m.hot_items)),
+            (
+                "hot_connections".into(),
+                serde_json::json!(m.hot_connections),
+            ),
+            (
+                "cold_worker_count".into(),
+                serde_json::json!(m.cold_worker_count),
+            ),
+            (
+                "configured_server_workers".into(),
+                serde_json::json!(m.configured_server_workers),
+            ),
             ("total_queues".into(), serde_json::json!(m.total_queues)),
             (
                 "cold_queues_active".into(),
@@ -969,6 +1011,26 @@ pub mod density {
             ),
             ("task_count".into(), serde_json::json!(m.task_count)),
             ("task_limit".into(), serde_json::json!(m.task_limit)),
+            (
+                "hot_phase_resource_samples".into(),
+                serde_json::json!(m.hot_phase_resource_samples),
+            ),
+            (
+                "hot_phase_started_unix_ms".into(),
+                serde_json::json!(m.hot_phase_started_unix_ms),
+            ),
+            (
+                "hot_phase_ended_unix_ms".into(),
+                serde_json::json!(m.hot_phase_ended_unix_ms),
+            ),
+            (
+                "first_hot_resource_sample_unix_ms".into(),
+                serde_json::json!(m.first_hot_resource_sample_unix_ms),
+            ),
+            (
+                "last_hot_resource_sample_unix_ms".into(),
+                serde_json::json!(m.last_hot_resource_sample_unix_ms),
+            ),
             ("revision".into(), serde_json::json!(meta.revision)),
             (
                 "duration_seconds".into(),
@@ -1035,8 +1097,8 @@ pub mod density {
             errors.push("bars_met must be true".into());
         }
         let total = integer("total_queues").unwrap_or(0);
-        if total < MIN_TOTAL_QUEUES as u64 {
-            errors.push("total_queues must be at least 1001".into());
+        if total != MIN_TOTAL_QUEUES as u64 {
+            errors.push("total_queues must equal canonical 1001".into());
         }
         let cold = total.saturating_sub(1);
         if integer("cold_queues_active") != Some(cold) {
@@ -1058,8 +1120,41 @@ pub mod density {
             integer("max_progress_latency_ms"),
             integer("progress_bound_ms"),
         ) {
-            (Some(age), Some(bound)) if bound > 0 && age <= bound => {}
+            (Some(age), Some(bound)) if bound == CANONICAL_PROGRESS_BOUND_MS && age <= bound => {}
             _ => errors.push("max_progress_latency_ms must be within progress_bound_ms".into()),
+        }
+        for (key, expected) in [
+            ("hot_items", CANONICAL_HOT_ITEMS),
+            ("hot_connections", CANONICAL_HOT_CONNECTIONS as u64),
+            ("cold_worker_count", CANONICAL_COLD_WORKERS as u64),
+            ("configured_server_workers", CANONICAL_SERVER_WORKERS as u64),
+        ] {
+            if integer(key) != Some(expected) {
+                errors.push(format!("{key} must equal canonical {expected}"));
+            }
+        }
+        if row.seed != CANONICAL_SEED {
+            errors.push(format!("seed must equal canonical {CANONICAL_SEED}"));
+        }
+        if integer("hot_phase_resource_samples").is_none_or(|v| v == 0) {
+            errors.push("hot_phase_resource_samples must be positive".into());
+        }
+        match (
+            integer("hot_phase_started_unix_ms"),
+            integer("hot_phase_ended_unix_ms"),
+        ) {
+            (Some(start), Some(end)) if start > 0 && end > start => {}
+            _ => errors.push("hot-phase timestamps must be ordered and positive".into()),
+        }
+        match (
+            integer("hot_phase_started_unix_ms"),
+            integer("first_hot_resource_sample_unix_ms"),
+            integer("last_hot_resource_sample_unix_ms"),
+            integer("hot_phase_ended_unix_ms"),
+        ) {
+            (Some(start), Some(first), Some(last), Some(end))
+                if start <= first && first <= last && last <= end => {}
+            _ => errors.push("resource sample timestamps must fall inside the hot phase".into()),
         }
         for key in [
             "noisy_neighbor_ingest_retention_pct",
@@ -1080,7 +1175,7 @@ pub mod density {
                 "connection_limit",
                 MAX_SERVER_CONNECTIONS,
             ),
-            ("task_count", "task_limit", MAX_SERVER_FDS),
+            ("task_count", "task_limit", MAX_SERVER_TASKS),
         ] {
             match (integer(count), integer(limit)) {
                 (Some(c), Some(l)) if l == governed_limit as u64 && c <= l => {}
@@ -1090,7 +1185,15 @@ pub mod density {
             }
         }
         require_nonempty("revision", &mut errors);
-        require_nonempty("queue_activity_definition", &mut errors);
+        if values
+            .get("queue_activity_definition")
+            .and_then(serde_json::Value::as_str)
+            != Some(QUEUE_ACTIVITY_DEFINITION)
+        {
+            errors.push(
+                "queue_activity_definition must record HOT_START claim-start semantics".into(),
+            );
+        }
         if integer("duration_seconds").is_none_or(|v| v == 0) {
             errors.push("duration_seconds must be positive".into());
         }

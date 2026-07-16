@@ -35,22 +35,32 @@ command, Git revision and image digest, seed, measured duration, one-node kind
 topology and node image, host/node/container CPU and RAM descriptions,
 active/progress-eligible queue counts, both hot throughput rates, maximum
 progress latency and violations, and both noisy-neighbor retention percentages.
-While the hot workload runs, a separate sampler observes the live server
-process's thread count, established port-8080 TCP connections, and open file
-descriptors. The governed maxima are 64 threads, 32 connections, and 256 file
-descriptors; these limits are fixed in the semantic validator rather than
-selected by the run. The focused validator is:
+The load generator emits explicit `HOT_START` and `HOT_END` phase markers. A
+separate sampler must record at least one sample strictly between those markers.
+The load pod and sampling host share the kind node's system clock; the row
+records the hot-phase start/end and first/last accepted sample timestamps, and
+the validator requires the sample interval to be contained by the hot interval.
+It reads Tokio's live runtime metrics from the service's atomic in-container
+snapshot, including the actual worker-pool size and all live async tasks
+(detached object-log flushers, background loops, and connection handlers), and
+counts established port-8080 TCP connections from the server network namespace.
+The governed maxima are four Tokio workers, 32 connections, and 64 live tasks;
+these limits are fixed in the semantic validator rather than selected by the
+run. The focused validator is:
 
 ```sh
 cargo run -p pqueue-release --bin pqueue-verify-density-evidence -- \
   target/pqueue-ledger/tp002-e2-density-kind.jsonl
 ```
 
-The validator requires release scale/tier, `bars_met=true`, at least 1,001
+The validator requires release scale/tier, `bars_met=true`, exactly 1,001
 queues, both hot rates at or above 2,777.78 items/s, zero progress-bound
 violations, maximum progress latency within 60 seconds, all resource counts
-within their governed bounds, and ingest and claim/finalize retention each at
-or above 100%. A failed run remains smoke evidence and cannot be promoted by
+within their governed bounds, at least one hot-phase resource sample, and ingest
+and claim/finalize retention each at or above 100%. The validator also rejects
+any substitution for the canonical 1,001 queues, 300,000 hot items, eight hot
+connections, eight cold workers, four server workers, seed 42, or 60,000 ms
+progress bound. A failed run remains smoke evidence and cannot be promoted by
 editing the ledger.
 
 This is intentionally a one-node density proof. It does not claim 1,000x
@@ -60,6 +70,9 @@ Multi-owner failover is tracked separately by `pqueue-0a1d4386`.
 The governed release configuration uses 1,001 queues, 300,000 hot items, eight
 hot connections, eight cold workers, four server workers, seed 42, and a
 60,000 ms progress bound. Environment overrides are useful for diagnostic
-reproduction, but a changed configuration is not the named release run and
-must not be presented as its result. `CLUSTER`, `IMAGE`, and `LEDGER_OUT` may be
-changed as operational locations without weakening a semantic bar.
+reproduction, but the focused validator rejects a changed governed
+configuration as release evidence. `CLUSTER`, `IMAGE`, and `LEDGER_OUT` may be
+changed as operational locations without weakening a semantic bar. Immediately
+before row emission and again before validation, the command rechecks both
+`HEAD` and the clean worktree to close the build-to-attestation
+time-of-check/time-of-use window.

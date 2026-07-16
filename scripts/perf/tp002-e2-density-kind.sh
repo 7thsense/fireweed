@@ -12,9 +12,9 @@ NOISY_WORKERS=${NOISY_WORKERS:-8}
 SERVER_WORKERS=${SERVER_WORKERS:-4}
 SEED=${SEED:-42}
 PROGRESS_BOUND_MS=${PROGRESS_BOUND_MS:-60000}
-THREAD_LIMIT=64
+THREAD_LIMIT=4
 CONNECTION_LIMIT=32
-FD_LIMIT=256
+TASK_LIMIT=64
 LEDGER_OUT=${LEDGER_OUT:-$REPO_ROOT/target/pqueue-ledger/tp002-e2-density-kind.jsonl}
 KUBECONFIG_FILE=$(mktemp)
 RESULT_FILE=$(mktemp)
@@ -23,14 +23,25 @@ SAMPLER_STOP=$(mktemp)
 rm -f "$SAMPLER_STOP"
 NAMESPACE="pqueue-density-${RANDOM}"
 SAMPLER_PID=
+LOG_WATCH_PID=
+PHASE_LOG=$(mktemp)
+
+assert_source_unchanged() {
+  [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" == "$REVISION" ]]
+  [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]]
+}
 
 cleanup() {
   if [[ -n "$SAMPLER_PID" ]]; then
     touch "$SAMPLER_STOP"
     wait "$SAMPLER_PID" 2>/dev/null || true
   fi
+  if [[ -n "$LOG_WATCH_PID" ]]; then
+    kill "$LOG_WATCH_PID" 2>/dev/null || true
+    wait "$LOG_WATCH_PID" 2>/dev/null || true
+  fi
   KUBECONFIG="$KUBECONFIG_FILE" kubectl delete namespace "$NAMESPACE" --wait=false >/dev/null 2>&1 || true
-  rm -f "$KUBECONFIG_FILE" "$RESULT_FILE" "$RESOURCE_FILE" "$SAMPLER_STOP"
+  rm -f "$KUBECONFIG_FILE" "$RESULT_FILE" "$RESOURCE_FILE" "$SAMPLER_STOP" "$PHASE_LOG"
 }
 trap cleanup EXIT
 
@@ -150,22 +161,22 @@ kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l job-name=density-load 
 LOAD_POD=$(kubectl -n "$NAMESPACE" get pod -l job-name=density-load -o jsonpath='{.items[0].metadata.name}')
 LOAD_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$LOAD_POD" -o jsonpath='{.status.containerStatuses[0].imageID}')
 [[ "$LOAD_IMAGE_ID" == *"$IMAGE_DIGEST" ]]
+kubectl -n "$NAMESPACE" logs -f "$LOAD_POD" >"$PHASE_LOG" 2>&1 &
+LOG_WATCH_PID=$!
 
-# Sample the live server process throughout the hot run. Values are max observed process threads,
-# established server-port TCP connections, and open file descriptors; they are not loadgen settings.
+# Sample only between the load generator's explicit HOT_START/HOT_END markers. Worker/task counts come
+# from Tokio's live RuntimeMetrics reporter; connections come from the server network namespace.
 (
-  max_threads=0
-  max_connections=0
-  max_fds=0
   while [[ ! -e "$SAMPLER_STOP" ]]; do
-    sample=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- sh -c \
-      'printf "%s " "$(find /proc/1/task -mindepth 1 -maxdepth 1 | wc -l)"; printf "%s " "$(awk '\''$2 ~ /:1F90$/ && $4 == "01" {n++} END {print n+0}'\'' /proc/1/net/tcp)"; find /proc/1/fd -mindepth 1 -maxdepth 1 | wc -l' 2>/dev/null) || continue
-    read -r threads connections fds <<<"$sample"
-    (( threads > max_threads )) && max_threads=$threads
-    (( connections > max_connections )) && max_connections=$connections
-    (( fds > max_fds )) && max_fds=$fds
-    printf '%s %s %s\n' "$max_threads" "$max_connections" "$max_fds" >"$RESOURCE_FILE"
-    sleep 1
+    if grep -q '^DENSITY_PHASE HOT_START ' "$PHASE_LOG" && ! grep -q '^DENSITY_PHASE HOT_END ' "$PHASE_LOG"; then
+      runtime=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/pqueue-runtime-resources.json 2>/dev/null) || continue
+      threads=$(jq -r '.tokio_worker_threads' <<<"$runtime")
+      tasks=$(jq -r '.tokio_alive_tasks' <<<"$runtime")
+      connections=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- sh -c \
+        'awk '\''$2 ~ /:1F90$/ && $4 == "01" {n++} END {print n+0}'\'' /proc/1/net/tcp' 2>/dev/null) || continue
+      printf '%s %s %s %s\n' "$(date +%s%3N)" "$threads" "$connections" "$tasks" >>"$RESOURCE_FILE"
+    fi
+    sleep 0.25
   done
 ) &
 SAMPLER_PID=$!
@@ -194,15 +205,38 @@ test -s "$RESULT_FILE"
 touch "$SAMPLER_STOP"
 wait "$SAMPLER_PID"
 SAMPLER_PID=
-read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_FDS <"$RESOURCE_FILE"
+kill "$LOG_WATCH_PID" 2>/dev/null || true
+wait "$LOG_WATCH_PID" 2>/dev/null || true
+LOG_WATCH_PID=
+HOT_START_MS=$(jq -r '.hot_phase_started_unix_ms' "$RESULT_FILE")
+HOT_END_MS=$(jq -r '.hot_phase_ended_unix_ms' "$RESULT_FILE")
+read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_SAMPLES FIRST_HOT_SAMPLE_MS LAST_HOT_SAMPLE_MS < <(
+  awk -v start="$HOT_START_MS" -v end="$HOT_END_MS" '
+    $1 >= start && $1 <= end {
+      if (samples == 0) first=$1
+      last=$1
+      if ($2 > threads) threads=$2
+      if ($3 > connections) connections=$3
+      if ($4 > tasks) tasks=$4
+      samples++
+    }
+    END { print threads+0, connections+0, tasks+0, samples+0, first+0, last+0 }
+  ' "$RESOURCE_FILE"
+)
+(( HOT_PHASE_RESOURCE_SAMPLES > 0 ))
 
 mkdir -p "$(dirname "$LEDGER_OUT")"
+assert_source_unchanged
 rustup run 1.92.0 cargo run --quiet -p pqueue-loadgen -- density-emit-row \
   --result "$RESULT_FILE" \
   --observed-threads "$OBSERVED_THREADS" --thread-limit "$THREAD_LIMIT" \
   --observed-connections "$OBSERVED_CONNECTIONS" --connection-limit "$CONNECTION_LIMIT" \
-  --observed-fds "$OBSERVED_FDS" --fd-limit "$FD_LIMIT" \
+  --observed-tasks "$OBSERVED_TASKS" --task-limit "$TASK_LIMIT" \
+  --hot-phase-resource-samples "$HOT_PHASE_RESOURCE_SAMPLES" \
+  --first-hot-resource-sample-ms "$FIRST_HOT_SAMPLE_MS" \
+  --last-hot-resource-sample-ms "$LAST_HOT_SAMPLE_MS" \
   --revision "$REVISION" --image-digest "$IMAGE_DIGEST" \
-  --topology "$TOPOLOGY" --hardware "$HARDWARE" --seed "$SEED" --out "$LEDGER_OUT"
+  --topology "$TOPOLOGY" --hardware "$HARDWARE" --out "$LEDGER_OUT"
+assert_source_unchanged
 rustup run 1.92.0 cargo run --quiet -p pqueue-release --bin pqueue-verify-density-evidence -- "$LEDGER_OUT"
 printf 'LEDGER_OUT=%s\n' "$LEDGER_OUT"

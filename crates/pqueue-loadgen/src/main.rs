@@ -67,6 +67,12 @@ type TuningMeta = pqueue_release::e2::E2Tuning;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DensityRunResult {
+    hot_items: u64,
+    hot_connections: usize,
+    cold_worker_count: usize,
+    seed: u64,
+    hot_phase_started_unix_ms: u64,
+    hot_phase_ended_unix_ms: u64,
     total_queues: usize,
     cold_queues_active: usize,
     cold_queues_progress_eligible: usize,
@@ -554,10 +560,13 @@ fn start_density_workers(
                         if stop.load(Ordering::Relaxed) {
                             break;
                         }
+                        // Capture phase at operation START. A claim begun before HOT_START must not be
+                        // promoted merely because it finishes after the flag changes.
+                        let started_in_hot_phase = hot_phase.load(Ordering::SeqCst);
                         let got = drain(&mut conn, key, &format!("density-w{worker}"), 1);
                         assert_eq!(got, 1, "cold queue {key} must remain progress eligible");
                         let latency_ms = eligible_since.elapsed().as_millis() as u64;
-                        if hot_phase.load(Ordering::SeqCst) {
+                        if started_in_hot_phase && hot_phase.load(Ordering::SeqCst) {
                             max_progress_latency_ms.fetch_max(latency_ms, Ordering::SeqCst);
                             if latency_ms > progress_bound_ms {
                                 progress_bound_violations.fetch_add(1, Ordering::SeqCst);
@@ -843,8 +852,18 @@ fn cmd_density_run(args: &[String]) -> ! {
         thread::sleep(Duration::from_millis(50));
     }
     hot_phase.store(true, Ordering::SeqCst);
+    let hot_phase_started_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as u64;
+    println!("DENSITY_PHASE HOT_START {hot_phase_started_unix_ms}");
     let (_, loaded_ingest, _, loaded_claim) = measure(&hot_spec, items, conns, pipe, batch);
+    let hot_phase_ended_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as u64;
     hot_phase.store(false, Ordering::SeqCst);
+    println!("DENSITY_PHASE HOT_END {hot_phase_ended_unix_ms}");
     stop.store(true, Ordering::SeqCst);
     for handle in handles {
         handle.join().expect("density cold worker");
@@ -865,6 +884,12 @@ fn cmd_density_run(args: &[String]) -> ! {
     let violations = progress_bound_violations.load(Ordering::SeqCst) as usize + missing_progress;
     let duration_seconds = started.elapsed().as_secs().max(1);
     let result = DensityRunResult {
+        hot_items: items,
+        hot_connections: conns,
+        cold_worker_count: noisy_workers,
+        seed,
+        hot_phase_started_unix_ms,
+        hot_phase_ended_unix_ms,
         total_queues,
         cold_queues_active: cold_active,
         cold_queues_progress_eligible: progress_eligible,
@@ -895,19 +920,26 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
         .unwrap_or(raw.trim());
     let result: DensityRunResult = serde_json::from_str(json).expect("parse density result");
     let observed_threads = parse_usize_arg(args, "--observed-threads", usize::MAX);
-    let thread_limit = parse_usize_arg(args, "--thread-limit", 64);
+    let thread_limit = parse_usize_arg(args, "--thread-limit", 4);
     let observed_connections = parse_usize_arg(args, "--observed-connections", usize::MAX);
     let connection_limit = parse_usize_arg(args, "--connection-limit", 32);
-    let observed_fds = parse_usize_arg(args, "--observed-fds", usize::MAX);
-    let fd_limit = parse_usize_arg(args, "--fd-limit", 256);
+    let observed_tasks = parse_usize_arg(args, "--observed-tasks", usize::MAX);
+    let task_limit = parse_usize_arg(args, "--task-limit", 64);
+    let hot_phase_resource_samples = parse_usize_arg(args, "--hot-phase-resource-samples", 0);
+    let first_hot_resource_sample_unix_ms =
+        parse_u64_arg(args, "--first-hot-resource-sample-ms", 0);
+    let last_hot_resource_sample_unix_ms = parse_u64_arg(args, "--last-hot-resource-sample-ms", 0);
     let revision = arg_value(args, "--revision").expect("density-emit-row needs --revision");
     let image_digest =
         arg_value(args, "--image-digest").expect("density-emit-row needs --image-digest");
     let hardware = arg_value(args, "--hardware").expect("density-emit-row needs --hardware");
     let topology = arg_value(args, "--topology").expect("density-emit-row needs --topology");
     let out = arg_value(args, "--out").expect("density-emit-row needs --out");
-    let seed = parse_u64_arg(args, "--seed", 42);
     let measurement = pqueue_release::density::DensityMeasurement {
+        hot_items: result.hot_items,
+        hot_connections: result.hot_connections,
+        cold_worker_count: result.cold_worker_count,
+        configured_server_workers: observed_threads,
         total_queues: result.total_queues,
         cold_queues_active: result.cold_queues_active,
         cold_queues_progress_eligible: result.cold_queues_progress_eligible,
@@ -922,17 +954,22 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
         shared_worker_limit: thread_limit,
         connection_count: observed_connections,
         connection_limit,
-        task_count: observed_fds,
-        task_limit: fd_limit,
+        task_count: observed_tasks,
+        task_limit,
+        hot_phase_resource_samples,
+        first_hot_resource_sample_unix_ms,
+        last_hot_resource_sample_unix_ms,
+        hot_phase_started_unix_ms: result.hot_phase_started_unix_ms,
+        hot_phase_ended_unix_ms: result.hot_phase_ended_unix_ms,
     };
     let metadata = pqueue_release::density::DensityMetadata {
         command: "scripts/perf/tp002-e2-density-kind.sh".into(),
         revision,
         topology,
         hardware,
-        seed,
+        seed: result.seed,
         duration_seconds: result.duration_seconds,
-        queue_activity_definition: "a cold queue is active only when final XLEN is >0, and progress-eligible only when its immediately eligible item is claimed/finalized during the hot phase within progress_bound_ms before being reseeded".into(),
+        queue_activity_definition: pqueue_release::density::QUEUE_ACTIVITY_DEFINITION.into(),
         image_digest,
         clean_revision: true,
     };
@@ -961,7 +998,7 @@ fn main() {
             eprintln!(
                 "usage:\n  pqueue-loadgen run --spec <json>|--spec-file <path> [--items-per-queue N] \
                  [--conns-per-queue C] [--pipe P] [--batch B]\n  pqueue-loadgen emit-row --result <f> \
-                 --result <f> --result <f> --tuning <json> --out <path>\n  pqueue-loadgen density-run --addr <host:port> --queue-count 1001 [--items N] [--seed N]\n  pqueue-loadgen density-emit-row --result <f> --observed-threads N --observed-connections N --observed-fds N --revision <sha> --image-digest <sha256> --topology <description> --hardware <description> --out <path>\ngot: {other:?}"
+                 --result <f> --result <f> --tuning <json> --out <path>\n  pqueue-loadgen density-run --addr <host:port> --queue-count 1001 [--items N] [--seed N]\n  pqueue-loadgen density-emit-row --result <f> --observed-threads N --observed-connections N --observed-tasks N --hot-phase-resource-samples N --first-hot-resource-sample-ms N --last-hot-resource-sample-ms N --revision <sha> --image-digest <sha256> --topology <description> --hardware <description> --out <path>\ngot: {other:?}"
             );
             exit(2);
         }
