@@ -65,6 +65,87 @@ fn parse_duration_ms(env: &BTreeMap<String, String>, key: &str, default_ms: u64)
     Duration::from_millis(parse_u64(env, key, default_ms))
 }
 
+fn replica_count(env: &BTreeMap<String, String>) -> Result<usize, ConfigError> {
+    let raw = env_or(env, "PQUEUE_REPLICA_COUNT", "1");
+    let count = raw.parse::<usize>().map_err(|_| {
+        ConfigError::new(format!(
+            "PQUEUE_REPLICA_COUNT must be a positive integer, got {raw:?}"
+        ))
+    })?;
+    if count == 0 {
+        return Err(ConfigError::new(
+            "PQUEUE_REPLICA_COUNT must be greater than 0",
+        ));
+    }
+    Ok(count)
+}
+
+fn control_plane_ttl_ms(
+    env: &BTreeMap<String, String>,
+    key: &str,
+    default_ms: u64,
+) -> Result<u64, ConfigError> {
+    let raw = env_or(env, key, &default_ms.to_string());
+    raw.parse::<u64>().map_err(|_| {
+        ConfigError::new(format!(
+            "{key} must be a positive integer number of milliseconds, got {raw:?}"
+        ))
+    })
+}
+
+fn parse_control_plane(
+    env: &BTreeMap<String, String>,
+    replicas: usize,
+) -> Result<ControlPlaneSpec, ConfigError> {
+    let profile = env_or(env, "PQUEUE_CONTROL_PLANE", "inprocess");
+    match profile.as_str() {
+        "inprocess" => {
+            if replicas > 1 {
+                return Err(ConfigError::new(format!(
+                    "PQUEUE_CONTROL_PLANE=inprocess is a development-only single-process profile and cannot be used with PQUEUE_REPLICA_COUNT={replicas}; select postgres and configure PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL"
+                )));
+            }
+            Ok(ControlPlaneSpec::InProcess)
+        }
+        "postgres" => {
+            let url = env
+                .get("PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ConfigError::new(
+                        "PQUEUE_CONTROL_PLANE=postgres requires non-empty PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL",
+                    )
+                })?
+                .to_string();
+            let heartbeat_ttl_ms =
+                control_plane_ttl_ms(env, "PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS", 5_000)?;
+            let lease_ttl_ms =
+                control_plane_ttl_ms(env, "PQUEUE_CONTROL_PLANE_LEASE_TTL_MS", 15_000)?;
+            if heartbeat_ttl_ms == 0 || lease_ttl_ms == 0 {
+                return Err(ConfigError::new(
+                    "PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS and PQUEUE_CONTROL_PLANE_LEASE_TTL_MS must be greater than 0",
+                ));
+            }
+            if lease_ttl_ms < heartbeat_ttl_ms {
+                return Err(ConfigError::new(
+                    "PQUEUE_CONTROL_PLANE_LEASE_TTL_MS must be greater than or equal to PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS",
+                ));
+            }
+            Ok(ControlPlaneSpec::Postgres {
+                url,
+                config: pqueue_engine::ControlPlaneConfig {
+                    heartbeat_ttl_ms,
+                    lease_ttl_ms,
+                },
+            })
+        }
+        other => Err(ConfigError::new(format!(
+            "unknown PQUEUE_CONTROL_PLANE={other:?}; expected inprocess|postgres"
+        ))),
+    }
+}
+
 /// The group-commit segment configuration for the segmented object-log families (byte-size + latency seal
 /// triggers), from `PQUEUE_SEGMENT_TARGET_BYTES` / `PQUEUE_SEGMENT_MAX_LATENCY_MS`.
 fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, ConfigError> {
@@ -333,10 +414,11 @@ fn parse_backend(env: &BTreeMap<String, String>) -> Result<BackendSpec, ConfigEr
         ));
     }
 
+    let replicas = replica_count(env)?;
     Ok(BackendSpec {
         log: log_spec,
         projection: projection_spec,
-        control_plane: ControlPlaneSpec::InProcess,
+        control_plane: parse_control_plane(env, replicas)?,
     })
 }
 
