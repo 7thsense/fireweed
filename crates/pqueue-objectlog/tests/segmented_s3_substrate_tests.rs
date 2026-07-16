@@ -3527,6 +3527,8 @@ fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::A
         next_seq: 0,
         next_manifest_index: 0,
         retention_floor_through: None,
+        tail_candidate_key: None,
+        legacy_next_manifest_index: 0,
     };
     assert!(
         store.read_manifest_head(&prefix).unwrap().is_none(),
@@ -3559,12 +3561,16 @@ fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::A
         next_seq: 2,
         next_manifest_index: 1,
         retention_floor_through: Some(0),
+        tail_candidate_key: None,
+        legacy_next_manifest_index: 0,
     };
     let winner_b = ManifestHeadBlob {
         current_epoch: 2,
         next_seq: 4,
         next_manifest_index: 1,
         retention_floor_through: Some(1),
+        tail_candidate_key: None,
+        legacy_next_manifest_index: 0,
     };
     let store_a = store.clone();
     let store_b = store.clone();
@@ -3611,6 +3617,397 @@ fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::A
             .as_deref(),
         Some(&serde_json::to_vec(&v0).unwrap()[..]),
         "losers still observe the old head value at the previous version"
+    );
+}
+
+struct PauseAtCut {
+    cut: FaultCutPoint,
+    entered: std::sync::Arc<Barrier>,
+    resume: std::sync::Arc<Barrier>,
+    fired: AtomicBool,
+}
+
+impl FaultHook for PauseAtCut {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == self.cut && !self.fired.swap(true, Ordering::SeqCst) {
+            self.entered.wait();
+            self.resume.wait();
+        }
+        Ok(())
+    }
+}
+
+struct FailAtCut {
+    cut: FaultCutPoint,
+    fired: AtomicBool,
+}
+
+impl FaultHook for FailAtCut {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == self.cut && !self.fired.swap(true, Ordering::SeqCst) {
+            return Err(EngineError::Storage(format!("fault at {cut:?}")));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn segmented_stale_append_prepared_before_fence_cannot_advance_authoritative_tail() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let queue = unique_qdef("authority-stale-race");
+    let shard = pqueue_engine::QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+    let owner_n = std::sync::Arc::new(SegmentedObjectLog::open(store.clone(), cfg));
+    let owner_next = SegmentedObjectLog::open(store.clone(), cfg);
+    owner_n.create_queue(&queue).unwrap();
+    owner_next.create_queue(&queue).unwrap();
+    assert_eq!(owner_n.fence_epoch(&shard, 0, 0).unwrap(), 0);
+    owner_n.enqueue(&shard, &pushes(2), 0, 1).unwrap();
+
+    let entered = std::sync::Arc::new(Barrier::new(2));
+    let resume = std::sync::Arc::new(Barrier::new(2));
+    owner_n.set_fault_hook(Some(std::sync::Arc::new(PauseAtCut {
+        cut: FaultCutPoint::AfterManifestCandidateBeforeHead,
+        entered: entered.clone(),
+        resume: resume.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let sealing = {
+        let owner_n = owner_n.clone();
+        let shard = shard.clone();
+        thread::spawn(move || owner_n.seal(&shard, 0, 2))
+    };
+    entered.wait();
+    assert_eq!(owner_next.fence_epoch(&shard, 1, 3).unwrap(), 1);
+    assert_eq!(
+        owner_next.gc_unreferenced_candidates(&shard, 1).unwrap(),
+        1,
+        "GC can classify the paused candidate as a permanent loser"
+    );
+    resume.wait();
+    assert_eq!(sealing.join().unwrap(), Err(EngineError::EpochFenced));
+    assert!(owner_next.read_all(&shard).unwrap().is_empty());
+    assert!(
+        store
+            .list("")
+            .unwrap()
+            .iter()
+            .all(|key| !key.contains("/seg_candidates/e00000000000000000000/")),
+        "the resumed stale preparer must delete the segment it wrote after GC removed its candidate"
+    );
+
+    owner_next.enqueue(&shard, &pushes(1), 1, 4).unwrap();
+    owner_next.seal(&shard, 1, 5).unwrap();
+    assert_eq!(owner_next.read_all(&shard).unwrap().len(), 1);
+    assert_eq!(owner_next.gc_unreferenced_candidates(&shard, 1).unwrap(), 0);
+    assert_eq!(owner_next.read_all(&shard).unwrap().len(), 1);
+}
+
+#[test]
+fn segmented_concurrent_target_n_and_n_plus_one_never_returns_usable_n_late() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let queue = unique_qdef("authority-fence-race");
+    let shard = pqueue_engine::QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+    let lower = std::sync::Arc::new(SegmentedObjectLog::open(store.clone(), cfg));
+    let higher = SegmentedObjectLog::open(store, cfg);
+    lower.create_queue(&queue).unwrap();
+    higher.create_queue(&queue).unwrap();
+    assert_eq!(lower.fence_epoch(&shard, 0, 0).unwrap(), 0);
+
+    let entered = std::sync::Arc::new(Barrier::new(2));
+    let resume = std::sync::Arc::new(Barrier::new(2));
+    lower.set_fault_hook(Some(std::sync::Arc::new(PauseAtCut {
+        cut: FaultCutPoint::DuringOwnerReassignment,
+        entered: entered.clone(),
+        resume: resume.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let lower_attempt = {
+        let lower = lower.clone();
+        let shard = shard.clone();
+        thread::spawn(move || lower.fence_epoch(&shard, 1, 1))
+    };
+    entered.wait();
+    assert_eq!(higher.fence_epoch(&shard, 2, 2).unwrap(), 2);
+    resume.wait();
+    assert_eq!(lower_attempt.join().unwrap(), Err(EngineError::EpochFenced));
+    assert_eq!(higher.fence_epoch(&shard, 2, 3).unwrap(), 2);
+    assert_eq!(
+        higher.fence_epoch(&shard, 1, 4),
+        Err(EngineError::EpochFenced)
+    );
+
+    let equality_entered = std::sync::Arc::new(Barrier::new(2));
+    let equality_resume = std::sync::Arc::new(Barrier::new(2));
+    lower.set_fault_hook(Some(std::sync::Arc::new(PauseAtCut {
+        cut: FaultCutPoint::DuringOwnerReassignment,
+        entered: equality_entered.clone(),
+        resume: equality_resume.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let equality_attempt = {
+        let lower = lower.clone();
+        let shard = shard.clone();
+        thread::spawn(move || lower.fence_epoch(&shard, 2, 5))
+    };
+    equality_entered.wait();
+    assert_eq!(higher.fence_epoch(&shard, 3, 6).unwrap(), 3);
+    equality_resume.wait();
+    assert_eq!(
+        equality_attempt.join().unwrap(),
+        Err(EngineError::EpochFenced),
+        "an equal-epoch observation cannot return usable after N+1 becomes authoritative"
+    );
+}
+
+#[test]
+fn segmented_authority_initialization_marker_blocks_concurrent_legacy_ack() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let queue = unique_qdef("authority-init-race");
+    let shard = QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+    let initializer = std::sync::Arc::new(SegmentedObjectLog::open(store.clone(), cfg));
+    let appender = SegmentedObjectLog::open(store, cfg);
+    initializer.create_queue(&queue).unwrap();
+    appender.create_queue(&queue).unwrap();
+
+    let entered = std::sync::Arc::new(Barrier::new(2));
+    let resume = std::sync::Arc::new(Barrier::new(2));
+    initializer.set_fault_hook(Some(std::sync::Arc::new(PauseAtCut {
+        cut: FaultCutPoint::BeforeAuthorityHeadInitialize,
+        entered: entered.clone(),
+        resume: resume.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let initializing = {
+        let initializer = initializer.clone();
+        let shard = shard.clone();
+        thread::spawn(move || initializer.fence_epoch(&shard, 0, 0))
+    };
+    entered.wait();
+    appender.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+    assert_eq!(appender.seal(&shard, 0, 2), Err(EngineError::Conflict));
+    resume.wait();
+    assert_eq!(initializing.join().unwrap().unwrap(), 0);
+    assert!(initializer.read_all(&shard).unwrap().is_empty());
+
+    let crashed_store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let crashed_queue = unique_qdef("authority-init-crash");
+    let crashed_shard = QueueKey::new(
+        crashed_queue.tenant_id.clone(),
+        crashed_queue.queue_id.clone(),
+    );
+    let crashed = SegmentedObjectLog::open(crashed_store.clone(), cfg);
+    crashed.create_queue(&crashed_queue).unwrap();
+    crashed.set_fault_hook(Some(std::sync::Arc::new(FailAtCut {
+        cut: FaultCutPoint::BeforeAuthorityHeadInitialize,
+        fired: AtomicBool::new(false),
+    })));
+    assert!(matches!(
+        crashed.fence_epoch(&crashed_shard, 0, 0),
+        Err(EngineError::Storage(_))
+    ));
+    assert_eq!(
+        crashed.fence_epoch(&crashed_shard, 0, 1),
+        Err(EngineError::Conflict),
+        "a crashed initialization requires explicit recovery and can never downgrade to legacy"
+    );
+    let reopened = SegmentedObjectLog::open(crashed_store, cfg);
+    assert_eq!(
+        reopened.create_queue(&crashed_queue),
+        Err(EngineError::Conflict)
+    );
+}
+
+#[test]
+fn segmented_authority_fault_cuts_recover_only_the_head_referenced_tail() {
+    let store = std::sync::Arc::new(FailingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let queue = unique_qdef("authority-faults");
+    let shard = pqueue_engine::QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&queue).unwrap();
+    log.fence_epoch(&shard, 0, 0).unwrap();
+
+    log.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+    log.set_fault_hook(Some(std::sync::Arc::new(FailAtCut {
+        cut: FaultCutPoint::AfterManifestCandidateBeforeHead,
+        fired: AtomicBool::new(false),
+    })));
+    assert!(matches!(
+        log.seal(&shard, 0, 2),
+        Err(EngineError::Storage(_))
+    ));
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&queue).unwrap();
+    assert!(reopened.read_all(&shard).unwrap().is_empty());
+
+    reopened.enqueue(&shard, &pushes(1), 0, 3).unwrap();
+    store.arm_put_if_absent("/authority_head/");
+    assert!(matches!(
+        reopened.seal(&shard, 0, 4),
+        Err(EngineError::Storage(_))
+    ));
+    store.disarm();
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&queue).unwrap();
+    assert!(reopened.read_all(&shard).unwrap().is_empty());
+
+    reopened.enqueue(&shard, &pushes(1), 0, 5).unwrap();
+    reopened.set_fault_hook(Some(std::sync::Arc::new(FailAtCut {
+        cut: FaultCutPoint::AfterManifestBeforeAck,
+        fired: AtomicBool::new(false),
+    })));
+    assert!(matches!(
+        reopened.seal(&shard, 0, 6),
+        Err(EngineError::Storage(_))
+    ));
+    let final_reopen = SegmentedObjectLog::open(store, cfg);
+    final_reopen.create_queue(&queue).unwrap();
+    assert_eq!(final_reopen.read_all(&shard).unwrap().len(), 1);
+}
+
+#[test]
+fn segmented_nonempty_legacy_queue_fails_closed_while_empty_equality_establishes_head() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let legacy_queue = unique_qdef("authority-legacy");
+    let legacy_shard = pqueue_engine::QueueKey::new(
+        legacy_queue.tenant_id.clone(),
+        legacy_queue.queue_id.clone(),
+    );
+    let legacy = SegmentedObjectLog::open(store.clone(), cfg);
+    legacy.create_queue(&legacy_queue).unwrap();
+    legacy.enqueue(&legacy_shard, &pushes(1), 0, 0).unwrap();
+    legacy.seal(&legacy_shard, 0, 1).unwrap();
+    assert_eq!(
+        legacy.fence_epoch(&legacy_shard, 0, 2),
+        Err(EngineError::Unavailable)
+    );
+
+    let empty_queue = unique_qdef("authority-empty");
+    let empty_shard =
+        pqueue_engine::QueueKey::new(empty_queue.tenant_id.clone(), empty_queue.queue_id.clone());
+    let empty = SegmentedObjectLog::open(store, cfg);
+    empty.create_queue(&empty_queue).unwrap();
+    assert_eq!(empty.fence_epoch(&empty_shard, 0, 0).unwrap(), 0);
+    assert_eq!(empty.fence_epoch(&empty_shard, 0, 1).unwrap(), 0);
+    assert_eq!(empty.fence_epoch(&empty_shard, 7, 2).unwrap(), 7);
+    assert_eq!(
+        empty.fence_epoch(&empty_shard, 6, 3),
+        Err(EngineError::EpochFenced)
+    );
+}
+
+#[test]
+fn segmented_authority_head_loss_and_version_holes_fail_closed() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+
+    let lost_queue = unique_qdef("authority-head-loss");
+    let lost_shard = QueueKey::new(lost_queue.tenant_id.clone(), lost_queue.queue_id.clone());
+    let lost = SegmentedObjectLog::open(store.clone(), cfg);
+    lost.create_queue(&lost_queue).unwrap();
+    lost.fence_epoch(&lost_shard, 0, 0).unwrap();
+    lost.enqueue(&lost_shard, &pushes(1), 0, 1).unwrap();
+    lost.seal(&lost_shard, 0, 2).unwrap();
+    let lost_prefix = format!(
+        "t/{}/q/{}/authority_head/",
+        hex_lower(lost_shard.tenant_id.as_str().as_bytes()),
+        hex_lower(lost_shard.queue_id.as_str().as_bytes())
+    );
+    for key in store.list(&lost_prefix).unwrap() {
+        store.delete(&key).unwrap();
+    }
+    assert_eq!(
+        lost.fence_epoch(&lost_shard, 1, 3),
+        Err(EngineError::Conflict)
+    );
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    assert_eq!(
+        reopened.create_queue(&lost_queue),
+        Err(EngineError::Conflict)
+    );
+
+    let hole_queue = unique_qdef("authority-head-hole");
+    let hole_shard = QueueKey::new(hole_queue.tenant_id.clone(), hole_queue.queue_id.clone());
+    let hole = SegmentedObjectLog::open(store.clone(), cfg);
+    hole.create_queue(&hole_queue).unwrap();
+    hole.fence_epoch(&hole_shard, 0, 0).unwrap(); // head v0
+    hole.enqueue(&hole_shard, &pushes(1), 0, 1).unwrap();
+    hole.seal(&hole_shard, 0, 2).unwrap(); // head v1
+    hole.fence_epoch(&hole_shard, 1, 3).unwrap(); // head v2
+    let hole_prefix = format!(
+        "t/{}/q/{}/authority_head/",
+        hex_lower(hole_shard.tenant_id.as_str().as_bytes()),
+        hex_lower(hole_shard.queue_id.as_str().as_bytes())
+    );
+    assert!(
+        store
+            .delete(&versioned_head_key_s(&hole_prefix, 1))
+            .unwrap()
+    );
+    assert_eq!(
+        hole.fence_epoch(&hole_shard, 2, 4),
+        Err(EngineError::Conflict)
+    );
+    assert!(matches!(
+        hole.read_all(&hole_shard),
+        Err(EngineError::Conflict)
+    ));
+}
+
+#[test]
+fn segmented_authority_recovery_walks_only_the_live_candidate_suffix() {
+    let store = std::sync::Arc::new(CountingBlobStore::default());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let queue = unique_qdef("authority-live-suffix");
+    let shard = pqueue_engine::QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    log.create_queue(&queue).unwrap();
+    log.fence_epoch(&shard, 0, 0).unwrap();
+    for now in 0..6 {
+        log.enqueue(&shard, &pushes(1), 0, now).unwrap();
+        log.seal(&shard, 0, now + 100).unwrap();
+    }
+    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
+        .unwrap();
+    assert_eq!(log.expire_segments_through(&shard, 3, 10_000).unwrap(), 4);
+    let candidate_prefix = format!(
+        "t/{}/q/{}/manifest_candidates/",
+        hex_lower(shard.tenant_id.as_str().as_bytes()),
+        hex_lower(shard.queue_id.as_str().as_bytes())
+    );
+    let candidates = store.list(&candidate_prefix).unwrap();
+    assert!(
+        candidates.iter().all(|key| {
+            !key.contains("/i00000000000000000000/")
+                && !key.contains("/i00000000000000000001/")
+                && !key.contains("/i00000000000000000002/")
+        }),
+        "winning candidates strictly below the durable horizon are physically reclaimed"
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|key| key.contains("/i00000000000000000003/")),
+        "the candidate at the horizon remains as the physical live-chain root"
+    );
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&queue).unwrap();
+    store.reset_reads();
+    let page = reopened.read_from(&shard, 4).unwrap();
+    assert_eq!(page.len(), 2);
+    let candidate_gets = store
+        .get_keys()
+        .into_iter()
+        .filter(|key| key.contains("/manifest_candidates/"))
+        .count();
+    assert_eq!(
+        candidate_gets, 6,
+        "the read performs two manifest folds (floor guard + tail read), each limited to the floor entry plus two live data candidates"
     );
 }
 
