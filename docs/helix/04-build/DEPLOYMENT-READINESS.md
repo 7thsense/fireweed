@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 31a09aecf7dce16845814dedf40076870a7a6691a0089e3d5758c9b749f607b5
+    self_hash: a0e586b8da0b19602c95fc769dabe4cfd964b9c4c013a27fc2ba9c0c790038bb
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: eb42f16b7dc36a9316cdafa06921e2d089246ed79f6155212022c533acfc4ae9
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-16T17:39:37Z"
+    reviewed_at: "2026-07-16T19:48:52Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -38,11 +38,11 @@ rendering, and CI evidence actually cover.
 ## Current Release Boundary
 
 > **Version source of truth:** the workspace `Cargo.toml` `[workspace.package] version`
-> (currently **0.15.1**) is canonical for the current release line. Release tags follow it
-> (`v0.15.1`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
+> (currently **0.16.0**) is canonical for the current release line. Release tags follow it
+> (`v0.16.0`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The v0.15.x release packaging ships the `pqueue-service` RESP binary, container
+The v0.16.x release packaging ships the `pqueue-service` RESP binary, container
 image, Helm chart, binary archive, checksums, and release evidence. The service
 runtime (`crates/pqueue-server/src/env_config.rs`) currently wires these
 executable combinations:
@@ -167,7 +167,9 @@ CI live-`kind` matrix covers `objectlog-inmemory`, `objectlog-sqlite`,
 `postgres-sqlite`, and `postgres-postgres`; `objectlog/hybrid-strict` remains
 env-only (see the table above).
 
-Current CI state (v0.15.1): the `ci` workflow is green on `main`; all GitHub
+Current CI state (v0.16.0 release candidate): local release gates must pass at the
+exact release commit, and pushed-main CI must be green at that same commit before
+the tag is created. All GitHub
 Actions are on their current (Node 24) action majors (`actions/checkout@v5`,
 `azure/setup-helm@v5`, `azure/setup-kubectl@v5`, `docker/build-push-action@v7`,
 `docker/login-action@v4`, `docker/setup-buildx-action@v4`); and the embedded

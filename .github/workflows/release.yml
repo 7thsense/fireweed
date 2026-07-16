@@ -57,6 +57,38 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
 
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ inputs.tag }}"
+          fi
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify release identity
+        shell: bash
+        run: |
+          workspace_version="$(
+            cargo metadata --no-deps --format-version 1 |
+              jq -r '.packages[] | select(.name == "pqueue") | .version'
+          )"
+          test "${{ steps.release.outputs.tag }}" = "v${workspace_version}"
+          test "${{ steps.release.outputs.version }}" = "${workspace_version}"
+          test -f "docs/releases/v${workspace_version}.md"
+          git fetch origin main --no-tags
+          test "${GITHUB_SHA}" = "$(git rev-parse origin/main)"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            test "${GITHUB_REF_NAME}" = "v${workspace_version}"
+          else
+            git fetch origin "refs/tags/v${workspace_version}:refs/tags/v${workspace_version}"
+            test "${GITHUB_SHA}" = "$(git rev-list -n 1 "v${workspace_version}")"
+          fi
+
       - name: Exact Postgres TP-003 storage-pair proof
         env:
           PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
@@ -96,19 +128,6 @@ jobs:
         env:
           PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
         run: bash scripts/ci/release-gate.sh
-
-      - name: Resolve release tag
-        id: release
-        shell: bash
-        run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            tag="${GITHUB_REF_NAME}"
-          else
-            tag="${{ inputs.tag }}"
-          fi
-          version="${tag#v}"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Deployment release gate
         env:
@@ -211,12 +230,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.release.outputs.tag }}"
+          notes="docs/releases/v${{ steps.release.outputs.version }}.md"
           if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$tag" --notes-file "$notes"
             gh release upload "$tag" target/release-dist/* --clobber
           else
             gh release create "$tag" target/release-dist/* \
               --title "$tag" \
-              --notes "pqueue $tag binary release. Storage is configured with separate log and projection backends."
+              --notes-file "$notes"
           fi
 
       - name: Surface release workflow failure
