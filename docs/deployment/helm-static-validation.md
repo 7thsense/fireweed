@@ -6,7 +6,9 @@ cluster.
 The chart storage contract is expressed as axes:
 
 - `storage.log.backend`: `objectlog` or `postgres`
+- `storage.log.objectLog.store`: `local` or `s3`
 - `storage.projection.backend`: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or `postgres`
+- `storage.controlPlane.backend`: `inprocess` or `postgres`
 
 `hybrid` is the projection value for the normative `objectlog/hybrid` contract:
 the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid`, uses
@@ -28,6 +30,13 @@ SQLite path and persistent volume mount plus all five fail-closed controls:
 `PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS`, and
 `PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD`. Only the object-log log
 axis pairs with `hybrid-async`; other pairings fail closed at startup.
+
+`shared-s3-postgres-control-plane` is the replica-safe shared profile. It
+renders `PQUEUE_OBJECT_LOG_S3_*`, `PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL`,
+and `PQUEUE_ADVERTISE_ADDR` from the pod IP, uses `replicaCount=3`, and keeps
+SQLite projections pod-local via `emptyDir` rather than a shared RWO PVC.
+The chart fails closed if a local object-log profile is scaled beyond one
+replica.
 
 The gate runs `helm lint --strict`, renders checked-in CI values for selected
 axis combinations, asserts the rendered environment variables, and validates the

@@ -42,7 +42,7 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/pqueue/ci/.
-COMBINATIONS=(objectlog-inmemory objectlog-sqlite objectlog-hybrid objectlog-hybrid-async postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
+COMBINATIONS=(objectlog-inmemory objectlog-sqlite objectlog-hybrid objectlog-hybrid-async shared-s3-postgres-control-plane postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -132,6 +132,7 @@ values_file_for() {
         objectlog-sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
         objectlog-hybrid) echo "${CHART_DIR}/ci/objectlog-hybrid-values.yaml" ;;
         objectlog-hybrid-async) echo "${CHART_DIR}/ci/objectlog-hybrid-async-values.yaml" ;;
+        shared-s3-postgres-control-plane) echo "${CHART_DIR}/ci/shared-s3-postgres-control-plane-values.yaml" ;;
         postgres-inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         postgres-sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres-postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
@@ -230,6 +231,34 @@ assert_objectlog_hybrid_async_contract() {
     assert_no_fixture_credentials "$rendered" "objectlog/hybrid-async rendered manifest"
 }
 
+assert_shared_s3_postgres_control_plane_contract() {
+    local rendered="$1"
+
+    assert_contains "$rendered" 'replicas: 3' "shared profile replica count"
+    assert_contains "$rendered" 'PQUEUE_REPLICA_COUNT: "3"' "replica count env"
+    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'PQUEUE_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
+    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_BUCKET: "pqueue-shared"' "S3 bucket"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_REGION: "us-east-1"' "S3 region"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE: "static"' "S3 credential source"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP: "false"' "S3 TLS setting"
+    assert_contains "$rendered" 'PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS: "5000"' "control-plane heartbeat ttl"
+    assert_contains "$rendered" 'PQUEUE_CONTROL_PLANE_LEASE_TTL_MS: "15000"' "control-plane lease ttl"
+    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "pod-local SQLite path"
+    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID' "S3 access key secret env"
+    assert_contains "$rendered" 'name: PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY' "S3 secret key secret env"
+    assert_contains "$rendered" 'name: PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL' "postgres control-plane secret env"
+    assert_contains "$rendered" 'name: PQUEUE_ADVERTISE_ADDR' "pod-reachable endpoint env"
+    assert_contains "$rendered" 'fieldPath: status.podIP' "pod IP downward API"
+    assert_contains "$rendered" 'value: "$(POD_IP):8080"' "pod-reachable endpoint value"
+    assert_not_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT' "shared object-log root"
+    assert_not_contains "$rendered" 'kind: PersistentVolumeClaim' "shared PVC"
+    assert_contains "$rendered" 'emptyDir: {}' "pod-local projection volume"
+    assert_no_fixture_credentials "$rendered" "shared S3/postgres rendered manifest"
+}
+
 assert_postgres_contract() {
     local rendered="$1"
     local projection="$2"
@@ -293,6 +322,7 @@ assert_combination_contract() {
         objectlog-sqlite) assert_objectlog_sqlite_contract "$rendered" ;;
         objectlog-hybrid) assert_objectlog_hybrid_contract "$rendered" ;;
         objectlog-hybrid-async) assert_objectlog_hybrid_async_contract "$rendered" ;;
+        shared-s3-postgres-control-plane) assert_shared_s3_postgres_control_plane_contract "$rendered" ;;
         postgres-inmemory) assert_postgres_contract "$rendered" "inmemory" ;;
         postgres-sqlite) assert_postgres_contract "$rendered" "sqlite" ;;
         postgres-postgres) assert_postgres_contract "$rendered" "postgres" ;;
@@ -315,6 +345,18 @@ main() {
 
     echo "--- generated bootstrap inventory contract ---"
     assert_generated_bootstrap_contract
+
+    echo "--- local profile fail-closed contract ---"
+    local scaled_local
+    scaled_local="$(mktemp)"
+    if helm template pqueue-local-scaled "$CHART_DIR" --values "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" --set replicaCount=2 >"$scaled_local" 2>&1; then
+        err "scaled local objectlog/sqlite profile unexpectedly rendered"
+        cat "$scaled_local" >&2
+        rm -f "$scaled_local"
+        exit 1
+    fi
+    assert_contains "$scaled_local" 'replicaCount > 1 requires storage.log.backend=objectlog' "scaled local fail-closed message"
+    rm -f "$scaled_local"
 
     echo "--- helm package ---"
     rm -rf "$PACKAGE_DIR"
