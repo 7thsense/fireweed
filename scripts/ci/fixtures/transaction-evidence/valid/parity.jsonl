@@ -1,0 +1,2 @@
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-6","backend":"postgres/sqlite","result":"pass","detail":"","assertions":["fixture parity proof"],"recorded_at":"fixture"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-6","backend":"postgres/postgres","result":"pass","detail":"","assertions":["fixture parity proof"],"recorded_at":"fixture"}

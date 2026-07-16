@@ -18,6 +18,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 
 pub mod attestation;
+pub mod transaction;
 
 /// One verification-ledger row: a single measured release-evidence run.
 ///
