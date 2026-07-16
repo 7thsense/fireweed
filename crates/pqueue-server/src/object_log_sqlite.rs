@@ -1674,6 +1674,12 @@ impl SegmentedObjectLogInMemoryBackend {
         })
     }
 
+    /// A snapshot of the measured group-commit segment/object counters (segments sealed, objects PUT,
+    /// commands committed, per-segment batch sizes) for the in-memory projection variant.
+    pub fn segment_counters(&self) -> SegmentCounters {
+        self.log.counters()
+    }
+
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
         self
