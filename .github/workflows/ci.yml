@@ -122,6 +122,9 @@ jobs:
           - storage: objectlog-hybrid
             log_backend: objectlog
             projection_backend: hybrid
+          - storage: objectlog-hybrid-async
+            log_backend: objectlog
+            projection_backend: hybrid-async
           - storage: postgres-inmemory
             log_backend: postgres
             projection_backend: inmemory

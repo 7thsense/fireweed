@@ -42,7 +42,7 @@ declare -A KUBECONFORM_SHA256=(
 )
 
 # Storage combinations to validate. Each maps to a CI values file under charts/pqueue/ci/.
-COMBINATIONS=(objectlog-inmemory objectlog-sqlite objectlog-hybrid postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
+COMBINATIONS=(objectlog-inmemory objectlog-sqlite objectlog-hybrid objectlog-hybrid-async postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
 
@@ -131,6 +131,7 @@ values_file_for() {
         objectlog-inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
         objectlog-sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
         objectlog-hybrid) echo "${CHART_DIR}/ci/objectlog-hybrid-values.yaml" ;;
+        objectlog-hybrid-async) echo "${CHART_DIR}/ci/objectlog-hybrid-async-values.yaml" ;;
         postgres-inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         postgres-sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres-postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
@@ -210,6 +211,25 @@ assert_objectlog_hybrid_contract() {
     assert_no_fixture_credentials "$rendered" "objectlog/hybrid rendered manifest"
 }
 
+assert_objectlog_hybrid_async_contract() {
+    local rendered="$1"
+
+    assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
+    assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "hybrid-async"' "hybrid-async projection axis"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_ROOT: "/var/lib/pqueue/projection/object-log"' "object-log root"
+    assert_contains "$rendered" 'PQUEUE_SQLITE_PROJECTION_PATH: "/var/lib/pqueue/projection/projection.db"' "hybrid-async sqlite projection path"
+    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS: "100000"' "hybrid-async command-lag bound"
+    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES: "536870912"' "hybrid-async byte-debt bound"
+    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX: "1024"' "hybrid-async queue-depth bound"
+    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS: "60000"' "hybrid-async oldest-unapplied bound"
+    assert_contains "$rendered" 'PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD: "3"' "hybrid-async poison retry threshold"
+    assert_contains "$rendered" 'kind: PersistentVolumeClaim' "storage PVC"
+    assert_contains "$rendered" 'name: storage' "storage volume"
+    assert_contains "$rendered" 'mountPath: "/var/lib/pqueue/projection"' "hybrid-async projection volume mount"
+    assert_not_contains "$rendered" 'PQUEUE_BACKEND_PROFILE' "legacy profile env"
+    assert_no_fixture_credentials "$rendered" "objectlog/hybrid-async rendered manifest"
+}
+
 assert_postgres_contract() {
     local rendered="$1"
     local projection="$2"
@@ -257,6 +277,7 @@ assert_combination_contract() {
         objectlog-inmemory) assert_objectlog_inmemory_contract "$rendered" ;;
         objectlog-sqlite) assert_objectlog_sqlite_contract "$rendered" ;;
         objectlog-hybrid) assert_objectlog_hybrid_contract "$rendered" ;;
+        objectlog-hybrid-async) assert_objectlog_hybrid_async_contract "$rendered" ;;
         postgres-inmemory) assert_postgres_contract "$rendered" "inmemory" ;;
         postgres-sqlite) assert_postgres_contract "$rendered" "sqlite" ;;
         postgres-postgres) assert_postgres_contract "$rendered" "postgres" ;;
