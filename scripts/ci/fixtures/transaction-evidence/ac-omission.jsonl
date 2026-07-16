@@ -1,0 +1,7 @@
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres/sqlite","result":"pass","detail":"","assertions":["proof"],"recorded_at":"fixture"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-2","backend":"postgres/sqlite","result":"pass","detail":"","assertions":["proof"],"recorded_at":"fixture"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"postgres/sqlite","result":"pass","detail":"","assertions":["proof"],"recorded_at":"fixture"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-6","backend":"postgres/sqlite","result":"pass","detail":"","assertions":["proof"],"recorded_at":"fixture"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres/postgres","result":"pass","detail":"","assertions":["proof"],"recorded_at":"fixture"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-2","backend":"postgres/postgres","result":"pass","detail":"","assertions":["proof"],"recorded_at":"fixture"}
+{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-3","backend":"postgres/postgres","result":"pass","detail":"","assertions":["proof"],"recorded_at":"fixture"}

@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 0c4b25916517119d392a1258138a532f28f585883091140eb7720c3f84f19f5e
+    self_hash: 7bf6f24f8c8c3f21eff67add7a4644c05f71a9c4865c46259096eca7572948b3
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: eb42f16b7dc36a9316cdafa06921e2d089246ed79f6155212022c533acfc4ae9
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-16T16:51:45Z"
+    reviewed_at: "2026-07-16T17:31:42Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -104,6 +104,20 @@ Release readiness requires:
   API-001's external transaction contract under fault injection: success is
   durable and visible, rejection has no committed effect, and unknown outcomes
   resolve exactly once by `request_id`.
+- CI and tag releases provision a live Postgres service and run
+  `ac_txn_contract_matrix_postgres_storage_pairs` plus
+  `ac_txn_6_postgres_storage_pair_parity` with `PQUEUE_PG_TEST_URL` set, so the
+  exact `postgres/sqlite` and `postgres/postgres` rows cannot pass by skip. Each
+  job deletes both tracked JSONL outputs before the tests, requires both
+  regenerated files to be non-empty, and only then invokes the verifier; stale
+  repository evidence cannot satisfy the live proof step.
+- `pqueue-verify-transaction-evidence` consumes the two exact-pair JSONL files
+  and requires AC-TXN-1/2/3/6 for both profiles. Missing, duplicate, failed,
+  partial, coverage-GAP, and all whole-row N/A results fail closed. Capability
+  limits may be recorded only as assertion context inside a passing AC row. The
+  standalone smoke release gate validates the repository-held snapshot;
+  freshness is an additional invariant enforced by the CI and tag-release steps
+  above.
 
 The `kind` proof is the minimum release-readiness gate. It is not a substitute
 for environment-specific capacity planning, credentials, monitoring, backups, or
@@ -313,7 +327,10 @@ from the local object-log fixture.
 Release-readiness verification for the current boundary is:
 
 ```sh
-bash scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3
+bash scripts/ci/release-gate.sh
+cargo run -p pqueue-release --bin pqueue-verify-transaction-evidence -- \
+  --evidence docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl \
+  --evidence docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
 bash scripts/ci/helm-gate.sh
 bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend inmemory
 bash scripts/ci/deployment-release-gate.sh

@@ -14,6 +14,9 @@
 #     emitted row is well-formed + strict-valid, and the SMOKE-tier headline
 #     ids E2 (cross-queue scale-out + queue density) and E3 (object-log
 #     cost/ack + recovery) are present.
+#   - Repository-held TP-003 evidence snapshot contains passing required rows
+#     for AC-TXN-1/2/3/6 on both exact Postgres storage pairs. Fresh generation
+#     is enforced by CI/release workflows.
 #   - Live coverage bars: pqueue-core >=90% line / >=85% branch,
 #     pqueue-engine >=80% line (enforced below; this comment is not the
 #     authority — the check-lcov-coverage.py calls are).
@@ -45,6 +48,14 @@ ${CARGO} fmt --all --check
 
 echo "--- clippy ---"
 ${CARGO} clippy --workspace --all-targets -- -D warnings
+
+echo "--- exact Postgres TP-003 transaction evidence fixtures ---"
+${CARGO} test -p pqueue-release --test transaction_evidence_tests -- --nocapture
+
+echo "--- repository-held Postgres TP-003 transaction evidence snapshot ---"
+${CARGO} run -p pqueue-release --bin pqueue-verify-transaction-evidence -- \
+    --evidence "${REPO_ROOT}/docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl" \
+    --evidence "${REPO_ROOT}/docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
 
 # A CLEAN ledger dir so stale pre-migration rows in target/pqueue-ledger can
 # never satisfy the gate. Every suite is pointed at this dir via the env var

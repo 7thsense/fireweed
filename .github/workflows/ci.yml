@@ -66,6 +66,26 @@ jobs:
           PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
         run: cargo +1.92.0 test -p pqueue-postgres --test conformance push_then_select_eligible_in_priority_order -- --nocapture
 
+      - name: Exact Postgres TP-003 storage-pair proof
+        env:
+          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+        run: |
+          matrix_evidence=docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl
+          parity_evidence=docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
+          rm -f "$matrix_evidence" "$parity_evidence"
+          cargo +1.92.0 test -p pqueue-conformance \
+            --test external_transaction_contract_matrix_tests \
+            ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture
+          cargo +1.92.0 test -p pqueue-conformance \
+            --test external_transaction_contract_matrix_tests \
+            ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture
+          test -s "$matrix_evidence"
+          test -s "$parity_evidence"
+          cargo +1.92.0 run -p pqueue-release \
+            --bin pqueue-verify-transaction-evidence -- \
+            --evidence "$matrix_evidence" \
+            --evidence "$parity_evidence"
+
       - name: Start MinIO (S3 object-log substrate)
         run: |
           docker run -d --name minio -p 9000:9000 \

@@ -18,6 +18,18 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pq
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: pqueue
@@ -45,6 +57,26 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
       - run: cargo install --locked cargo-llvm-cov --version 0.8.2
 
+      - name: Exact Postgres TP-003 storage-pair proof
+        env:
+          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+        run: |
+          matrix_evidence=docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl
+          parity_evidence=docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
+          rm -f "$matrix_evidence" "$parity_evidence"
+          cargo +1.92.0 test -p pqueue-conformance \
+            --test external_transaction_contract_matrix_tests \
+            ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture
+          cargo +1.92.0 test -p pqueue-conformance \
+            --test external_transaction_contract_matrix_tests \
+            ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture
+          test -s "$matrix_evidence"
+          test -s "$parity_evidence"
+          cargo +1.92.0 run -p pqueue-release \
+            --bin pqueue-verify-transaction-evidence -- \
+            --evidence "$matrix_evidence" \
+            --evidence "$parity_evidence"
+
       - name: Install Helm
         uses: azure/setup-helm@v5
         with:
@@ -60,7 +92,10 @@ jobs:
           curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
           sudo install -m 0755 kind /usr/local/bin/kind
 
-      - run: bash scripts/ci/release-gate.sh
+      - name: Release gate
+        env:
+          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+        run: bash scripts/ci/release-gate.sh
 
       - name: Resolve release tag
         id: release
