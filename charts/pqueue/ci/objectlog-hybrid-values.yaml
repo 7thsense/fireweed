@@ -1,4 +1,4 @@
-# Static render values: objectlog log with hybrid SQLite-plus-memory projection axis selected.
+# Live kind CI values: objectlog log with hybrid durable-SQLite-plus-hot-memory projection.
 storage:
   log:
     backend: objectlog

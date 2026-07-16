@@ -99,6 +99,9 @@ jobs:
           - storage: objectlog-sqlite
             log_backend: objectlog
             projection_backend: sqlite
+          - storage: objectlog-hybrid
+            log_backend: objectlog
+            projection_backend: hybrid
           - storage: postgres-inmemory
             log_backend: postgres
             projection_backend: inmemory
