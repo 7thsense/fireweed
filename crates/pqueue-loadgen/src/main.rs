@@ -851,19 +851,21 @@ fn cmd_density_run(args: &[String]) -> ! {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    hot_phase.store(true, Ordering::SeqCst);
     let hot_phase_started_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_millis() as u64;
+    hot_phase.store(true, Ordering::SeqCst);
     println!("DENSITY_PHASE HOT_START {hot_phase_started_unix_ms}");
+    io::stdout().flush().expect("flush HOT_START marker");
     let (_, loaded_ingest, _, loaded_claim) = measure(&hot_spec, items, conns, pipe, batch);
+    hot_phase.store(false, Ordering::SeqCst);
     let hot_phase_ended_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_millis() as u64;
-    hot_phase.store(false, Ordering::SeqCst);
     println!("DENSITY_PHASE HOT_END {hot_phase_ended_unix_ms}");
+    io::stdout().flush().expect("flush HOT_END marker");
     stop.store(true, Ordering::SeqCst);
     for handle in handles {
         handle.join().expect("density cold worker");
