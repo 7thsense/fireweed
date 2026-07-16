@@ -49,10 +49,13 @@ export KUBECONFIG="$KUBECONFIG_FILE"
 docker build \
   --label "org.opencontainers.image.revision=$REVISION" \
   -f "$REPO_ROOT/Dockerfile.e2" -t "$IMAGE" "$REPO_ROOT"
-IMAGE_DIGEST=$(docker image inspect "$IMAGE" --format '{{.Id}}')
-[[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+DOCKER_IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}')
+[[ "$DOCKER_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ "$(docker image inspect "$IMAGE" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" == "$REVISION" ]]
 kind load docker-image "$IMAGE" --name "$CLUSTER"
+IMAGE_DIGEST=$(docker exec "${CLUSTER}-control-plane" crictl images -o json | jq -r \
+  --arg id "$DOCKER_IMAGE_ID" '.images[] | select(.id == $id) | .repoDigests[0] | split("@")[1]' | head -n1)
+[[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
 
 kubectl create namespace "$NAMESPACE"
 cat <<YAML | kubectl apply -f -
