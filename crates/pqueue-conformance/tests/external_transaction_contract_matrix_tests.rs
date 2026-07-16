@@ -20,6 +20,13 @@
 //! | AC-TXN-6 cross-combination parity | — | ✓ (sqlite-log vs objectlog+sqlite) | | | | — |
 //! | AC-TXN-7 latency-bound invariance | — | — | — | pass (AC-TXN-1/2/3 + AC-TXN-6 across regimes AND the numeric 1/5/20/100 ms flusher sweep, incl. the AC-TXN-5/5A hybrid object-log-touching invariants swept across the numeric bounds)^ | | — |
 //!
+//! The final `postgres (env)` column above is the legacy Postgres-log/in-memory-projection row.  The shipped
+//! exact `postgres/sqlite` and `postgres/postgres` pairs have dedicated live-DB tests and evidence files:
+//! `ac_txn_contract_matrix_postgres_storage_pairs` proves AC-TXN-1/2/3 while reopening both durable axes,
+//! and `ac_txn_6_postgres_storage_pair_parity` proves the same-history observable-state parity.  Their
+//! profile-keyed rows live in `tp003-ac-txn-matrix-postgres-storage-pairs.jsonl` and
+//! `tp003-ac-txn-parity-postgres-storage-pairs.jsonl`.
+//!
 //! AC-TXN-3's request_id-replay-across-restart is a REAL assertion on EVERY durable profile (atomic AND
 //! eventual-apply): `ComposedBackend` recovery rebuilds the push-idempotency map from the durable log for
 //! both durability classes (this suite's B3.1 run closed the earlier atomic-composed-log gap in
@@ -157,6 +164,7 @@
 //! commit-latency knob) — its drain-exactly-once ESSENCE is swept on the composed backend. So the row is now
 //! `pass` — no coverage-GAP remains.
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -254,6 +262,84 @@ fn objectlog_sqlite_factory() -> impl Fn(&str) -> HybridBackend {
         .with_group_commit(true)
         .recover()
         .expect("recover objectlog/hybrid")
+    }
+}
+
+/// The two Postgres-log storage pairs exposed by `pqueue-server`.  These are deliberately assembled from
+/// the same axis types as the runtime composition root rather than substituting the older
+/// Postgres-log/in-memory convenience constructor.
+type PostgresSqliteBackend = ComposedBackend<
+    pqueue_postgres::PostgresLog,
+    pqueue_sqlite::SqliteProjectionStore,
+    InProcessControlPlane,
+>;
+type PostgresPostgresBackend = ComposedBackend<
+    pqueue_postgres::PostgresLog,
+    pqueue_postgres::PostgresRelational,
+    InProcessControlPlane,
+>;
+
+fn postgres_schema(prefix: &str, run: u64, tag: &str, axis: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tag.hash(&mut hasher);
+    format!(
+        "pq_{prefix}_{}_{}_{}_{:016x}",
+        std::process::id(),
+        run,
+        axis,
+        hasher.finish()
+    )
+}
+
+/// Exact `storage.log.backend=postgres` + `storage.projection.backend=sqlite` factory.  Reopening a tag
+/// reconnects the Postgres log schema AND the same file-backed SQLite projection, then runs normal composed
+/// recovery.  Thus the kill/reopen checkpoints exercise both durable axes used by the server profile.
+fn postgres_sqlite_factory(
+    url: String,
+    prefix: &'static str,
+) -> impl Fn(&str) -> PostgresSqliteBackend {
+    let run = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let base = base_dir(&format!("postgres-sqlite-{prefix}"));
+    move |tag: &str| {
+        std::fs::create_dir_all(&base).expect("create postgres/sqlite projection directory");
+        let log_schema = postgres_schema(prefix, run, tag, "log");
+        let projection_path = base.join(format!("{tag}-projection.sqlite"));
+        let log = pqueue_postgres::PostgresLog::connect_in_schema(&url, &log_schema)
+            .expect("connect postgres/sqlite log axis");
+        let projection =
+            pqueue_sqlite::SqliteProjectionStore::open(projection_path.to_str().unwrap())
+                .expect("open postgres/sqlite projection axis");
+        ComposedBackend::new(log, projection, InProcessControlPlane::new())
+            .recover()
+            .expect("recover postgres/sqlite exact storage pair")
+            // The server applies its configured node id after recovery.  Keep generated ids in a distinct
+            // namespace from AC-TXN-6's explicit fixture ids (1..4), just as a real multi-owner deployment
+            // does; otherwise the parity probe's later server-minted request-id push can collide with an
+            // intentionally hand-authored fixture id.
+            .with_node_id(1)
+    }
+}
+
+/// Exact `storage.log.backend=postgres` + `storage.projection.backend=postgres` factory.  The log and
+/// projection use independent Postgres connections and schemas, matching the server's two-axis wiring.
+/// Reopening a tag reconnects both schemas before composed recovery replays any unapplied log tail.
+fn postgres_postgres_factory(
+    url: String,
+    prefix: &'static str,
+) -> impl Fn(&str) -> PostgresPostgresBackend {
+    let run = COUNTER.fetch_add(1, Ordering::SeqCst);
+    move |tag: &str| {
+        let log_schema = postgres_schema(prefix, run, tag, "log");
+        let projection_schema = postgres_schema(prefix, run, tag, "projection");
+        let log = pqueue_postgres::PostgresLog::connect_in_schema(&url, &log_schema)
+            .expect("connect postgres/postgres log axis");
+        let projection =
+            pqueue_postgres::PostgresRelational::connect_in_schema(&url, &projection_schema)
+                .expect("connect postgres/postgres projection axis");
+        ComposedBackend::new(log, projection, InProcessControlPlane::new())
+            .recover()
+            .expect("recover postgres/postgres exact storage pair")
+            .with_node_id(1)
     }
 }
 
@@ -4446,6 +4532,153 @@ fn ac_txn_contract_matrix_postgres() {
     assert!(
         failures.is_empty(),
         "AC-TXN postgres failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// TP-003 production-claim proof for the two exact Postgres-log storage pairs shipped by
+/// `pqueue-server`.  Unlike `ac_txn_contract_matrix_postgres`, neither row substitutes an in-memory
+/// projection: every checkpoint drops and reconnects both configured durable axes.
+#[test]
+fn ac_txn_contract_matrix_postgres_storage_pairs() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "AC-TXN POSTGRES STORAGE-PAIR MATRIX SKIPPED — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+
+    let mut records: Vec<AcEvidence> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-1",
+        "postgres/sqlite",
+        futures::executor::block_on(ac_txn_1_success_durable_visible(postgres_sqlite_factory(
+            url.clone(),
+            "pgsqlite_txn1",
+        ))),
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-2",
+        "postgres/sqlite",
+        futures::executor::block_on(ac_txn_2_rejection_no_effect(
+            postgres_sqlite_factory(url.clone(), "pgsqlite_txn2"),
+            DURABLE,
+        )),
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-3",
+        "postgres/sqlite",
+        futures::executor::block_on(ac_txn_3_unknown_outcome_replay(
+            postgres_sqlite_factory(url.clone(), "pgsqlite_txn3"),
+            DURABLE,
+        )),
+    );
+
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-1",
+        "postgres/postgres",
+        futures::executor::block_on(ac_txn_1_success_durable_visible(postgres_postgres_factory(
+            url.clone(),
+            "pgpg_txn1",
+        ))),
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-2",
+        "postgres/postgres",
+        futures::executor::block_on(ac_txn_2_rejection_no_effect(
+            postgres_postgres_factory(url.clone(), "pgpg_txn2"),
+            DURABLE,
+        )),
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-3",
+        "postgres/postgres",
+        futures::executor::block_on(ac_txn_3_unknown_outcome_replay(
+            postgres_postgres_factory(url, "pgpg_txn3"),
+            DURABLE,
+        )),
+    );
+
+    let path = write_evidence("tp003-ac-txn-matrix-postgres-storage-pairs.jsonl", &records)
+        .expect("write exact postgres storage-pair evidence");
+    eprintln!(
+        "AC-TXN exact postgres storage-pair evidence written to {}",
+        path.display()
+    );
+    assert!(
+        failures.is_empty(),
+        "AC-TXN exact postgres storage-pair failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// AC-TXN-6 runs one generated history and failure schedule against the two exact storage pairs and records
+/// the parity result under each production profile key.  `ac_txn_6_parity` compares final visible metrics,
+/// eligibility order, pending/active leases, per-item terminal outcomes, and request-id replay/conflict
+/// behavior after both sides reopen.
+#[test]
+fn ac_txn_6_postgres_storage_pair_parity() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "AC-TXN-6 POSTGRES STORAGE-PAIR PARITY SKIPPED — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+
+    let parity = futures::executor::block_on(ac_txn_6_parity(
+        postgres_sqlite_factory(url.clone(), "pgsqlite_txn6"),
+        postgres_postgres_factory(url, "pgpg_txn6"),
+    ));
+    let mut records: Vec<AcEvidence> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-6",
+        "postgres/sqlite",
+        parity.clone().map(|assertions| {
+            assertions
+                .into_iter()
+                .map(|a| format!("parity peer=postgres/postgres: {a}"))
+                .collect()
+        }),
+    );
+    record(
+        &mut records,
+        &mut failures,
+        "AC-TXN-6",
+        "postgres/postgres",
+        parity.map(|assertions| {
+            assertions
+                .into_iter()
+                .map(|a| format!("parity peer=postgres/sqlite: {a}"))
+                .collect()
+        }),
+    );
+
+    let path = write_evidence("tp003-ac-txn-parity-postgres-storage-pairs.jsonl", &records)
+        .expect("write exact postgres storage-pair parity evidence");
+    eprintln!(
+        "AC-TXN-6 exact postgres storage-pair parity evidence written to {}",
+        path.display()
+    );
+    assert!(
+        failures.is_empty(),
+        "AC-TXN-6 exact postgres storage-pair parity failures:\n{}",
         failures.join("\n")
     );
 }
