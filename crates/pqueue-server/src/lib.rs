@@ -853,6 +853,10 @@ pub struct Config {
     pub node_id: u8,
     /// Listen address, e.g. `"127.0.0.1:6380"` (use `":0"` for an ephemeral port in tests).
     pub listen: String,
+    /// Client-reachable RESP address advertised through the shared control plane. Multi-replica env
+    /// profiles require this explicitly so an unspecified listen bind is never rewritten to loopback and
+    /// published as if it were pod-reachable.
+    pub advertise_addr: Option<String>,
     /// How often the background reclaim task ticks the engine.
     pub reclaim_interval: Duration,
     /// Queues to provision at startup. The RESP front has no create-queue command, so a server started
@@ -903,6 +907,7 @@ impl Config {
             embedded_fjord: EmbeddedFjordConfig::default(),
             node_id,
             listen,
+            advertise_addr: None,
             reclaim_interval,
             queues,
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
@@ -920,7 +925,8 @@ pub struct OwnershipRuntime<B, CP: ?Sized> {
     control_plane: Arc<CP>,
     owner: OwnerId,
     endpoint: String,
-    owner_endpoints: Mutex<std::collections::HashMap<OwnerId, String>>,
+    owner_endpoints: Mutex<std::collections::HashMap<OwnerId, CachedOwnerEndpoint>>,
+    endpoint_refreshes: AtomicU64,
     managed_queues: Mutex<std::collections::HashSet<QueueKey>>,
     sessions: Mutex<std::collections::HashMap<QueueKey, OwnedSession>>,
     /// Per-queue gate serializing COLD-START acquisition. `acquire_queue_lease` is non-idempotent (it bumps
@@ -930,20 +936,36 @@ pub struct OwnershipRuntime<B, CP: ?Sized> {
     acquire_gates: Mutex<std::collections::HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
+#[derive(Clone)]
+struct CachedOwnerEndpoint {
+    endpoint: String,
+    expires_at: UtcTimestamp,
+}
+
+/// Accept only canonical, dialable IP socket addresses. The control-plane column is intentionally opaque,
+/// so validation happens both before publication and after every durable read. Unspecified addresses and
+/// port zero are listener bindings, not peer-reachable redirect targets.
+fn validated_owner_endpoint(endpoint: &str) -> Option<String> {
+    let address = endpoint.parse::<SocketAddr>().ok()?;
+    if address.ip().is_unspecified() || address.port() == 0 {
+        return None;
+    }
+    Some(address.to_string())
+}
+
 impl<B, CP: ?Sized> OwnershipRuntime<B, CP>
 where
     B: RespBackend,
     CP: QueueControlPlane + 'static,
 {
     pub fn new(backend: Arc<B>, control_plane: Arc<CP>, owner: OwnerId, endpoint: String) -> Self {
-        let mut endpoints = std::collections::HashMap::new();
-        endpoints.insert(owner.clone(), endpoint.clone());
         Self {
             backend,
             control_plane,
             owner,
             endpoint,
-            owner_endpoints: Mutex::new(endpoints),
+            owner_endpoints: Mutex::new(std::collections::HashMap::new()),
+            endpoint_refreshes: AtomicU64::new(0),
             managed_queues: Mutex::new(std::collections::HashSet::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
             acquire_gates: Mutex::new(std::collections::HashMap::new()),
@@ -958,11 +980,9 @@ where
         &self.endpoint
     }
 
-    pub fn set_owner_endpoint(&self, owner: OwnerId, endpoint: impl Into<String>) {
-        self.owner_endpoints
-            .lock()
-            .expect("poisoned")
-            .insert(owner, endpoint.into());
+    /// Number of node-wide endpoint snapshot polls attempted by this runtime.
+    pub fn endpoint_refresh_count(&self) -> u64 {
+        self.endpoint_refreshes.load(Ordering::Relaxed)
     }
 
     pub fn watch_queue(&self, queue: QueueKey) {
@@ -1024,7 +1044,7 @@ where
     }
 
     pub async fn renew_sessions(&self, now: UtcTimestamp) -> EngineResult<()> {
-        self.cp_heartbeat(self.owner.clone(), now).await?;
+        self.advertise_and_refresh_owner_endpoints(now).await?;
         let mut queues: std::collections::BTreeSet<QueueKey> = self
             .managed_queues
             .lock()
@@ -1233,9 +1253,57 @@ where
         blocking_control_plane(move || cp.register_owner(&owner, now)).await
     }
 
-    async fn cp_heartbeat(&self, owner: OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+    async fn cp_advertise_endpoint(
+        &self,
+        owner: OwnerId,
+        endpoint: String,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let endpoint = validated_owner_endpoint(&endpoint).ok_or(EngineError::Invalid(
+            "owner endpoint must be a dialable IP socket address with a nonzero port",
+        ))?;
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.heartbeat(&owner, now)).await
+        blocking_control_plane(move || cp.advertise_owner_endpoint(&owner, &endpoint, now)).await
+    }
+
+    async fn cp_live_owner_endpoints(
+        &self,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<pqueue_engine::OwnerEndpointAdvertisement>> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.live_owner_endpoints(now)).await
+    }
+
+    /// One advertisement write and one bounded live-owner read per node-level ownership tick. The entire
+    /// cache is replaced so unknown, expired, or removed advertisements cannot survive a successful poll.
+    async fn advertise_and_refresh_owner_endpoints(&self, now: UtcTimestamp) -> EngineResult<()> {
+        self.endpoint_refreshes.fetch_add(1, Ordering::Relaxed);
+        self.cp_advertise_endpoint(self.owner.clone(), self.endpoint.clone(), now)
+            .await?;
+        let advertisements = match self.cp_live_owner_endpoints(now).await {
+            Ok(advertisements) => advertisements,
+            Err(error) => {
+                self.owner_endpoints.lock().expect("poisoned").clear();
+                return Err(error);
+            }
+        };
+        let endpoints = advertisements
+            .into_iter()
+            .filter(|advertisement| now < advertisement.expires_at)
+            .filter_map(|advertisement| {
+                validated_owner_endpoint(&advertisement.endpoint).map(|endpoint| {
+                    (
+                        advertisement.owner,
+                        CachedOwnerEndpoint {
+                            endpoint,
+                            expires_at: advertisement.expires_at,
+                        },
+                    )
+                })
+            })
+            .collect();
+        *self.owner_endpoints.lock().expect("poisoned") = endpoints;
+        Ok(())
     }
 
     async fn cp_resolve(
@@ -1339,7 +1407,12 @@ where
             routing_key,
             &auth,
             &resolution,
-            |owner| endpoints.get(owner).cloned(),
+            |owner| {
+                endpoints
+                    .get(owner)
+                    .filter(|advertisement| now < advertisement.expires_at)
+                    .map(|advertisement| advertisement.endpoint.clone())
+            },
             is_new_claim,
         ))
     }
@@ -1536,6 +1609,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let fjord_log = fjord_surface.log_backend();
     let fjord_broker_listen = config.embedded_fjord.broker_listen.clone();
     let listen = config.listen.clone();
+    let advertise_addr = config.advertise_addr.clone();
     let interval = config.reclaim_interval;
     let queues = config.queues.clone();
     let recovery_max_tail = config.recovery_max_tail;
@@ -1584,6 +1658,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1600,6 +1675,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1622,6 +1698,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1649,6 +1726,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1688,6 +1766,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned_with_fjord_task(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1735,6 +1814,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned_with_fjord_task(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1792,6 +1872,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned_with_fjord_task(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1827,6 +1908,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1865,6 +1947,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -1905,6 +1988,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             run_owned(
                 backend,
                 control_plane,
+                advertise_addr.as_deref(),
                 node_id,
                 clock,
                 &listen,
@@ -2008,9 +2092,11 @@ fn spawn_hybrid_flusher(
 
 /// Wrap an already-`Arc`-shared backend in the selected ownership runtime and run it. [`start`] constructs
 /// the control plane once and passes it through every backend arm instead of manufacturing private state.
+#[allow(clippy::too_many_arguments)]
 async fn run_owned<B: RespBackend>(
     backend: Arc<B>,
     control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
     node_id: u8,
     clock: Arc<dyn Clock>,
     listen: &str,
@@ -2019,12 +2105,13 @@ async fn run_owned<B: RespBackend>(
 ) -> EngineResult<Server> {
     let owner =
         OwnerId::new(format!("node-{node_id}")).map_err(|e| EngineError::Storage(e.to_string()))?;
-    start_with_ownership(
+    start_with_ownership_advertised(
         backend,
         control_plane,
         owner,
         clock,
         listen,
+        advertise_addr,
         reclaim_interval,
         queues,
     )
@@ -2037,6 +2124,7 @@ async fn run_owned<B: RespBackend>(
 async fn run_owned_with_fjord_task<B: RespBackend>(
     backend: Arc<B>,
     control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
     node_id: u8,
     clock: Arc<dyn Clock>,
     listen: &str,
@@ -2047,6 +2135,7 @@ async fn run_owned_with_fjord_task<B: RespBackend>(
     let mut server = run_owned(
         backend,
         control_plane,
+        advertise_addr,
         node_id,
         clock,
         listen,
@@ -2114,19 +2203,51 @@ where
     B: RespBackend,
     CP: QueueControlPlane + ?Sized + 'static,
 {
+    start_with_ownership_advertised(
+        backend,
+        control_plane,
+        owner,
+        clock,
+        listen,
+        None,
+        reclaim_interval,
+        queues,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_with_ownership_advertised<B, CP>(
+    backend: Arc<B>,
+    control_plane: Arc<CP>,
+    owner: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    advertise_addr: Option<&str>,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server>
+where
+    B: RespBackend,
+    CP: QueueControlPlane + ?Sized + 'static,
+{
     for def in queues {
         backend.create_queue(def.clone()).await?;
     }
     let listener = TcpListener::bind(listen).await.map_err(io_err)?;
     let addr = listener.local_addr().map_err(io_err)?;
-    let endpoint = {
+    let endpoint = if let Some(advertise_addr) = advertise_addr {
+        validated_owner_endpoint(advertise_addr).ok_or(EngineError::Invalid(
+            "advertise address must be a dialable IP socket address with a nonzero port",
+        ))?
+    } else {
         let ip = addr.ip();
-        let host = if ip.is_unspecified() {
-            "127.0.0.1".to_string()
+        let advertised_ip = if ip.is_unspecified() {
+            "127.0.0.1".parse().expect("loopback IP is valid")
         } else {
-            ip.to_string()
+            ip
         };
-        format!("{host}:{}", addr.port())
+        SocketAddr::new(advertised_ip, addr.port()).to_string()
     };
     let hooks = Arc::new(OwnershipRuntime::new(
         backend.clone(),
@@ -2135,7 +2256,7 @@ where
         endpoint,
     ));
     let now = clock.now();
-    hooks.cp_register(hooks.owner.clone(), now).await?;
+    hooks.advertise_and_refresh_owner_endpoints(now).await?;
     for def in queues {
         let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
         hooks.watch_queue(queue.clone());

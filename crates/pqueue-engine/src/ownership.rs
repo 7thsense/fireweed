@@ -391,6 +391,20 @@ mod tests {
             fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
                 self.0.register_owner(owner, now)
             }
+            fn advertise_owner_endpoint(
+                &self,
+                owner: &OwnerId,
+                endpoint: &str,
+                now: UtcTimestamp,
+            ) -> EngineResult<()> {
+                self.0.advertise_owner_endpoint(owner, endpoint, now)
+            }
+            fn live_owner_endpoints(
+                &self,
+                now: UtcTimestamp,
+            ) -> EngineResult<Vec<crate::control_plane::OwnerEndpointAdvertisement>> {
+                self.0.live_owner_endpoints(now)
+            }
             fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
                 self.0.heartbeat(owner, now)
             }

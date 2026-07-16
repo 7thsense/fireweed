@@ -22,7 +22,7 @@ use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
     EmbeddedFjordConfig, LogSpec, ObjectLogSpec, ProjectionSpec, S3CredentialSource, SegmentConfig,
-    resolve_node_id,
+    resolve_node_id, validated_owner_endpoint,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -622,11 +622,30 @@ impl Config {
     /// `env-config` feature (default-on for the bin); a library embedder can drop it via `default-features = false`.
     pub fn from_env(env: &BTreeMap<String, String>) -> Result<Config, ConfigError> {
         let segments = segment_config(env)?;
+        let replicas = replica_count(env)?;
+        let advertise_addr = match env
+            .get("PQUEUE_ADVERTISE_ADDR")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(endpoint) => Some(validated_owner_endpoint(endpoint).ok_or_else(|| {
+                ConfigError::new(
+                    "PQUEUE_ADVERTISE_ADDR must be a dialable IP socket address with a nonzero port",
+                )
+            })?),
+            None if replicas > 1 => {
+                return Err(ConfigError::new(
+                    "PQUEUE_REPLICA_COUNT>1 requires PQUEUE_ADVERTISE_ADDR with a pod-reachable IP:port",
+                ));
+            }
+            None => None,
+        };
         Ok(Config {
             backend: parse_backend(env, segments)?,
             embedded_fjord: embedded_fjord_config(env),
             node_id: resolve_node_id(&env_or(env, "PQUEUE_NODE_ID", "0")),
             listen: env_or(env, "PQUEUE_LISTEN_ADDR", "0.0.0.0:8080"),
+            advertise_addr,
             reclaim_interval: parse_duration_ms(env, "PQUEUE_RECLAIM_INTERVAL_MS", 1_000),
             queues: parse_bootstrap_queues(env)?,
             recovery_max_tail: parse_u64(

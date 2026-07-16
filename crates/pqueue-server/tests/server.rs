@@ -12,9 +12,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest, Clock,
-    ComposedBackend, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
-    InMemoryControlPlane, InProcessControlPlane, LogStore, ProjectionRead, PushPort, PushSpec,
-    QueueControlPlane, QueueKey,
+    ComposedBackend, ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind,
+    FinalizeOutcome, FinalizePort, InMemoryControlPlane, InProcessControlPlane, LogStore,
+    ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
 };
 use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_objectlog::ObjectLog;
@@ -183,11 +183,10 @@ async fn ownership_runtime_routes_wrong_node_to_moved() {
         owner("node-b"),
         "10.0.0.2:7000".to_string(),
     );
-    b.set_owner_endpoint(owner("node-a"), "10.0.0.1:7000");
-
-    a.register_owner(ts(0)).unwrap();
+    cp.advertise_owner_endpoint(&owner("node-a"), "10.0.0.1:7000", ts(0))
+        .unwrap();
     a.acquire_queue(&qkey(), ts(0)).await.unwrap();
-    b.register_owner(ts(1)).unwrap();
+    b.renew_sessions(ts(1)).await.unwrap();
 
     let decision = b
         .route_command("XADD", &[], b"t1:q1", ts(1), false)
@@ -210,7 +209,8 @@ async fn resp_misrouted_write_emits_moved_to_active_owner() {
         owner("node-a"),
         "10.0.0.1:7000".to_string(),
     );
-    a.register_owner(ts(0)).unwrap();
+    cp.advertise_owner_endpoint(&owner("node-a"), "10.0.0.1:7000", ts(0))
+        .unwrap();
     a.acquire_queue(&qkey(), ts(0)).await.unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -222,7 +222,7 @@ async fn resp_misrouted_write_emits_moved_to_active_owner() {
         owner("node-b"),
         endpoint(addr),
     ));
-    b.set_owner_endpoint(owner("node-a"), "10.0.0.1:7000");
+    b.renew_sessions(ts(1)).await.unwrap();
     let cancel = CancellationToken::new();
     let task = tokio::spawn(serve_with_shutdown_and_hooks(
         listener,
@@ -243,6 +243,94 @@ async fn resp_misrouted_write_emits_moved_to_active_owner() {
     );
     cancel.cancel();
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn expired_cached_owner_endpoint_fails_closed_before_the_next_refresh() {
+    let backend = Arc::new(composed_memory_backend());
+    backend.create_queue(qdef()).await.unwrap();
+    let cp = Arc::new(InMemoryControlPlane::new(ControlPlaneConfig {
+        heartbeat_ttl_ms: 50,
+        lease_ttl_ms: 5_000,
+    }));
+    let a = OwnershipRuntime::new(
+        backend.clone(),
+        cp.clone(),
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    cp.advertise_owner_endpoint(&owner("node-a"), "10.0.0.1:7000", ts(0))
+        .unwrap();
+    a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+    let b = OwnershipRuntime::new(backend, cp, owner("node-b"), "10.0.0.2:7000".to_string());
+    b.renew_sessions(ts(0)).await.unwrap();
+    assert!(matches!(
+        b.route_command("XADD", &[], b"t1:q1", ts(0), false)
+            .await
+            .unwrap(),
+        RouteDecision::Moved { .. }
+    ));
+
+    // The lease is still live at t=1, but node-a's 50ms membership/endpoint advertisement is expired.
+    // Route-time expiry checking must fail closed even though b has not refreshed its cache again.
+    assert_eq!(
+        b.route_command("XADD", &[], b"t1:q1", ts(1), false)
+            .await
+            .unwrap(),
+        RouteDecision::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn malformed_or_unknown_owner_endpoint_never_redirects() {
+    for advertised in [Some("not-an-address"), None] {
+        let backend = Arc::new(composed_memory_backend());
+        backend.create_queue(qdef()).await.unwrap();
+        let cp = Arc::new(InMemoryControlPlane::default());
+        match advertised {
+            Some(endpoint) => cp
+                .advertise_owner_endpoint(&owner("node-a"), endpoint, ts(0))
+                .unwrap(),
+            None => cp.register_owner(&owner("node-a"), ts(0)).unwrap(),
+        }
+        let a = OwnershipRuntime::new(
+            backend.clone(),
+            cp.clone(),
+            owner("node-a"),
+            "10.0.0.1:7000".to_string(),
+        );
+        a.acquire_queue(&qkey(), ts(0)).await.unwrap();
+        let b = OwnershipRuntime::new(backend, cp, owner("node-b"), "10.0.0.2:7000".to_string());
+        b.renew_sessions(ts(0)).await.unwrap();
+        assert_eq!(
+            b.route_command("XADD", &[], b"t1:q1", ts(0), false)
+                .await
+                .unwrap(),
+            RouteDecision::Unavailable
+        );
+    }
+}
+
+#[tokio::test]
+async fn endpoint_snapshot_refresh_is_once_per_node_tick_not_per_queue() {
+    let backend = Arc::new(composed_memory_backend());
+    let cp = Arc::new(InMemoryControlPlane::default());
+    let runtime = OwnershipRuntime::new(
+        backend.clone(),
+        cp,
+        owner("node-a"),
+        "10.0.0.1:7000".to_string(),
+    );
+    for index in 0..100 {
+        let mut definition = qdef();
+        definition.queue_id = QueueId::new(format!("q-{index}")).unwrap();
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        runtime.watch_queue(key);
+    }
+
+    runtime.renew_sessions(ts(0)).await.unwrap();
+    assert_eq!(runtime.endpoint_refresh_count(), 1);
 }
 
 #[tokio::test]
