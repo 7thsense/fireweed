@@ -43,6 +43,8 @@ STORAGE BACKENDS (runnable live smokes):
   objectlog + inmemory   ephemeral projection over the durable object log
   objectlog + sqlite     durable SQLite relational projection over the object log,
                          persisted on the chart's storage volume
+  objectlog + hybrid     durable SQLite projection plus the hot in-memory serving
+                         image over the object log, persisted on the chart's volume
   postgres  + inmemory   durable postgres command log + in-memory projection
                          (the wired managed-postgres profile). The harness stands
                          up a throwaway in-cluster postgres and injects its DSN as
@@ -114,6 +116,7 @@ values_file_for() {
     case "$1:$2" in
         objectlog:inmemory) echo "${CHART_DIR}/ci/objectlog-inmemory-values.yaml" ;;
         objectlog:sqlite) echo "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" ;;
+        objectlog:hybrid) echo "${CHART_DIR}/ci/objectlog-hybrid-values.yaml" ;;
         postgres:inmemory) echo "${CHART_DIR}/ci/postgres-inmemory-values.yaml" ;;
         postgres:sqlite) echo "${CHART_DIR}/ci/postgres-sqlite-values.yaml" ;;
         postgres:postgres) echo "${CHART_DIR}/ci/postgres-postgres-values.yaml" ;;
@@ -245,10 +248,11 @@ validate_config() {
     case "${LOG_BACKEND}:${PROJECTION_BACKEND}" in
         objectlog:inmemory) ;;
         objectlog:sqlite) ;;
+        objectlog:hybrid) ;;
         postgres:inmemory) ;;
         postgres:sqlite) ;;
         postgres:postgres) ;;
-        *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite}, and log=postgres projection={inmemory,sqlite,postgres}; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
+        *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite,hybrid}, and log=postgres projection={inmemory,sqlite,postgres}; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
     esac
     [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example pqueue:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"

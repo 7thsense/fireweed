@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 7bf6f24f8c8c3f21eff67add7a4644c05f71a9c4865c46259096eca7572948b3
+    self_hash: 9a50cd297430506abc8d6efdc3fbcc3ec3ed5bba2b9678fa0344a62c2aa0299a
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: eb42f16b7dc36a9316cdafa06921e2d089246ed79f6155212022c533acfc4ae9
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-16T17:31:42Z"
+    reviewed_at: "2026-07-16T17:37:11Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -67,7 +67,7 @@ combinations:
 |-------------|--------------------|------|
 | `objectlog` | `inmemory` | Helm render/lint and live `kind` smoke (CI matrix). |
 | `objectlog` | `sqlite` | Runtime wired, Helm render/lint, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite`). |
-| `objectlog` | `hybrid` | Runtime wired and Helm render/lint (`helm-gate.sh` `objectlog-hybrid`); not yet in the CI live-`kind` matrix. |
+| `objectlog` | `hybrid` | Runtime wired, Helm render/lint (`helm-gate.sh` `objectlog-hybrid`), and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid`). |
 | `objectlog` | `hybrid-async` | Runtime wired; chart-schema-selectable with a CI values file (`charts/pqueue/ci/objectlog-hybrid-async-values.yaml`), but not yet in the `helm-gate.sh` static-combination list or the live-`kind` matrix. |
 | `objectlog` | `hybrid-strict` | Runtime wired via env only; **not** chart-selectable (projection enum omits it). |
 | `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend inmemory`). |
@@ -149,9 +149,9 @@ The release CI surface must include:
   chart CI values;
 - a negative check that `PQUEUE_BACKEND_PROFILE` is absent from rendered Helm
   output;
-- live `kind` Helm smokes for `objectlog` + `inmemory` and `objectlog` +
-  `sqlite`, including RESP `PING`, `XADD`, `XREADGROUP`, rollout restart, and
-  post-restart readback;
+- live `kind` Helm smokes for `objectlog` + `inmemory`, `objectlog` + `sqlite`,
+  and `objectlog` + `hybrid`, including RESP `PING`, `XADD`, `XREADGROUP`,
+  rollout restart, and post-restart readback;
 - the TP-003 `AC-TXN-*` transaction-contract matrix for every production-claimed
   storage combination, including object-log crash points around segment write,
   manifest commit, projection apply, response delivery, snapshot, and owner
@@ -163,9 +163,9 @@ The release CI surface must include:
 As more runtime adapters are wired, the live `kind` matrix must grow by storage
 combination. Do not introduce single-name shortcuts for that matrix. The current
 CI live-`kind` matrix covers `objectlog-inmemory`, `objectlog-sqlite`,
-`postgres-inmemory`, `postgres-sqlite`, and `postgres-postgres`; the
-`objectlog` hybrid projection combinations remain static-render-gated only
-(see the table above).
+`objectlog-hybrid`, `postgres-inmemory`, `postgres-sqlite`, and
+`postgres-postgres`; `objectlog/hybrid-async` remains static-render-only and
+`objectlog/hybrid-strict` remains env-only (see the table above).
 
 Current CI state (v0.15.1): the `ci` workflow is green on `main`; all GitHub
 Actions are on their current (Node 24) action majors (`actions/checkout@v5`,
