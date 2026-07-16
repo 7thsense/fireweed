@@ -8,14 +8,14 @@ ddx:
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
-    self_hash: 73d6fa2cc8d44d13d7efdbf302cba38dcc10a2a6809387bf879f74ec945f1647
+    self_hash: eb42f16b7dc36a9316cdafa06921e2d089246ed79f6155212022c533acfc4ae9
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-16T16:38:07Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -118,6 +118,74 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 these source beads directly when invoked with the corresponding
 `--tp002-*-source` flags. The gate may also scan generated ledger rows, but the
 source mapping is the reproducible release authority from a clean checkout.
+
+## Release-evidence freshness and source binding
+
+TP-002 selects **exact-tag rerun** as the release freshness policy. Historical
+E0–E3 rows remain useful build records, but they cannot make a later tag green.
+For every release tag, the governed evidence commands MUST run from the exact
+40-character commit named by that tag and produce a new reviewed attestation.
+The tag gate supplies both the tag and resolved commit to
+`pqueue-verify-evidence-attestation`; a mismatch fails closed.
+
+The policy deliberately favors a simple, auditable rule over reviewed-range
+reuse: even a docs-only release commit invalidates the prior attestation. This
+avoids asking automation to infer whether a source-range change can affect a
+benchmark. Expensive evidence may be scheduled before a release candidate, but
+the final tag's evidence must still be rerun at the exact release commit.
+
+### Attestation contract (`schema_version: 1`)
+
+Each tag has one JSON attestation with these required fields:
+
+- `policy: "exact-tag-rerun"` and `scope: "tp002-release-v1"`;
+- `source.tag` and the full lowercase `source.commit` resolved from that tag;
+- the exact non-empty `producing_command`, plus UTC `produced_at` and
+  `reviewed_at` timestamps;
+- one or more `evidence` entries containing a repository-relative file or
+  directory `path` and its lowercase SHA-256;
+- `inputs` entries with `path`, SHA-256, and one of the mandatory kinds
+  `product_code`, `harness`, `config`, or `dependency_lock`. Every kind must be
+  present. Producers must bind the complete inputs to the command, including
+  the product crates/workspace manifests, benchmark and deployment scripts,
+  chart/runtime configuration, and dependency lockfiles.
+
+The normative wire schema is
+[`release-evidence-attestation.schema.json`](../../../perf/evidence/release-evidence-attestation.schema.json).
+The Rust deserializer independently rejects unknown fields, and the semantic
+verifier enforces the cross-field and filesystem rules that JSON Schema cannot.
+
+Directory SHA-256 values use the canonical implementation in
+`pqueue_release::attestation::digest_path`: recursively sorted regular files,
+with relative names, lengths, and contents in the digest. Absolute paths,
+`..`, symlinks, missing inputs, duplicate bindings, malformed hashes, unknown
+schema fields, and digest drift are rejected. Therefore a code, harness,
+configuration, dependency, or evidence-file change without a freshly reviewed
+attestation cannot silently reuse a green result.
+
+The enforcement command is:
+
+```bash
+cargo run -p pqueue-release --bin pqueue-verify-evidence-attestation -- \
+  --manifest <attestation.json> --repo-root . \
+  --tag "${RELEASE_TAG}" --commit "${RELEASE_COMMIT}"
+```
+
+### Invalidation and emergency releases
+
+Any new tag or release commit, or any product-code, harness, config,
+dependency-lock, evidence, producing-command, or reviewed-attestation change,
+requires a rerun and review. Review updates `reviewed_at`; it does not waive a
+digest or source mismatch.
+
+An emergency/manual exception is never an alternate green state. A manifest
+may carry an `exception` record (`approval_id`, `approved_by`, `reason`, and
+`expires_at`) for auditability, but the automated verifier intentionally
+returns failure whenever it is present. Shipping while evidence is red requires
+an out-of-band release-manager approval, a release note that names the missing
+evidence and user-visible risk, and a follow-up exact-tag evidence run. The tag
+and release UI must remain visibly unverified until that follow-up passes; an
+exception cannot suppress or relabel the failed gate.
 
 ### E0 — Per-queue throughput floor (stated requirement)
 

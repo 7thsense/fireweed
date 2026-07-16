@@ -17,6 +17,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+pub mod attestation;
+
 /// One verification-ledger row: a single measured release-evidence run.
 ///
 /// Every field is required (a row that fails to deserialize is rejected by the verifier). `measurements`

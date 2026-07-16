@@ -31,9 +31,9 @@ ddx:
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
-      tp-scale-substantiation: 39792548c579ce686ad8f57017bfcd49f56fe584443ffedd29baf149ba641cb0
+      tp-scale-substantiation: eb42f16b7dc36a9316cdafa06921e2d089246ed79f6155212022c533acfc4ae9
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-11T01:06:39Z"
+    reviewed_at: "2026-07-16T16:38:29Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence

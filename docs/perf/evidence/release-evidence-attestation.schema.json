@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pqueue.dev/schemas/release-evidence-attestation-v1.json",
+  "title": "pqueue TP-002 release-evidence attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy",
+    "scope",
+    "source",
+    "producing_command",
+    "produced_at",
+    "reviewed_at",
+    "evidence",
+    "inputs"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "policy": { "const": "exact-tag-rerun" },
+    "scope": { "const": "tp002-release-v1" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tag", "commit"],
+      "properties": {
+        "tag": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+      }
+    },
+    "producing_command": { "type": "string", "minLength": 1 },
+    "produced_at": { "type": "string", "format": "date-time" },
+    "reviewed_at": { "type": "string", "format": "date-time" },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/digestBinding" }
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 4,
+      "items": { "$ref": "#/$defs/inputBinding" }
+    },
+    "exception": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_id", "approved_by", "reason", "expires_at"],
+      "properties": {
+        "approval_id": { "type": "string", "minLength": 1 },
+        "approved_by": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "expires_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "digestBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "inputBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha256"],
+      "properties": {
+        "kind": {
+          "enum": ["product_code", "harness", "config", "dependency_lock"]
+        },
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    }
+  }
+}
