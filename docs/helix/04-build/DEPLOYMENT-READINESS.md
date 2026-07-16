@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 5bcc95c3d0ec47e33743200264535224f126ff8bb8efb70a3ac85a6a765c1e76
+    self_hash: 0c4b25916517119d392a1258138a532f28f585883091140eb7720c3f84f19f5e
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
       tp-scale-substantiation: eb42f16b7dc36a9316cdafa06921e2d089246ed79f6155212022c533acfc4ae9
       tp-verification-acceptance-criteria: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
-    reviewed_at: "2026-07-16T16:48:33Z"
+    reviewed_at: "2026-07-16T16:51:45Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -71,8 +71,8 @@ combinations:
 | `objectlog` | `hybrid-async` | Runtime wired; chart-schema-selectable with a CI values file (`charts/pqueue/ci/objectlog-hybrid-async-values.yaml`), but not yet in the `helm-gate.sh` static-combination list or the live-`kind` matrix. |
 | `objectlog` | `hybrid-strict` | Runtime wired via env only; **not** chart-selectable (projection enum omits it). |
 | `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend inmemory`). |
-| `postgres` | `sqlite` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite`). TP-003 production-claim evidence for this exact pairing remains owed (`pqueue-949933e4`). |
-| `postgres` | `postgres` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres`). TP-003 production-claim evidence for this exact pairing remains owed (`pqueue-949933e4`). |
+| `postgres` | `sqlite` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite`). Exact-pair TP-003 AC-TXN-1/2/3/6 evidence passes in `tp003-ac-txn-{matrix,parity}-postgres-storage-pairs.jsonl`. |
+| `postgres` | `postgres` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres`). Exact-pair TP-003 AC-TXN-1/2/3/6 evidence passes in `tp003-ac-txn-{matrix,parity}-postgres-storage-pairs.jsonl`; AC-TXN-3 records `commit_transition` capability-N/A because the shipped two-connection composition is eventual-apply, while proving push request-id replay at every applicable cut. |
 
 Unsupported runtime combinations must fail loudly at process startup with the
 requested log/projection pair. They must not be silently mapped onto a synthetic
@@ -217,16 +217,23 @@ storage axis. **Status (2026-07): `PostgresRelationalBackend` now IMPLEMENTS `Co
 (commit-transition is a relational-family capability). The rebuildable-from-log migration bead
 `pqueue-3c5aa2e0` is closed.
 
-**(a) Backend flavor in scope: `PostgresRelationalBackend` only.**
+**(a) Keep the unified backend distinct from the shipped two-axis composition.**
 
-- The Managed Postgres Boundary above targets `storage.log.backend=postgres` +
-  `storage.projection.backend=postgres` together — TD-002's `postgres_native`
-  mode, which TD-002 defines as the **relational projection family**, not the
-  log-replay adapter. Lakebase/Snorri production runs this combination.
-- `PostgresRelationalBackend` already implements both `LogStore` and
-  `ProjectionStore` as one unified store (the ADR-012 composition, mirroring
-  `SqliteRelationalBackend`), so it is the one postgres artifact that can carry
-  an atomic per-entry commit boundary.
+- `PostgresRelationalBackend` implements both storage axes as one unified store
+  (mirroring `SqliteRelationalBackend`) and carries the atomic
+  `CommitTransitionPort` boundary.
+- The shipped `storage.log.backend=postgres` +
+  `storage.projection.backend=postgres` composition is not that unified
+  backend. The server opens an independent `PostgresLog` connection and
+  `PostgresRelational` projection connection, then composes them through
+  `ComposedBackend`. It is therefore an eventual-apply pair and correctly
+  returns `Unavailable` for `commit_transition`.
+- Exact-pair AC-TXN-3 evidence does not turn that unavailable operation into a
+  success claim: it records a principled capability-N/A for `commit_transition`
+  while proving request-id-bearing pushes at the before-append,
+  append-before-apply, apply-before-response, and after-response cuts. A future
+  Snorri claim requiring the atomic vectorized commit boundary must explicitly
+  wire the unified backend; the storage-axis names alone do not imply it.
 - `PostgresBackend` (log-replay) is out of scope. It already refuses every
   relational-only feature at the port default (`SetGatesPort`, `ReschedulePort`,
   `DiscoveryPort` all stay `Unavailable`; `crates/pqueue-postgres/src/lib.rs:906-917`),
@@ -271,9 +278,12 @@ no new table.
 
 Update (2026-07): the `commit_transition` implementation for
 `PostgresRelationalBackend` has landed (`relational.rs:3800`) and epic
-`pqueue-2201fd37` is closed. Exact-pair external transaction evidence for the
-postgres deployment combinations is tracked by `pqueue-949933e4`; future
-`RecoveryReadPort` or delayed-timer refinements require separately scoped work.
+`pqueue-2201fd37` is closed. Exact-pair external transaction evidence for
+`postgres/sqlite` and `postgres/postgres` is recorded in
+`docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl` and
+`docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl`; future
+unified-backend server wiring, `RecoveryReadPort`, or delayed-timer refinements
+require separately scoped work.
 
 ## Object-Log Boundary
 
