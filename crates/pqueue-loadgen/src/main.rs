@@ -551,8 +551,9 @@ fn start_density_workers(
                     push_items(&mut conn, &key, 1, 1);
                     let got = drain(&mut conn, &key, &format!("density-w{worker}"), 1);
                     assert_eq!(got, 1, "cold queue {key} must claim/finalize its seed");
+                    let eligible_since = Instant::now();
                     push_items(&mut conn, &key, 1, 1);
-                    states.push((index, key, Instant::now()));
+                    states.push((index, key, eligible_since));
                     ready.fetch_add(1, Ordering::SeqCst);
                 }
                 while !stop.load(Ordering::Relaxed) {
@@ -578,8 +579,8 @@ fn start_density_workers(
                                 hot_progressed.fetch_add(1, Ordering::SeqCst);
                             }
                         }
-                        push_items(&mut conn, key, 1, 1);
                         *eligible_since = Instant::now();
+                        push_items(&mut conn, key, 1, 1);
                     }
                 }
             })

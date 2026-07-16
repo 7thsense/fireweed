@@ -10,8 +10,6 @@ use std::collections::BTreeMap;
 
 use pqueue_server::{Config, start};
 
-const RUNTIME_RESOURCE_METRICS_PATH: &str = "/tmp/pqueue-runtime-resources.json";
-
 const HELP: &str = "pqueue-service\n\nEnvironment:\n  PQUEUE_LISTEN_ADDR=0.0.0.0:8080\n  PQUEUE_ADVERTISE_ADDR=10.0.0.12:8080      (required for replicas>1; pod-reachable IP:port)\n  PQUEUE_LOG_BACKEND=objectlog|postgres|sqlite|memory\n  PQUEUE_PROJECTION_BACKEND=inmemory|sqlite|hybrid|hybrid-async|postgres\n  PQUEUE_CONTROL_PLANE=inprocess|postgres   (inprocess is development-only and requires one replica)\n  PQUEUE_REPLICA_COUNT=1                    (>1 requires the postgres control plane)\n  PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL=postgres://user:pass@host:5432/db\n  PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS=5000\n  PQUEUE_CONTROL_PLANE_LEASE_TTL_MS=15000\n  PQUEUE_NODE_ID=0           (per-replica id; distinct integer per instance, else hashed to a byte)\n  PQUEUE_SQLITE_LOG_PATH=/var/lib/pqueue/pqueue-log.db\n  PQUEUE_OBJECT_LOG_ROOT=/var/lib/pqueue/object-log\n  PQUEUE_PG_URL=postgres://user:pass@host:5432/db   (postgres backend; build --features postgres[,tls])\n  PQUEUE_POSTGRES_LOG_DATABASE_URL=...   (Helm/Lakebase DSN secret; preferred over PQUEUE_PG_URL; sslmode=require needs --features tls)\n  DATABRICKS_HOST/...=...   (optional Databricks service-principal|PAT credential injection for the postgres backend)\n  PQUEUE_SQLITE_PROJECTION_PATH=/var/lib/pqueue/pqueue-projection.db   (objectlog log + sqlite, hybrid, or hybrid-async projection)\n  PQUEUE_FJORD_STATE_ROOT=/var/lib/pqueue/fjord   (embedded fjord storage namespace root, separate from queue storage)\n  PQUEUE_FJORD_CLUSTER_ID=pqueue-fjord            (embedded fjord cluster id)\n  PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS=100000   (objectlog/hybrid-async async-apply thresholds; each bound must be >0)\n  PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES=536870912\n  PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX=1024\n  PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS=60000\n  PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD=3\n  PQUEUE_WORKER_THREADS=N                  (cap the tokio worker-thread pool; default one per core)\n  PQUEUE_BOOTSTRAP_QUEUES=t1:q1[,tenant:queue]\n  PQUEUE_CHANGE_RECORD_SINK_ENABLED=1
   PQUEUE_CHANGE_RECORD_SINK_ENDPOINT=http://127.0.0.1:8081/ingest
   PQUEUE_CHANGE_RECORD_SINK_TICK_INTERVAL_MS=250
@@ -50,6 +48,7 @@ fn main() {
             std::process::exit(2);
         }
     };
+    let runtime_resource_metrics_path = env.get("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH").cloned();
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
@@ -59,20 +58,21 @@ fn main() {
     builder
         .build()
         .expect("build tokio runtime")
-        .block_on(run(config));
+        .block_on(run(config, runtime_resource_metrics_path));
 }
 
-async fn run(config: Config) {
+async fn run(config: Config, runtime_resource_metrics_path: Option<String>) {
     let listen = config.listen.clone();
     match start(config).await {
         Ok(server) => {
-            tokio::spawn(report_runtime_resources(RUNTIME_RESOURCE_METRICS_PATH));
+            if let Some(path) = runtime_resource_metrics_path {
+                tokio::spawn(report_runtime_resources(path));
+            }
             eprintln!(
-                "pqueue-service {} listening on {} (configured listen={}); runtime resources={}",
+                "pqueue-service {} listening on {} (configured listen={})",
                 env!("CARGO_PKG_VERSION"),
                 server.addr(),
                 listen,
-                RUNTIME_RESOURCE_METRICS_PATH,
             );
             std::future::pending::<()>().await;
         }
@@ -86,7 +86,7 @@ async fn run(config: Config) {
 /// Export authoritative Tokio runtime gauges for the live process. `num_alive_tasks` includes detached
 /// object-log flushers, the server background loops, and per-connection handler tasks, so the density
 /// proof does not substitute OS file descriptors for async work. Rename makes each JSON snapshot atomic.
-async fn report_runtime_resources(path: &'static str) {
+async fn report_runtime_resources(path: String) {
     let tmp = format!("{path}.tmp");
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
@@ -97,7 +97,7 @@ async fn report_runtime_resources(path: &'static str) {
             "tokio_alive_tasks": metrics.num_alive_tasks(),
         });
         if std::fs::write(&tmp, snapshot.to_string()).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
+            let _ = std::fs::rename(&tmp, &path);
         }
     }
 }

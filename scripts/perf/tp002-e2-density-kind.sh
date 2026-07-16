@@ -92,6 +92,7 @@ spec:
             - { name: PQUEUE_SQLITE_PROJECTION_PATH, value: /data/projection.db }
             - { name: PQUEUE_LISTEN_ADDR, value: "0.0.0.0:8080" }
             - { name: PQUEUE_WORKER_THREADS, value: "$SERVER_WORKERS" }
+            - { name: PQUEUE_RUNTIME_RESOURCE_METRICS_PATH, value: /tmp/pqueue-runtime-resources.json }
             - { name: PQUEUE_BOOTSTRAP_GENERATED_COUNT, value: "$QUEUE_COUNT" }
             - { name: PQUEUE_BOOTSTRAP_GENERATED_TENANT, value: density }
             - { name: PQUEUE_BOOTSTRAP_GENERATED_PREFIX, value: q }

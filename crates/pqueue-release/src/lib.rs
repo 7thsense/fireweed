@@ -918,10 +918,13 @@ pub mod density {
             && m.noisy_neighbor_claim_retention_pct.is_finite()
             && m.noisy_neighbor_claim_retention_pct >= 100.0
             && m.shared_worker_limit == MAX_SERVER_THREADS
+            && m.shared_worker_count > 0
             && m.shared_worker_count <= m.shared_worker_limit
             && m.connection_limit == MAX_SERVER_CONNECTIONS
+            && m.connection_count > 0
             && m.connection_count <= m.connection_limit
             && m.task_limit == MAX_SERVER_TASKS
+            && m.task_count > 0
             && m.task_count <= m.task_limit
             && m.hot_phase_resource_samples > 0
             && m.hot_phase_started_unix_ms > 0
@@ -1178,7 +1181,7 @@ pub mod density {
             ("task_count", "task_limit", MAX_SERVER_TASKS),
         ] {
             match (integer(count), integer(limit)) {
-                (Some(c), Some(l)) if l == governed_limit as u64 && c <= l => {}
+                (Some(c), Some(l)) if c > 0 && l == governed_limit as u64 && c <= l => {}
                 _ => errors.push(format!(
                     "{count} must be bounded by governed {limit}={governed_limit}"
                 )),

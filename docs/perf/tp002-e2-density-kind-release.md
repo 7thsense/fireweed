@@ -46,7 +46,9 @@ snapshot, including the actual worker-pool size and all live async tasks
 counts established port-8080 TCP connections from the server network namespace.
 The governed maxima are four Tokio workers, 32 connections, and 64 live tasks;
 these limits are fixed in the semantic validator rather than selected by the
-run. The focused validator is:
+run. The snapshot reporter is disabled in normal service deployments and is
+enabled only by the density Deployment's explicit
+`PQUEUE_RUNTIME_RESOURCE_METRICS_PATH`. The focused validator is:
 
 ```sh
 cargo run -p pqueue-release --bin pqueue-verify-density-evidence -- \

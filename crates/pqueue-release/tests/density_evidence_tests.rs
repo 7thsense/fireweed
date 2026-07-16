@@ -159,6 +159,34 @@ fn density_validator_rejects_progress_semantics_substitution() {
 }
 
 #[test]
+fn density_validator_rejects_direct_tampering_of_an_otherwise_valid_release_row() {
+    let mutations = [
+        ("hot_items", serde_json::json!(299_999)),
+        ("hot_connections", serde_json::json!(7)),
+        ("cold_worker_count", serde_json::json!(7)),
+        ("configured_server_workers", serde_json::json!(3)),
+        ("total_queues", serde_json::json!(1002)),
+        ("cold_queues_progress_eligible", serde_json::json!(999)),
+        ("progress_bound_violations", serde_json::json!(1)),
+        ("progress_bound_ms", serde_json::json!(60_001)),
+        ("shared_worker_count", serde_json::json!(0)),
+        ("connection_count", serde_json::json!(0)),
+        ("task_count", serde_json::json!(0)),
+        ("hot_phase_resource_samples", serde_json::json!(0)),
+        (
+            "first_hot_resource_sample_unix_ms",
+            serde_json::json!(1_699_999_999_999_u64),
+        ),
+    ];
+    for (key, value) in mutations {
+        let mut row = build_release_row(&measurement(), &metadata());
+        assert_eq!(row.evidence_tier, "release");
+        row.measurements.values.insert(key.into(), value);
+        assert!(validate_release_row(&row).is_err(), "tampered {key}");
+    }
+}
+
+#[test]
 fn semantic_density_validator_accepts_complete_release_row() {
     let row = build_release_row(&measurement(), &metadata());
     assert_eq!(row.evidence_tier, "release");
