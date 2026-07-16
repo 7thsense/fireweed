@@ -846,6 +846,9 @@ pub mod density {
 
     pub const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
     pub const MIN_TOTAL_QUEUES: usize = 1001;
+    pub const MAX_SERVER_THREADS: usize = 64;
+    pub const MAX_SERVER_CONNECTIONS: usize = 32;
+    pub const MAX_SERVER_FDS: usize = 256;
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DensityMeasurement {
@@ -855,6 +858,8 @@ pub mod density {
         pub hot_ingest_per_s: f64,
         pub hot_claim_finalize_per_s: f64,
         pub progress_bound_violations: usize,
+        pub max_progress_latency_ms: u64,
+        pub progress_bound_ms: u64,
         pub noisy_neighbor_ingest_retention_pct: f64,
         pub noisy_neighbor_claim_retention_pct: f64,
         pub shared_worker_count: usize,
@@ -874,6 +879,8 @@ pub mod density {
         pub seed: u64,
         pub duration_seconds: u64,
         pub queue_activity_definition: String,
+        pub image_digest: String,
+        pub clean_revision: bool,
     }
 
     pub fn bars_met(m: &DensityMeasurement) -> bool {
@@ -884,12 +891,17 @@ pub mod density {
             && m.hot_ingest_per_s >= FLOOR_ITEMS_PER_SEC
             && m.hot_claim_finalize_per_s >= FLOOR_ITEMS_PER_SEC
             && m.progress_bound_violations == 0
+            && m.progress_bound_ms > 0
+            && m.max_progress_latency_ms <= m.progress_bound_ms
             && m.noisy_neighbor_ingest_retention_pct.is_finite()
-            && m.noisy_neighbor_ingest_retention_pct > 0.0
+            && m.noisy_neighbor_ingest_retention_pct >= 100.0
             && m.noisy_neighbor_claim_retention_pct.is_finite()
-            && m.noisy_neighbor_claim_retention_pct > 0.0
+            && m.noisy_neighbor_claim_retention_pct >= 100.0
+            && m.shared_worker_limit == MAX_SERVER_THREADS
             && m.shared_worker_count <= m.shared_worker_limit
+            && m.connection_limit == MAX_SERVER_CONNECTIONS
             && m.connection_count <= m.connection_limit
+            && m.task_limit == MAX_SERVER_FDS
             && m.task_count <= m.task_limit
     }
 
@@ -922,6 +934,14 @@ pub mod density {
             (
                 "progress_bound_violations".into(),
                 serde_json::json!(m.progress_bound_violations),
+            ),
+            (
+                "max_progress_latency_ms".into(),
+                serde_json::json!(m.max_progress_latency_ms),
+            ),
+            (
+                "progress_bound_ms".into(),
+                serde_json::json!(m.progress_bound_ms),
             ),
             (
                 "noisy_neighbor_ingest_retention_pct".into(),
@@ -962,6 +982,11 @@ pub mod density {
             (
                 "failover_reference".into(),
                 serde_json::json!("pqueue-0a1d4386"),
+            ),
+            ("image_digest".into(), serde_json::json!(meta.image_digest)),
+            (
+                "clean_revision".into(),
+                serde_json::json!(meta.clean_revision),
             ),
         ]);
         LedgerRow {
@@ -1029,22 +1054,39 @@ pub mod density {
         if integer("progress_bound_violations") != Some(0) {
             errors.push("progress_bound_violations must be zero".into());
         }
+        match (
+            integer("max_progress_latency_ms"),
+            integer("progress_bound_ms"),
+        ) {
+            (Some(age), Some(bound)) if bound > 0 && age <= bound => {}
+            _ => errors.push("max_progress_latency_ms must be within progress_bound_ms".into()),
+        }
         for key in [
             "noisy_neighbor_ingest_retention_pct",
             "noisy_neighbor_claim_retention_pct",
         ] {
-            if number(key).is_none_or(|v| !v.is_finite() || v <= 0.0) {
-                errors.push(format!("{key} must be numeric and positive"));
+            if number(key).is_none_or(|v| !v.is_finite() || v < 100.0) {
+                errors.push(format!("{key} must be numeric and at least 100%"));
             }
         }
-        for (count, limit) in [
-            ("shared_worker_count", "shared_worker_limit"),
-            ("connection_count", "connection_limit"),
-            ("task_count", "task_limit"),
+        for (count, limit, governed_limit) in [
+            (
+                "shared_worker_count",
+                "shared_worker_limit",
+                MAX_SERVER_THREADS,
+            ),
+            (
+                "connection_count",
+                "connection_limit",
+                MAX_SERVER_CONNECTIONS,
+            ),
+            ("task_count", "task_limit", MAX_SERVER_FDS),
         ] {
             match (integer(count), integer(limit)) {
-                (Some(c), Some(l)) if c <= l => {}
-                _ => errors.push(format!("{count} must be bounded by {limit}")),
+                (Some(c), Some(l)) if l == governed_limit as u64 && c <= l => {}
+                _ => errors.push(format!(
+                    "{count} must be bounded by governed {limit}={governed_limit}"
+                )),
             }
         }
         require_nonempty("revision", &mut errors);
@@ -1065,8 +1107,38 @@ pub mod density {
         if row.command.trim().is_empty() {
             errors.push("command is required".into());
         }
-        if row.environment.trim().is_empty() {
-            errors.push("topology and hardware environment are required".into());
+        if row.command != "scripts/perf/tp002-e2-density-kind.sh" {
+            errors.push("command must be scripts/perf/tp002-e2-density-kind.sh".into());
+        }
+        let revision = values
+            .get("revision")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if revision.len() != 40 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+            errors.push("revision must be a full 40-character Git SHA".into());
+        }
+        let digest = values
+            .get("image_digest")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if digest.len() != 71
+            || !digest.starts_with("sha256:")
+            || !digest[7..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            errors.push("image_digest must be a sha256 digest".into());
+        }
+        if values.get("clean_revision") != Some(&serde_json::Value::Bool(true)) {
+            errors.push("clean_revision must be true".into());
+        }
+        if !row.environment.contains("live one-node kind deployment")
+            || !row.environment.contains("objectlog/sqlite")
+            || !row.environment.contains("cores")
+            || !row.environment.contains("GiB RAM")
+        {
+            errors.push(
+                "environment must record live one-node objectlog/sqlite topology and hardware"
+                    .into(),
+            );
         }
         if errors.is_empty() {
             Ok(())
