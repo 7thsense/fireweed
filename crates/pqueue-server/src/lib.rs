@@ -23,9 +23,9 @@ use heimq::server::Server as HeimqServer;
 use heimq_broker::storage::{ClusterView, LogBackend, OffsetStore, RecordBatchView};
 use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, AuthContext, Clock, ComposedBackend, EngineError, EngineResult,
-    InMemoryControlPlane, InProcessControlPlane, LeaseState, OwnedSession, QueueControlPlane,
-    QueueKey,
+    AcquireOutcome, AuthContext, Clock, ComposedBackend, ControlPlaneConfig, EngineError,
+    EngineResult, InMemoryControlPlane, InProcessControlPlane, LeaseState, OwnedSession,
+    QueueControlPlane, QueueKey,
 };
 use pqueue_memory::composed_memory_backend;
 use pqueue_objectlog::ObjectLog;
@@ -148,9 +148,17 @@ impl ProjectionSpec {
 type ObjectLogHybridBackend =
     ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>;
 
-/// The control-plane axis (queue definitions + placement). The in-process plane is the only wired one.
+/// The queue-ownership control-plane axis. `InProcess` is an explicit single-process development profile;
+/// production replicas use the shared transactional Postgres authority.
+#[derive(Debug, Clone)]
 pub enum ControlPlaneSpec {
+    /// Development/test only. Environment parsing rejects this profile when `PQUEUE_REPLICA_COUNT > 1`.
     InProcess,
+    /// Shared production membership, queue-lease, and monotonic assignment-epoch authority.
+    Postgres {
+        url: String,
+        config: ControlPlaneConfig,
+    },
 }
 
 fn change_record_sink_profile_is_wired(log: &LogSpec, projection: &ProjectionSpec) -> bool {
@@ -766,7 +774,7 @@ impl Config {
     }
 }
 
-pub struct OwnershipRuntime<B, CP> {
+pub struct OwnershipRuntime<B, CP: ?Sized> {
     backend: Arc<B>,
     control_plane: Arc<CP>,
     owner: OwnerId,
@@ -781,7 +789,7 @@ pub struct OwnershipRuntime<B, CP> {
     acquire_gates: Mutex<std::collections::HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl<B, CP> OwnershipRuntime<B, CP>
+impl<B, CP: ?Sized> OwnershipRuntime<B, CP>
 where
     B: RespBackend,
     CP: QueueControlPlane + 'static,
@@ -1155,7 +1163,7 @@ where
         .map_err(|e| EngineError::Storage(format!("control-plane task failed: {e}")))?
 }
 
-impl<B, CP> RespHooks for OwnershipRuntime<B, CP>
+impl<B, CP: ?Sized> RespHooks for OwnershipRuntime<B, CP>
 where
     B: RespBackend,
     CP: QueueControlPlane + 'static,
@@ -1400,8 +1408,21 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         projection,
         control_plane,
     } = config.backend;
-    // Only the in-process control plane (queue definitions + placement) is wired today.
-    let ControlPlaneSpec::InProcess = control_plane;
+    // The sync Postgres client owns an internal runtime, so connect off the Tokio reactor. Erase the
+    // concrete implementation only after construction; every backend arm receives this same selected
+    // queue-ownership authority instead of manufacturing a private per-process control plane.
+    let control_plane: Arc<dyn QueueControlPlane> = match control_plane {
+        ControlPlaneSpec::InProcess => Arc::new(InMemoryControlPlane::default()),
+        ControlPlaneSpec::Postgres { url, config } => Arc::new(
+            tokio::task::spawn_blocking(move || {
+                pqueue_postgres::PostgresControlPlane::connect(&url, config)
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("postgres control-plane connect task failed: {e}"))
+            })??,
+        ),
+    };
     if config.change_record_sink.enabled
         && config.queues.iter().any(|queue| queue.emit_change_records)
         && !change_record_sink_profile_is_wired(&log, &projection)
@@ -1420,14 +1441,32 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     match (log, projection) {
         (LogSpec::Memory, ProjectionSpec::InMemory) => {
             let backend = Arc::new(composed_memory_backend().with_node_id(node_id));
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned(
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
         }
         (LogSpec::Sqlite { path }, ProjectionSpec::InMemory) => {
             let p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
             let backend = Arc::new(composed_sqlite_backend(p)?.with_node_id(node_id));
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned(
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
         }
         (LogSpec::ObjectLog { root }, ProjectionSpec::InMemory) => {
             // The segmented group-commit object log (the object log's only production form) over an in-memory
@@ -1438,7 +1477,16 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             );
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
             backend.spawn_flusher();
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned(
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
         }
         (LogSpec::ObjectLog { root }, ProjectionSpec::Sqlite { path }) => {
             // The segmented group-commit object log driving the derived SQLite projection: concurrent pushes
@@ -1454,7 +1502,16 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     .with_debug_segments(debug_segments),
             );
             backend.spawn_flusher();
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned(
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
         }
         (LogSpec::ObjectLog { root }, ProjectionSpec::Hybrid { path }) => {
             let backend = open_objectlog_hybrid_backend(
@@ -1483,7 +1540,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     fjord_log.clone(),
                 )?;
             run_owned_with_fjord_task(
-                backend, node_id, clock, &listen, interval, &queues, fjord_task,
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+                fjord_task,
             )
             .await
         }
@@ -1521,7 +1585,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     fjord_log.clone(),
                 )?;
             run_owned_with_fjord_task(
-                backend, node_id, clock, &listen, interval, &queues, fjord_task,
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+                fjord_task,
             )
             .await
         }
@@ -1569,7 +1640,14 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     fjord_log.clone(),
                 )?;
             run_owned_with_fjord_task(
-                backend, node_id, clock, &listen, interval, &queues, fjord_task,
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+                fjord_task,
             )
             .await
         }
@@ -1596,7 +1674,16 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
             let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned(
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::Sqlite { path }) => {
@@ -1625,7 +1712,16 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("postgres/sqlite connect task join failed: {e}"))
             })??;
             let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned(
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
         }
         #[cfg(feature = "postgres")]
         (
@@ -1656,7 +1752,16 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("postgres/postgres connect task join failed: {e}"))
             })??;
             let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
-            run_owned(backend, node_id, clock, &listen, interval, &queues).await
+            run_owned(
+                backend,
+                control_plane,
+                node_id,
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
         }
         (log, projection) => Err(EngineError::Storage(format!(
             "unsupported backend composition: log={} projection={} (not wired by pqueue-server)",
@@ -1751,25 +1856,37 @@ fn spawn_hybrid_flusher(
     })
 }
 
-/// Wrap an already-`Arc`-shared backend in the single-node ownership runtime and run it: a per-node
-/// in-memory lease control plane + a `node-{id}` owner, then [`start_with_ownership`]. The shared tail of
-/// every `start` arm (each arm builds a different concrete backend type, monomorphized here).
+/// Wrap an already-`Arc`-shared backend in the selected ownership runtime and run it. [`start`] constructs
+/// the control plane once and passes it through every backend arm instead of manufacturing private state.
 async fn run_owned<B: RespBackend>(
     backend: Arc<B>,
+    control_plane: Arc<dyn QueueControlPlane>,
     node_id: u8,
     clock: Arc<dyn Clock>,
     listen: &str,
     reclaim_interval: Duration,
     queues: &[QueueDefinition],
 ) -> EngineResult<Server> {
-    let cp = Arc::new(InMemoryControlPlane::default());
     let owner =
         OwnerId::new(format!("node-{node_id}")).map_err(|e| EngineError::Storage(e.to_string()))?;
-    start_with_ownership(backend, cp, owner, clock, listen, reclaim_interval, queues).await
+    start_with_ownership(
+        backend,
+        control_plane,
+        owner,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+    )
+    .await
 }
 
+// The Fjord variant carries the same explicit composition-root inputs as `run_owned`, plus the
+// lifecycle task that must be attached to the returned server.
+#[allow(clippy::too_many_arguments)]
 async fn run_owned_with_fjord_task<B: RespBackend>(
     backend: Arc<B>,
+    control_plane: Arc<dyn QueueControlPlane>,
     node_id: u8,
     clock: Arc<dyn Clock>,
     listen: &str,
@@ -1777,7 +1894,16 @@ async fn run_owned_with_fjord_task<B: RespBackend>(
     queues: &[QueueDefinition],
     fjord_task: Option<JoinHandle<()>>,
 ) -> EngineResult<Server> {
-    let mut server = run_owned(backend, node_id, clock, listen, reclaim_interval, queues).await?;
+    let mut server = run_owned(
+        backend,
+        control_plane,
+        node_id,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+    )
+    .await?;
     server.fjord_task = fjord_task;
     Ok(server)
 }
@@ -1836,7 +1962,7 @@ pub async fn start_with_ownership<B, CP>(
 ) -> EngineResult<Server>
 where
     B: RespBackend,
-    CP: QueueControlPlane + 'static,
+    CP: QueueControlPlane + ?Sized + 'static,
 {
     for def in queues {
         backend.create_queue(def.clone()).await?;
@@ -1859,7 +1985,7 @@ where
         endpoint,
     ));
     let now = clock.now();
-    hooks.register_owner(now)?;
+    hooks.cp_register(hooks.owner.clone(), now).await?;
     for def in queues {
         let queue = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
         hooks.watch_queue(queue.clone());
@@ -1945,7 +2071,7 @@ async fn ownership_loop<B, CP>(
     counters: Arc<OwnershipCounters>,
 ) where
     B: RespBackend,
-    CP: QueueControlPlane + 'static,
+    CP: QueueControlPlane + ?Sized + 'static,
 {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
