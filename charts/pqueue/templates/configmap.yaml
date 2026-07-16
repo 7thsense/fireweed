@@ -10,7 +10,13 @@ data:
   PQUEUE_PROJECTION_BACKEND: {{ .Values.storage.projection.backend | quote }}
   PQUEUE_PRINCIPAL_ID: {{ .Values.config.principalId | quote }}
   PQUEUE_TENANTS: {{ join "," .Values.config.tenants | quote }}
-  PQUEUE_BOOTSTRAP_QUEUES: "t1:q1"
+  {{- if gt (len .Values.bootstrap.queues) 0 }}
+  PQUEUE_BOOTSTRAP_QUEUES: {{ join "," .Values.bootstrap.queues | quote }}
+  {{- else if gt (int .Values.bootstrap.generated.count) 0 }}
+  PQUEUE_BOOTSTRAP_GENERATED_COUNT: {{ .Values.bootstrap.generated.count | quote }}
+  PQUEUE_BOOTSTRAP_GENERATED_TENANT: {{ .Values.bootstrap.generated.tenant | quote }}
+  PQUEUE_BOOTSTRAP_GENERATED_PREFIX: {{ .Values.bootstrap.generated.prefix | quote }}
+  {{- end }}
   PQUEUE_SHARD_COUNT_MIN: {{ .Values.storage.shardCount.min | quote }}
   PQUEUE_SHARD_COUNT_MAX: {{ .Values.storage.shardCount.max | quote }}
   {{- if eq .Values.storage.log.backend "objectlog" }}

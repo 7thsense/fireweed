@@ -62,6 +62,16 @@ config:
   principalId: pqueue-service
   tenants: []
 
+# Queues provisioned before the RESP listener becomes ready. An explicit list
+# takes precedence over generation. With both disabled, the server preserves
+# its built-in t1:q1 default.
+bootstrap:
+  queues: []
+  generated:
+    count: 0
+    tenant: t1
+    prefix: q
+
 storage:
   lakebase:
     enabled: false

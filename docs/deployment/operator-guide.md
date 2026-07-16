@@ -62,6 +62,38 @@ helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
   --set storage.projection.backend=inmemory
 ```
 
+## Bootstrap Queue Inventories
+
+The service provisions bootstrap queues before its RESP listener becomes ready.
+Small deployments may provide exact queue keys through Helm:
+
+```sh
+--set-json 'bootstrap.queues=["tenant-a:work","tenant-a:priority"]'
+```
+
+For reproducible density and integration deployments, generate a bounded ordered
+inventory instead of embedding a long comma-separated manifest:
+
+```sh
+--set bootstrap.generated.count=1001 \
+--set bootstrap.generated.tenant=density \
+--set bootstrap.generated.prefix=q
+```
+
+That contract deterministically creates `density:q0` through `density:q1000`.
+The count must be between 1 and 10,000 when generation is enabled; both the Helm
+schema and the server enforce the 10,000-queue ceiling. Tenant and prefix must be
+non-empty and every generated identifier must pass the normal queue identifier
+validation. The same tenant, prefix, and count always produce the same unique
+queue keys in numeric order.
+
+An explicit non-empty `bootstrap.queues` list takes precedence over generated
+settings. With neither form configured, the server preserves the `t1:q1`
+default. The corresponding direct environment variables are
+`PQUEUE_BOOTSTRAP_QUEUES`, `PQUEUE_BOOTSTRAP_GENERATED_COUNT`,
+`PQUEUE_BOOTSTRAP_GENERATED_TENANT`, and
+`PQUEUE_BOOTSTRAP_GENERATED_PREFIX`.
+
 ## Verification
 
 ```sh
