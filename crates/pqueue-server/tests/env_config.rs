@@ -14,6 +14,7 @@ fn postgres_control_plane_env_selects_typed_shared_authority() {
     let config = Config::from_env(&env(&[
         ("PQUEUE_CONTROL_PLANE", "postgres"),
         ("PQUEUE_REPLICA_COUNT", "3"),
+        ("PQUEUE_OWNER_ID", "pqueue-7f4c9d8b-owner-a"),
         ("PQUEUE_ADVERTISE_ADDR", "10.0.0.12:8080"),
         (
             "PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL",
@@ -25,6 +26,7 @@ fn postgres_control_plane_env_selects_typed_shared_authority() {
     .expect("shared Postgres control-plane config must parse");
 
     assert_eq!(config.advertise_addr.as_deref(), Some("10.0.0.12:8080"));
+    assert_eq!(config.owner_id.as_str(), "pqueue-7f4c9d8b-owner-a");
 
     match config.backend.control_plane {
         ControlPlaneSpec::Postgres { url, config } => {
@@ -64,6 +66,7 @@ fn postgres_control_plane_boundary_rejects_inprocess_for_multiple_replicas() {
     let Err(error) = Config::from_env(&env(&[
         ("PQUEUE_CONTROL_PLANE", "inprocess"),
         ("PQUEUE_REPLICA_COUNT", "2"),
+        ("PQUEUE_OWNER_ID", "replica-a"),
         ("PQUEUE_ADVERTISE_ADDR", "10.0.0.12:8080"),
     ])) else {
         panic!("the development-only plane cannot coordinate replicas");
@@ -194,6 +197,7 @@ fn postgres_control_plane_multireplica_advertise_address_fails_closed() {
         let mut values = env(&[
             ("PQUEUE_CONTROL_PLANE", "postgres"),
             ("PQUEUE_REPLICA_COUNT", "2"),
+            ("PQUEUE_OWNER_ID", "replica-a"),
             (
                 "PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL",
                 "postgres://localhost/pqueue",
@@ -207,4 +211,56 @@ fn postgres_control_plane_multireplica_advertise_address_fails_closed() {
         };
         assert!(error.0.contains("PQUEUE_ADVERTISE_ADDR"), "{}", error.0);
     }
+}
+
+#[test]
+fn owner_identity_multireplica_requires_and_preserves_full_width_id() {
+    let mut values = env(&[
+        ("PQUEUE_CONTROL_PLANE", "postgres"),
+        ("PQUEUE_REPLICA_COUNT", "2"),
+        ("PQUEUE_ADVERTISE_ADDR", "10.0.0.12:8080"),
+        (
+            "PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL",
+            "postgres://localhost/pqueue",
+        ),
+        ("PQUEUE_NODE_ID", "7"),
+    ]);
+    let Err(error) = Config::from_env(&values) else {
+        panic!("multi-replica owner id is mandatory");
+    };
+    assert!(error.0.contains("PQUEUE_OWNER_ID"), "{}", error.0);
+
+    values.insert("PQUEUE_OWNER_ID".into(), "".into());
+    let Err(error) = Config::from_env(&values) else {
+        panic!("empty multi-replica owner id is invalid");
+    };
+    assert!(error.0.contains("PQUEUE_OWNER_ID"), "{}", error.0);
+
+    values.insert(
+        "PQUEUE_OWNER_ID".into(),
+        "pod-7f4c9d8b-6b8d9f7c5-x2k9m".into(),
+    );
+    let config = Config::from_env(&values).expect("full-width owner identity is valid");
+    assert_eq!(config.node_id, 7);
+    assert_eq!(config.owner_id.as_str(), "pod-7f4c9d8b-6b8d9f7c5-x2k9m");
+
+    values.insert(
+        "PQUEUE_OWNER_ID".into(),
+        "pod-7f4c9d8b-6b8d9f7c5-r8v4q".into(),
+    );
+    let peer = Config::from_env(&values).expect("second full-width owner identity is valid");
+    assert_eq!(peer.node_id, config.node_id, "8-bit item IDs may match");
+    assert_ne!(
+        peer.owner_id, config.owner_id,
+        "control-plane owners must not"
+    );
+    assert_eq!(peer.owner_id.as_str(), "pod-7f4c9d8b-6b8d9f7c5-r8v4q");
+}
+
+#[test]
+fn owner_identity_single_replica_derives_legacy_node_owner() {
+    let config = Config::from_env(&env(&[("PQUEUE_NODE_ID", "23")]))
+        .expect("single-replica legacy configuration remains valid");
+    assert_eq!(config.node_id, 23);
+    assert_eq!(config.owner_id.as_str(), "node-23");
 }

@@ -851,6 +851,10 @@ pub struct Config {
     /// StatefulSet ordinal or pod identity into it) — the application stays infrastructure-agnostic. Build
     /// it from a configured string via [`resolve_node_id`]. `0` is the single-instance default.
     pub node_id: u8,
+    /// Full-width identity published to the queue ownership control plane. This is deliberately
+    /// independent of the 8-bit `node_id`, whose bounded namespace is suitable for item IDs but not
+    /// for collision-free replica membership.
+    pub owner_id: OwnerId,
     /// Listen address, e.g. `"127.0.0.1:6380"` (use `":0"` for an ephemeral port in tests).
     pub listen: String,
     /// Client-reachable RESP address advertised through the shared control plane. Multi-replica env
@@ -902,10 +906,13 @@ impl Config {
         reclaim_interval: Duration,
         queues: Vec<QueueDefinition>,
     ) -> Self {
+        let owner_id = OwnerId::new(format!("node-{node_id}"))
+            .expect("a numeric node id always forms a valid owner id");
         Self {
             backend,
             embedded_fjord: EmbeddedFjordConfig::default(),
             node_id,
+            owner_id,
             listen,
             advertise_addr: None,
             reclaim_interval,
@@ -1687,6 +1694,7 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 pub async fn start(config: Config) -> EngineResult<Server> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
+    let owner_id = config.owner_id.clone();
     // B0.1b: construct the ONE embedded fjord surface here. Its shared `Arc<dyn LogBackend>` is handed BOTH
     // to the change-record sink (in-process appends) AND — when a deployment opts into an external TCP
     // surface via `embedded_fjord.broker_listen` — to the embedded `HeimqServer`, so in-process appends are
@@ -1746,7 +1754,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -1763,7 +1771,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -1786,7 +1794,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -1814,7 +1822,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -1854,7 +1862,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -1902,7 +1910,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -1960,7 +1968,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -1996,7 +2004,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -2035,7 +2043,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -2076,7 +2084,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
-                node_id,
+                owner_id.clone(),
                 clock,
                 &listen,
                 interval,
@@ -2184,14 +2192,12 @@ async fn run_owned<B: RespBackend>(
     backend: Arc<B>,
     control_plane: Arc<dyn QueueControlPlane>,
     advertise_addr: Option<&str>,
-    node_id: u8,
+    owner: OwnerId,
     clock: Arc<dyn Clock>,
     listen: &str,
     reclaim_interval: Duration,
     queues: &[QueueDefinition],
 ) -> EngineResult<Server> {
-    let owner =
-        OwnerId::new(format!("node-{node_id}")).map_err(|e| EngineError::Storage(e.to_string()))?;
     start_with_ownership_advertised(
         backend,
         control_plane,
@@ -2212,7 +2218,7 @@ async fn run_owned_with_fjord_task<B: RespBackend>(
     backend: Arc<B>,
     control_plane: Arc<dyn QueueControlPlane>,
     advertise_addr: Option<&str>,
-    node_id: u8,
+    owner: OwnerId,
     clock: Arc<dyn Clock>,
     listen: &str,
     reclaim_interval: Duration,
@@ -2223,7 +2229,7 @@ async fn run_owned_with_fjord_task<B: RespBackend>(
         backend,
         control_plane,
         advertise_addr,
-        node_id,
+        owner,
         clock,
         listen,
         reclaim_interval,

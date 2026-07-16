@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use pqueue_core::{
-    EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    EligibilityPolicy, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
@@ -623,6 +623,22 @@ impl Config {
     pub fn from_env(env: &BTreeMap<String, String>) -> Result<Config, ConfigError> {
         let segments = segment_config(env)?;
         let replicas = replica_count(env)?;
+        let node_id = resolve_node_id(&env_or(env, "PQUEUE_NODE_ID", "0"));
+        let owner_id = match env
+            .get("PQUEUE_OWNER_ID")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            Some(value) => OwnerId::new(value)
+                .map_err(|error| ConfigError::new(format!("invalid PQUEUE_OWNER_ID: {error}")))?,
+            None if replicas > 1 => {
+                return Err(ConfigError::new(
+                    "PQUEUE_REPLICA_COUNT>1 requires a non-empty, full-width PQUEUE_OWNER_ID",
+                ));
+            }
+            None => OwnerId::new(format!("node-{node_id}"))
+                .expect("a numeric node id always forms a valid owner id"),
+        };
         let advertise_addr = match env
             .get("PQUEUE_ADVERTISE_ADDR")
             .map(|value| value.trim())
@@ -643,7 +659,8 @@ impl Config {
         Ok(Config {
             backend: parse_backend(env, segments)?,
             embedded_fjord: embedded_fjord_config(env),
-            node_id: resolve_node_id(&env_or(env, "PQUEUE_NODE_ID", "0")),
+            node_id,
+            owner_id,
             listen: env_or(env, "PQUEUE_LISTEN_ADDR", "0.0.0.0:8080"),
             advertise_addr,
             reclaim_interval: parse_duration_ms(env, "PQUEUE_RECLAIM_INTERVAL_MS", 1_000),
