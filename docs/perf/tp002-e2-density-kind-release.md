@@ -73,6 +73,7 @@ hot connections, eight cold workers, four server workers, seed 42, and a
 reproduction, but the focused validator rejects a changed governed
 configuration as release evidence. `CLUSTER`, `IMAGE`, and `LEDGER_OUT` may be
 changed as operational locations without weakening a semantic bar. Immediately
-before row emission and again before validation, the command rechecks both
-`HEAD` and the clean worktree to close the build-to-attestation
-time-of-check/time-of-use window.
+before row emission, before validation, and after the final verifier returns,
+the command rechecks both `HEAD` and the clean worktree. The emitter and
+verifier run with Cargo's `--locked` mode. Together these checks close the
+build-to-attestation time-of-check/time-of-use window.

@@ -227,7 +227,7 @@ read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_
 
 mkdir -p "$(dirname "$LEDGER_OUT")"
 assert_source_unchanged
-rustup run 1.92.0 cargo run --quiet -p pqueue-loadgen -- density-emit-row \
+rustup run 1.92.0 cargo run --locked --quiet -p pqueue-loadgen -- density-emit-row \
   --result "$RESULT_FILE" \
   --observed-threads "$OBSERVED_THREADS" --thread-limit "$THREAD_LIMIT" \
   --observed-connections "$OBSERVED_CONNECTIONS" --connection-limit "$CONNECTION_LIMIT" \
@@ -238,5 +238,6 @@ rustup run 1.92.0 cargo run --quiet -p pqueue-loadgen -- density-emit-row \
   --revision "$REVISION" --image-digest "$IMAGE_DIGEST" \
   --topology "$TOPOLOGY" --hardware "$HARDWARE" --out "$LEDGER_OUT"
 assert_source_unchanged
-rustup run 1.92.0 cargo run --quiet -p pqueue-release --bin pqueue-verify-density-evidence -- "$LEDGER_OUT"
+rustup run 1.92.0 cargo run --locked --quiet -p pqueue-release --bin pqueue-verify-density-evidence -- "$LEDGER_OUT"
+assert_source_unchanged
 printf 'LEDGER_OUT=%s\n' "$LEDGER_OUT"
