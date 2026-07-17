@@ -239,6 +239,7 @@ assert_shared_s3_postgres_control_plane_contract() {
     assert_contains "$rendered" 'PQUEUE_LOG_BACKEND: "objectlog"' "objectlog log axis"
     assert_contains "$rendered" 'PQUEUE_CONTROL_PLANE: "postgres"' "postgres control-plane axis"
     assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_STORE: "s3"' "shared object-log store selection"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_BUCKET: "pqueue-shared"' "S3 bucket"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_REGION: "us-east-1"' "S3 region"
