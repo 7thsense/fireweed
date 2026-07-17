@@ -236,7 +236,13 @@ fn is_transient_fence(e: &str) -> bool {
 /// SUCCESSFUL `XADD`s count toward `total`; an item fenced by a transient epoch flap is simply re-sent on the
 /// next wave (the item payloads are interchangeable, so retry preserves the exact pushed count). A long fence
 /// storm trips the guard and fails the run loudly rather than spinning forever.
-fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
+fn push_items_counted(
+    conn: &mut Conn,
+    key: &str,
+    total: u64,
+    pipe: usize,
+    completed: Option<&AtomicU64>,
+) {
     let mut done = 0u64;
     let mut pr = 0u64;
     let mut fence_waves = 0u64;
@@ -260,6 +266,9 @@ fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
             }
         }
         done += ok;
+        if let Some(completed) = completed {
+            completed.fetch_add(ok, Ordering::Relaxed);
+        }
         pr += n as u64;
         if ok < n as u64 {
             fence_waves += 1;
@@ -272,8 +281,18 @@ fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
     }
 }
 
+fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
+    push_items_counted(conn, key, total, pipe, None);
+}
+
 /// Cooperatively drain `key` (`XREADGROUP >` + `XACK`) until an empty batch. Returns the count drained.
-fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
+fn drain_counted(
+    conn: &mut Conn,
+    key: &str,
+    consumer: &str,
+    batch: usize,
+    completed: Option<&AtomicU64>,
+) -> u64 {
     let mut total = 0u64;
     let count = batch.max(1).to_string();
     let mut guard = 0u64;
@@ -321,8 +340,15 @@ fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
             }
         }
         total += ids.len() as u64;
+        if let Some(completed) = completed {
+            completed.fetch_add(ids.len() as u64, Ordering::Relaxed);
+        }
     }
     total
+}
+
+fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
+    drain_counted(conn, key, consumer, batch, None)
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -385,7 +411,12 @@ fn assert_one_owner_per_queue(spec: &RunSpec) -> usize {
 }
 
 /// Run ONE phase across every queue's connections and return `(per_queue_max_ns, wall_seconds)`.
-fn run_phase<F>(queue_keys: &[(String, String)], conns_per_queue: usize, work: F) -> (Vec<u64>, f64)
+fn run_phase<F>(
+    queue_keys: &[(String, String)],
+    conns_per_queue: usize,
+    progress: Option<(&str, u64, Arc<AtomicU64>)>,
+    work: F,
+) -> (Vec<u64>, f64)
 where
     F: Fn(&mut Conn, &str, usize) + Send + Sync + 'static,
 {
@@ -414,10 +445,50 @@ where
     }
     barrier.wait();
     let wall_start = Instant::now();
+    let progress_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_reporter = progress.as_ref().map(|(stage, total, completed)| {
+        println!(
+            "DENSITY_PROGRESS stage={stage} completed={} total={total} elapsed_ms=0",
+            completed.load(Ordering::Relaxed)
+        );
+        io::stdout().flush().expect("flush density progress");
+        let stage = (*stage).to_string();
+        let total = *total;
+        let completed = Arc::clone(completed);
+        let stop = Arc::clone(&progress_stop);
+        thread::spawn(move || {
+            let mut next_report = Duration::from_secs(5);
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(250));
+                if wall_start.elapsed() < next_report {
+                    continue;
+                }
+                println!(
+                    "DENSITY_PROGRESS stage={stage} completed={} total={total} elapsed_ms={}",
+                    completed.load(Ordering::Relaxed),
+                    wall_start.elapsed().as_millis()
+                );
+                io::stdout().flush().expect("flush density progress");
+                next_report += Duration::from_secs(5);
+            }
+        })
+    });
     for h in handles {
         h.join().unwrap();
     }
     let wall = wall_start.elapsed().as_secs_f64();
+    progress_stop.store(true, Ordering::Relaxed);
+    if let Some(reporter) = progress_reporter {
+        reporter.join().expect("density progress reporter");
+    }
+    if let Some((stage, total, completed)) = &progress {
+        println!(
+            "DENSITY_PROGRESS stage={stage} completed={} total={total} elapsed_ms={}",
+            completed.load(Ordering::Relaxed),
+            (wall * 1_000.0).round() as u128
+        );
+        io::stdout().flush().expect("flush density progress");
+    }
     let per_queue = Arc::try_unwrap(per_queue_ns)
         .expect("phase done")
         .into_iter()
@@ -463,6 +534,17 @@ fn measure(
     pipe: usize,
     batch: usize,
 ) -> (f64, f64, f64, f64) {
+    measure_with_progress(spec, items_per_queue, conns_per_queue, pipe, batch, None)
+}
+
+fn measure_with_progress(
+    spec: &RunSpec,
+    items_per_queue: u64,
+    conns_per_queue: usize,
+    pipe: usize,
+    batch: usize,
+    progress_prefix: Option<&str>,
+) -> (f64, f64, f64, f64) {
     let conns_per_queue = conns_per_queue.max(1);
     let queue_keys: Vec<(String, String)> = spec
         .nodes
@@ -476,19 +558,42 @@ fn measure(
     let remainder = items_per_queue - per_conn * conns_per_queue as u64;
 
     // ---- Phase 1: INGEST ----
-    let (push_ns, ingest_wall) = run_phase(&queue_keys, conns_per_queue, move |c, key, ci| {
-        let my_push = per_conn + if ci == 0 { remainder } else { 0 };
-        push_items(c, key, my_push, pipe);
-    });
+    let total_items = num_queues as u64 * items_per_queue;
+    let ingest_completed = Arc::new(AtomicU64::new(0));
+    let ingest_worker_completed = Arc::clone(&ingest_completed);
+    let ingest_stage = progress_prefix.map(|prefix| format!("{prefix}_INGEST"));
+    let ingest_progress = ingest_stage
+        .as_deref()
+        .map(|stage| (stage, total_items, Arc::clone(&ingest_completed)));
+    let (push_ns, ingest_wall) = run_phase(
+        &queue_keys,
+        conns_per_queue,
+        ingest_progress,
+        move |c, key, ci| {
+            let my_push = per_conn + if ci == 0 { remainder } else { 0 };
+            push_items_counted(c, key, my_push, pipe, Some(&ingest_worker_completed));
+        },
+    );
 
     // ---- Phase 2: CLAIM+FINALIZE ----
     let drained_total = Arc::new(AtomicU64::new(0));
     let dt = Arc::clone(&drained_total);
-    let (drain_ns, drain_wall) = run_phase(&queue_keys, conns_per_queue, move |c, key, ci| {
-        let consumer = format!("c{ci}");
-        let got = drain(c, key, &consumer, batch);
-        dt.fetch_add(got, Ordering::SeqCst);
-    });
+    let drain_completed = Arc::new(AtomicU64::new(0));
+    let drain_worker_completed = Arc::clone(&drain_completed);
+    let drain_stage = progress_prefix.map(|prefix| format!("{prefix}_CLAIM_FINALIZE"));
+    let drain_progress = drain_stage
+        .as_deref()
+        .map(|stage| (stage, total_items, Arc::clone(&drain_completed)));
+    let (drain_ns, drain_wall) = run_phase(
+        &queue_keys,
+        conns_per_queue,
+        drain_progress,
+        move |c, key, ci| {
+            let consumer = format!("c{ci}");
+            let got = drain_counted(c, key, &consumer, batch, Some(&drain_worker_completed));
+            dt.fetch_add(got, Ordering::SeqCst);
+        },
+    );
     assert_eq!(
         drained_total.load(Ordering::SeqCst),
         num_queues as u64 * items_per_queue,
@@ -500,7 +605,7 @@ fn measure(
             .map(|&ns| items_per_queue as f64 / (ns as f64 / 1e9))
             .fold(f64::INFINITY, f64::min)
     };
-    let total_items = (num_queues as u64 * items_per_queue) as f64;
+    let total_items = total_items as f64;
     (
         total_items / ingest_wall,
         min_per_queue(&push_ns),
@@ -799,7 +904,15 @@ fn cmd_density_run(args: &[String]) -> ! {
             queues: keys.clone(),
         }],
     };
+    println!("DENSITY_STAGE stage=READINESS status=START");
+    io::stdout().flush().expect("flush density readiness stage");
     await_ready(&all_spec);
+    println!("DENSITY_STAGE stage=READINESS status=DONE");
+    println!(
+        "DENSITY_STAGE stage=INVENTORY status=START completed=0 total={}",
+        keys.len()
+    );
+    io::stdout().flush().expect("flush density inventory stage");
     for key in &keys {
         let mut conn = Conn::connect(&addr).expect("density inventory probe connect");
         assert!(
@@ -809,6 +922,12 @@ fn cmd_density_run(args: &[String]) -> ! {
             "generated queue {key} is absent"
         );
     }
+    println!(
+        "DENSITY_STAGE stage=INVENTORY status=DONE completed={} total={}",
+        keys.len(),
+        keys.len()
+    );
+    io::stdout().flush().expect("flush density inventory stage");
 
     let hot_spec = RunSpec {
         owners: 1,
@@ -818,7 +937,18 @@ fn cmd_density_run(args: &[String]) -> ! {
         }],
     };
     let started = Instant::now();
-    let (_, baseline_ingest, _, baseline_claim) = measure(&hot_spec, items, conns, pipe, batch);
+    println!("DENSITY_STAGE stage=BASELINE status=START");
+    io::stdout().flush().expect("flush density baseline stage");
+    let (_, baseline_ingest, _, baseline_claim) =
+        measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("BASELINE"));
+    println!("DENSITY_STAGE stage=BASELINE status=DONE");
+    println!(
+        "DENSITY_STAGE stage=COLD_PRIME status=START completed=0 total={}",
+        cold.len()
+    );
+    io::stdout()
+        .flush()
+        .expect("flush density cold-prime stage");
 
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let ready = Arc::new(AtomicU64::new(0));
@@ -845,13 +975,30 @@ fn cmd_density_run(args: &[String]) -> ! {
         progress_bound_ms,
     );
     let deadline = Instant::now() + Duration::from_secs(300);
+    let mut next_cold_report = Instant::now();
     while ready.load(Ordering::SeqCst) < cold.len() as u64 {
         assert!(
             Instant::now() < deadline,
             "cold queues did not all prove progress within 300s"
         );
+        if Instant::now() >= next_cold_report {
+            let completed = ready.load(Ordering::SeqCst);
+            println!(
+                "DENSITY_PROGRESS stage=COLD_PRIME completed={completed} total={}",
+                cold.len()
+            );
+            io::stdout()
+                .flush()
+                .expect("flush density cold-prime progress");
+            next_cold_report += Duration::from_secs(5);
+        }
         thread::sleep(Duration::from_millis(50));
     }
+    println!(
+        "DENSITY_STAGE stage=COLD_PRIME status=DONE completed={} total={}",
+        cold.len(),
+        cold.len()
+    );
     let hot_phase_started_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before Unix epoch")
@@ -859,7 +1006,8 @@ fn cmd_density_run(args: &[String]) -> ! {
     hot_phase.store(true, Ordering::SeqCst);
     println!("DENSITY_PHASE HOT_START {hot_phase_started_unix_ms}");
     io::stdout().flush().expect("flush HOT_START marker");
-    let (_, loaded_ingest, _, loaded_claim) = measure(&hot_spec, items, conns, pipe, batch);
+    let (_, loaded_ingest, _, loaded_claim) =
+        measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("LOADED"));
     hot_phase.store(false, Ordering::SeqCst);
     let hot_phase_ended_unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
