@@ -1066,6 +1066,24 @@ where
                         return Err(fence_error);
                     }
                 };
+                // A pod-local projection may have been initialized while this node was a non-owner and
+                // therefore be behind the shared log. Hydrate only after the durable epoch fence has made
+                // old writers stale, but before confirming/publishing this lease as serving. Failure keeps
+                // the lease non-serving and takes the same compensation path as a failed fence.
+                if let Err(hydration_error) =
+                    self.backend.hydrate_projection_for_ownership(queue).await
+                {
+                    self.sessions.lock().expect("poisoned").remove(queue);
+                    let _ = self
+                        .cp_release(
+                            queue.clone(),
+                            self.owner.clone(),
+                            lease.assignment_epoch,
+                            now,
+                        )
+                        .await;
+                    return Err(hydration_error);
+                }
                 if lease.state == LeaseState::PendingFence
                     && let Err(confirm_error) = self
                         .cp_confirm(

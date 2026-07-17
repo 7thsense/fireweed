@@ -7,14 +7,14 @@ use std::sync::{Arc, Barrier};
 
 use bytes::Bytes;
 use pqueue_core::{
-    EligibilityPolicy, Metadata, OrderingMode, OwnerId, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
-    TenantId, UtcTimestamp,
+    EligibilityPolicy, LeaseToken, Metadata, OrderingMode, OwnerId, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
+    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    AcquireOutcome, ControlPlaneConfig, ControlPlaneStore, EngineError, EngineResult, LeaseState,
-    OwnerEndpointAdvertisement, OwnerResolution, ProjectionRead, PushPort, PushSpec,
-    QueueControlPlane, QueueKey, QueueLease,
+    AcquireOutcome, ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneConfig,
+    ControlPlaneStore, EngineError, EngineResult, LeaseState, OwnerEndpointAdvertisement,
+    OwnerResolution, ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey, QueueLease,
 };
 use pqueue_objectlog::segmented::{FaultCutPoint, FaultHook, S3BlobStore};
 use pqueue_postgres::PostgresControlPlane;
@@ -339,6 +339,191 @@ fn concurrent_acquires_publish_exactly_one_usable_owner() {
     let lease = observer.lease(&queue).unwrap();
     assert_eq!(lease.state, LeaseState::Assigned);
     assert_eq!(lease.assignment_epoch, 1);
+}
+
+#[test]
+fn greater_epoch_owner_hydrates_snapshot_tail_before_serving() {
+    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP TAKEOVER HYDRATION") else {
+        return;
+    };
+    let (schema, definition, queue) = unique("hydrate");
+    let config = ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 10_000,
+    };
+    let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
+    let a_backend = backend(store.clone(), "hydrate-a");
+    let b_backend = backend(store, "hydrate-b");
+    let a = OwnershipRuntime::new(
+        a_backend.clone(),
+        cp_a,
+        owner("owner-a"),
+        "127.0.0.1:7101".into(),
+    );
+    let b = OwnershipRuntime::new(
+        b_backend.clone(),
+        cp_b,
+        owner("owner-b"),
+        "127.0.0.1:7102".into(),
+    );
+    a.register_owner(ts(0)).unwrap();
+    b.register_owner(ts(20)).unwrap();
+
+    test_runtime().block_on(async {
+        a_backend.create_queue(definition.clone()).await.unwrap();
+        // Standby initialization happens before any owner writes, matching the multi-pod Helm profile.
+        b_backend.create_queue(definition).await.unwrap();
+        a_backend.fence_epoch(&queue, 0).await.unwrap();
+        a.acquire_queue(&queue, ts(0)).await.unwrap();
+        let flusher = a_backend.spawn_flusher();
+
+        a_backend
+            .push(
+                &queue,
+                vec![spec("prefix-1"), spec("prefix-2")],
+                ts(1),
+                Some(1),
+            )
+            .await
+            .unwrap();
+        // Materialize a durable standby snapshot/high-water, then deliberately leave it behind the log.
+        b_backend
+            .hydrate_projection_for_ownership(&queue)
+            .await
+            .unwrap();
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 2);
+        a_backend
+            .push(&queue, vec![spec("tail-1"), spec("tail-2")], ts(2), Some(1))
+            .await
+            .unwrap();
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 2);
+
+        // Epoch-2 acquisition must replay the missing tail before Postgres publishes owner-b as serving.
+        b.acquire_queue(&queue, ts(20)).await.unwrap();
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 4);
+        let recovery = b_backend.recovery_stats(&queue).unwrap();
+        assert!(recovery.snapshot_used);
+        assert!(recovery.start_seq > 0);
+        assert!(recovery.tail_replayed > 0);
+
+        // The old epoch is rejected before mutation, and exact visible state remains four.
+        assert_eq!(
+            a_backend
+                .push(&queue, vec![spec("stale")], ts(21), Some(1))
+                .await,
+            Err(EngineError::EpochFenced)
+        );
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 4);
+
+        let first = b_backend
+            .claim(ClaimRequest {
+                shard: queue.clone(),
+                worker_id: WorkerId::new("worker-a").unwrap(),
+                max_items: 4,
+                lease_token: LeaseToken::new("lease-a").unwrap(),
+                lease_expires_at: ts(80),
+                now: ts(22),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: Some(2),
+            })
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 4);
+        let second = b_backend
+            .claim(ClaimRequest {
+                shard: queue.clone(),
+                worker_id: WorkerId::new("worker-b").unwrap(),
+                max_items: 4,
+                lease_token: LeaseToken::new("lease-b").unwrap(),
+                lease_expires_at: ts(80),
+                now: ts(23),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: Some(2),
+            })
+            .await
+            .unwrap();
+        assert!(
+            second.items.is_empty(),
+            "no item may receive a double lease"
+        );
+        let metrics = b_backend.metrics(&queue).await.unwrap();
+        assert_eq!(metrics.pending, 0);
+        assert_eq!(metrics.leased, 4);
+        flusher.abort();
+    });
+    let lease = observer.lease(&queue).unwrap();
+    assert_eq!(lease.state, LeaseState::Assigned);
+    assert_eq!(lease.active_owner_id, Some(owner("owner-b")));
+    assert_eq!(lease.assignment_epoch, 2);
+}
+
+#[test]
+fn greater_epoch_owner_rebuilds_projection_initialized_before_writes() {
+    let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP EMPTY TAKEOVER REBUILD") else {
+        return;
+    };
+    let (schema, definition, queue) = unique("empty_hydrate");
+    let config = ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 10_000,
+    };
+    let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let cp_b = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
+    let a_backend = backend(store.clone(), "empty-hydrate-a");
+    let b_backend = backend(store, "empty-hydrate-b");
+    let a = OwnershipRuntime::new(
+        a_backend.clone(),
+        cp_a,
+        owner("owner-a"),
+        "127.0.0.1:7101".into(),
+    );
+    let b = OwnershipRuntime::new(
+        b_backend.clone(),
+        cp_b,
+        owner("owner-b"),
+        "127.0.0.1:7102".into(),
+    );
+    a.register_owner(ts(0)).unwrap();
+    b.register_owner(ts(20)).unwrap();
+
+    test_runtime().block_on(async {
+        a_backend.create_queue(definition.clone()).await.unwrap();
+        b_backend.create_queue(definition).await.unwrap();
+        a_backend.fence_epoch(&queue, 0).await.unwrap();
+        a.acquire_queue(&queue, ts(0)).await.unwrap();
+        let flusher = a_backend.spawn_flusher();
+        a_backend
+            .push(
+                &queue,
+                vec![spec("one"), spec("two"), spec("three"), spec("four")],
+                ts(1),
+                Some(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(a_backend.metrics(&queue).await.unwrap().pending, 4);
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 0);
+
+        b.acquire_queue(&queue, ts(20)).await.unwrap();
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 4);
+        let recovery = b_backend.recovery_stats(&queue).unwrap();
+        assert!(
+            !recovery.snapshot_used,
+            "empty standby must use safe genesis fallback"
+        );
+        assert_eq!(recovery.start_seq, 0);
+        assert!(recovery.tail_replayed > 0);
+        flusher.abort();
+    });
+    let lease = observer.lease(&queue).unwrap();
+    assert_eq!(lease.state, LeaseState::Assigned);
+    assert_eq!(lease.active_owner_id, Some(owner("owner-b")));
+    assert_eq!(lease.assignment_epoch, 2);
 }
 
 #[test]
