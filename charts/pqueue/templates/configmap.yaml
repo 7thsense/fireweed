@@ -25,6 +25,9 @@ data:
   PQUEUE_CONTROL_PLANE_HEARTBEAT_TTL_MS: {{ .Values.storage.controlPlane.postgres.heartbeatTtlMs | int64 | quote }}
   PQUEUE_CONTROL_PLANE_LEASE_TTL_MS: {{ .Values.storage.controlPlane.postgres.leaseTtlMs | int64 | quote }}
   {{- end }}
+  {{- if eq .Values.storage.log.backend "objectlog" }}
+  PQUEUE_OBJECT_LOG_STORE: {{ .Values.storage.log.objectLog.store | quote }}
+  {{- end }}
   {{- if and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "local") }}
   PQUEUE_OBJECT_LOG_ROOT: {{ .Values.storage.log.objectLog.root | quote }}
   {{- end }}

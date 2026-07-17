@@ -94,7 +94,7 @@ pod_ip() { k -n "${NS}" get pod "$1" -o jsonpath='{.status.podIP}'; }
 for tool in docker kind kubectl helm python3 cargo git; do need "${tool}"; done
 
 SOURCE_REV="$(git -C "${ROOT}" rev-parse HEAD)"
-CHART_REV="$(git -C "${ROOT}" hash-object "${CHART}/Chart.yaml" "${CHART}/values-shared-s3.yaml" "${CHART}/templates/deployment.yaml" | sha256sum | awk '{print $1}')"
+CHART_REV="$(cd "${CHART}" && rg --files -0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 HARDWARE="$(uname -srm); cpu=$(getconf _NPROCESSORS_ONLN); memory_bytes=$(awk '/MemTotal/{print $2*1024}' /proc/meminfo)"
 echo "TP-002 E2 source=${SOURCE_REV} chart=${CHART_REV} seed=${SEED}"
 
