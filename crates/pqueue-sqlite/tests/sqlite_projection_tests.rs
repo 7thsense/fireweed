@@ -4,13 +4,13 @@ use bytes::Bytes;
 use pqueue_conformance::{item, qdef, shard, ts};
 use pqueue_core::{
     ClientItemKey, GroupKey, IndexSpec, ItemId, LeaseToken, Metadata, MetadataValue, PriorityValue,
-    QueueDefinition,
+    QueueDefinition, WorkerId,
 };
 use pqueue_engine::{
     AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
     CommandPosition, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    PauseQueueCommand, ProjectionRead, PushCommand, PushItem, QueueCommand, SideRecord,
-    WriteSideRecordsCommand,
+    LeaseExpiredCommand, PauseQueueCommand, ProjectionRead, PushCommand, PushItem, QueueCommand,
+    SideRecord, WriteSideRecordsCommand,
 };
 use pqueue_projection::InMemoryProjection;
 use pqueue_sqlite::{HybridProjectionStore, SqliteProjectionStore};
@@ -611,4 +611,102 @@ fn hybrid_chaos_secondary_index_and_metrics_match_sqlite_image() {
     .unwrap()
     .expect("unique index hit");
     assert_eq!(hit.item_id, first);
+}
+
+#[test]
+fn lease_clearing_transitions_remove_worker_attribution_from_export_and_recovery() {
+    let worker = WorkerId::new("projection-worker").unwrap();
+    let lease_token = LeaseToken::new("projection-lease").unwrap();
+    for (case, command) in [
+        (
+            "complete",
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(
+                    ItemId::new("1").unwrap(),
+                    FinalizeKind::Complete,
+                )],
+            }),
+        ),
+        (
+            "retry",
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(
+                    ItemId::new("1").unwrap(),
+                    FinalizeKind::Retry,
+                )],
+            }),
+        ),
+        (
+            "rearm",
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(
+                    ItemId::new("1").unwrap(),
+                    FinalizeKind::Rearm,
+                )],
+            }),
+        ),
+        (
+            "expired",
+            QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: vec![ItemId::new("1").unwrap()],
+            }),
+        ),
+    ] {
+        let definition = qdef();
+        let store = SqliteProjectionStore::in_memory().unwrap();
+        store.create_queue_projection(definition.clone()).unwrap();
+        let item_id = ItemId::new("1").unwrap();
+        let commands = vec![
+            envelope(
+                &format!("push-{case}"),
+                QueueCommand::Push(PushCommand {
+                    items: vec![rich_item("1", "k1")],
+                }),
+                vec![item_id],
+                0,
+            ),
+            envelope(
+                &format!("claim-{case}"),
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: vec![item_id],
+                    lease_token: lease_token.clone(),
+                    lease_expires_at: ts(60),
+                    worker_id: Some(worker.clone()),
+                }),
+                vec![item_id],
+                1,
+            ),
+        ];
+        store
+            .apply_committed_batch(&[pos(0), pos(1)], &commands)
+            .unwrap();
+        assert_eq!(
+            store.export_projection_image(&shard()).unwrap().items[0].worker_id,
+            Some(worker.clone()),
+            "{case}: leased export must retain attribution"
+        );
+        store
+            .apply_committed_batch(
+                &[pos(2)],
+                &[envelope(
+                    &format!("clear-{case}"),
+                    command,
+                    vec![item_id],
+                    2,
+                )],
+            )
+            .unwrap();
+        let image = store.export_projection_image(&shard()).unwrap();
+        assert_eq!(
+            image.items[0].worker_id, None,
+            "{case}: lease-clearing export must drop attribution"
+        );
+        let mut recovered = InMemoryProjection::new();
+        recovered.hydrate_shard(&definition, image.clone()).unwrap();
+        assert_eq!(
+            pqueue_engine::ProjectionStore::metrics(&recovered, &shard()).unwrap(),
+            image.metrics,
+            "{case}: recovered memory projection must match SQLite export"
+        );
+    }
 }

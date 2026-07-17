@@ -1943,6 +1943,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         loop {
             let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
             for (_, env) in &page.entries {
+                if let QueueCommand::RenewLease(renew) = &env.command {
+                    let renewed: HashSet<ItemId> = renew.item_ids.iter().copied().collect();
+                    idempotency
+                        .entry(shard.clone())
+                        .or_default()
+                        .extend_expiry_matching(renew.lease_expires_at, |(item_ids, _)| {
+                            !item_ids.is_empty()
+                                && item_ids.iter().all(|item_id| renewed.contains(item_id))
+                        });
+                    continue;
+                }
                 let (
                     Some(request_id),
                     Some(fingerprint),
@@ -3371,7 +3382,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
                     item_ids: item_ids.clone(),
                     lease_expires_at: new_lease_expires_at,
                 }),
-                item_ids,
+                item_ids.clone(),
                 now,
             );
             if gc {
@@ -3379,6 +3390,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
             } else {
                 Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             }
+            let renewed: HashSet<ItemId> = item_ids.iter().copied().collect();
+            g.claim_by_query_idempotency
+                .entry(shard.clone())
+                .or_default()
+                .extend_expiry_matching(new_lease_expires_at, |(claimed, _)| {
+                    !claimed.is_empty() && claimed.iter().all(|item_id| renewed.contains(item_id))
+                });
             Ok(())
         })();
         std::future::ready(result)
@@ -6340,6 +6358,73 @@ mod ordered_tests {
                 ..Default::default()
             }))
         );
+    }
+
+    #[test]
+    fn renewed_query_claim_rebuild_extends_replay_and_trim_pin_horizon() {
+        let log = FakeGroupCommitLog::default();
+        let shard = queue();
+        let item_id = ItemId::from_u64(77);
+        let lease_token = LeaseToken::new("query-lease").unwrap();
+        let request_id = RequestId::new("query-request").unwrap();
+        let fingerprint = 7_u64;
+        log.set_entries(
+            &shard,
+            0,
+            vec![
+                CommandEnvelope {
+                    command_id: CommandId::new("query-claim"),
+                    request_id: Some(request_id.clone()),
+                    request_fingerprint: Some(fingerprint),
+                    request_outcome: Some(RequestOutcome::ClaimByQuery {
+                        item_ids: vec![item_id],
+                        lease_token: lease_token.clone(),
+                        worker_id: Some(WorkerId::new("query-worker").unwrap()),
+                    }),
+                    item_ids: vec![item_id],
+                    command: QueueCommand::Claim(ClaimCommand {
+                        item_ids: vec![item_id],
+                        lease_token: lease_token.clone(),
+                        lease_expires_at: ts(130),
+                        worker_id: Some(WorkerId::new("query-worker").unwrap()),
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: ts(100),
+                },
+                CommandEnvelope {
+                    command_id: CommandId::new("renew-query-claim"),
+                    request_id: None,
+                    request_fingerprint: None,
+                    request_outcome: None,
+                    item_ids: vec![item_id],
+                    command: QueueCommand::RenewLease(RenewLeaseCommand {
+                        item_ids: vec![item_id],
+                        lease_expires_at: ts(160),
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: ts(105),
+                },
+            ],
+        );
+        let mut recovered = HashMap::new();
+        ComposedBackend::<FakeGroupCommitLog, FakeProjection, InProcessControlPlane>::rebuild_claim_by_query_idempotency_from_log(
+            &log,
+            &mut recovered,
+            &shard,
+            10_000,
+            None,
+        )
+        .unwrap();
+        let cache = recovered.get(&shard).unwrap();
+        assert!(matches!(
+            cache.check_conflict_first(&request_id, BodyHash(fingerprint), ts(145)),
+            IdempotencyDecision::Replay(_)
+        ));
+        assert!(cache.has_unexpired_matching(ts(145), |(item_ids, _)| !item_ids.is_empty()));
+        assert!(matches!(
+            cache.check_conflict_first(&request_id, BodyHash(fingerprint), ts(160)),
+            IdempotencyDecision::Expired
+        ));
     }
 }
 

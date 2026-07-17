@@ -1613,6 +1613,50 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
             let request_fingerprint = claim_by_query_fingerprint(&request)?;
             let request_expires_at = request_expires_at(&g.queues, shard, context.now)?;
+            let created_at = context.now;
+            let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+            let eligibility_nanos = ts_nanos(context.eligibility_at());
+            let Inner {
+                conn,
+                live_tokens,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                ..
+            } = &mut *g;
+            let (t, q) = parts(shard);
+            // Conflict-first is the cross-backend request-id policy: once the basic envelope can be
+            // fingerprinted, a changed body reusing a retained id conflicts even if its query structure is
+            // itself invalid. Structural validation applies only to a genuinely new execution.
+            let tx = st(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            if let Some(replay) = check_claim_by_query_idempotency(
+                &tx,
+                shard,
+                &request_id,
+                &request_fingerprint,
+                context.now,
+            )? {
+                if replay
+                    .worker_id
+                    .as_ref()
+                    .is_some_and(|worker_id| worker_id != &request.worker_id)
+                {
+                    return Err(EngineError::Storage(
+                        "claim_by_query replay worker attribution mismatch".into(),
+                    ));
+                }
+                let items = render_claimed(&tx, shard, &replay.item_ids, |_| {
+                    Some(replay.lease_token.clone())
+                })?;
+                st(tx.commit())?;
+                for item_id in &replay.item_ids {
+                    live_tokens.insert(*item_id, replay.lease_token.clone());
+                }
+                return Ok(Claimed {
+                    items,
+                    ..Default::default()
+                });
+            }
             let spec = if let Some(name) = request.index.as_deref() {
                 definition
                     .typed_indexes
@@ -1643,49 +1687,6 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 return Err(EngineError::Invalid("unindexed-field"));
             }
 
-            let created_at = context.now;
-            let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
-            let eligibility_nanos = ts_nanos(context.eligibility_at());
-            let Inner {
-                conn,
-                live_tokens,
-                grouped_shards,
-                claim_scan_hints,
-                claim_scan_default_fifo,
-                ..
-            } = &mut *g;
-            let (t, q) = parts(shard);
-            // Acquire the SQLite writer reservation before reading candidates. Separate backend handles
-            // therefore cannot both select the same observed version and race their lease transitions.
-            let tx = st(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
-            if let Some(replay) = check_claim_by_query_idempotency(
-                &tx,
-                shard,
-                &request_id,
-                &request_fingerprint,
-                context.now,
-            )? {
-                if replay
-                    .worker_id
-                    .as_ref()
-                    .is_some_and(|worker_id| worker_id != &request.worker_id)
-                {
-                    return Err(EngineError::Storage(
-                        "claim_by_query replay worker attribution mismatch".into(),
-                    ));
-                }
-                let items = render_claimed(&tx, shard, &replay.item_ids, |_| {
-                    Some(replay.lease_token.clone())
-                })?;
-                st(tx.commit())?;
-                for item_id in &replay.item_ids {
-                    live_tokens.insert(*item_id, replay.lease_token.clone());
-                }
-                return Ok(Claimed {
-                    items,
-                    ..Default::default()
-                });
-            }
             let paused = queue_paused(&tx, shard)?;
             let mut matched = Vec::new();
             let mut stmt = (!paused)
