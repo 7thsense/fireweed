@@ -1167,6 +1167,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         f(&self.inner.lock().expect("poisoned").projection)
     }
 
+    /// Run lifecycle/repair work against the log and mutable projection under the composition's full
+    /// unit-of-work lock. This is intentionally narrower than exposing either axis: callers can reconcile a
+    /// disposable projection from authoritative log history without allowing a live append/apply operation
+    /// to interleave between reset, replay, and verification.
+    pub fn with_log_and_projection_mut<R>(&self, f: impl FnOnce(&L, &mut P) -> R) -> R {
+        let mut inner = self.inner.lock().expect("poisoned");
+        let Inner {
+            log, projection, ..
+        } = &mut *inner;
+        f(log, projection)
+    }
+
     /// Read, emit, and durably advance the change-record tail cursor for one shard.
     pub fn emit_change_record_tail<S: crate::port::ChangeRecordSink + ?Sized>(
         &self,

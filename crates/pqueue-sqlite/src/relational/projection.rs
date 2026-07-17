@@ -50,24 +50,29 @@ impl SqliteProjectionStore {
     /// commands before treating the durable projection as current again.
     pub fn reset_projection(&self) -> EngineResult<()> {
         let mut g = self.inner.lock().expect("projection store poisoned");
-        let tables: Vec<String> = {
-            let mut stmt = st(g.conn.prepare(
-                "SELECT name FROM sqlite_master \
-                 WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-            ))?;
-            let rows = st(stmt.query_map([], |row| row.get::<_, String>(0)))?;
-            let mut tables = Vec::new();
-            for row in rows {
-                tables.push(st(row)?);
-            }
-            tables
-        };
+        const OWNED_TABLES: &[&str] = &[
+            "pqueue_checkpoint_lineage",
+            "pqueue_item_index",
+            "pqueue_instance_fences",
+            "pqueue_side_records",
+            "pqueue_gate_state",
+            "pqueue_item_gates",
+            "pqueue_cohorts",
+            "pqueue_request_idempotency",
+            "pqueue_item_key_retention",
+            "pqueue_group_summary",
+            "relational_emission_cursor",
+            "pqueue_id_high_water",
+            "pqueue_items",
+            "relational_cursor",
+            "queues",
+        ];
 
         st(g.conn.execute_batch("BEGIN IMMEDIATE"))?;
         let reset = (|| -> EngineResult<()> {
-            for table in tables {
-                let quoted = table.replace('"', "\"\"");
-                st(g.conn.execute_batch(&format!("DROP TABLE \"{quoted}\"")))?;
+            for table in OWNED_TABLES {
+                st(g.conn
+                    .execute_batch(&format!("DROP TABLE IF EXISTS {table}")))?;
             }
             st(g.conn.execute_batch(RELATIONAL_SCHEMA))?;
             Ok(())

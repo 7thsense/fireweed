@@ -1,5 +1,7 @@
 //! Projection-only replay/apply seam for object_log_sqlite_projection.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use pqueue_conformance::{item, qdef, shard, ts};
 use pqueue_core::{
@@ -13,7 +15,11 @@ use pqueue_engine::{
     WriteSideRecordsCommand,
 };
 use pqueue_projection::InMemoryProjection;
-use pqueue_sqlite::{HybridProjectionStore, SqliteProjectionStore};
+use pqueue_sqlite::{
+    HybridAsyncThresholds, HybridFaultCutPoint, HybridFaultHook, HybridProjectionStore,
+    SqliteProjectionStore,
+};
+use rusqlite::Connection;
 
 fn envelope(
     id: &str,
@@ -607,4 +613,86 @@ fn hybrid_chaos_secondary_index_and_metrics_match_sqlite_image() {
     .unwrap()
     .expect("unique index hit");
     assert_eq!(hit.item_id, first);
+}
+
+#[test]
+fn reset_projection_preserves_unrelated_shared_database_tables() {
+    let path = std::env::temp_dir().join(format!(
+        "pqueue-projection-shared-db-{}-{}.sqlite",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    let _ = std::fs::remove_file(&path);
+    let path_string = path.to_string_lossy().into_owned();
+    {
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE application_state (key TEXT PRIMARY KEY, value TEXT NOT NULL); \
+                 INSERT INTO application_state VALUES ('owner', 'preserved');",
+            )
+            .unwrap();
+    }
+    let store = SqliteProjectionStore::open(&path_string).unwrap();
+    store.reset_projection().unwrap();
+    drop(store);
+
+    let connection = Connection::open(&path).unwrap();
+    let value: String = connection
+        .query_row(
+            "SELECT value FROM application_state WHERE key='owner'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(value, "preserved");
+    let queues_table: String = connection
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='queues'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(queues_table, "queues");
+    drop(connection);
+    let _ = std::fs::remove_file(path);
+}
+
+struct AsyncCheckpointFailure;
+
+impl HybridFaultHook for AsyncCheckpointFailure {
+    fn fault_point(&self, cut: HybridFaultCutPoint) -> pqueue_engine::EngineResult<()> {
+        if cut == HybridFaultCutPoint::DuringAsyncSqliteApply {
+            Err(EngineError::Storage("checkpoint worker failed".into()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn async_checkpoint_worker_failure_is_visible_and_fails_closed() {
+    let mut store = HybridProjectionStore::in_memory()
+        .unwrap()
+        .with_async_monitor(HybridAsyncThresholds::new(10, 10, 10, 10, 1).unwrap());
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
+    let id = ItemId::new("1").unwrap();
+    pqueue_engine::ProjectionStore::apply_live(
+        &mut store,
+        &[pos(0)],
+        &[envelope(
+            "async-worker-push",
+            QueueCommand::Push(PushCommand {
+                items: vec![rich_item("1", "async-worker-key")],
+            }),
+            vec![id],
+            0,
+        )],
+    )
+    .unwrap();
+    assert_eq!(store.deferred_command_count(), 1);
+    store.set_fault_hook(Some(Arc::new(AsyncCheckpointFailure)));
+    assert!(pqueue_engine::ProjectionStore::flush_deferred(&mut store).is_err());
+    assert!(store.poison_reason().is_some());
+    assert!(pqueue_engine::ProjectionStore::metrics(&store, &shard()).is_err());
 }

@@ -34,7 +34,7 @@ fn public_config(
         },
         response_barrier: pqueue::EmbeddedResponseBarrier::Strict,
         segments: pqueue::EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
-        namespace: format!("conformance-{}", COUNTER.fetch_add(1, Ordering::SeqCst)),
+        namespace: "objectlog-hybrid-conformance".into(),
         recovery: pqueue::EmbeddedRecoveryPolicy {
             max_tail_commands,
             ..pqueue::EmbeddedRecoveryPolicy::default()
