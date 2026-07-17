@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
+use std::ops::Deref;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -423,6 +424,219 @@ impl EmbeddedHandle {
             return Err(EngineError::Unavailable);
         }
         self.inner.lifecycle.rehydrate_projection().await
+    }
+}
+
+/// An embedded pqueue paired with its opaque durability lifecycle handle.
+///
+/// Queue operations are available directly through [`Deref`] to [`Pqueue`]; projection maintenance is
+/// intentionally exposed only through the stable lifecycle value types below.
+pub struct EmbeddedPqueue<B> {
+    pqueue: Pqueue<B>,
+    lifecycle: EmbeddedHandle,
+}
+
+impl<B> EmbeddedPqueue<B> {
+    pub fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
+        self.lifecycle.lifecycle_capabilities()
+    }
+
+    pub async fn verify_projection(&self) -> EngineResult<EmbeddedProjectionVerification> {
+        self.lifecycle.verify_projection().await
+    }
+
+    pub async fn delete_projection(&self) -> EngineResult<()> {
+        self.lifecycle.delete_projection().await
+    }
+
+    pub async fn rehydrate_projection(&self) -> EngineResult<EmbeddedRehydration> {
+        self.lifecycle.rehydrate_projection().await
+    }
+
+    pub fn lifecycle_handle(&self) -> EmbeddedHandle {
+        self.lifecycle.clone()
+    }
+}
+
+impl<B> Deref for EmbeddedPqueue<B> {
+    type Target = Pqueue<B>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.pqueue
+    }
+}
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+type ObjectLogPostgresBackend = pqueue_engine::ComposedBackend<
+    pqueue_objectlog::ObjectLog,
+    pqueue_postgres::PostgresRelational,
+    pqueue_engine::InProcessControlPlane,
+>;
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+struct ObjectLogPostgresLifecycle {
+    backend: Arc<ObjectLogPostgresBackend>,
+    max_tail_commands: u64,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+fn validate_objectlog_postgres_catalog(
+    log: &pqueue_objectlog::ObjectLog,
+    projection: &pqueue_postgres::PostgresRelational,
+) -> EngineResult<Vec<QueueDefinition>> {
+    use pqueue_engine::{LogStore, ProjectionStore};
+
+    let definitions = LogStore::recover_definitions(log)?;
+    let log_by_key: HashMap<QueueKey, QueueDefinition> = definitions
+        .iter()
+        .cloned()
+        .map(|definition| {
+            (
+                QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                definition,
+            )
+        })
+        .collect();
+    for projected in ProjectionStore::recover_definitions(projection)? {
+        let key = QueueKey::new(projected.tenant_id.clone(), projected.queue_id.clone());
+        let Some(authoritative) = log_by_key.get(&key) else {
+            return Err(EngineError::Storage(
+                "projection contains a queue absent from the authoritative object log".into(),
+            ));
+        };
+        if authoritative != &projected {
+            return Err(EngineError::Storage(
+                "projection queue definition conflicts with the authoritative object log".into(),
+            ));
+        }
+        let projected_high_water = ProjectionStore::recovery_high_water(projection, &key)?;
+        let authoritative_high_water = LogStore::high_water(log, &key)?;
+        match (projected_high_water, authoritative_high_water) {
+            (Some(_), None) => {
+                return Err(EngineError::Storage(
+                    "projection is non-empty but the authoritative object log is empty".into(),
+                ));
+            }
+            (Some(projected), Some(authoritative))
+                if projected.backend_epoch > authoritative.backend_epoch
+                    || (projected.backend_epoch == authoritative.backend_epoch
+                        && projected.sequence > authoritative.sequence) =>
+            {
+                return Err(EngineError::Storage(
+                    "projection is ahead of the authoritative object log".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(definitions)
+}
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+impl ObjectLogPostgresLifecycle {
+    fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
+        use pqueue_engine::{LogStore, ProjectionStore};
+
+        let projection = self.backend.with_projection(Clone::clone);
+        let definitions = self
+            .backend
+            .with_log(|log| validate_objectlog_postgres_catalog(log, &projection))?;
+        let mut projection_sequence = 0;
+        let mut authoritative_sequence = 0;
+        for definition in definitions {
+            let key = QueueKey::new(definition.tenant_id, definition.queue_id);
+            projection_sequence = projection_sequence.max(
+                ProjectionStore::recovery_high_water(&projection, &key)?
+                    .map_or(0, |position| position.sequence),
+            );
+            authoritative_sequence = authoritative_sequence.max(
+                self.backend
+                    .with_log(|log| LogStore::high_water(log, &key))?
+                    .map_or(0, |position| position.sequence),
+            );
+        }
+        Ok(EmbeddedProjectionVerification {
+            compatible: true,
+            projection_sequence,
+            authoritative_sequence,
+        })
+    }
+
+    fn rehydrate_now(&self) -> EngineResult<EmbeddedRehydration> {
+        use pqueue_engine::{LogStore, ProjectionStore};
+
+        let mut projection = self.backend.with_projection(Clone::clone);
+        let definitions = self
+            .backend
+            .with_log(|log| validate_objectlog_postgres_catalog(log, &projection))?;
+        let mut replay = Vec::new();
+        for definition in &definitions {
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            ProjectionStore::ensure_shard(&mut projection, definition)?;
+            let mut from = projection.recovery_high_water(&key)?;
+            loop {
+                let page = self
+                    .backend
+                    .with_log(|log| log.read_from(&key, from.clone(), 1_024))?;
+                replay.extend(page.entries);
+                if replay.len() as u64 > self.max_tail_commands {
+                    return Err(EngineError::Storage(format!(
+                        "projection rehydrate exceeds configured tail bound {}",
+                        self.max_tail_commands
+                    )));
+                }
+                match page.next {
+                    Some(next) => from = Some(next),
+                    None => break,
+                }
+            }
+        }
+        for chunk in replay.chunks(1_024) {
+            let positions: Vec<_> = chunk.iter().map(|(position, _)| position.clone()).collect();
+            let commands: Vec<_> = chunk.iter().map(|(_, command)| command.clone()).collect();
+            projection.apply_recovery(&positions, &commands)?;
+        }
+        let verification = self.verify_now()?;
+        Ok(EmbeddedRehydration {
+            snapshot_used: false,
+            tail_commands_replayed: replay.len() as u64,
+            projection_sequence: verification.projection_sequence,
+        })
+    }
+}
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
+    fn capabilities(&self) -> EmbeddedLifecycleCapabilities {
+        EmbeddedLifecycleCapabilities {
+            verify_projection: true,
+            delete_projection: true,
+            rehydrate_projection: true,
+        }
+    }
+
+    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
+        Box::pin(async { self.verify_now() })
+    }
+
+    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
+        Box::pin(async {
+            self.backend
+                .with_projection(pqueue_postgres::PostgresRelational::delete_projection)
+        })
+    }
+
+    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
+        Box::pin(async { self.rehydrate_now() })
+    }
+
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(flusher) = self.flusher.lock().expect("flusher poisoned").take() {
+            let _ = flusher.join();
+        }
     }
 }
 
@@ -1811,6 +2025,111 @@ pub fn open_objectlog(
         Arc::new(pqueue_objectlog::ObjectLogBackend::open(root)?),
         clock,
     ))
+}
+
+/// Open an authoritative object log with a disposable PostgreSQL projection behind the public embedded
+/// facade. The projection is verified against the log before serving, group-commit is flushed by an owned
+/// background thread, and dropping the last lifecycle handle shuts that thread down.
+///
+/// This constructor requires both the `objectlog` and `postgres` features. The SQLite projection variant
+/// is reserved for its dedicated composition and currently returns [`EngineError::Unavailable`].
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+pub fn open_embedded(
+    config: EmbeddedDurabilityConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
+    use pqueue_engine::{ComposedBackend, InProcessControlPlane};
+    use pqueue_objectlog::segmented::{BlobStore, S3BlobStore};
+
+    config.validate()?;
+    if config.response_barrier != EmbeddedResponseBarrier::Strict {
+        return Err(EngineError::Unavailable);
+    }
+    let projection = match &config.projection {
+        EmbeddedProjectionConfig::Postgres { url } => {
+            pqueue_postgres::PostgresRelational::connect_in_schema(&url.0, &config.namespace)?
+        }
+        EmbeddedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
+    };
+    let segment_config = pqueue_objectlog::SegmentConfig::new(
+        config.segments.target_bytes,
+        config.segments.max_latency_ms,
+    )?;
+    let log = match &config.object_log {
+        EmbeddedObjectLogConfig::Local { root } => {
+            pqueue_objectlog::ObjectLog::open_group_commit(root, segment_config)?
+        }
+        EmbeddedObjectLogConfig::S3Compatible {
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            allow_insecure_http,
+        } => {
+            if endpoint.starts_with("http://") && !allow_insecure_http {
+                return Err(EngineError::Invalid(
+                    "insecure S3-compatible HTTP endpoint was not explicitly allowed",
+                ));
+            }
+            let store: Arc<dyn BlobStore> = Arc::new(S3BlobStore::new(
+                endpoint,
+                bucket,
+                &access_key_id.0,
+                &secret_access_key.0,
+                region,
+            )?);
+            pqueue_objectlog::ObjectLog::open_group_commit_with_blob_store(store, segment_config)?
+        }
+    };
+
+    if let Err(error) = validate_objectlog_postgres_catalog(&log, &projection) {
+        match config.recovery.incompatible_projection {
+            EmbeddedRecoveryAction::FailClosed => return Err(error),
+            EmbeddedRecoveryAction::RehydrateProjection => projection.delete_projection()?,
+        }
+    }
+    let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+        .with_recovery_max_tail(config.recovery.max_tail_commands)
+        .with_group_commit(true)
+        .recover()?;
+    let flush_interval = backend.group_commit_flush_interval_ms();
+    let backend = Arc::new(backend);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let weak_backend = Arc::downgrade(&backend);
+    let thread_stop = Arc::clone(&stop);
+    let flusher = std::thread::Builder::new()
+        .name(format!("pqueue-embedded-{}", config.namespace))
+        .spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(flush_interval));
+                let Some(backend) = weak_backend.upgrade() else {
+                    break;
+                };
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                let _ = backend.flush_tick(now_ms);
+            }
+        })
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let lifecycle = EmbeddedHandle {
+        inner: Arc::new(EmbeddedHandleInner {
+            _config: config.clone(),
+            lifecycle: Box::new(ObjectLogPostgresLifecycle {
+                backend: Arc::clone(&backend),
+                max_tail_commands: config.recovery.max_tail_commands,
+                stop,
+                flusher: Mutex::new(Some(flusher)),
+            }),
+        }),
+    };
+    Ok(EmbeddedPqueue {
+        pqueue: Pqueue::new(backend, clock),
+        lifecycle,
+    })
 }
 
 /// Open a **sole-owner** postgres-backed pqueue (log-replay class) at `url`. Requires the `postgres`

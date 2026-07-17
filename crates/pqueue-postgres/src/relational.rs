@@ -78,8 +78,8 @@ use pqueue_engine::{
     validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
-    AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogStore,
-    ProjectionSnapshot, ProjectionStore, SnapshotRef,
+    AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogLineageIdentity,
+    LogStore, ProjectionSnapshot, ProjectionStore, SnapshotRef,
 };
 use sha2::{Digest, Sha256};
 
@@ -4737,6 +4737,26 @@ impl PostgresRelational {
             .lock()
             .expect("postgres relational store poisoned")
     }
+
+    /// Delete the rebuildable projection while leaving any external authoritative log untouched.
+    ///
+    /// This is intended for object-log-backed compositions. The PostgreSQL schema owned by this store
+    /// contains projection state only in that posture, so clearing it is safe and a subsequent recovery
+    /// can replay the retained object log from genesis.
+    pub fn delete_projection(&self) -> EngineResult<()> {
+        let mut g = self.lock();
+        st(g.client.batch_execute(
+            "TRUNCATE TABLE \
+             pqueue_instance_fences, pqueue_side_records, pqueue_item_index, \
+             pqueue_request_idempotency, pqueue_gate_state, pqueue_item_gates, pqueue_cohorts, \
+             pqueue_item_key_retention, pqueue_group_summary, relational_emission_cursor, \
+             pqueue_items, relational_cursor, queues CASCADE",
+        ))?;
+        g.queues.clear();
+        g.schemas.clear();
+        g.live_tokens.clear();
+        Ok(())
+    }
 }
 
 impl LogStore for PostgresRelational {
@@ -5014,7 +5034,7 @@ impl ProjectionStore for PostgresRelational {
         } = &mut *g;
         let mut tx = st(client.transaction())?;
         let mut token_ops = Vec::new();
-        let mut max_seq: HashMap<QueueKey, u64> = HashMap::new();
+        let mut max_position: HashMap<QueueKey, (u64, u64)> = HashMap::new();
         for (pos, env) in positions.iter().zip(commands) {
             apply_command_sql(
                 &mut tx,
@@ -5025,17 +5045,22 @@ impl ProjectionStore for PostgresRelational {
                 env.created_at,
                 &env.command,
             )?;
-            let slot = max_seq.entry(pos.queue.clone()).or_insert(pos.sequence);
-            if pos.sequence > *slot {
-                *slot = pos.sequence;
+            let slot = max_position
+                .entry(pos.queue.clone())
+                .or_insert((pos.backend_epoch, pos.sequence));
+            if (pos.backend_epoch, pos.sequence) > *slot {
+                *slot = (pos.backend_epoch, pos.sequence);
             }
         }
-        for (queue, &seq) in &max_seq {
+        for (queue, &(epoch, seq)) in &max_position {
             let (t, q) = parts(queue);
             let next = (seq + 1) as i64;
+            let epoch = epoch as i64;
             st(tx.execute(
-                "UPDATE relational_cursor SET next_seq=$3 WHERE tenant=$1 AND queue=$2 AND next_seq<$3",
-                &[&t, &q, &next],
+                "UPDATE relational_cursor SET next_seq=$3, assignment_epoch=$4 \
+                 WHERE tenant=$1 AND queue=$2 \
+                 AND (assignment_epoch<$4 OR (assignment_epoch=$4 AND next_seq<$3))",
+                &[&t, &q, &next, &epoch],
             ))?;
         }
         st(tx.commit())?;
@@ -5054,6 +5079,28 @@ impl ProjectionStore for PostgresRelational {
 
     fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         LogStore::high_water(self, shard)
+    }
+
+    fn validate_recovery_lineage(&mut self, identity: &LogLineageIdentity) -> EngineResult<()> {
+        let Some(projected) = self.recovery_high_water(&identity.shard)? else {
+            return Ok(());
+        };
+        let Some(authoritative) = identity.high_water.as_ref() else {
+            return Err(EngineError::Storage(
+                "projection has applied commands but the authoritative log is empty".into(),
+            ));
+        };
+        if projected.queue != identity.shard
+            || projected.backend_epoch > identity.current_epoch
+            || projected.backend_epoch > authoritative.backend_epoch
+            || (projected.backend_epoch == authoritative.backend_epoch
+                && projected.sequence > authoritative.sequence)
+        {
+            return Err(EngineError::Storage(
+                "projection lineage is ahead of or incompatible with the authoritative log".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {

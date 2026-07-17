@@ -2016,6 +2016,7 @@ dependencies = [
  "axon-esf",
  "bytes",
  "futures",
+ "postgres",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-memory",
