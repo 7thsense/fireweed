@@ -204,14 +204,14 @@ fn public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps() {
     block_on(pq.push(&key, item(0))).unwrap();
 
     block_on(pq.delete_projection()).unwrap();
-    block_on(pq.push(&key, item(1))).unwrap();
-    assert_eq!(
-        block_on(pq.metrics(&key)).unwrap().pending,
-        2,
-        "async success remains immediately visible while SQLite is offline"
-    );
+    assert!(matches!(
+        block_on(pq.push(&key, item(1))),
+        Err(pqueue::EngineError::Unavailable)
+    ));
+    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 1);
     assert!(block_on(pq.verify_projection()).is_err());
     block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.push(&key, item(1))).unwrap();
     block_on(pq.verify_projection()).unwrap();
 
     let writer = Arc::clone(&pq);
@@ -238,14 +238,53 @@ fn public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted
     let key = queue("strict-offline-queue");
     block_on(pq.create_queue(definition("strict-offline-queue"))).unwrap();
     block_on(pq.push(&key, item(0))).unwrap();
+    let claimed = block_on(pq.claim(&key, 1, 30_000)).unwrap();
     block_on(pq.delete_projection()).unwrap();
     assert!(matches!(
         block_on(pq.push(&key, item(1))),
         Err(pqueue::EngineError::Unavailable)
     ));
+    assert!(matches!(
+        block_on(pq.ack(&key, [claimed[0].item_id])),
+        Err(pqueue::EngineError::Unavailable)
+    ));
     block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.ack(&key, [claimed[0].item_id])).unwrap();
     block_on(pq.push(&key, item(2))).unwrap();
-    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
+    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 1);
+    drop(pq);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-buffered-{}", nonce()));
+    let mut config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
+    config.segments = EmbeddedSegmentConfig::new(16 * 1024 * 1024, 1_000).unwrap();
+    let pq =
+        Arc::new(pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap());
+    let key = queue("buffered-lifecycle-queue");
+    block_on(pq.create_queue(definition("buffered-lifecycle-queue"))).unwrap();
+
+    let writer = Arc::clone(&pq);
+    let writer_key = key.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        block_on(writer.push(&writer_key, item(7)))
+    });
+    started_rx.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+
+    block_on(pq.delete_projection()).unwrap();
+    assert!(
+        thread.join().unwrap().is_ok(),
+        "quiescence must seal the waiting push"
+    );
+    let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
+    assert_eq!(rebuilt.tail_commands_replayed, 1);
+    block_on(pq.verify_projection()).unwrap();
+    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 1);
     drop(pq);
     let _ = fs::remove_dir_all(fixture);
 }

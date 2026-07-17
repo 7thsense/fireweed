@@ -791,62 +791,65 @@ fn verify_objectlog_sqlite_axes(
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 impl ObjectLogSqliteLifecycle {
     fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
-        self.backend.with_log_and_projection_mut(|log, projection| {
-            verify_objectlog_sqlite_axes(log, projection, true)
-        })
+        self.backend
+            .with_quiesced_log_and_projection_mut(|log, projection| {
+                verify_objectlog_sqlite_axes(log, projection, true)
+            })
     }
 
     fn rehydrate_now(&self) -> EngineResult<EmbeddedRehydration> {
         use pqueue_engine::LogStore;
 
-        self.backend.with_log_and_projection_mut(|log, projection| {
-            projection.begin_durable_rebuild()?;
-            let definitions = LogStore::recover_definitions(log)?;
-            let mut replayed = 0_u64;
-            for definition in &definitions {
-                let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-                projection
-                    .sqlite()
-                    .create_queue_projection(definition.clone())?;
-                let mut from = None;
-                loop {
-                    let page = log.read_from(&key, from.clone(), 1_024)?;
-                    replayed = replayed.saturating_add(page.entries.len() as u64);
-                    if replayed > self.max_tail_commands {
-                        return Err(EngineError::Storage(format!(
-                            "projection rehydrate exceeds configured tail bound {}",
-                            self.max_tail_commands
-                        )));
-                    }
-                    if !page.entries.is_empty() {
-                        let positions: Vec<_> = page
-                            .entries
-                            .iter()
-                            .map(|(position, _)| position.clone())
-                            .collect();
-                        let commands: Vec<_> = page
-                            .entries
-                            .iter()
-                            .map(|(_, command)| command.clone())
-                            .collect();
-                        projection
-                            .sqlite()
-                            .apply_committed_batch(&positions, &commands)?;
-                    }
-                    match page.next {
-                        Some(next) => from = Some(next),
-                        None => break,
+        self.backend
+            .with_quiesced_log_and_projection_mut(|log, projection| {
+                projection.begin_durable_rebuild()?;
+                let definitions = LogStore::recover_definitions(log)?;
+                let mut replayed = 0_u64;
+                for definition in &definitions {
+                    let key =
+                        QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+                    projection
+                        .sqlite()
+                        .create_queue_projection(definition.clone())?;
+                    let mut from = None;
+                    loop {
+                        let page = log.read_from(&key, from.clone(), 1_024)?;
+                        replayed = replayed.saturating_add(page.entries.len() as u64);
+                        if replayed > self.max_tail_commands {
+                            return Err(EngineError::Storage(format!(
+                                "projection rehydrate exceeds configured tail bound {}",
+                                self.max_tail_commands
+                            )));
+                        }
+                        if !page.entries.is_empty() {
+                            let positions: Vec<_> = page
+                                .entries
+                                .iter()
+                                .map(|(position, _)| position.clone())
+                                .collect();
+                            let commands: Vec<_> = page
+                                .entries
+                                .iter()
+                                .map(|(_, command)| command.clone())
+                                .collect();
+                            projection
+                                .sqlite()
+                                .apply_committed_batch(&positions, &commands)?;
+                        }
+                        match page.next {
+                            Some(next) => from = Some(next),
+                            None => break,
+                        }
                     }
                 }
-            }
-            let verification = verify_objectlog_sqlite_axes(log, projection, false)?;
-            projection.finish_durable_rebuild();
-            Ok(EmbeddedRehydration {
-                snapshot_used: false,
-                tail_commands_replayed: replayed,
-                projection_sequence: verification.projection_sequence,
+                let verification = verify_objectlog_sqlite_axes(log, projection, false)?;
+                projection.finish_durable_rebuild();
+                Ok(EmbeddedRehydration {
+                    snapshot_used: false,
+                    tail_commands_replayed: replayed,
+                    projection_sequence: verification.projection_sequence,
+                })
             })
-        })
     }
 }
 
@@ -867,7 +870,9 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
     fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
         Box::pin(async {
             self.backend
-                .with_log_and_projection_mut(|_, projection| projection.delete_durable_projection())
+                .with_quiesced_log_and_projection_mut(|_, projection| {
+                    projection.delete_durable_projection()
+                })
         })
     }
 
