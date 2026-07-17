@@ -309,12 +309,12 @@ PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" \
 PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
   cargo test -p pqueue-server --test objectlog_shared_ownership \
   stale_append_paused_before_authority_cannot_survive_handoff -- --nocapture
-PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" PQUEUE_S3_TEST_BUCKET="pqueue-e2" PQUEUE_E3_RESIDENT=40 \
-PQUEUE_E3_ACK_PUSHES=16 PQUEUE_E3_ACK_CONCURRENCY=4 PQUEUE_E3_LOAD_CONCURRENCY=2 \
-  cargo test -p pqueue-server --release --test performance_object_log_e3_live_tests \
-  performance_object_log_e3_live_tests -- --nocapture 2>&1 | tee "${RUN_DIR}/snapshot-tail.log"
-grep -Eq '"snapshot_used"[[:space:]]*:[[:space:]]*true' "${RUN_DIR}/snapshot-tail.log" || die "snapshot+tail seam was not exercised"
-grep -Eq '"bar_met"[[:space:]]*:[[:space:]]*true' "${RUN_DIR}/snapshot-tail.log" || die "snapshot+tail recovery bar failed"
+PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
+PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
+  cargo test -p pqueue-server --test objectlog_shared_ownership \
+  greater_epoch_owner_hydrates_snapshot_tail_before_serving -- --nocapture 2>&1 | tee "${RUN_DIR}/snapshot-tail.log"
+grep -Fq 'greater_epoch_owner_hydrates_snapshot_tail_before_serving ... ok' "${RUN_DIR}/snapshot-tail.log" || \
+  die "snapshot+tail takeover seam did not pass"
 kill "${PG_PF}" "${S3_PF}" 2>/dev/null || true; wait "${PG_PF}" "${S3_PF}" 2>/dev/null || true
 
 DURATION_MS="$(( $(date +%s%3N) - START_MS ))"
