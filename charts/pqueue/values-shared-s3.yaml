@@ -1,0 +1,31 @@
+# Replica-safe shared object-log profile. Operators must create the referenced
+# Secrets before installation; credentials and database URLs are never embedded
+# in chart values.
+replicaCount: 3
+
+storage:
+  log:
+    backend: objectlog
+    objectLog:
+      store: s3
+      s3:
+        endpoint: https://s3.example.com
+        bucket: pqueue-shared
+        region: us-east-1
+        allowInsecureHttp: false
+        credentials:
+          existingSecret: pqueue-objectlog-s3
+          accessKeyIdKey: access-key-id
+          secretAccessKeyKey: secret-access-key
+  controlPlane:
+    backend: postgres
+    postgres:
+      existingSecret: pqueue-control-plane
+      databaseUrlKey: database-url
+      heartbeatTtlMs: 5000
+      leaseTtlMs: 15000
+  projection:
+    backend: sqlite
+
+persistence:
+  enabled: false

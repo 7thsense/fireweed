@@ -88,6 +88,15 @@ The chart renders:
 
 The service exposes the RESP port and uses TCP liveness/readiness probes.
 
+## Shared S3 Multi-Replica Profile
+
+`values-shared-s3.yaml` selects the replica-safe shared S3 object log, Postgres
+ownership control plane, and pod-local rebuildable SQLite projection. Each pod
+publishes its Kubernetes `metadata.uid` as the full-width `PQUEUE_OWNER_ID` and
+its pod IP as `PQUEUE_ADVERTISE_ADDR`; `PQUEUE_NODE_ID` remains the independent
+compact item-ID field. Create the referenced S3 and Postgres Secrets before
+installing this profile.
+
 ## Lakebase Postgres Native Profile
 
 `charts/pqueue/ci/lakebase-postgres-values.yaml` is the static render profile for

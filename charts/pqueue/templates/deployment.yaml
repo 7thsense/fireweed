@@ -49,6 +49,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
+            - name: PQUEUE_OWNER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: PQUEUE_ADVERTISE_ADDR
               value: "$(POD_IP):{{ .Values.containerPort }}"
             {{- end }}
