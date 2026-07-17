@@ -1,59 +1,70 @@
-# TP-002 E3 - live object-log projection matrix over S3 (MinIO) RELEASE evidence
+# TP-002 E3 — live object-log projection matrix over MinIO
 
-**Harness:** [`crates/pqueue-server/tests/performance_object_log_e3_live_tests.rs`](/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-42ad32c4-20260716T222915-15050fce/crates/pqueue-server/tests/performance_object_log_e3_live_tests.rs)
+**Date:** 2026-07-16. **Result:** PASS. **Evidence:**
+`docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl`.
 
-**Wrapper:** [`scripts/perf/tp002-e3-minio.sh`](/home/erik/.cache/ddx/exec-wt/.execute-bead-wt-pqueue-42ad32c4-20260716T222915-15050fce/scripts/perf/tp002-e3-minio.sh)
-
-This harness now runs both governed object-log projection variants at the same release workload:
-
-- `object_log_inmemory_projection`
-- `object_log_sqlite_projection`
-
-Each profile is measured at four commit-latency bounds: `1ms`, `5ms`, `20ms`, and `100ms`.
+The release harness ran both committed object-log projection variants at the same four commit-latency
+bounds. Both emitted rows are `scale=release`, `evidence_tier=release`, `bars_met=true`, and cite E3.
 
 ## Command
 
+Start a fresh MinIO instance with a tmpfs data volume:
+
 ```bash
-PQUEUE_PERF_ENV=1 PQUEUE_E3_RESIDENT=10000000 \
-  PQUEUE_S3_TEST_ENDPOINT="http://<minio-ip>:9000" \
-  scripts/perf/tp002-e3-minio.sh
+docker run -d --name pqe3-minio \
+  --tmpfs /data:rw,size=8g \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data
+IP=$(docker inspect pqe3-minio --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+PQUEUE_S3_TEST_ENDPOINT="http://$IP:9000" scripts/perf/tp002-e3-minio.sh
 ```
 
-## Topology
+The wrapper fixes the release workload at 10,000,000 resident items, 100,000 single-item acknowledgement
+pushes per bound, acknowledgement concurrency 384, load batch 1,000, load concurrency 8, and seed 0.
 
-- One MinIO container reachable over the bridge IP.
-- One `cargo test` process driving the E3 matrix harness.
-- Two backend profiles, each running the same 1/5/20/100ms bound set.
-- Single deployment, release resident shape `PQUEUE_E3_RESIDENT=10000000`.
+## Topology and hardware
 
-## Hardware
+- One local Rust test process drove one MinIO container over live HTTP/S3 at its bridge IP.
+- MinIO `RELEASE.2025-09-07T16-13-09Z` stored object data on an 8 GiB tmpfs mounted at `/data`.
+- Docker server 29.1.3 ran under Linux 6.6.87.2 WSL2.
+- Host: AMD Ryzen 9 5950X, 16 cores / 32 threads, 94 GiB RAM.
+- No cluster orchestration or published loopback port was used.
 
-- Same host class and bridge-IP MinIO setup used for the original E3 evidence run.
-- The matrix harness is still a local test process; no cluster orchestration is involved.
+Total test wall time was 3,332.60 seconds (55m32.60s).
 
-## Seed
+## Ack throughput and latency
 
-- `0`
+All throughput measurements exceed the 2,777.78 items/s floor. All p50/p95/p99 measurements are within
+the recorded acknowledgement budget.
 
-## Duration
+| profile | bound | throughput/s | p50 ms | p95 ms | p99 ms | budget ms | result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| object_log_inmemory_projection | 1 ms | 13,355.620 | 27.563 | 47.283 | 54.764 | 751.25 | PASS |
+| object_log_inmemory_projection | 5 ms | 13,908.435 | 23.687 | 42.016 | 49.582 | 756.25 | PASS |
+| object_log_inmemory_projection | 20 ms | 13,594.685 | 25.285 | 43.789 | 49.500 | 775.00 | PASS |
+| object_log_inmemory_projection | 100 ms | 15,134.630 | 24.878 | 27.664 | 29.946 | 875.00 | PASS |
+| object_log_sqlite_projection | 1 ms | 10,625.001 | 26.271 | 73.161 | 170.049 | 751.25 | PASS |
+| object_log_sqlite_projection | 5 ms | 8,289.433 | 27.147 | 76.520 | 255.308 | 756.25 | PASS |
+| object_log_sqlite_projection | 20 ms | 10,319.998 | 27.349 | 64.002 | 178.945 | 775.00 | PASS |
+| object_log_sqlite_projection | 100 ms | 10,747.161 | 26.187 | 61.323 | 127.071 | 875.00 | PASS |
 
-- Historical single-profile E3 run: `26m32s`.
-- The new two-profile matrix harness has not been rerun in this workspace, so the updated wall-clock should be recorded by the next MinIO evidence pass.
+## Recovery
 
-## Exclusions
+The SQLite projection loaded 10,000,000 resident items in 10,000 commands, reopened from snapshot high-water
+sequence 10,000, replayed zero tail commands, and restored exactly 10,000,000 pending items in 4,333.887 ms.
+The recovery bar passed.
 
-- `object_log_inmemory_projection` records `recovery_excluded=true` because it does not expose the SQLite reopen telemetry seam used to capture snapshot-tail recovery stats.
-- No other exclusions are intended.
+## Exclusions and claim boundary
 
-## Evidence Shape
+- `object_log_inmemory_projection` records `recovery_excluded=true` because it does not expose the SQLite
+  reopen telemetry seam. Its four acknowledgement-bound rows remain release evidence.
+- Tmpfs isolates object-log protocol and projection performance from Docker overlay-disk contention while
+  preserving live HTTP/S3 semantics. This evidence does **not** prove object-store host durability, MinIO
+  host restart, or provisioned production storage.
+- This local MinIO row does not claim cloud-provider-specific S3 IAM, TLS, or operational certification.
 
-Each emitted row is expected to be:
+## Cost-model continuity
 
-- `scale=release`
-- `evidence_tier=release` when the release workload and bars are met
-- `bars_met=true`
-- `tp002_evidence_ids=["E3"]`
-- throughput at or above `2777.78 items/s`
-- `ack_p50_ms`, `ack_p95_ms`, and `ack_p99_ms` within the configured bound
-
-The harness emits one ledger row per backend profile, with the four bound measurements embedded under `bound_1ms_*`, `bound_5ms_*`, `bound_20ms_*`, and `bound_100ms_*`.
+E3 segment and object counters continue to feed the separate directional cost model in
+`docs/perf/tp002-e3-cost-model.md`. This matrix does not alter cost-model policy or pricing inputs.

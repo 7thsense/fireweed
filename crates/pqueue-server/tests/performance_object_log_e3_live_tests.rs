@@ -47,7 +47,7 @@
 //! Optional overrides: `PQUEUE_S3_TEST_BUCKET` (default `pqueue-test`), `PQUEUE_S3_TEST_ACCESS_KEY` /
 //! `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`), `PQUEUE_E3_LOAD_BATCH` (items per push command during
 //! the recovery-load phase, default 1000), `PQUEUE_E3_ACK_PUSHES` (pushes per ack-latency config, default
-//! 4000), `PQUEUE_E3_ACK_CONCURRENCY` (concurrent push tasks, default 512), `PQUEUE_E3_LOAD_CONCURRENCY`
+//! 100000), `PQUEUE_E3_ACK_CONCURRENCY` (concurrent push tasks, default 384), `PQUEUE_E3_LOAD_CONCURRENCY`
 //! (concurrent recovery-load tasks, default 8).
 
 use std::collections::BTreeMap;
@@ -906,8 +906,8 @@ async fn performance_object_log_e3_live_tests() {
     let perf_env = std::env::var("PQUEUE_PERF_ENV").is_ok();
     let resident = env_u64("PQUEUE_E3_RESIDENT", 4_000);
     let load_batch = env_u64("PQUEUE_E3_LOAD_BATCH", 1_000).max(1);
-    let ack_pushes = env_u64("PQUEUE_E3_ACK_PUSHES", 4_000).max(1);
-    let ack_concurrency = env_u64("PQUEUE_E3_ACK_CONCURRENCY", 512).max(1);
+    let ack_pushes = env_u64("PQUEUE_E3_ACK_PUSHES", 100_000).max(1);
+    let ack_concurrency = env_u64("PQUEUE_E3_ACK_CONCURRENCY", 384).max(1);
     let release_shape = resident >= RELEASE_RESIDENT;
     let require_bars = perf_env && release_shape;
 
