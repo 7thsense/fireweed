@@ -1589,10 +1589,29 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
         &self,
         shard: &QueueKey,
         request: ClaimByQueryRequest,
+        context: pqueue_engine::ClaimByQueryContext,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let result = (|| {
             let mut g = self.inner.lock().expect("projection store poisoned");
             let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            if request.max_items == 0
+                || u64::from(request.max_items) > definition.max_claim_batch_size
+            {
+                return Err(EngineError::Invalid("invalid claim_by_query max_items"));
+            }
+            if request.lease_duration_ms == 0
+                || request.lease_duration_ms > definition.max_lease_duration_ms
+            {
+                return Err(EngineError::Invalid(
+                    "invalid claim_by_query lease_duration_ms",
+                ));
+            }
+            let request_id = request
+                .request_id
+                .clone()
+                .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
+            let request_fingerprint = claim_by_query_fingerprint(&request)?;
+            let request_expires_at = request_expires_at(&g.queues, shard, context.now)?;
             let spec = if let Some(name) = request.index.as_deref() {
                 definition
                     .typed_indexes
@@ -1623,9 +1642,9 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 return Err(EngineError::Invalid("unindexed-field"));
             }
 
-            let created_at = request.now;
-            let lease_expires_at = request.lease_expires_at();
-            let eligibility_nanos = ts_nanos(created_at);
+            let created_at = context.now;
+            let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+            let eligibility_nanos = ts_nanos(context.eligibility_at());
             let Inner {
                 conn,
                 live_tokens,
@@ -1638,11 +1657,31 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             // Acquire the SQLite writer reservation before reading candidates. Separate backend handles
             // therefore cannot both select the same observed version and race their lease transitions.
             let tx = st(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
-            if queue_paused(&tx, shard)? {
-                return Ok(Claimed::default());
+            if let Some(replay) = check_claim_by_query_idempotency(
+                &tx,
+                shard,
+                &request_id,
+                &request_fingerprint,
+                context.now,
+            )? {
+                let items = render_claimed(&tx, shard, &replay.item_ids, |_| {
+                    Some(replay.lease_token.clone())
+                })?;
+                st(tx.commit())?;
+                for item_id in &replay.item_ids {
+                    live_tokens.insert(*item_id, replay.lease_token.clone());
+                }
+                return Ok(Claimed {
+                    items,
+                    ..Default::default()
+                });
             }
-            let mut stmt = st(tx.prepare(
-                "SELECT item_id, entity_document, item_version FROM pqueue_items \
+            let paused = queue_paused(&tx, shard)?;
+            let mut matched = Vec::new();
+            let mut stmt = (!paused)
+                .then(|| {
+                    tx.prepare(
+                        "SELECT item_id, entity_document, item_version FROM pqueue_items \
                  WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' \
                  AND superseded=0 AND fenced=0 AND cohort_size IS NULL \
                  AND (not_before IS NULL OR not_before<=?3) AND eligible_since IS NOT NULL \
@@ -1652,117 +1691,122 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                      WHERE ig.tenant_id=pqueue_items.tenant_id \
                      AND ig.queue_id=pqueue_items.queue_id \
                      AND ig.item_id=pqueue_items.item_id)",
-            ))?;
-            let rows = st(stmt.query_map(params![t, q, eligibility_nanos], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            }))?;
+                    )
+                })
+                .transpose()
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            if let Some(stmt) = stmt.as_mut() {
+                let rows = st(stmt.query_map(params![t, q, eligibility_nanos], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                }))?;
 
-            let mut matched = Vec::new();
-            for row in rows {
-                let (item_id, entity_json, item_version): (String, Option<String>, i64) = st(row)?;
-                let item_id =
-                    ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
-                let Some(entity_json) = entity_json else {
-                    continue;
-                };
-                let entity: JsonValue = serde_json::from_str(&entity_json)
-                    .map_err(|e| EngineError::Storage(e.to_string()))?;
-                let mut fields_map = BTreeMap::new();
-                match &spec.declaration {
-                    IndexDeclaration::Single(def) => {
-                        let Some(value) = typed_value_for_json(
-                            entity.get(&def.field).unwrap_or(&JsonValue::Null),
-                            &def.index_type,
-                        )?
-                        else {
-                            continue;
-                        };
-                        fields_map.insert(def.field.clone(), value);
-                    }
-                    IndexDeclaration::Compound(def) => {
-                        let mut missing = false;
-                        for field in &def.fields {
+                for row in rows {
+                    let (item_id, entity_json, item_version): (String, Option<String>, i64) =
+                        st(row)?;
+                    let item_id =
+                        ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
+                    let Some(entity_json) = entity_json else {
+                        continue;
+                    };
+                    let entity: JsonValue = serde_json::from_str(&entity_json)
+                        .map_err(|e| EngineError::Storage(e.to_string()))?;
+                    let mut fields_map = BTreeMap::new();
+                    match &spec.declaration {
+                        IndexDeclaration::Single(def) => {
                             let Some(value) = typed_value_for_json(
-                                entity.get(&field.field).unwrap_or(&JsonValue::Null),
-                                &field.index_type,
+                                entity.get(&def.field).unwrap_or(&JsonValue::Null),
+                                &def.index_type,
                             )?
                             else {
-                                missing = true;
+                                continue;
+                            };
+                            fields_map.insert(def.field.clone(), value);
+                        }
+                        IndexDeclaration::Compound(def) => {
+                            let mut missing = false;
+                            for field in &def.fields {
+                                let Some(value) = typed_value_for_json(
+                                    entity.get(&field.field).unwrap_or(&JsonValue::Null),
+                                    &field.index_type,
+                                )?
+                                else {
+                                    missing = true;
+                                    break;
+                                };
+                                fields_map.insert(field.field.clone(), value);
+                            }
+                            if missing {
+                                continue;
+                            }
+                        }
+                    }
+                    let row = RangeScanRow {
+                        item_id,
+                        fields: fields_map,
+                    };
+
+                    let mut accepted = true;
+                    let mut prefix_len = 0usize;
+                    for (field_name, index_type) in &fields {
+                        let Some(filter) = request
+                            .filters
+                            .iter()
+                            .find(|filter| filter.field == *field_name)
+                        else {
+                            break;
+                        };
+                        if filter.op != FilterOp::Eq {
+                            break;
+                        }
+                        let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+                        let Some(value) = row.fields.get(*field_name) else {
+                            accepted = false;
+                            break;
+                        };
+                        if !typed_value_matches_query(value, &typed) {
+                            accepted = false;
+                            break;
+                        }
+                        prefix_len += 1;
+                    }
+                    if accepted {
+                        for filter in &request.filters {
+                            let Some((idx, (_, index_type))) = fields
+                                .iter()
+                                .enumerate()
+                                .find(|(_, (field_name, _))| *field_name == filter.field.as_str())
+                            else {
+                                return Err(EngineError::Invalid("unindexed-field"));
+                            };
+                            if idx < prefix_len {
+                                continue;
+                            }
+                            let Some(value) = row.fields.get(filter.field.as_str()) else {
+                                accepted = false;
                                 break;
                             };
-                            fields_map.insert(field.field.clone(), value);
-                        }
-                        if missing {
-                            continue;
-                        }
-                    }
-                }
-                let row = RangeScanRow {
-                    item_id,
-                    fields: fields_map,
-                };
-
-                let mut accepted = true;
-                let mut prefix_len = 0usize;
-                for (field_name, index_type) in &fields {
-                    let Some(filter) = request
-                        .filters
-                        .iter()
-                        .find(|filter| filter.field == *field_name)
-                    else {
-                        break;
-                    };
-                    if filter.op != FilterOp::Eq {
-                        break;
-                    }
-                    let typed = typed_value_from_filter_value(&filter.value, index_type)?;
-                    let Some(value) = row.fields.get(*field_name) else {
-                        accepted = false;
-                        break;
-                    };
-                    if !typed_value_matches_query(value, &typed) {
-                        accepted = false;
-                        break;
-                    }
-                    prefix_len += 1;
-                }
-                if accepted {
-                    for filter in &request.filters {
-                        let Some((idx, (_, index_type))) = fields
-                            .iter()
-                            .enumerate()
-                            .find(|(_, (field_name, _))| *field_name == filter.field.as_str())
-                        else {
-                            return Err(EngineError::Invalid("unindexed-field"));
-                        };
-                        if idx < prefix_len {
-                            continue;
-                        }
-                        let Some(value) = row.fields.get(filter.field.as_str()) else {
-                            accepted = false;
-                            break;
-                        };
-                        let typed = typed_value_from_filter_value(&filter.value, index_type)?;
-                        let ord = typed_value_compare(value, &typed)?;
-                        let ok = match filter.op {
-                            FilterOp::Eq => ord.is_eq(),
-                            FilterOp::Gte => ord.is_ge(),
-                            FilterOp::Gt => ord.is_gt(),
-                            FilterOp::Lte => ord.is_le(),
-                            FilterOp::Lt => ord.is_lt(),
-                        };
-                        if !ok {
-                            accepted = false;
-                            break;
+                            let typed = typed_value_from_filter_value(&filter.value, index_type)?;
+                            let ord = typed_value_compare(value, &typed)?;
+                            let ok = match filter.op {
+                                FilterOp::Eq => ord.is_eq(),
+                                FilterOp::Gte => ord.is_ge(),
+                                FilterOp::Gt => ord.is_gt(),
+                                FilterOp::Lte => ord.is_le(),
+                                FilterOp::Lt => ord.is_lt(),
+                            };
+                            if !ok {
+                                accepted = false;
+                                break;
+                            }
                         }
                     }
-                }
-                if accepted {
-                    matched.push((row, item_version));
+                    if accepted {
+                        matched.push((row, item_version));
+                    }
                 }
             }
 
@@ -1777,16 +1821,13 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 .map(|(row, version)| (row.item_id, version))
                 .collect();
 
-            if selected.is_empty() {
-                return Ok(Claimed::default());
-            }
-
             drop(stmt);
-            let seq: i64 = st(tx
+            let (seq, assignment_epoch): (i64, i64) = st(tx
                 .query_row(
-                    "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    "SELECT next_seq, assignment_epoch FROM relational_cursor \
+                     WHERE tenant=?1 AND queue=?2",
                     params![t, q],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional())?
             .ok_or(EngineError::NotFound)?;
@@ -1817,7 +1858,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     params![
                         hash,
                         lease_expires_nanos,
-                        eligibility_nanos,
+                        ts_nanos(created_at),
                         seq,
                         t,
                         q,
@@ -1831,21 +1872,39 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     claimed_ids.push(item_id);
                 }
             }
-            if claimed_ids.is_empty() {
-                return Ok(Claimed::default());
+            let mut positions = Vec::new();
+            if !claimed_ids.is_empty() {
+                let groups = groups_of(&tx, shard, &claimed_ids)?;
+                if !groups.is_empty() {
+                    grouped_shards.insert(shard.clone());
+                }
+                for group in &groups {
+                    refresh_group_summary(&tx, shard, group, created_at)?;
+                }
+                reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+                st(tx.execute(
+                    "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
+                    params![t, q, seq + 1],
+                ))?;
+                positions.push(CommandPosition::new(
+                    shard.clone(),
+                    assignment_epoch as u64,
+                    seq as u64,
+                ));
             }
-            let groups = groups_of(&tx, shard, &claimed_ids)?;
-            if !groups.is_empty() {
-                grouped_shards.insert(shard.clone());
-            }
-            for group in &groups {
-                refresh_group_summary(&tx, shard, group, created_at)?;
-            }
-            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
-            st(tx.execute(
-                "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
-                params![t, q, seq + 1],
-            ))?;
+            record_claim_by_query_idempotency(
+                &tx,
+                shard,
+                &request_id,
+                &request_fingerprint,
+                &ClaimByQueryReplay {
+                    item_ids: claimed_ids.clone(),
+                    lease_token: lease_token.clone(),
+                },
+                &positions,
+                context.now,
+                request_expires_at,
+            )?;
             let items = render_claimed(&tx, shard, &claimed_ids, |_| Some(lease_token.clone()))?;
             debug_assert_eq!(
                 items.len(),

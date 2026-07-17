@@ -7,8 +7,8 @@ use pqueue_core::{
     OrderField, QueryFilter, QueueDefinition, QueueIndex, SortDirection, TypedValue, WorkerId,
 };
 use pqueue_engine::{
-    ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind, FinalizeOutcome, FinalizePort,
-    HotProjectionQueryPort, PushPort, PushSpec, UpsertPort,
+    ClaimByQueryContext, ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind,
+    FinalizeOutcome, FinalizePort, HotProjectionQueryPort, PushPort, PushSpec, UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -47,7 +47,7 @@ fn ordinary_claim(max_items: usize, token: &str) -> ClaimRequest {
     }
 }
 
-fn query_request(now: i64) -> ClaimByQueryRequest {
+fn query_request(request_id: &str) -> ClaimByQueryRequest {
     ClaimByQueryRequest {
         index: Some("by_rank".to_string()),
         filters: vec![QueryFilter {
@@ -61,9 +61,15 @@ fn query_request(now: i64) -> ClaimByQueryRequest {
         },
         max_items: 20,
         lease_duration_ms: 30_000,
-        now: ts(now),
         worker_id: WorkerId::new("query-worker").unwrap(),
-        request_id: None,
+        request_id: Some(pqueue_core::RequestId::new(request_id).unwrap()),
+    }
+}
+
+fn query_context(now: i64) -> ClaimByQueryContext {
+    ClaimByQueryContext {
+        now: ts(now),
+        eligibility_time: None,
     }
 }
 
@@ -156,7 +162,11 @@ async fn claim_by_query_excludes_leased_terminal_superseded_and_future_rows() {
         .unwrap()[0];
 
     let claimed = backend
-        .claim_by_query(&shard(), query_request(100))
+        .claim_by_query(
+            &shard(),
+            query_request("eligibility-request"),
+            query_context(100),
+        )
         .await
         .unwrap();
     let ids: Vec<_> = claimed.items.iter().map(|item| item.item_id).collect();
@@ -204,10 +214,121 @@ async fn claim_by_query_reopen_does_not_reissue_terminal_or_live_lease() {
 
     let reopened = SqliteRelationalBackend::open(&path_string).unwrap();
     let claimed = reopened
-        .claim_by_query(&shard(), query_request(100))
+        .claim_by_query(
+            &shard(),
+            query_request("reopen-request"),
+            query_context(100),
+        )
         .await
         .unwrap();
     assert!(claimed.items.is_empty());
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
+    let path = std::env::temp_dir().join(format!(
+        "pqueue-claim-by-query-replay-{}-{}.db",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    let _ = std::fs::remove_file(&path);
+    let path_string = path.to_string_lossy().into_owned();
+
+    let first = {
+        let backend = SqliteRelationalBackend::open(&path_string).unwrap();
+        backend.create_queue(query_definition()).await.unwrap();
+        backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    not_before: Some(ts(150)),
+                    ..spec(0)
+                }],
+                ts(0),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut missing_request_id = query_request("unused");
+        missing_request_id.request_id = None;
+        assert!(matches!(
+            backend
+                .claim_by_query(&shard(), missing_request_id, query_context(100))
+                .await,
+            Err(EngineError::Invalid(_))
+        ));
+        for (request_id, max_items, lease_duration_ms) in [
+            ("zero-items", 0, 30_000),
+            ("too-many-items", 101, 30_000),
+            ("zero-duration", 1, 0),
+            ("too-long-duration", 1, 60_001),
+        ] {
+            let mut invalid = query_request(request_id);
+            invalid.max_items = max_items;
+            invalid.lease_duration_ms = lease_duration_ms;
+            assert!(matches!(
+                backend
+                    .claim_by_query(&shard(), invalid, query_context(100))
+                    .await,
+                Err(EngineError::Invalid(_))
+            ));
+        }
+
+        let context = ClaimByQueryContext {
+            now: ts(100),
+            eligibility_time: Some(ts(200)),
+        };
+        let first = backend
+            .claim_by_query(&shard(), query_request("durable-replay"), context)
+            .await
+            .unwrap();
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].lease_expires_at, ts(130));
+        first
+    };
+
+    let reopened = SqliteRelationalBackend::open(&path_string).unwrap();
+    let replay = reopened
+        .claim_by_query(
+            &shard(),
+            query_request("durable-replay"),
+            query_context(101),
+        )
+        .await
+        .unwrap();
+    assert_eq!(replay.items.len(), 1);
+    assert_eq!(replay.items[0].item_id, first.items[0].item_id);
+    assert_eq!(replay.items[0].item_version, first.items[0].item_version);
+    assert_eq!(replay.items[0].lease_token, first.items[0].lease_token);
+    assert_eq!(
+        replay.items[0].lease_expires_at,
+        first.items[0].lease_expires_at
+    );
+
+    let mut conflict = query_request("durable-replay");
+    conflict.worker_id = WorkerId::new("different-worker").unwrap();
+    assert_eq!(
+        reopened
+            .claim_by_query(&shard(), conflict, query_context(101))
+            .await
+            .unwrap_err(),
+        EngineError::RequestIdConflict
+    );
+    assert_eq!(
+        reopened
+            .claim_by_query(
+                &shard(),
+                query_request("durable-replay"),
+                query_context(131),
+            )
+            .await
+            .unwrap_err(),
+        EngineError::RequestExpired
+    );
+
     drop(reopened);
     let _ = std::fs::remove_file(path);
 }

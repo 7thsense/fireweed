@@ -2040,6 +2040,7 @@ dependencies = [
  "pqueue-objectlog",
  "pqueue-postgres",
  "pqueue-sqlite",
+ "rusqlite",
  "serde_json",
  "tokio",
 ]

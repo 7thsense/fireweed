@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use bytes::Bytes;
 use pqueue_core::{
-    FilterOp, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken, Metadata, OrderField,
-    PriorityModel, PriorityValue, QueryFilter, QueueDefinition, QueueIndex, RangeScanRow,
-    RequestId, SortDirection, TypedValue, UtcTimestamp, priority_sort,
+    ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken,
+    Metadata, OrderField, PriorityModel, PriorityValue, QueryFilter, QueueDefinition, QueueIndex,
+    RangeScanRow, RequestId, SortDirection, TypedValue, UtcTimestamp, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, CommandPosition, CommitEntryOutcome, CommitEntryStatus, CommitTransitionEntry,
@@ -344,6 +344,110 @@ pub(crate) fn record_request_idempotency(
             request_id.as_str(),
             fingerprint,
             item_ids_to_json(response_ids)?,
+            positions_to_json(positions)?,
+            expires_at,
+            ts_nanos(now),
+        ],
+    ))?;
+    Ok(())
+}
+
+pub(crate) const IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY: &str = "claim_by_query";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ClaimByQueryReplay {
+    pub(crate) item_ids: Vec<ItemId>,
+    pub(crate) lease_token: LeaseToken,
+}
+
+pub(crate) fn claim_by_query_fingerprint(request: &ClaimByQueryRequest) -> EngineResult<Vec<u8>> {
+    let mut canonical = request.clone();
+    canonical.request_id = None;
+    let bytes = serde_json::to_vec(&canonical).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Sha256::digest(&bytes).to_vec())
+}
+
+pub(crate) fn check_claim_by_query_idempotency(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    now: UtcTimestamp,
+) -> EngineResult<Option<ClaimByQueryReplay>> {
+    let (t, q) = parts(shard);
+    let prior: Option<(Vec<u8>, String, i64)> = st(tx
+        .query_row(
+            "SELECT request_fingerprint, response_payload, expires_at \
+             FROM pqueue_request_idempotency \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![
+                t,
+                q,
+                IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY,
+                request_id.as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional())?;
+    let Some((prior_fingerprint, response_payload, expires_at)) = prior else {
+        return Ok(None);
+    };
+    if prior_fingerprint != fingerprint {
+        return Err(EngineError::RequestIdConflict);
+    }
+    if expires_at <= ts_nanos(now) {
+        return Err(EngineError::RequestExpired);
+    }
+    let replay: ClaimByQueryReplay =
+        serde_json::from_str(&response_payload).map_err(|e| EngineError::Storage(e.to_string()))?;
+    if replay.item_ids.is_empty() {
+        return Ok(Some(replay));
+    }
+    let token_hash = lease_hash(&replay.lease_token);
+    for item_id in &replay.item_ids {
+        let active: Option<i64> = st(tx
+            .query_row(
+                "SELECT lease_expires_at FROM pqueue_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+                 AND lifecycle_state='Leased' AND superseded=0 AND fenced=0 \
+                 AND lease_token_hash=?4",
+                params![t, q, item_id.to_string(), token_hash],
+                |row| row.get(0),
+            )
+            .optional())?;
+        if active.is_none_or(|expires_at| expires_at <= ts_nanos(now)) {
+            return Err(EngineError::RequestExpired);
+        }
+    }
+    Ok(Some(replay))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_claim_by_query_idempotency(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    replay: &ClaimByQueryReplay,
+    positions: &[CommandPosition],
+    now: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let response_payload =
+        serde_json::to_string(replay).map_err(|e| EngineError::Storage(e.to_string()))?;
+    st(tx.execute(
+        "INSERT INTO pqueue_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+          command_positions,expires_at,created_at) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            t,
+            q,
+            IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY,
+            request_id.as_str(),
+            fingerprint,
+            response_payload,
             positions_to_json(positions)?,
             expires_at,
             ts_nanos(now),

@@ -153,9 +153,8 @@ fn claim_due_scheduled_actions_request() -> ClaimByQueryRequest {
         },
         max_items: 2,
         lease_duration_ms: 30_000,
-        now: UtcTimestamp::new(1_783_004_400, 0).expect("valid ts"),
         worker_id: pqueue_core::WorkerId::new("query-worker").expect("worker id"),
-        request_id: None,
+        request_id: Some(pqueue_core::RequestId::new("query-request").expect("request id")),
     }
 }
 
@@ -781,6 +780,13 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(p
         .claim_by_query(&q, claim_due_scheduled_actions_request())
         .await
         .unwrap();
+    assert!(
+        claimed
+            .items
+            .iter()
+            .all(|item| item.lease_expires_at == UtcTimestamp::new(30, 0).unwrap()),
+        "public claim-by-query leases must be based on the injected clock"
+    );
     let by_id: HashMap<ItemId, String> = ids.into_iter().collect();
     let action_ids = claimed
         .items
@@ -921,7 +927,14 @@ async fn backend_capability_advertising_is_explicit() {
     );
     assert!(matches!(
         unsupported
-            .claim_by_query(&q, claim_due_scheduled_actions_request())
+            .claim_by_query(
+                &q,
+                claim_due_scheduled_actions_request(),
+                pqueue_engine::ClaimByQueryContext {
+                    now: UtcTimestamp::new(0, 0).unwrap(),
+                    eligibility_time: None,
+                },
+            )
             .await,
         Err(EngineError::Unavailable)
     ));

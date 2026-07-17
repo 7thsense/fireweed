@@ -24,13 +24,14 @@
 //! a relational-class concern, NOT add it to the shared core suite — else the families would diverge.
 //!
 //! REQUEST-ID IDEMPOTENCY (BQ-11e slice): `pqueue_request_idempotency` is wired for the first
-//! request-id-carrying data-plane path, BatchPush. That proves the TD-002 relational table/replay flow
-//! without claiming full API-001 coverage for every mutating operation. Claim replay and finalize/update
-//! replay remain later request-id-carrying port work.
+//! request-id-carrying data-plane paths, including BatchPush and ClaimByQuery. That proves the TD-002
+//! relational table/replay flow without claiming full API-001 coverage for every mutating operation.
+//! Finalize/update replay remain later request-id-carrying port work.
 //!
 //! ## Lease tokens (TD-004 §security / TD-002 parity)
 //! The durable projection stores only the lease token **hash** (`lease_token_hash`, never the cleartext
-//! token). The cleartext token lives in an ephemeral in-process map ([`Inner::live_tokens`]) so
+//! token). Except for the bounded ClaimByQuery request-replay record, the cleartext token lives in an
+//! ephemeral in-process map ([`Inner::live_tokens`]) so
 //! `pending()` / `claimed_view()` return the real token at parity with the in-memory family. The at-rest
 //! hash is currently inert (lease validation is by `(state, fenced, superseded)`, exactly like the
 //! in-memory family — see [`validate_leased`] — never by presented-token comparison); it is persisted so
@@ -41,7 +42,8 @@
 //! `pqueue_items` after reopen but is **omitted** from `pending()`/`claimed_view()` (its cleartext token
 //! is gone) — unlike the log-replay family, which reconstructs the token by replaying the `Claim`
 //! command. This is the relational family's by-design recovery semantics (the token is a worker
-//! capability, not durable server state; a tokenless in-flight lease is reclaimed by the epoch owner),
+//! capability, not durable server state; a ClaimByQuery retry can reconstruct its retained token from
+//! the request replay record, while any other tokenless in-flight lease is reclaimed by the epoch owner),
 //! which is why the relational-reconnect conformance scenario asserts only pending-item state. BQ-11d
 
 use pqueue_engine::{ComposedBackend, EngineResult, InProcessControlPlane};
