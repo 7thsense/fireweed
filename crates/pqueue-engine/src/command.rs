@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, OwnerId,
-    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+    PriorityValue, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -247,6 +247,9 @@ pub struct ClaimCommand {
     pub item_ids: Vec<ItemId>,
     pub lease_token: LeaseToken,
     pub lease_expires_at: UtcTimestamp,
+    /// Caller-supplied observability label; never an authorization principal.
+    #[serde(default)]
+    pub worker_id: Option<WorkerId>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1023,6 +1026,8 @@ pub enum RequestOutcome {
     ClaimByQuery {
         item_ids: Vec<ItemId>,
         lease_token: LeaseToken,
+        #[serde(default)]
+        worker_id: Option<WorkerId>,
     },
     /// The full per-entry outcome of a `commit_transition` (committed AND rejected entries), recorded on a
     /// terminal marker envelope so recovery can rebuild the whole `Vec<EntryRecovery>` — not just the
@@ -1137,6 +1142,7 @@ mod serde_tests {
                 item_ids: vec![iid("a")],
                 lease_token: LeaseToken::new("lease").unwrap(),
                 lease_expires_at: ts(100),
+                worker_id: None,
             }),
             QueueCommand::RenewLease(RenewLeaseCommand {
                 item_ids: vec![iid("a")],
@@ -1332,6 +1338,7 @@ mod serde_tests {
                     item_ids: vec![iid("a"), iid("b")],
                     lease_token: LeaseToken::new("lease").unwrap(),
                     lease_expires_at: ts(100),
+                    worker_id: None,
                 }),
                 vec![
                     ExpectedRecord {

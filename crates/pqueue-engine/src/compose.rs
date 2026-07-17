@@ -60,7 +60,7 @@ use crate::port::{
     PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
     RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore,
     TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    validate_api001_reserved_write_fields, validate_instance_fence,
+    generate_query_lease_token, validate_api001_reserved_write_fields, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
@@ -1328,6 +1328,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             }
         }
 
+        // A non-empty claim-by-query replay lives through its lease expiry even when request-id retention is
+        // shorter. Keep its originating command durable for the same interval; otherwise a restart after
+        // segment reclamation would retain the leased projection row but lose the request outcome needed to
+        // replay the claim.
+        if inner
+            .claim_by_query_idempotency
+            .get(shard)
+            .is_some_and(|cache| {
+                cache.has_unexpired_matching(now, |(item_ids, _)| !item_ids.is_empty())
+            })
+        {
+            return Ok(deleted);
+        }
+
         // (a1) The durable checkpoint high-water — the highest seq the durable projection image has absorbed.
         // Under the Clear gate the hybrid-async monitor returns the REAL (un-withheld) value. `None` means
         // nothing is durably applied, so nothing is safe to trim.
@@ -1935,6 +1949,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     Some(RequestOutcome::ClaimByQuery {
                         item_ids,
                         lease_token,
+                        ..
                     }),
                 ) = (
                     &env.request_id,
@@ -1944,11 +1959,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 else {
                     continue;
                 };
+                let expires_at = match (&env.command, item_ids.is_empty()) {
+                    (QueueCommand::Claim(claim), false) => {
+                        request_expires_at(env.created_at, retention_ms).max(claim.lease_expires_at)
+                    }
+                    _ => request_expires_at(env.created_at, retention_ms),
+                };
                 idempotency.entry(shard.clone()).or_default().record(
                     request_id.clone(),
                     BodyHash(fingerprint),
                     (item_ids.clone(), lease_token.clone()),
-                    request_expires_at(env.created_at, retention_ms),
+                    expires_at,
                 );
             }
             match page.next {
@@ -2239,6 +2260,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 item_ids: candidates.clone(),
                 lease_token: req.lease_token.clone(),
                 lease_expires_at: req.lease_expires_at,
+                worker_id: Some(req.worker_id.clone()),
             })
         };
         let env = Self::make_envelope(&mut g, self.node_id, command, candidates.clone(), req.now);
@@ -2358,13 +2380,17 @@ fn push_body_hash_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<Bo
 }
 
 fn claim_by_query_body_hash(request: &ClaimByQueryRequest) -> EngineResult<BodyHash> {
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
+
     let mut canonical = request.clone();
     canonical.request_id = None;
     let bytes = serde_json::to_vec(&canonical).map_err(|e| EngineError::Storage(e.to_string()))?;
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    bytes.hash(&mut h);
-    Ok(BodyHash(h.finish()))
+    let digest = Sha256::digest(bytes);
+    Ok(BodyHash(u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    )))
 }
 
 /// Stable body fingerprint for the vectorized commit path: a non-cryptographic hash over the serialized
@@ -3085,6 +3111,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                     item_ids: candidates.clone(),
                     lease_token: req.lease_token.clone(),
                     lease_expires_at: req.lease_expires_at,
+                    worker_id: Some(req.worker_id.clone()),
                 }),
                 candidates.clone(),
                 req.now,
@@ -4071,152 +4098,171 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         request: ClaimByQueryRequest,
         context: crate::port::ClaimByQueryContext,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
-        let result = (|| {
-            let definition = self.control.queue_definition(shard)?;
-            if request.max_items == 0
-                || u64::from(request.max_items) > definition.max_claim_batch_size
-            {
-                return Err(EngineError::Invalid("invalid claim_by_query max_items"));
-            }
-            if request.lease_duration_ms == 0
-                || request.lease_duration_ms > definition.max_lease_duration_ms
-            {
-                return Err(EngineError::Invalid(
-                    "invalid claim_by_query lease_duration_ms",
-                ));
-            }
-            let request_id = request
-                .request_id
-                .clone()
-                .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
-            let fingerprint = claim_by_query_body_hash(&request)?;
-            let expires_at = request_expires_at(context.now, definition.request_id_retention_ms);
-            let mut g = self.inner.lock().expect("poisoned");
-            match g
-                .claim_by_query_idempotency
-                .entry(shard.clone())
-                .or_default()
-                .check(&request_id, fingerprint, context.now)
-            {
-                IdempotencyDecision::Replay((item_ids, lease_token)) => {
-                    let items = g.projection.render_claimed(shard, &item_ids)?;
-                    if items.len() != item_ids.len()
-                        || items
-                            .iter()
-                            .any(|item| item.lease_expires_at <= context.now)
-                    {
-                        return Err(EngineError::RequestExpired);
-                    }
-                    for item in &items {
-                        if item.lease_token.as_ref() != Some(&lease_token) {
+        let result =
+            (|| {
+                let definition = self.control.queue_definition(shard)?;
+                if request.max_items == 0
+                    || u64::from(request.max_items) > definition.max_claim_batch_size
+                {
+                    return Err(EngineError::Invalid("invalid claim_by_query max_items"));
+                }
+                if request.lease_duration_ms == 0
+                    || request.lease_duration_ms > definition.max_lease_duration_ms
+                {
+                    return Err(EngineError::Invalid(
+                        "invalid claim_by_query lease_duration_ms",
+                    ));
+                }
+                let request_id = request
+                    .request_id
+                    .clone()
+                    .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
+                let fingerprint = claim_by_query_body_hash(&request)?;
+                let expires_at =
+                    request_expires_at(context.now, definition.request_id_retention_ms);
+                let mut g = self.inner.lock().expect("poisoned");
+                match g
+                    .claim_by_query_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .check_conflict_first(&request_id, fingerprint, context.now)
+                {
+                    IdempotencyDecision::Replay((item_ids, lease_token)) => {
+                        let items = g.projection.render_claimed(shard, &item_ids)?;
+                        if items.len() != item_ids.len()
+                            || items
+                                .iter()
+                                .any(|item| item.lease_expires_at <= context.now)
+                        {
                             return Err(EngineError::RequestExpired);
                         }
+                        for item in &items {
+                            if item.lease_token.as_ref() != Some(&lease_token) {
+                                return Err(EngineError::RequestExpired);
+                            }
+                        }
+                        return Ok(Claimed {
+                            items,
+                            ..Default::default()
+                        });
                     }
-                    return Ok(Claimed {
-                        items,
-                        ..Default::default()
-                    });
+                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                    IdempotencyDecision::Expired => return Err(EngineError::RequestExpired),
+                    IdempotencyDecision::Proceed => {}
                 }
-                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
-                IdempotencyDecision::Expired => return Err(EngineError::RequestExpired),
-                IdempotencyDecision::Proceed => {}
-            }
-            let page_size = request.max_items.clamp(1, 1_000);
-            let mut cursor = None;
-            let mut item_ids = Vec::new();
-            while item_ids.len() < request.max_items as usize {
-                let page = g.projection.range_scan(
-                    shard,
-                    RangeScanRequest {
-                        index: request.index.clone(),
-                        filters: request.filters.clone(),
-                        order_by: vec![request.order_by.clone()],
-                        page_size,
-                        cursor,
-                    },
-                )?;
-                item_ids.extend(page.rows.into_iter().map(|row| row.item_id));
-                item_ids.truncate(request.max_items as usize);
-                cursor = page.next_cursor;
-                if cursor.is_none() {
-                    break;
+                let eligible: HashSet<ItemId> = g
+                    .projection
+                    .eligible_candidates(shard, context.eligibility_at(), usize::MAX)?
+                    .into_iter()
+                    .collect();
+                let reserved = g.coords.get(shard).map(|coord| &coord.in_flight_claims);
+                let page_size = request.max_items.clamp(1, 1_000);
+                let mut cursor = None;
+                let mut item_ids = Vec::new();
+                while item_ids.len() < request.max_items as usize {
+                    let page = g.projection.range_scan(
+                        shard,
+                        RangeScanRequest {
+                            index: request.index.clone(),
+                            filters: request.filters.clone(),
+                            order_by: vec![request.order_by.clone()],
+                            page_size,
+                            cursor,
+                        },
+                    )?;
+                    item_ids.extend(page.rows.into_iter().map(|row| row.item_id).filter(
+                        |item_id| {
+                            eligible.contains(item_id)
+                                && reserved.is_none_or(|reserved| !reserved.contains(item_id))
+                        },
+                    ));
+                    item_ids.truncate(request.max_items as usize);
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
                 }
-            }
 
-            if item_ids.is_empty() {
-                let lease_token = LeaseToken::new("empty-claim").expect("valid token");
+                if item_ids.is_empty() {
+                    let lease_token = LeaseToken::new("empty-claim").expect("valid token");
+                    let command_id = Self::next_command_id(&mut g, self.node_id);
+                    let env = CommandEnvelope {
+                        command_id,
+                        request_id: Some(request_id.clone()),
+                        request_fingerprint: Some(fingerprint.0),
+                        request_outcome: Some(RequestOutcome::ClaimByQuery {
+                            item_ids: Vec::new(),
+                            lease_token: lease_token.clone(),
+                            worker_id: Some(request.worker_id.clone()),
+                        }),
+                        item_ids: Vec::new(),
+                        command: QueueCommand::Claim(ClaimCommand {
+                            item_ids: Vec::new(),
+                            lease_token: lease_token.clone(),
+                            lease_expires_at: context.lease_expires_at(request.lease_duration_ms),
+                            worker_id: Some(request.worker_id.clone()),
+                        }),
+                        checksum: CommandChecksum(0),
+                        created_at: context.now,
+                    };
+                    Self::commit_locked(&mut g, shard, env, None)?;
+                    g.claim_by_query_idempotency
+                        .entry(shard.clone())
+                        .or_default()
+                        .record(
+                            request_id,
+                            fingerprint,
+                            (Vec::new(), lease_token),
+                            expires_at,
+                        );
+                    return Ok(Claimed::default());
+                }
+
+                let created_at = context.now;
+                let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+                let lease_token = generate_query_lease_token()?;
                 let command_id = Self::next_command_id(&mut g, self.node_id);
                 let env = CommandEnvelope {
                     command_id,
                     request_id: Some(request_id.clone()),
                     request_fingerprint: Some(fingerprint.0),
                     request_outcome: Some(RequestOutcome::ClaimByQuery {
-                        item_ids: Vec::new(),
+                        item_ids: item_ids.clone(),
                         lease_token: lease_token.clone(),
+                        worker_id: Some(request.worker_id.clone()),
                     }),
-                    item_ids: Vec::new(),
+                    item_ids: item_ids.clone(),
                     command: QueueCommand::Claim(ClaimCommand {
-                        item_ids: Vec::new(),
+                        item_ids: item_ids.clone(),
                         lease_token: lease_token.clone(),
-                        lease_expires_at: context.lease_expires_at(request.lease_duration_ms),
+                        lease_expires_at,
+                        worker_id: Some(request.worker_id.clone()),
                     }),
                     checksum: CommandChecksum(0),
-                    created_at: context.now,
+                    created_at,
                 };
                 Self::commit_locked(&mut g, shard, env, None)?;
+                let items = g.projection.render_claimed(shard, &item_ids)?;
+                debug_assert_eq!(
+                    items.len(),
+                    item_ids.len(),
+                    "every queried claim candidate must render"
+                );
+                let replay_expires_at = expires_at.max(lease_expires_at);
                 g.claim_by_query_idempotency
                     .entry(shard.clone())
                     .or_default()
                     .record(
                         request_id,
                         fingerprint,
-                        (Vec::new(), lease_token),
-                        expires_at,
+                        (item_ids, lease_token),
+                        replay_expires_at,
                     );
-                return Ok(Claimed::default());
-            }
-
-            let created_at = context.now;
-            let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
-            let lease_token = LeaseToken::new(format!(
-                "cbq-{}-{}-{}",
-                created_at.seconds, created_at.nanoseconds, g.cmd_seq
-            ))
-            .expect("generated lease token is valid");
-            let command_id = Self::next_command_id(&mut g, self.node_id);
-            let env = CommandEnvelope {
-                command_id,
-                request_id: Some(request_id.clone()),
-                request_fingerprint: Some(fingerprint.0),
-                request_outcome: Some(RequestOutcome::ClaimByQuery {
-                    item_ids: item_ids.clone(),
-                    lease_token: lease_token.clone(),
-                }),
-                item_ids: item_ids.clone(),
-                command: QueueCommand::Claim(ClaimCommand {
-                    item_ids: item_ids.clone(),
-                    lease_token: lease_token.clone(),
-                    lease_expires_at,
-                }),
-                checksum: CommandChecksum(0),
-                created_at,
-            };
-            Self::commit_locked(&mut g, shard, env, None)?;
-            let items = g.projection.render_claimed(shard, &item_ids)?;
-            debug_assert_eq!(
-                items.len(),
-                item_ids.len(),
-                "every queried claim candidate must render"
-            );
-            g.claim_by_query_idempotency
-                .entry(shard.clone())
-                .or_default()
-                .record(request_id, fingerprint, (item_ids, lease_token), expires_at);
-            Ok(Claimed {
-                items,
-                ..Default::default()
-            })
-        })();
+                Ok(Claimed {
+                    items,
+                    ..Default::default()
+                })
+            })();
         std::future::ready(result)
     }
 }

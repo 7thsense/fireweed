@@ -77,7 +77,8 @@ pub use port::{
     ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
     RequestIdReplayProbe, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
     TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    is_api001_reserved_write_field, validate_api001_reserved_write_fields, validate_instance_fence,
+    generate_query_lease_token, is_api001_reserved_write_field,
+    validate_api001_reserved_write_fields, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};

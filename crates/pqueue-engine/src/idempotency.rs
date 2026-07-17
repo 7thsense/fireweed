@@ -83,6 +83,35 @@ impl<O: Clone> QueueIdempotencyCache<O> {
         }
     }
 
+    /// Claim-request precedence: a reused id with a different body is always a conflict while its durable
+    /// record exists; only an equal-body replay is then classified by retention expiry.
+    pub fn check_conflict_first(
+        &self,
+        request_id: &RequestId,
+        fingerprint: BodyHash,
+        now: UtcTimestamp,
+    ) -> IdempotencyDecision<O> {
+        match self.entries.get(request_id) {
+            None => IdempotencyDecision::Proceed,
+            Some(e) if e.fingerprint != fingerprint => IdempotencyDecision::Conflict,
+            Some(e) if e.expires_at <= now => IdempotencyDecision::Expired,
+            Some(e) => IdempotencyDecision::Replay(e.outcome.clone()),
+        }
+    }
+
+    /// Whether a retained, non-expired entry satisfies `predicate`.
+    ///
+    /// Segment reclamation uses this to retain the durable command behind an active query-claim replay.
+    pub fn has_unexpired_matching(
+        &self,
+        now: UtcTimestamp,
+        predicate: impl Fn(&O) -> bool,
+    ) -> bool {
+        self.entries
+            .values()
+            .any(|entry| entry.expires_at > now && predicate(&entry.outcome))
+    }
+
     /// Record the outcome of a freshly-executed request. Only call after `check` returned `Proceed`
     /// or `Expired` (never overwrite a live `Replay`/`Conflict` record; that would corrupt the
     /// idempotency guarantee).

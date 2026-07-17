@@ -580,6 +580,7 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
                 item_ids: vec![pqueue_core::ItemId::new("1").unwrap()],
                 lease_token: pqueue_core::LeaseToken::new("lease-1").unwrap(),
                 lease_expires_at: pqueue_conformance::ts(500),
+                worker_id: None,
             }),
             vec![pqueue_core::ItemId::new("1").unwrap()],
         );
@@ -834,6 +835,7 @@ async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcO
                     item_ids: vec![a1],
                     lease_token: pqueue_core::LeaseToken::new("compose-lease-1").unwrap(),
                     lease_expires_at: pqueue_conformance::ts(500),
+                    worker_id: None,
                 }),
                 vec![a1],
             ),

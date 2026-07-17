@@ -775,6 +775,8 @@ async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_clai
 async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
     let q = qkey();
     let ids = seed_scheduled_action_fixture(pq).await;
+    let ordinarily_claimed = pq.claim(&q, 1, 60_000).await.unwrap();
+    assert_eq!(ordinarily_claimed.len(), 1);
 
     let claimed = pq
         .claim_by_query(&q, claim_due_scheduled_actions_request())
@@ -788,6 +790,12 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(p
         "public claim-by-query leases must be based on the injected clock"
     );
     let by_id: HashMap<ItemId, String> = ids.into_iter().collect();
+    assert_eq!(
+        by_id
+            .get(&ordinarily_claimed[0].item_id)
+            .map(String::as_str),
+        Some("act_001")
+    );
     let action_ids = claimed
         .items
         .iter()
@@ -798,7 +806,15 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(p
                 .expect("claimed row should map to a seeded action_id")
         })
         .collect::<Vec<_>>();
-    assert_eq!(action_ids, vec!["act_001", "act_002"]);
+    assert_eq!(
+        action_ids,
+        vec!["act_002"],
+        "query claim must exclude the active ordinary lease on act_001"
+    );
+    let token = claimed.items[0].lease_token.as_ref().unwrap().as_str();
+    assert_eq!(token.len(), 68);
+    assert!(token.starts_with("cbq-"));
+    assert!(token[4..].bytes().all(|byte| byte.is_ascii_hexdigit()));
 
     let entries = claimed
         .items
@@ -836,7 +852,8 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(p
     );
 
     let metrics = pq.metrics(&q).await.unwrap();
-    assert_eq!(metrics.complete, 2);
+    assert_eq!(metrics.complete, 1);
+    assert_eq!(metrics.leased, 1);
     assert_eq!(metrics.pending, 4);
 }
 

@@ -15,6 +15,7 @@ pqueue-core = { path = "../pqueue-core" }
 axon-esf.workspace = true
 bytes = { version = "1", features = ["serde"] }
 sha2 = "0.11"
+getrandom = "0.3"
 # Command/log types derive Serialize/Deserialize so a durable backend can persist the command log.
 serde = { version = "1", features = ["derive"] }
 # Deterministic body fingerprint for the composed backend's request-id idempotency (ADR-012). Pure

@@ -358,6 +358,8 @@ pub(crate) const IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY: &str = "claim_by_query";
 pub(crate) struct ClaimByQueryReplay {
     pub(crate) item_ids: Vec<ItemId>,
     pub(crate) lease_token: LeaseToken,
+    #[serde(default)]
+    pub(crate) worker_id: Option<pqueue_core::WorkerId>,
 }
 
 pub(crate) fn claim_by_query_fingerprint(request: &ClaimByQueryRequest) -> EngineResult<Vec<u8>> {

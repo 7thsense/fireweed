@@ -238,7 +238,9 @@ async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
 
     let first = {
         let backend = SqliteRelationalBackend::open(&path_string).unwrap();
-        backend.create_queue(query_definition()).await.unwrap();
+        let mut definition = query_definition();
+        definition.request_id_retention_ms = 10_000;
+        backend.create_queue(definition).await.unwrap();
         backend
             .push(
                 &shard(),
@@ -307,12 +309,34 @@ async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
         replay.items[0].lease_expires_at,
         first.items[0].lease_expires_at
     );
+    let worker: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT worker_id FROM pqueue_items WHERE item_id=?1",
+            [first.items[0].item_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(worker, "query-worker");
+
+    let active_after_retention = reopened
+        .claim_by_query(
+            &shard(),
+            query_request("durable-replay"),
+            query_context(115),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        active_after_retention.items[0].item_id,
+        first.items[0].item_id
+    );
 
     let mut conflict = query_request("durable-replay");
     conflict.worker_id = WorkerId::new("different-worker").unwrap();
     assert_eq!(
         reopened
-            .claim_by_query(&shard(), conflict, query_context(101))
+            .claim_by_query(&shard(), conflict, query_context(115))
             .await
             .unwrap_err(),
         EngineError::RequestIdConflict

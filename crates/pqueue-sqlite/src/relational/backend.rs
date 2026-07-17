@@ -879,6 +879,7 @@ impl ClaimPort for SqliteRelationalBackend {
                     item_ids: candidates.clone(),
                     lease_token: req.lease_token.clone(),
                     lease_expires_at: req.lease_expires_at,
+                    worker_id: Some(req.worker_id.clone()),
                 })
             };
             apply_command_sql(
@@ -1664,6 +1665,15 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 &request_fingerprint,
                 context.now,
             )? {
+                if replay
+                    .worker_id
+                    .as_ref()
+                    .is_some_and(|worker_id| worker_id != &request.worker_id)
+                {
+                    return Err(EngineError::Storage(
+                        "claim_by_query replay worker attribution mismatch".into(),
+                    ));
+                }
                 let items = render_claimed(&tx, shard, &replay.item_ids, |_| {
                     Some(replay.lease_token.clone())
                 })?;
@@ -1831,11 +1841,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 )
                 .optional())?
             .ok_or(EngineError::NotFound)?;
-            let lease_token = LeaseToken::new(format!(
-                "cbq-{}-{}-{seq}",
-                created_at.seconds, created_at.nanoseconds
-            ))
-            .expect("generated lease token is valid");
+            let lease_token = pqueue_engine::generate_query_lease_token()?;
             let hash = lease_hash(&lease_token);
             let lease_expires_nanos = ts_nanos(lease_expires_at);
             let mut token_ops = Vec::new();
@@ -1843,11 +1849,11 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             for (item_id, expected_version) in selected {
                 let changed = st(tx.execute(
                     "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
-                     lease_expires_at=?2, retry_count=retry_count+1, item_version=item_version+1, \
-                     updated_at=?3, last_command_sequence=?4 \
-                     WHERE tenant_id=?5 AND queue_id=?6 AND item_id=?7 AND item_version=?8 \
+                     lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
+                     item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
+                     WHERE tenant_id=?6 AND queue_id=?7 AND item_id=?8 AND item_version=?9 \
                      AND lifecycle_state='Pending' AND superseded=0 AND fenced=0 \
-                     AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?9) \
+                     AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?10) \
                      AND eligible_since IS NOT NULL \
                      AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
                          ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
@@ -1858,6 +1864,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     params![
                         hash,
                         lease_expires_nanos,
+                        request.worker_id.as_str(),
                         ts_nanos(created_at),
                         seq,
                         t,
@@ -1900,10 +1907,15 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 &ClaimByQueryReplay {
                     item_ids: claimed_ids.clone(),
                     lease_token: lease_token.clone(),
+                    worker_id: Some(request.worker_id.clone()),
                 },
                 &positions,
                 context.now,
-                request_expires_at,
+                if claimed_ids.is_empty() {
+                    request_expires_at
+                } else {
+                    request_expires_at.max(lease_expires_nanos)
+                },
             )?;
             let items = render_claimed(&tx, shard, &claimed_ids, |_| Some(lease_token.clone()))?;
             debug_assert_eq!(

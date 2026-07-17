@@ -1058,6 +1058,23 @@ impl ClaimByQueryContext {
     }
 }
 
+/// Mint an unguessable server-owned lease capability for query claims.
+#[doc(hidden)]
+pub fn generate_query_lease_token() -> EngineResult<LeaseToken> {
+    use std::fmt::Write as _;
+
+    let mut entropy = [0_u8; 32];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        EngineError::Storage(format!("lease-token entropy unavailable: {error}"))
+    })?;
+    let mut encoded = String::with_capacity(4 + entropy.len() * 2);
+    encoded.push_str("cbq-");
+    for byte in entropy {
+        write!(&mut encoded, "{byte:02x}").expect("writing to String is infallible");
+    }
+    LeaseToken::new(encoded).map_err(|error| EngineError::Storage(error.to_string()))
+}
+
 #[doc(hidden)]
 pub trait HotProjectionQueryPort: Send + Sync {
     /// Advertised capability flags for `shard`. The default advertises every capability

@@ -832,6 +832,7 @@ pub(crate) fn apply_command_sql(
         QueueCommand::Claim(c) => {
             let hash = lease_hash(&c.lease_token);
             let exp = ts_nanos(c.lease_expires_at);
+            let worker_id = c.worker_id.as_ref().map(|worker| worker.as_str());
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             if claim_scan_default_fifo.get(shard).copied().unwrap_or(false)
                 && let Some((min_rowid, max_rowid)) =
@@ -839,10 +840,12 @@ pub(crate) fn apply_command_sql(
             {
                 let changed = st(tx.execute(
                     "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
-                     lease_expires_at=?2, retry_count=retry_count+1, item_version=item_version+1, \
-                     updated_at=?3, last_command_sequence=?4 \
-                     WHERE tenant_id=?5 AND queue_id=?6 AND rowid BETWEEN ?7 AND ?8",
-                    params![hash, exp, now_n, seq as i64, t, q, min_rowid, max_rowid],
+                     lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
+                     item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
+                     WHERE tenant_id=?6 AND queue_id=?7 AND rowid BETWEEN ?8 AND ?9",
+                    params![
+                        hash, exp, worker_id, now_n, seq as i64, t, q, min_rowid, max_rowid
+                    ],
                 ))?;
                 if changed != ids.len() {
                     return Err(EngineError::Storage(
@@ -860,11 +863,13 @@ pub(crate) fn apply_command_sql(
                 exec_items_in(
                     tx,
                     "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?, \
-                     lease_expires_at=?, retry_count=retry_count+1, item_version=item_version+1, \
-                     updated_at=?, last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                     lease_expires_at=?, worker_id=?, retry_count=retry_count+1, \
+                     item_version=item_version+1, updated_at=?, last_command_sequence=? \
+                     WHERE tenant_id=? AND queue_id=? AND item_id IN",
                     &[
                         Value::Blob(hash),
                         Value::Integer(exp),
+                        worker_id.map_or(Value::Null, |worker| Value::Text(worker.to_string())),
                         Value::Integer(now_n),
                         Value::Integer(seq as i64),
                     ],
