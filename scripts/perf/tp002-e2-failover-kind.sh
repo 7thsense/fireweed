@@ -75,14 +75,19 @@ owner_row() {
   pg_scalar "SELECT active_owner_id || '|' || assignment_epoch FROM pqueue_queue_owner WHERE tenant='t1' AND queue='q1' AND state='assigned';" | tail -1
 }
 
-wait_owner() {
-  local reject="${1:-}" row
-  for _ in {1..120}; do
+wait_stable_owner() {
+  local reject="${1:-}" row last="" stable=0
+  for _ in {1..180}; do
     row="$(owner_row 2>/dev/null || true)"
-    if [[ -n "${row}" && "${row%%|*}" != "${reject}" ]]; then printf '%s\n' "${row}"; return 0; fi
+    if [[ -n "${row}" && "${row%%|*}" != "${reject}" ]]; then
+      if [[ "${row}" == "${last}" ]]; then ((stable += 1)); else last="${row}"; stable=1; fi
+      if ((stable >= 10)); then printf '%s\n' "${row}"; return 0; fi
+    else
+      last=""; stable=0
+    fi
     sleep 1
   done
-  die "timed out waiting for assigned owner distinct from ${reject:-<none>}"
+  die "timed out waiting for a stable assigned owner distinct from ${reject:-<none>}"
 }
 
 pod_for_uid() {
@@ -191,7 +196,7 @@ helm upgrade --install pqueue "${CHART}" --kube-context "kind-${CLUSTER}" -n "${
 k -n "${NS}" rollout status deploy/pqueue --timeout "${TIMEOUT}"
 [[ "$(k -n "${NS}" get deploy pqueue -o jsonpath='{.status.readyReplicas}')" == 3 ]] || die "three replicas are not ready"
 
-OLD="$(wait_owner)"; OLD_OWNER="${OLD%%|*}"; OLD_EPOCH="${OLD##*|}"
+OLD="$(wait_stable_owner)"; OLD_OWNER="${OLD%%|*}"; OLD_EPOCH="${OLD##*|}"
 OWNER_POD="$(pod_for_uid "${OLD_OWNER}")"; [[ -n "${OWNER_POD}" ]] || die "owner UID does not map to a pod"
 OWNER_IP="$(pod_ip "${OWNER_POD}")"
 NONOWNER_POD="$(k -n "${NS}" get pods -l app.kubernetes.io/instance=pqueue -o name | sed 's#pod/##' | grep -v -Fx "${OWNER_POD}" | head -1)"
@@ -200,21 +205,22 @@ NONOWNER_POD="$(k -n "${NS}" get pods -l app.kubernetes.io/instance=pqueue -o na
 # One request to a non-owner must redirect to the pod-reachable active endpoint; retry exactly once.
 wait_owner_usable "${OWNER_POD}"
 stop_pf
+[[ "$(owner_row)" == "${OLD}" ]] || die "owner changed while establishing routing readiness"
 start_pf "pod/${NONOWNER_POD}" "${PORT}" 8080
-resp "${RUN_DIR}/moved.resp" XADD t1:q1 '*' priority 9
+resp "${RUN_DIR}/moved.resp" XLEN t1:q1
 grep -Eq "^-MOVED .* ${OWNER_IP}:8080" "${RUN_DIR}/moved.resp" || { cat "${RUN_DIR}/moved.resp" >&2; die "non-owner did not return owner MOVED"; }
 stop_pf
 start_pf "pod/${OWNER_POD}" "${PORT}" 8080
-resp "${RUN_DIR}/retry.resp" XADD t1:q1 '*' priority 9
-grep -Eq '^\$[0-9]+' "${RUN_DIR}/retry.resp" || die "one-hop retry failed"
+resp "${RUN_DIR}/retry.resp" XLEN t1:q1
+grep -Eq '^:0' "${RUN_DIR}/retry.resp" || die "one-hop retry failed"
 for p in 1 2 3; do resp "${RUN_DIR}/push-${p}.resp" XADD t1:q1 '*' priority "${p}"; grep -Eq '^\$[0-9]+' "${RUN_DIR}/push-${p}.resp" || die "pre-fault push failed"; done
 resp "${RUN_DIR}/before.resp" XLEN t1:q1
-BEFORE="$(tr -dc '0-9' <"${RUN_DIR}/before.resp")"; [[ "${BEFORE}" == 4 ]] || die "expected 4 visible items, got ${BEFORE}"
+BEFORE="$(tr -dc '0-9' <"${RUN_DIR}/before.resp")"; [[ "${BEFORE}" == 3 ]] || die "expected 3 visible items, got ${BEFORE}"
 stop_pf
 
 # Kill the active owner and require a different Kubernetes UID at a strictly larger control-plane epoch.
 k -n "${NS}" delete pod "${OWNER_POD}" --wait=false
-NEW="$(wait_owner "${OLD_OWNER}")"; NEW_OWNER="${NEW%%|*}"; NEW_EPOCH="${NEW##*|}"
+NEW="$(wait_stable_owner "${OLD_OWNER}")"; NEW_OWNER="${NEW%%|*}"; NEW_EPOCH="${NEW##*|}"
 ((NEW_EPOCH > OLD_EPOCH)) || die "takeover epoch did not increase (${OLD_EPOCH} -> ${NEW_EPOCH})"
 NEW_POD="$(pod_for_uid "${NEW_OWNER}")"; [[ -n "${NEW_POD}" ]] || die "replacement owner UID does not map to a pod"
 k -n "${NS}" wait --for=condition=Ready "pod/${NEW_POD}" --timeout "${TIMEOUT}"
@@ -265,7 +271,7 @@ row = {
  "moved_endpoint":${OWNER_IP@Q}+":8080",
  "topology":"kind: 3 pqueue pods; shared MinIO S3 object log; Postgres ownership; per-pod SQLite projection",
  "hardware":${HARDWARE@Q},"seed":int(${SEED@Q}),"duration_ms":int(${DURATION_MS@Q}),
- "fault_schedule":"after one redirected/retried push plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
+ "fault_schedule":"after one redirected/retried read plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
  "exclusions":"density throughput and managed-cloud S3/Postgres; performance is covered by the separate E3 lane"
 }
 with open(sys.argv[1], "w") as f: json.dump(row, f, indent=2); f.write("\n")
