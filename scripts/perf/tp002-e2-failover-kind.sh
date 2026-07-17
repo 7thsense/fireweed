@@ -36,7 +36,8 @@ trap cleanup EXIT
 start_pf() {
   local resource="$1" local_port="$2" remote_port="$3"
   stop_pf
-  k -n "${NS}" port-forward "${resource}" "${local_port}:${remote_port}" >"${RUN_DIR}/port-forward.log" 2>&1 &
+  kubectl --context "kind-${CLUSTER}" -n "${NS}" port-forward \
+    "${resource}" "${local_port}:${remote_port}" >"${RUN_DIR}/port-forward.log" 2>&1 &
   PF_PID=$!
   for _ in {1..40}; do
     (exec 3<>"/dev/tcp/127.0.0.1/${local_port}") >/dev/null 2>&1 && return 0
@@ -202,12 +203,21 @@ OWNER_IP="$(pod_ip "${OWNER_POD}")"
 NONOWNER_POD="$(k -n "${NS}" get pods -l app.kubernetes.io/instance=pqueue -o name | sed 's#pod/##' | grep -v -Fx "${OWNER_POD}" | head -1)"
 [[ -n "${NONOWNER_POD}" ]] || die "no non-owner pod"
 
+{
+  echo "selected_owner_row=${OLD}"
+  echo "selected_owner_pod=${OWNER_POD} uid=$(k -n "${NS}" get pod "${OWNER_POD}" -o jsonpath='{.metadata.uid}') ip=${OWNER_IP}"
+  echo "selected_nonowner_pod=${NONOWNER_POD} uid=$(k -n "${NS}" get pod "${NONOWNER_POD}" -o jsonpath='{.metadata.uid}') ip=$(pod_ip "${NONOWNER_POD}")"
+  echo "workers=$(pg_scalar "SELECT owner_id || '@' || endpoint FROM pqueue_workers ORDER BY owner_id;")"
+} | tee "${RUN_DIR}/routing-selection.log"
+
 # One request to a non-owner must redirect to the pod-reachable active endpoint; retry exactly once.
 wait_owner_usable "${OWNER_POD}"
 stop_pf
 [[ "$(owner_row)" == "${OLD}" ]] || die "owner changed while establishing routing readiness"
+owner_row >"${RUN_DIR}/owner-immediately-before-request.log"
 start_pf "pod/${NONOWNER_POD}" "${PORT}" 8080
 resp "${RUN_DIR}/moved.resp" XADD t1:q1 '*' priority 9
+owner_row >"${RUN_DIR}/owner-immediately-after-request.log"
 grep -Eq "^-MOVED .* ${OWNER_IP}:8080" "${RUN_DIR}/moved.resp" || { cat "${RUN_DIR}/moved.resp" >&2; die "non-owner did not return owner MOVED"; }
 stop_pf
 start_pf "pod/${OWNER_POD}" "${PORT}" 8080
@@ -239,7 +249,8 @@ stop_pf
 # Use the same live dependencies to prove the epoch-stale append cut and true snapshot+tail reopen seam.
 start_pf svc/pqueue-e2-postgres "${PG_PORT}" 5432
 PG_PF="${PF_PID}"; PF_PID=""
-k -n "${NS}" port-forward svc/pqueue-e2-minio "${S3_PORT}:9000" >"${RUN_DIR}/s3-port-forward.log" 2>&1 & S3_PF=$!
+kubectl --context "kind-${CLUSTER}" -n "${NS}" port-forward \
+  svc/pqueue-e2-minio "${S3_PORT}:9000" >"${RUN_DIR}/s3-port-forward.log" 2>&1 & S3_PF=$!
 trap 'kill "${PG_PF:-}" "${S3_PF:-}" 2>/dev/null || true; cleanup' EXIT
 sleep 2
 PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
