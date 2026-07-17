@@ -116,6 +116,7 @@ async fn hybrid_async_checkpoint_applies_ordered_batches_and_advances_logical_hi
                 item_ids: vec![item_id],
                 lease_token: lease.clone(),
                 lease_expires_at: ts(60),
+                worker_id: None,
             }),
             vec![item_id],
             1,

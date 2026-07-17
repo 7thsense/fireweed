@@ -1625,12 +1625,13 @@ fn apply_command_sql(
             let hash = lease_hash(&c.lease_token);
             let exp = ts_nanos(c.lease_expires_at);
             let ids: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
+            let worker_id = c.worker_id.as_ref().map(|worker| worker.as_str());
             st(tx.execute(
                 "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=$4, \
-                 lease_expires_at=$5, retry_count=retry_count+1, item_version=item_version+1, \
-                 updated_at=$6, last_command_sequence=$7 \
+                 lease_expires_at=$5, worker_id=$6, retry_count=retry_count+1, \
+                 item_version=item_version+1, updated_at=$7, last_command_sequence=$8 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
-                &[&t, &q, &ids, &hash, &exp, &now_n, &seqi],
+                &[&t, &q, &ids, &hash, &exp, &worker_id, &now_n, &seqi],
             ))?;
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
@@ -3669,6 +3670,7 @@ impl ClaimPort for PostgresRelationalBackend {
                     item_ids: candidates.clone(),
                     lease_token: req.lease_token.clone(),
                     lease_expires_at: req.lease_expires_at,
+                    worker_id: Some(req.worker_id.clone()),
                 })
             };
             apply_command_sql(

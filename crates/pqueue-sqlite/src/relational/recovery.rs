@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, GroupKey, ItemId, QueueDefinition, QueueId, RequestId, TenantId};
+use pqueue_core::{
+    ClientItemKey, GroupKey, ItemId, QueueDefinition, QueueId, RequestId, TenantId, WorkerId,
+};
 use pqueue_engine::{
     CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, QueueCounters,
     QueueKey, RequestOutcome, compile_entity_schema,
@@ -437,7 +439,7 @@ pub(crate) fn export_projection_image_sql(
     let mut gate_keys_by_item = item_gate_key_map(conn, shard)?;
     let mut stmt = st(conn.prepare(
         "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,group_key,payload,\
-         fields,metadata,entity_document,retry_count,item_version,lease_expires_at,fenced,\
+         fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,fenced,\
          superseded,max_attempts,created_seq \
          FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
     ))?;
@@ -456,10 +458,11 @@ pub(crate) fn export_projection_image_sql(
             row.get::<_, i64>(10)?,
             row.get::<_, i64>(11)?,
             row.get::<_, Option<i64>>(12)?,
-            row.get::<_, i64>(13)?,
+            row.get::<_, Option<String>>(13)?,
             row.get::<_, i64>(14)?,
             row.get::<_, i64>(15)?,
             row.get::<_, i64>(16)?,
+            row.get::<_, i64>(17)?,
         ))
     }))?;
     let mut items = Vec::new();
@@ -478,6 +481,7 @@ pub(crate) fn export_projection_image_sql(
             retry_count,
             item_version,
             lease_expires_at,
+            worker_id,
             fenced,
             superseded,
             max_attempts,
@@ -509,6 +513,10 @@ pub(crate) fn export_projection_image_sql(
             created_seq: created_seq as u64,
             lease_token: None,
             lease_expires_at: lease_expires_at.map(nanos_ts),
+            worker_id: worker_id
+                .map(WorkerId::new)
+                .transpose()
+                .map_err(|e| EngineError::Storage(e.to_string()))?,
             fenced: fenced != 0,
             superseded: superseded != 0,
             terminal_at: None,

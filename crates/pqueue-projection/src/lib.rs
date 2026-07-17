@@ -74,6 +74,7 @@ struct ItemRecord {
     created_seq: u64,
     lease_token: Option<LeaseToken>,
     lease_expires_at: Option<UtcTimestamp>,
+    worker_id: Option<pqueue_core::WorkerId>,
     fenced: bool,
     superseded: bool,
     terminal_at: Option<UtcTimestamp>,
@@ -100,6 +101,8 @@ pub struct ProjectionImageItem {
     pub created_seq: u64,
     pub lease_token: Option<LeaseToken>,
     pub lease_expires_at: Option<UtcTimestamp>,
+    #[serde(default)]
+    pub worker_id: Option<pqueue_core::WorkerId>,
     pub fenced: bool,
     pub superseded: bool,
     pub terminal_at: Option<UtcTimestamp>,
@@ -126,6 +129,7 @@ impl From<&ItemRecord> for ProjectionImageItem {
             created_seq: rec.created_seq,
             lease_token: rec.lease_token.clone(),
             lease_expires_at: rec.lease_expires_at,
+            worker_id: rec.worker_id.clone(),
             fenced: rec.fenced,
             superseded: rec.superseded,
             terminal_at: rec.terminal_at,
@@ -155,6 +159,7 @@ impl From<ProjectionImageItem> for ItemRecord {
             created_seq: item.created_seq,
             lease_token: item.lease_token,
             lease_expires_at: item.lease_expires_at,
+            worker_id: item.worker_id,
             fenced: item.fenced,
             superseded: item.superseded,
             terminal_at: item.terminal_at,
@@ -1429,6 +1434,7 @@ impl ProjectionData {
             created_seq: seq,
             lease_token: None,
             lease_expires_at: None,
+            worker_id: None,
             fenced: false,
             superseded: false,
             terminal_at: None,
@@ -1509,6 +1515,9 @@ impl ProjectionData {
                 .map_err(|_| EngineError::Invalid("illegal lifecycle transition"))?;
             rec.state = new;
             rec.item_version += 1;
+            if new != ItemState::Leased {
+                rec.worker_id = None;
+            }
             if new.is_terminal() {
                 rec.terminal_at = terminal_at;
                 rec.terminal_position = terminal_position.cloned();
@@ -1564,6 +1573,7 @@ impl ProjectionData {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = Some(c.lease_token.clone());
                     rec.lease_expires_at = Some(c.lease_expires_at);
+                    rec.worker_id = c.worker_id.clone();
                     rec.attempt_count += 1; // delivery count (flavor-diff 7)
                 }
                 Ok(())
@@ -3370,6 +3380,7 @@ mod tests {
             created_seq: 0,
             lease_token: None,
             lease_expires_at: None,
+            worker_id: None,
             fenced: false,
             superseded: false,
             terminal_at: Some(terminal_at),
@@ -3544,6 +3555,7 @@ mod tests {
             created_seq: 0,
             lease_token: None,
             lease_expires_at: None,
+            worker_id: None,
             fenced: false,
             superseded: false,
             terminal_at: None,
@@ -3596,6 +3608,7 @@ mod tests {
                 item_ids: vec![iid("1")],
                 lease_token: LeaseToken::new("lt").unwrap(),
                 lease_expires_at: ts(60),
+                worker_id: None,
             }))
             .unwrap();
         assert_eq!(
@@ -4013,6 +4026,7 @@ mod tests {
                 item_ids: vec![item_id],
                 lease_token: lease_token.clone(),
                 lease_expires_at: ts(60),
+                worker_id: None,
             }))
             .unwrap();
         projection
@@ -4191,6 +4205,7 @@ mod tests {
                 item_ids: vec![iid("1")],
                 lease_token: lease,
                 lease_expires_at: ts(7_000),
+                worker_id: None,
             })),
             None,
         )
@@ -4245,6 +4260,7 @@ mod tests {
                     created_seq: 0,
                     lease_token: None,
                     lease_expires_at: None,
+                    worker_id: None,
                     fenced: false,
                     superseded: true,
                     terminal_at: None,
@@ -4268,6 +4284,7 @@ mod tests {
                     created_seq: 1,
                     lease_token: None,
                     lease_expires_at: None,
+                    worker_id: None,
                     fenced: false,
                     superseded: false,
                     terminal_at: None,
@@ -4371,6 +4388,7 @@ mod tests {
                 item_ids: vec![iid("1")],
                 lease_token: LeaseToken::new("lease-1").unwrap(),
                 lease_expires_at: ts(500),
+                worker_id: None,
             })),
             None,
         )
