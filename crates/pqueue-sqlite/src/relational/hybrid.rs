@@ -707,8 +707,9 @@ impl ProjectionStore for HybridProjectionStore {
         Ok(())
     }
 
-    /// Apply at most [`Self::deferred_flush_chunk`] deferred commands, oldest-first, then return —
-    /// leaving any remainder queued for the next call. This runs under the composed backend's
+    /// Apply at most [`Self::deferred_flush_chunk`] deferred commands from the oldest non-poisoned shard,
+    /// preserving that shard's batch order, then return. A poisoned shard remains queued for repair but
+    /// cannot head-of-line block healthy shards. This runs under the composed backend's
     /// unit-of-work mutex, so bounding the batch bounds how long one call can block concurrent
     /// push/claim callers waiting on the same lock; the periodic flusher cadence drains a large
     /// backlog over several calls instead of one unbounded transaction.
@@ -724,10 +725,17 @@ impl ProjectionStore for HybridProjectionStore {
             return Ok(());
         }
 
+        let Some(batch_index) = self.deferred.iter().position(|batch| {
+            self.async_monitors
+                .get(&batch.shard)
+                .is_none_or(|monitor| !monitor.is_poisoned())
+        }) else {
+            return Ok(());
+        };
         let shard = self
             .deferred
-            .front()
-            .expect("checked non-empty")
+            .get(batch_index)
+            .expect("selected batch exists")
             .shard
             .clone();
         let mut remaining = self.deferred_flush_chunk;
@@ -736,6 +744,7 @@ impl ProjectionStore for HybridProjectionStore {
         for batch in self
             .deferred
             .iter()
+            .skip(batch_index)
             .take_while(|batch| batch.shard == shard)
         {
             let take = batch.entries.len().min(remaining);
@@ -782,12 +791,15 @@ impl ProjectionStore for HybridProjectionStore {
         }
         let mut applied = positions.len();
         while applied > 0 {
-            let batch = self.deferred.front_mut().expect("applied prefix exists");
+            let batch = self
+                .deferred
+                .get_mut(batch_index)
+                .expect("applied batch exists");
             let drained = batch.entries.len().min(applied);
             batch.entries.drain(..drained);
             applied -= drained;
             if batch.entries.is_empty() {
-                self.deferred.pop_front();
+                self.deferred.remove(batch_index);
             }
         }
         self.checkpoint_errors.remove(&shard);

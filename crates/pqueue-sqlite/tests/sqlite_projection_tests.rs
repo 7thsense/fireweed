@@ -898,3 +898,63 @@ fn async_poison_rejects_future_admission_but_not_an_already_admitted_apply() {
     assert_eq!(store.deferred_command_count(), 2);
     assert!(pqueue_engine::ProjectionStore::admit_mutation(&mut store, &shard()).is_err());
 }
+
+#[test]
+fn poisoned_head_shard_does_not_block_healthy_tail_checkpoint_progress() {
+    let mut store = HybridProjectionStore::in_memory()
+        .unwrap()
+        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 10_000, 1).unwrap());
+    let poisoned = named_shard("poisoned-head");
+    let healthy = named_shard("healthy-tail");
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &named_qdef("poisoned-head")).unwrap();
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &named_qdef("healthy-tail")).unwrap();
+
+    let poisoned_command = envelope(
+        "poisoned-head-push",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("501", "poisoned-head-key")],
+        }),
+        vec![ItemId::new("501").unwrap()],
+        0,
+    );
+    pqueue_engine::ProjectionStore::apply_live(
+        &mut store,
+        &[named_pos("poisoned-head", 0)],
+        &[poisoned_command],
+    )
+    .unwrap();
+    let healthy_command = envelope(
+        "healthy-tail-push",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("502", "healthy-tail-key")],
+        }),
+        vec![ItemId::new("502").unwrap()],
+        0,
+    );
+    pqueue_engine::ProjectionStore::apply_live(
+        &mut store,
+        &[named_pos("healthy-tail", 0)],
+        &[healthy_command],
+    )
+    .unwrap();
+
+    store.set_fault_hook(Some(Arc::new(AsyncCheckpointFailure)));
+    assert!(pqueue_engine::ProjectionStore::flush_deferred(&mut store).is_err());
+    store.set_fault_hook(None);
+    assert!(store.async_metrics_for(&poisoned).unwrap().poisoned);
+
+    pqueue_engine::ProjectionStore::flush_deferred(&mut store)
+        .expect("healthy tail shard must checkpoint past a poisoned FIFO head");
+    assert_eq!(store.deferred_command_count(), 1);
+    let healthy_metrics = store.async_metrics_for(&healthy).unwrap();
+    assert_eq!(healthy_metrics.apply_lag_commands, 0);
+    assert_eq!(healthy_metrics.apply_queue_depth, 0);
+    assert_eq!(
+        pqueue_engine::ProjectionStore::recovery_high_water(store.sqlite(), &healthy)
+            .unwrap()
+            .unwrap(),
+        named_pos("healthy-tail", 0)
+    );
+    assert!(pqueue_engine::ProjectionStore::admit_mutation(&mut store, &healthy).is_ok());
+    assert!(pqueue_engine::ProjectionStore::admit_mutation(&mut store, &poisoned).is_err());
+}
