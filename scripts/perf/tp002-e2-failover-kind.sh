@@ -67,6 +67,56 @@ Path(os.environ["RESP_OUT"]).write_bytes(b"".join(chunks))
 PY
 }
 
+resp_claim_counts() {
+  python3 - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+data = Path(sys.argv[1]).read_bytes()
+offset = 0
+
+def read_line():
+    global offset
+    end = data.index(b"\r\n", offset)
+    value = data[offset:end]
+    offset = end + 2
+    return value
+
+def parse():
+    global offset
+    kind = chr(data[offset])
+    offset += 1
+    header = read_line()
+    if kind == "*":
+        count = int(header)
+        return None if count == -1 else [parse() for _ in range(count)]
+    if kind == "$":
+        length = int(header)
+        if length == -1:
+            return None
+        value = data[offset:offset + length]
+        offset += length
+        if data[offset:offset + 2] != b"\r\n":
+            raise ValueError("bulk string is missing its terminator")
+        offset += 2
+        return value.decode()
+    if kind in "+-":
+        return header.decode()
+    if kind == ":":
+        return int(header)
+    raise ValueError(f"unsupported RESP type: {kind!r}")
+
+response = parse()
+if offset != len(data):
+    raise ValueError("trailing bytes in RESP response")
+if not isinstance(response, list) or len(response) != 1:
+    raise ValueError("expected one XREADGROUP stream")
+entries = response[0][1]
+ids = [entry[0] for entry in entries]
+print(len(ids), len(set(ids)))
+PY
+}
+
 pg_scalar() {
   local sql="$1"
   k -n "${NS}" exec deploy/pqueue-e2-postgres -- psql -U pqueue -d pqueue -Atqc "${sql}"
@@ -240,8 +290,9 @@ AFTER="$(tr -dc '0-9' <"${RUN_DIR}/after.resp")"; [[ "${AFTER}" == "${BEFORE}" ]
 
 # Claim every item once, then prove a second consumer cannot concurrently lease any of them.
 resp "${RUN_DIR}/claim-one.resp" XREADGROUP GROUP failover-g c1 COUNT 10 STREAMS t1:q1 '>'
-IDS_ONE="$(grep -Eo '[0-9]+-[0-9]+' "${RUN_DIR}/claim-one.resp" | sort -u | wc -l)"
-[[ "${IDS_ONE}" == "${BEFORE}" ]] || die "first consumer did not receive each item exactly once (${IDS_ONE}/${BEFORE})"
+read -r IDS_ONE UNIQUE_IDS_ONE < <(resp_claim_counts "${RUN_DIR}/claim-one.resp")
+[[ "${IDS_ONE}" == "${BEFORE}" && "${UNIQUE_IDS_ONE}" == "${BEFORE}" ]] || \
+  die "first consumer did not receive each item exactly once (${IDS_ONE} entries, ${UNIQUE_IDS_ONE} unique, expected ${BEFORE})"
 resp "${RUN_DIR}/claim-two.resp" XREADGROUP GROUP failover-g c2 COUNT 10 STREAMS t1:q1 '>'
 grep -Eq '^\*0|^\*-1|^\$-1' "${RUN_DIR}/claim-two.resp" || { cat "${RUN_DIR}/claim-two.resp" >&2; die "second consumer acquired a double lease"; }
 stop_pf
