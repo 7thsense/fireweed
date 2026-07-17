@@ -15,6 +15,7 @@ use pqueue::{
 };
 use pqueue_memory::ManualClock;
 use pqueue_objectlog::segmented::S3BlobStore;
+use rusqlite::{Connection, params};
 
 fn nonce() -> u128 {
     SystemTime::now()
@@ -151,6 +152,146 @@ fn public_objectlog_sqlite_delete_and_rehydrate() {
         vec![first, second]
     );
     drop(reopened);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_verification_is_exact_per_queue() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-verify-{}", nonce()));
+    let root = fixture.join("objects");
+    let sqlite = fixture.join("projection.sqlite");
+    let config = local_config(&root, &sqlite);
+    let pq = pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let dominant = queue("dominant-queue");
+    let behind = queue("behind-queue");
+    block_on(pq.create_queue(definition("dominant-queue"))).unwrap();
+    block_on(pq.create_queue(definition("behind-queue"))).unwrap();
+    block_on(pq.push(&dominant, item(1))).unwrap();
+    block_on(pq.push(&dominant, item(2))).unwrap();
+    block_on(pq.push(&behind, item(3))).unwrap();
+    block_on(pq.verify_projection()).unwrap();
+
+    let connection = Connection::open(&sqlite).unwrap();
+    connection
+        .execute(
+            "UPDATE relational_cursor SET next_seq=0 WHERE tenant=?1 AND queue=?2",
+            params!["embedded-tenant", "behind-queue"],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(
+        block_on(pq.verify_projection()).is_err(),
+        "a caught-up higher-sequence queue must not mask a behind queue"
+    );
+    let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
+    assert_eq!(rebuilt.tail_commands_replayed, 3);
+    block_on(pq.verify_projection()).unwrap();
+    drop(pq);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-interleave-{}", nonce()));
+    let root = fixture.join("objects");
+    let sqlite = fixture.join("projection.sqlite");
+    let mut config = local_config(&root, &sqlite);
+    config.response_barrier = EmbeddedResponseBarrier::AsyncProjection;
+    let pq =
+        Arc::new(pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap());
+    let key = queue("interleaved-queue");
+    block_on(pq.create_queue(definition("interleaved-queue"))).unwrap();
+    block_on(pq.push(&key, item(0))).unwrap();
+
+    block_on(pq.delete_projection()).unwrap();
+    block_on(pq.push(&key, item(1))).unwrap();
+    assert_eq!(
+        block_on(pq.metrics(&key)).unwrap().pending,
+        2,
+        "async success remains immediately visible while SQLite is offline"
+    );
+    assert!(block_on(pq.verify_projection()).is_err());
+    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.verify_projection()).unwrap();
+
+    let writer = Arc::clone(&pq);
+    let writer_key = key.clone();
+    let thread = std::thread::spawn(move || {
+        for priority in 2..22 {
+            block_on(writer.push(&writer_key, item(priority))).unwrap();
+        }
+    });
+    block_on(pq.rehydrate_projection()).unwrap();
+    thread.join().unwrap();
+    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.verify_projection()).unwrap();
+    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 22);
+    drop(pq);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-strict-offline-{}", nonce()));
+    let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
+    let pq = pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let key = queue("strict-offline-queue");
+    block_on(pq.create_queue(definition("strict-offline-queue"))).unwrap();
+    block_on(pq.push(&key, item(0))).unwrap();
+    block_on(pq.delete_projection()).unwrap();
+    assert!(matches!(
+        block_on(pq.push(&key, item(1))),
+        Err(pqueue::EngineError::Unavailable)
+    ));
+    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.push(&key, item(2))).unwrap();
+    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
+    drop(pq);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-namespace-{}", nonce()));
+    let root = fixture.join("shared-objects");
+    let mut first_config = local_config(&root, &fixture.join("first.sqlite"));
+    first_config.namespace = "first namespace".into();
+    let mut second_config = local_config(&root, &fixture.join("second.sqlite"));
+    second_config.namespace = "second namespace".into();
+    let key = queue("shared-queue-name");
+
+    let first =
+        pqueue::open_embedded_sqlite(first_config.clone(), Arc::new(ManualClock::at(1_000)))
+            .unwrap();
+    block_on(first.create_queue(definition("shared-queue-name"))).unwrap();
+    block_on(first.push(&key, item(11))).unwrap();
+    drop(first);
+
+    let second =
+        pqueue::open_embedded_sqlite(second_config.clone(), Arc::new(ManualClock::at(1_000)))
+            .unwrap();
+    assert!(
+        block_on(second.create_queue(definition("shared-queue-name")))
+            .unwrap()
+            .created,
+        "the second namespace must not recover the first namespace's queue catalog"
+    );
+    block_on(second.push(&key, item(22))).unwrap();
+    drop(second);
+
+    let first =
+        pqueue::open_embedded_sqlite(first_config, Arc::new(ManualClock::at(2_000))).unwrap();
+    let second =
+        pqueue::open_embedded_sqlite(second_config, Arc::new(ManualClock::at(2_000))).unwrap();
+    assert_eq!(
+        block_on(first.peek(&key, 10)).unwrap()[0].priority,
+        Some(PriorityValue::Int64(11))
+    );
+    assert_eq!(
+        block_on(second.peek(&key, 10)).unwrap()[0].priority,
+        Some(PriorityValue::Int64(22))
+    );
+    drop((first, second));
     let _ = fs::remove_dir_all(fixture);
 }
 

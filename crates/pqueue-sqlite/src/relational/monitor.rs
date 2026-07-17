@@ -269,6 +269,17 @@ impl HybridAsyncMonitor {
         self.clean_batch_since_hard = true;
     }
 
+    /// Clear worker poison/debt bookkeeping after an operator-driven rebuild has proven a complete,
+    /// contiguous SQLite image from authoritative history.
+    pub(crate) fn clear_after_rebuild(&mut self) {
+        self.level = BackpressureLevel::Clear;
+        self.poisoned = None;
+        self.consecutive_retries = 0;
+        self.clean_batch_since_hard = true;
+        self.hard_entered_at_ms = None;
+        self.last_debt = HybridAsyncDebt::default();
+    }
+
     /// Record a failed async SQLite apply/checkpoint attempt for the current batch. Increments both the
     /// cumulative error counter and the consecutive-retry counter; when consecutive retries reach the
     /// configured poison threshold the queue is poisoned (fail-closed). Returns `true` iff this call

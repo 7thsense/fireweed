@@ -709,25 +709,42 @@ fn validate_objectlog_sqlite_catalog(
 }
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
-impl ObjectLogSqliteLifecycle {
-    fn flush_deferred(&self) -> EngineResult<()> {
-        while self
-            .backend
-            .with_projection(|projection| projection.deferred_command_count())
-            > 0
-        {
-            self.backend.flush_deferred_projection()?;
-        }
-        Ok(())
+fn verify_objectlog_sqlite_axes(
+    log: &pqueue_objectlog::ObjectLog,
+    projection: &pqueue_sqlite::HybridProjectionStore,
+    require_online: bool,
+) -> EngineResult<EmbeddedProjectionVerification> {
+    use pqueue_engine::{LogStore, ProjectionStore};
+
+    if require_online && projection.durable_projection_offline() {
+        return Err(EngineError::Storage(
+            "SQLite projection is offline pending authoritative rebuild".into(),
+        ));
     }
-
-    fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
-        use pqueue_engine::{LogStore, ProjectionStore};
-
-        let definitions = self.backend.with_log(LogStore::recover_definitions)?;
-        let log_by_key: HashMap<QueueKey, QueueDefinition> = definitions
-            .iter()
-            .cloned()
+    if require_online && let Some(reason) = projection.checkpoint_error() {
+        return Err(EngineError::Storage(format!(
+            "async SQLite checkpoint worker failed: {reason}"
+        )));
+    }
+    if require_online && let Some(reason) = projection.poison_reason() {
+        return Err(EngineError::Storage(format!(
+            "hybrid projection worker is poisoned: {reason}"
+        )));
+    }
+    let definitions = LogStore::recover_definitions(log)?;
+    let authoritative: HashMap<QueueKey, QueueDefinition> = definitions
+        .iter()
+        .cloned()
+        .map(|definition| {
+            (
+                QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                definition,
+            )
+        })
+        .collect();
+    let projected: HashMap<QueueKey, QueueDefinition> =
+        ProjectionStore::recover_definitions(projection.sqlite())?
+            .into_iter()
             .map(|definition| {
                 (
                     QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
@@ -735,117 +752,100 @@ impl ObjectLogSqliteLifecycle {
                 )
             })
             .collect();
-        let projected = self.backend.with_projection(|projection| {
-            ProjectionStore::recover_definitions(projection.sqlite())
-        })?;
-        for definition in projected {
-            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            let Some(authoritative) = log_by_key.get(&key) else {
-                return Err(EngineError::Storage(
-                    "projection contains a queue absent from the authoritative object log".into(),
-                ));
-            };
-            if authoritative != &definition {
-                return Err(EngineError::Storage(
-                    "projection queue definition conflicts with the authoritative object log"
-                        .into(),
-                ));
-            }
+    if authoritative != projected {
+        return Err(EngineError::Storage(
+            "SQLite queue catalog does not exactly match the authoritative object log".into(),
+        ));
+    }
+
+    let mut projection_sequence = 0;
+    let mut authoritative_sequence = 0;
+    for definition in definitions {
+        let key = QueueKey::new(definition.tenant_id, definition.queue_id);
+        let projected_position = projection.sqlite().recovery_high_water(&key)?;
+        let authoritative_position = LogStore::high_water(log, &key)?;
+        if projected_position != authoritative_position {
+            return Err(EngineError::Storage(format!(
+                "SQLite projection for {}/{} is not at the authoritative position: projection {:?}, log {:?}",
+                key.tenant_id, key.queue_id, projected_position, authoritative_position
+            )));
         }
-        let mut projection_sequence = 0;
-        let mut authoritative_sequence = 0;
-        for definition in definitions {
-            let key = QueueKey::new(definition.tenant_id, definition.queue_id);
-            let projected = self
-                .backend
-                .with_projection(|projection| projection.sqlite().recovery_high_water(&key))?;
-            let authoritative = self
-                .backend
-                .with_log(|log| LogStore::high_water(log, &key))?;
-            match (&projected, &authoritative) {
-                (Some(_), None) => {
-                    return Err(EngineError::Storage(
-                        "projection is non-empty but the authoritative object log is empty".into(),
-                    ));
-                }
-                (Some(projected), Some(authoritative))
-                    if projected.backend_epoch > authoritative.backend_epoch
-                        || (projected.backend_epoch == authoritative.backend_epoch
-                            && projected.sequence > authoritative.sequence) =>
-                {
-                    return Err(EngineError::Storage(
-                        "projection is ahead of the authoritative object log".into(),
-                    ));
-                }
-                _ => {}
-            }
-            projection_sequence =
-                projection_sequence.max(projected.map_or(0, |position| position.sequence));
-            authoritative_sequence =
-                authoritative_sequence.max(authoritative.map_or(0, |position| position.sequence));
-        }
-        Ok(EmbeddedProjectionVerification {
-            compatible: true,
-            projection_sequence,
-            authoritative_sequence,
+        projection_sequence = projection_sequence.max(
+            projected_position
+                .as_ref()
+                .map_or(0, |position| position.sequence),
+        );
+        authoritative_sequence = authoritative_sequence.max(
+            authoritative_position
+                .as_ref()
+                .map_or(0, |position| position.sequence),
+        );
+    }
+    Ok(EmbeddedProjectionVerification {
+        compatible: true,
+        projection_sequence,
+        authoritative_sequence,
+    })
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+impl ObjectLogSqliteLifecycle {
+    fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
+        self.backend.with_log_and_projection_mut(|log, projection| {
+            verify_objectlog_sqlite_axes(log, projection, true)
         })
     }
 
     fn rehydrate_now(&self) -> EngineResult<EmbeddedRehydration> {
         use pqueue_engine::LogStore;
 
-        self.flush_deferred()?;
-        let definitions = self.backend.with_log(LogStore::recover_definitions)?;
-        let mut replayed = 0_u64;
-        for definition in &definitions {
-            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            self.backend.with_projection(|projection| {
+        self.backend.with_log_and_projection_mut(|log, projection| {
+            projection.begin_durable_rebuild()?;
+            let definitions = LogStore::recover_definitions(log)?;
+            let mut replayed = 0_u64;
+            for definition in &definitions {
+                let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
                 projection
                     .sqlite()
-                    .create_queue_projection(definition.clone())
-            })?;
-            let mut from = self
-                .backend
-                .with_projection(|projection| projection.sqlite().recovery_high_water(&key))?;
-            loop {
-                let page = self
-                    .backend
-                    .with_log(|log| log.read_from(&key, from.clone(), 1_024))?;
-                replayed = replayed.saturating_add(page.entries.len() as u64);
-                if replayed > self.max_tail_commands {
-                    return Err(EngineError::Storage(format!(
-                        "projection rehydrate exceeds configured tail bound {}",
-                        self.max_tail_commands
-                    )));
-                }
-                if !page.entries.is_empty() {
-                    let positions: Vec<_> = page
-                        .entries
-                        .iter()
-                        .map(|(position, _)| position.clone())
-                        .collect();
-                    let commands: Vec<_> = page
-                        .entries
-                        .iter()
-                        .map(|(_, command)| command.clone())
-                        .collect();
-                    self.backend.with_projection(|projection| {
+                    .create_queue_projection(definition.clone())?;
+                let mut from = None;
+                loop {
+                    let page = log.read_from(&key, from.clone(), 1_024)?;
+                    replayed = replayed.saturating_add(page.entries.len() as u64);
+                    if replayed > self.max_tail_commands {
+                        return Err(EngineError::Storage(format!(
+                            "projection rehydrate exceeds configured tail bound {}",
+                            self.max_tail_commands
+                        )));
+                    }
+                    if !page.entries.is_empty() {
+                        let positions: Vec<_> = page
+                            .entries
+                            .iter()
+                            .map(|(position, _)| position.clone())
+                            .collect();
+                        let commands: Vec<_> = page
+                            .entries
+                            .iter()
+                            .map(|(_, command)| command.clone())
+                            .collect();
                         projection
                             .sqlite()
-                            .apply_committed_batch(&positions, &commands)
-                    })?;
-                }
-                match page.next {
-                    Some(next) => from = Some(next),
-                    None => break,
+                            .apply_committed_batch(&positions, &commands)?;
+                    }
+                    match page.next {
+                        Some(next) => from = Some(next),
+                        None => break,
+                    }
                 }
             }
-        }
-        let verification = self.verify_now()?;
-        Ok(EmbeddedRehydration {
-            snapshot_used: false,
-            tail_commands_replayed: replayed,
-            projection_sequence: verification.projection_sequence,
+            let verification = verify_objectlog_sqlite_axes(log, projection, false)?;
+            projection.finish_durable_rebuild();
+            Ok(EmbeddedRehydration {
+                snapshot_used: false,
+                tail_commands_replayed: replayed,
+                projection_sequence: verification.projection_sequence,
+            })
         })
     }
 }
@@ -866,9 +866,8 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
 
     fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
         Box::pin(async {
-            self.flush_deferred()?;
             self.backend
-                .with_projection(|projection| projection.sqlite().reset_projection())
+                .with_log_and_projection_mut(|_, projection| projection.delete_durable_projection())
         })
     }
 
@@ -882,6 +881,52 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
             let _ = flusher.join();
         }
     }
+}
+
+#[cfg(feature = "objectlog")]
+fn open_embedded_object_log(
+    config: &EmbeddedDurabilityConfig,
+) -> EngineResult<pqueue_objectlog::ObjectLog> {
+    use pqueue_objectlog::segmented::{
+        BlobStore, LocalFsBlobStore, NamespacedBlobStore, S3BlobStore,
+    };
+
+    let segment_config = pqueue_objectlog::SegmentConfig::new(
+        config.segments.target_bytes,
+        config.segments.max_latency_ms,
+    )?;
+    let raw: Arc<dyn BlobStore> = match &config.object_log {
+        EmbeddedObjectLogConfig::Local { root } => Arc::new(LocalFsBlobStore::open(root)?),
+        EmbeddedObjectLogConfig::S3Compatible {
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            allow_insecure_http,
+        } => {
+            if endpoint.starts_with("http://") && !allow_insecure_http {
+                return Err(EngineError::Invalid(
+                    "insecure S3-compatible HTTP endpoint was not explicitly allowed",
+                ));
+            }
+            Arc::new(S3BlobStore::new(
+                endpoint,
+                bucket,
+                &access_key_id.0,
+                &secret_access_key.0,
+                region,
+            )?)
+        }
+    };
+    let namespace = config
+        .namespace
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let store: Arc<dyn BlobStore> = Arc::new(NamespacedBlobStore::new(raw, &namespace)?);
+    pqueue_objectlog::ObjectLog::open_group_commit_with_blob_store(store, segment_config)
 }
 
 /// The capabilities the library facade composes over (the worker + control-plane ports). This is an
@@ -2283,7 +2328,6 @@ pub fn open_embedded(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
     use pqueue_engine::{ComposedBackend, InProcessControlPlane};
-    use pqueue_objectlog::segmented::{BlobStore, S3BlobStore};
 
     config.validate()?;
     if config.response_barrier != EmbeddedResponseBarrier::Strict {
@@ -2295,37 +2339,7 @@ pub fn open_embedded(
         }
         EmbeddedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
     };
-    let segment_config = pqueue_objectlog::SegmentConfig::new(
-        config.segments.target_bytes,
-        config.segments.max_latency_ms,
-    )?;
-    let log = match &config.object_log {
-        EmbeddedObjectLogConfig::Local { root } => {
-            pqueue_objectlog::ObjectLog::open_group_commit(root, segment_config)?
-        }
-        EmbeddedObjectLogConfig::S3Compatible {
-            endpoint,
-            bucket,
-            region,
-            access_key_id,
-            secret_access_key,
-            allow_insecure_http,
-        } => {
-            if endpoint.starts_with("http://") && !allow_insecure_http {
-                return Err(EngineError::Invalid(
-                    "insecure S3-compatible HTTP endpoint was not explicitly allowed",
-                ));
-            }
-            let store: Arc<dyn BlobStore> = Arc::new(S3BlobStore::new(
-                endpoint,
-                bucket,
-                &access_key_id.0,
-                &secret_access_key.0,
-                region,
-            )?);
-            pqueue_objectlog::ObjectLog::open_group_commit_with_blob_store(store, segment_config)?
-        }
-    };
+    let log = open_embedded_object_log(&config)?;
 
     if let Err(error) = validate_objectlog_postgres_catalog(&log, &projection) {
         match config.recovery.incompatible_projection {
@@ -2390,7 +2404,6 @@ pub fn open_embedded_sqlite(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
     use pqueue_engine::{ComposedBackend, InProcessControlPlane};
-    use pqueue_objectlog::segmented::{BlobStore, S3BlobStore};
 
     config.validate()?;
     let projection_path = match &config.projection {
@@ -2405,39 +2418,12 @@ pub fn open_embedded_sqlite(
     {
         std::fs::create_dir_all(parent).map_err(|error| EngineError::Storage(error.to_string()))?;
     }
-    let projection = pqueue_sqlite::HybridProjectionStore::open(projection_path)?
+    let mut projection = pqueue_sqlite::HybridProjectionStore::open(projection_path)?
         .with_strict_apply(config.response_barrier == EmbeddedResponseBarrier::Strict);
-    let segment_config = pqueue_objectlog::SegmentConfig::new(
-        config.segments.target_bytes,
-        config.segments.max_latency_ms,
-    )?;
-    let log = match &config.object_log {
-        EmbeddedObjectLogConfig::Local { root } => {
-            pqueue_objectlog::ObjectLog::open_group_commit(root, segment_config)?
-        }
-        EmbeddedObjectLogConfig::S3Compatible {
-            endpoint,
-            bucket,
-            region,
-            access_key_id,
-            secret_access_key,
-            allow_insecure_http,
-        } => {
-            if endpoint.starts_with("http://") && !allow_insecure_http {
-                return Err(EngineError::Invalid(
-                    "insecure S3-compatible HTTP endpoint was not explicitly allowed",
-                ));
-            }
-            let store: Arc<dyn BlobStore> = Arc::new(S3BlobStore::new(
-                endpoint,
-                bucket,
-                &access_key_id.0,
-                &secret_access_key.0,
-                region,
-            )?);
-            pqueue_objectlog::ObjectLog::open_group_commit_with_blob_store(store, segment_config)?
-        }
-    };
+    if config.response_barrier == EmbeddedResponseBarrier::AsyncProjection {
+        projection = projection.with_async_monitor(pqueue_sqlite::HybridAsyncThresholds::default());
+    }
+    let log = open_embedded_object_log(&config)?;
 
     if let Err(error) = validate_objectlog_sqlite_catalog(&log, projection.sqlite()) {
         match config.recovery.incompatible_projection {

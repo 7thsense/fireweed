@@ -256,6 +256,105 @@ impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
     }
 }
 
+/// A logical object namespace over a shared blob store. Every key/list cursor is prefixed on the backing
+/// store and stripped on return, so independent embedded deployments may safely share one local root or S3
+/// bucket without observing or fencing each other's manifests.
+pub struct NamespacedBlobStore {
+    inner: std::sync::Arc<dyn BlobStore>,
+    prefix: String,
+}
+
+impl NamespacedBlobStore {
+    pub fn new(inner: std::sync::Arc<dyn BlobStore>, namespace: &str) -> EngineResult<Self> {
+        let namespace = namespace.trim_matches('/');
+        if namespace.is_empty() {
+            return Err(EngineError::Invalid("object namespace must not be empty"));
+        }
+        Ok(Self {
+            inner,
+            prefix: format!("{namespace}/"),
+        })
+    }
+
+    fn key(&self, key: &str) -> String {
+        format!("{}{key}", self.prefix)
+    }
+
+    fn strip_keys(&self, keys: Vec<String>) -> EngineResult<Vec<String>> {
+        keys.into_iter()
+            .map(|key| {
+                key.strip_prefix(&self.prefix)
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        EngineError::Storage("blob namespace returned foreign key".into())
+                    })
+            })
+            .collect()
+    }
+}
+
+impl BlobStore for NamespacedBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.inner.put(&self.key(key), body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        self.inner.put_if_absent(&self.key(key), body)
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.inner.get(&self.key(key))
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.inner.delete(&self.key(key))
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.strip_keys(self.inner.list(&self.key(prefix))?)
+    }
+
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> EngineResult<Vec<String>> {
+        let cursor = start_after.map(|value| self.key(value));
+        self.strip_keys(
+            self.inner
+                .list_page(&self.key(prefix), cursor.as_deref(), limit)?,
+        )
+    }
+
+    fn list_from(&self, prefix: &str, start_after: &str) -> EngineResult<Vec<String>> {
+        self.strip_keys(
+            self.inner
+                .list_from(&self.key(prefix), &self.key(start_after))?,
+        )
+    }
+
+    fn list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> EngineResult<(Vec<String>, u64)> {
+        let (keys, requests) = self
+            .inner
+            .list_from_with_request_count(&self.key(prefix), &self.key(start_after))?;
+        Ok((self.strip_keys(keys)?, requests))
+    }
+
+    fn list_with_request_count(&self, prefix: &str) -> EngineResult<(Vec<String>, u64)> {
+        let (keys, requests) = self.inner.list_with_request_count(&self.key(prefix))?;
+        Ok((self.strip_keys(keys)?, requests))
+    }
+
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(&self.key(prefix))
+    }
+}
+
 /// In-memory [`BlobStore`] for unit tests — no network. `put_if_absent` is a genuine compare-and-set under
 /// the map lock, so the manifest-CAS / epoch-fence path is exercised without an S3 server.
 #[derive(Default)]

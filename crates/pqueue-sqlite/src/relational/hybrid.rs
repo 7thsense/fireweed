@@ -106,6 +106,11 @@ pub struct HybridProjectionStore {
     /// memory-first-then-deferred-checkpoint ordering. This puts the `AfterSqliteCommitBeforeMemoryApply`
     /// poison cut and the durable-before-visible barrier on the real server write pipeline.
     strict: bool,
+    /// The disposable SQLite image was deliberately removed and has not yet completed an authoritative
+    /// rebuild. Async writes may continue against object-log + hot memory, but checkpoint flush is withheld;
+    /// strict writes fail admission because their response barrier includes SQLite durability.
+    durable_projection_offline: bool,
+    last_checkpoint_error: Option<String>,
     poisoned: Option<String>,
     /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-5/5A). `None` in every production path.
     fault_hook: Mutex<Option<Arc<dyn HybridFaultHook>>>,
@@ -138,6 +143,8 @@ impl HybridProjectionStore {
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             strict: false,
+            durable_projection_offline: false,
+            last_checkpoint_error: None,
             poisoned: None,
             fault_hook: Mutex::new(None),
             async_monitor: None,
@@ -155,6 +162,8 @@ impl HybridProjectionStore {
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             strict: false,
+            durable_projection_offline: false,
+            last_checkpoint_error: None,
             poisoned: None,
             fault_hook: Mutex::new(None),
             async_monitor: None,
@@ -272,6 +281,45 @@ impl HybridProjectionStore {
 
     pub fn sqlite(&self) -> &SqliteProjectionStore {
         &self.sqlite
+    }
+
+    /// Remove the disposable SQLite image while preserving the authoritative hot image. Deferred entries
+    /// are discarded because the subsequent rebuild replays their commands from the object log; retaining
+    /// them would attempt to apply a high-position suffix to an empty database.
+    pub fn delete_durable_projection(&mut self) -> EngineResult<()> {
+        self.sqlite.reset_projection()?;
+        self.deferred.clear();
+        self.deferred_commands = 0;
+        self.durable_projection_offline = true;
+        self.observe_async_debt();
+        Ok(())
+    }
+
+    /// Start an authoritative rebuild from an empty SQLite image. Safe to call after an earlier delete or
+    /// directly as repair: queued async suffixes are superseded by the full log replay performed while the
+    /// composition lock is held.
+    pub fn begin_durable_rebuild(&mut self) -> EngineResult<()> {
+        self.delete_durable_projection()
+    }
+
+    /// Mark a fully replayed and verified SQLite image online and clear async worker poison/debt.
+    pub fn finish_durable_rebuild(&mut self) {
+        self.deferred.clear();
+        self.deferred_commands = 0;
+        self.durable_projection_offline = false;
+        self.last_checkpoint_error = None;
+        self.poisoned = None;
+        if let Some(monitor) = self.async_monitor.as_mut() {
+            monitor.clear_after_rebuild();
+        }
+    }
+
+    pub fn durable_projection_offline(&self) -> bool {
+        self.durable_projection_offline
+    }
+
+    pub fn checkpoint_error(&self) -> Option<&str> {
+        self.last_checkpoint_error.as_deref()
     }
 
     /// The latched poison reason, or `None` when healthy. Fed to the composition's recovery gate via
@@ -396,6 +444,9 @@ impl HybridProjectionStore {
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
         self.check_healthy()?;
+        if self.durable_projection_offline {
+            return Err(EngineError::Unavailable);
+        }
         // A "SQLite apply failed" fault aborts BEFORE the durable commit: no durable projection effect, no
         // memory effect, and NO poison. The object-log manifest entry is already durable, so recovery replays
         // the tail beyond the prior SQLite high-water and the command is neither lost nor duplicated (TD-004
@@ -522,6 +573,9 @@ impl ProjectionStore for HybridProjectionStore {
     /// backlog over several calls instead of one unbounded transaction.
     fn flush_deferred(&mut self) -> EngineResult<()> {
         self.check_healthy()?;
+        if self.durable_projection_offline {
+            return Ok(());
+        }
         if self.deferred.is_empty() {
             return Ok(());
         }
@@ -543,11 +597,22 @@ impl ProjectionStore for HybridProjectionStore {
             // The deferred batch is untouched (still queued for the next flush attempt) but the async
             // apply pipeline is no longer trustworthy: poison so it fails closed instead of silently
             // retrying forever against a possibly-corrupt SQLite image.
-            return self.poison(format!("async SQLite checkpoint apply faulted: {e}"));
+            let reason = format!("async SQLite checkpoint apply faulted: {e}");
+            self.last_checkpoint_error = Some(reason.clone());
+            return self.poison(reason);
         }
-        self.sqlite.apply_committed_batch(&positions, &commands)?;
+        if let Err(error) = self.sqlite.apply_committed_batch(&positions, &commands) {
+            self.last_checkpoint_error = Some(error.to_string());
+            if let Some(monitor) = self.async_monitor.as_mut()
+                && monitor.record_checkpoint_error(error.to_string())
+            {
+                self.poisoned = monitor.poison_reason().map(str::to_owned);
+            }
+            return Err(error);
+        }
         self.deferred.drain(..take);
         self.deferred_commands = self.deferred.len();
+        self.last_checkpoint_error = None;
         // An ordered batch checkpointed cleanly into the durable SQLite image: satisfy the clean-batch
         // precondition for releasing Hard backpressure, then re-fold the (now-smaller) backlog so the level
         // can drop once debt falls below the release band. Only the `hybrid-async` profile arms the monitor.
@@ -650,6 +715,9 @@ impl ProjectionStore for HybridProjectionStore {
     /// profiles arm no monitor and admit unconditionally (the default trait impl semantics).
     fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
         self.check_healthy()?;
+        if self.strict && self.durable_projection_offline {
+            return Err(EngineError::Unavailable);
+        }
         match self.async_monitor.as_ref() {
             Some(monitor) => monitor.admit_mutation(),
             None => Ok(()),

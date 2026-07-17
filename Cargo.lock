@@ -2024,6 +2024,7 @@ dependencies = [
  "pqueue-postgres",
  "pqueue-release",
  "pqueue-sqlite",
+ "rusqlite",
  "serde_json",
  "tokio",
 ]
