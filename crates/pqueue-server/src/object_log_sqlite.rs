@@ -1652,6 +1652,8 @@ pub struct SegmentedObjectLogInMemoryBackend {
     command_seq: AtomicU64,
     node_id: u8,
     flush_interval: Duration,
+    /// Observed full-log replay telemetry for the intentionally ephemeral projection.
+    recovery_stats: Mutex<HashMap<QueueKey, RecoveryStats>>,
     /// Per-queue request-id replay/conflict cache (API-001 / TD-007 §4): a retried `request_id` with the
     /// same body replays the committed ids without a second append; a different body is `RequestIdConflict`.
     idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
@@ -1684,6 +1686,7 @@ impl SegmentedObjectLogInMemoryBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             flush_interval: Duration::from_millis(flush_ms),
+            recovery_stats: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(HashMap::new()),
         })
     }
@@ -1692,6 +1695,17 @@ impl SegmentedObjectLogInMemoryBackend {
     /// commands committed, per-segment batch sizes) for the in-memory projection variant.
     pub fn segment_counters(&self) -> SegmentCounters {
         self.log.counters()
+    }
+
+    /// Last observed durable-log rebuild for this queue. The in-memory projection has no snapshot, so a
+    /// successful reopen records `start_seq=0`, `snapshot_used=false`, and the exact number of replayed
+    /// command envelopes in `tail_replayed`.
+    pub fn recovery_stats(&self, shard: &QueueKey) -> Option<RecoveryStats> {
+        self.recovery_stats
+            .lock()
+            .expect("inmemory recovery stats poisoned")
+            .get(shard)
+            .copied()
     }
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
@@ -1912,10 +1926,10 @@ impl SegmentedObjectLogInMemoryBackend {
         &self,
         shard: &QueueKey,
         proj: &Arc<Mutex<ProjectionData>>,
-    ) -> EngineResult<()> {
+    ) -> EngineResult<u64> {
         let entries = self.log.read_all(shard)?;
         if entries.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let mut p = proj.lock().expect("segmented inmemory projection poisoned");
         for (_pos, env) in &entries {
@@ -1924,7 +1938,7 @@ impl SegmentedObjectLogInMemoryBackend {
             }
             p.apply_command(&env.command)?;
         }
-        Ok(())
+        Ok(entries.len() as u64)
     }
 
     async fn require_leased(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
@@ -1991,7 +2005,18 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
             let epoch = self.log.current_epoch(&key).unwrap_or(0);
             self.set_epoch(&key, epoch);
             let _ = self.coord_for(&key);
-            self.replay_queue(&key, &proj)?;
+            let replayed = self.replay_queue(&key, &proj)?;
+            self.recovery_stats
+                .lock()
+                .expect("inmemory recovery stats poisoned")
+                .insert(
+                    key,
+                    RecoveryStats {
+                        start_seq: 0,
+                        tail_replayed: replayed,
+                        snapshot_used: false,
+                    },
+                );
             Ok(CreateQueueOutcome {
                 created: true,
                 definition,
@@ -2625,6 +2650,40 @@ mod recovery_tests {
         );
         // Committed state preserved across the restart.
         assert_eq!(b2.metrics(&shard).await.unwrap().pending, N as u64);
+    }
+
+    #[tokio::test]
+    async fn segmented_inmemory_restart_reports_observed_full_replay() {
+        let tmp = TmpDir::new("seg-inmemory-replay");
+        let def = queue_def("t", "inmemory-q");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        const N: usize = 25;
+
+        {
+            let backend =
+                SegmentedObjectLogInMemoryBackend::open(tmp.object_root(), seal_each_config())
+                    .unwrap();
+            backend.create_queue(def.clone()).await.unwrap();
+            for i in 0..N {
+                backend
+                    .push(&shard, vec![spec(&format!("p{i}"))], ts(), None)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let reopened =
+            SegmentedObjectLogInMemoryBackend::open(tmp.object_root(), seal_each_config()).unwrap();
+        reopened.create_queue(def).await.unwrap();
+        assert_eq!(reopened.metrics(&shard).await.unwrap().pending, N as u64);
+        assert_eq!(
+            reopened.recovery_stats(&shard),
+            Some(RecoveryStats {
+                start_seq: 0,
+                tail_replayed: N as u64,
+                snapshot_used: false,
+            })
+        );
     }
 
     /// AC (crash-consistency): a reopen where the projection high-water LAGS the durable object-log head

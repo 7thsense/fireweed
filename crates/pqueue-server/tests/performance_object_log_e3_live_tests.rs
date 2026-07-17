@@ -13,13 +13,13 @@
 //!      are asserted bounded by the config's `segment_max_latency_ms` plus a stated tolerance (the flusher poll
 //!      interval `max_latency_ms/4` + a fixed seal-cost slack). The ack lands near the latency cap, not
 //!      wildly over.
-//!   3. **Snapshot-tail recovery within the recovery-window budget** — the SQLite projection variant loads a
-//!      resident backlog (env-scaled; 10,000,000 items in the release shape), materializes it, then reopens and
-//!      measures recovery via the `recovery_stats` seam: it MUST resume at the persisted high-water
-//!      (`start_seq > 0`, NOT a full-genesis replay) and replay a bounded tail (`<<` total commands, within
-//!      `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`), and the recovered state (pending item count) MUST equal the
-//!      pre-restart state. The in-memory projection variant records `recovery_excluded=true` because it does
-//!      not expose the SQLite reopen telemetry seam.
+//!   3. **Projection-appropriate recovery within the recovery-window budget** — both variants load a resident
+//!      backlog (10,000,000 items in the release shape), reopen, and recover the exact pending count. SQLite
+//!      MUST resume from its durable snapshot high-water and replay a bounded tail; the intentionally
+//!      ephemeral in-memory projection MUST report an exact bounded genesis replay (`start_seq=0`,
+//!      `tail_replayed=total_commands`, `snapshot_used=false`).
+//!   4. **Measured request-cost linkage** — every bound and recovery records the actual PUT, GET, LIST, and
+//!      DELETE requests issued through the live `BlobStore` seam; release cost rows consume these counters.
 //!
 //! ## ENV-GATING (mirrors the postgres E0/E1 baseline + the MinIO substrate test)
 //!
@@ -187,7 +187,7 @@ struct S3Env {
 }
 
 impl S3Env {
-    fn store(&self) -> Arc<dyn BlobStore> {
+    fn measured_store(&self) -> (Arc<dyn BlobStore>, Arc<StoreOperationCounters>) {
         let s3 = S3BlobStore::new(
             &self.endpoint,
             &self.bucket,
@@ -196,7 +196,116 @@ impl S3Env {
             "us-east-1",
         )
         .expect("build S3 client");
-        Arc::new(s3)
+        let counters = Arc::new(StoreOperationCounters::default());
+        (
+            Arc::new(MeasuredBlobStore {
+                inner: s3,
+                counters: counters.clone(),
+            }),
+            counters,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct StoreOperations {
+    puts: u64,
+    gets: u64,
+    lists: u64,
+    deletes: u64,
+}
+
+impl StoreOperations {
+    fn since(self, baseline: Self) -> Self {
+        Self {
+            puts: self.puts.saturating_sub(baseline.puts),
+            gets: self.gets.saturating_sub(baseline.gets),
+            lists: self.lists.saturating_sub(baseline.lists),
+            deletes: self.deletes.saturating_sub(baseline.deletes),
+        }
+    }
+}
+
+#[derive(Default)]
+struct StoreOperationCounters {
+    puts: AtomicU64,
+    gets: AtomicU64,
+    lists: AtomicU64,
+    deletes: AtomicU64,
+}
+
+impl StoreOperationCounters {
+    fn snapshot(&self) -> StoreOperations {
+        StoreOperations {
+            puts: self.puts.load(Ordering::Relaxed),
+            gets: self.gets.load(Ordering::Relaxed),
+            lists: self.lists.load(Ordering::Relaxed),
+            deletes: self.deletes.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct MeasuredBlobStore {
+    inner: S3BlobStore,
+    counters: Arc<StoreOperationCounters>,
+}
+
+impl BlobStore for MeasuredBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
+        self.counters.puts.fetch_add(1, Ordering::Relaxed);
+        self.inner.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<bool> {
+        self.counters.puts.fetch_add(1, Ordering::Relaxed);
+        self.inner.put_if_absent(key, body)
+    }
+
+    fn get(&self, key: &str) -> pqueue_engine::EngineResult<Option<Vec<u8>>> {
+        self.counters.gets.fetch_add(1, Ordering::Relaxed);
+        self.inner.get(key)
+    }
+
+    fn delete(&self, key: &str) -> pqueue_engine::EngineResult<bool> {
+        self.counters.deletes.fetch_add(1, Ordering::Relaxed);
+        self.inner.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> pqueue_engine::EngineResult<Vec<String>> {
+        let (keys, requests) = self.inner.list_with_request_count(prefix)?;
+        self.counters.lists.fetch_add(requests, Ordering::Relaxed);
+        Ok(keys)
+    }
+
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> pqueue_engine::EngineResult<Vec<String>> {
+        self.counters.lists.fetch_add(1, Ordering::Relaxed);
+        self.inner.list_page(prefix, start_after, limit)
+    }
+
+    fn list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> pqueue_engine::EngineResult<(Vec<String>, u64)> {
+        let (keys, requests) = self
+            .inner
+            .list_from_with_request_count(prefix, start_after)?;
+        self.counters.lists.fetch_add(requests, Ordering::Relaxed);
+        Ok((keys, requests))
+    }
+
+    fn list_with_request_count(
+        &self,
+        prefix: &str,
+    ) -> pqueue_engine::EngineResult<(Vec<String>, u64)> {
+        let (keys, requests) = self.inner.list_with_request_count(prefix)?;
+        self.counters.lists.fetch_add(requests, Ordering::Relaxed);
+        Ok((keys, requests))
     }
 }
 
@@ -218,14 +327,17 @@ impl E3Flusher for SegmentedObjectLogInMemoryBackend {
 
 struct E3ProfileSpec {
     backend_profile: &'static str,
+    requires_snapshot: bool,
 }
 
 const E3_PROFILE_SPECS: [E3ProfileSpec; 2] = [
     E3ProfileSpec {
         backend_profile: "object_log_inmemory_projection",
+        requires_snapshot: false,
     },
     E3ProfileSpec {
         backend_profile: "object_log_sqlite_projection",
+        requires_snapshot: true,
     },
 ];
 
@@ -254,6 +366,7 @@ struct AckResult {
     max_latency_ms: u64,
     segments_sealed: u64,
     objects_put: u64,
+    store_operations: StoreOperations,
     commands_committed: u64,
     mean_batch: f64,
     max_batch: usize,
@@ -295,19 +408,22 @@ impl E3Backend for SegmentedObjectLogInMemoryBackend {
 }
 
 trait E3RecoveryProbe {
-    fn recovery_probe(&self, shard: &QueueKey) -> Option<(u64, u64, bool)>;
+    fn recovery_probe(&self, shard: &QueueKey, total_commands: u64) -> (u64, u64, bool);
 }
 
 impl E3RecoveryProbe for SegmentedObjectLogSqliteBackend {
-    fn recovery_probe(&self, shard: &QueueKey) -> Option<(u64, u64, bool)> {
+    fn recovery_probe(&self, shard: &QueueKey, _total_commands: u64) -> (u64, u64, bool) {
         self.recovery_stats(shard)
             .map(|stats| (stats.start_seq, stats.tail_replayed, stats.snapshot_used))
+            .unwrap_or((0, u64::MAX, false))
     }
 }
 
 impl E3RecoveryProbe for SegmentedObjectLogInMemoryBackend {
-    fn recovery_probe(&self, _shard: &QueueKey) -> Option<(u64, u64, bool)> {
-        None
+    fn recovery_probe(&self, shard: &QueueKey, _total_commands: u64) -> (u64, u64, bool) {
+        self.recovery_stats(shard)
+            .map(|stats| (stats.start_seq, stats.tail_replayed, stats.snapshot_used))
+            .unwrap_or((u64::MAX, u64::MAX, true))
     }
 }
 
@@ -331,9 +447,11 @@ where
     let proj = projection_path(&format!("ack-{profile}-{}", bound.label));
     let cfg = SegmentConfig::new(bound.target_bytes, bound.max_latency_ms).unwrap();
 
-    let backend = Arc::new(open(s3.store(), &proj, cfg).expect("open segmented backend over S3"));
+    let (store, store_counters) = s3.measured_store();
+    let backend = Arc::new(open(store, &proj, cfg).expect("open segmented backend over S3"));
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
+    let store_baseline = store_counters.snapshot();
     let started = Instant::now();
 
     let per_task = pushes.div_ceil(concurrency);
@@ -381,6 +499,7 @@ where
         max_latency_ms: cfg.max_latency_ms,
         segments_sealed: c.segments_sealed,
         objects_put: c.objects_put,
+        store_operations: store_counters.snapshot().since(store_baseline),
         commands_committed: c.commands_committed,
         mean_batch: round3(c.mean_batch_size()),
         max_batch: c.max_batch_size(),
@@ -406,6 +525,7 @@ struct RecoveryResult {
     recovery_max_tail: u64,
     recovery_wall_ms: f64,
     pending_after: u64,
+    store_operations: StoreOperations,
     bar_met: bool,
 }
 
@@ -426,13 +546,13 @@ async fn push_with_retry<B: PushPort>(backend: &B, shard: &QueueKey, items: Vec<
     }
 }
 
-/// Load `resident` items (pushes of `load_batch` items each) into a SQLite projection over MinIO, then reopen
-/// and measure snapshot-tail recovery via the `RecoveryStats` seam (bead pqueue-8a76daad).
+/// Load `resident` items over MinIO, then reopen and measure the projection-specific rebuild contract.
 async fn run_recovery<B, F>(
     s3: &S3Env,
     profile: &'static str,
     resident: u64,
     load_batch: u64,
+    requires_snapshot: bool,
     open: F,
 ) -> RecoveryResult
 where
@@ -450,9 +570,10 @@ where
     // one tiny segment per push.
     let cfg = SegmentConfig::new(8_388_608, 10_000).unwrap();
     let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
+    let (store, store_counters) = s3.measured_store();
 
     let (command_count, total_commands, pending_loaded) = {
-        let backend = Arc::new(open(s3.store(), &proj, cfg).expect("open backend for load"));
+        let backend = Arc::new(open(store.clone(), &proj, cfg).expect("open backend for load"));
         backend
             .create_queue(def.clone())
             .await
@@ -508,9 +629,10 @@ where
         pending_loaded, resident,
         "every loaded item must be materialized + durable before the snapshot"
     );
+    let recovery_baseline = store_counters.snapshot();
 
-    // Reopen on the SAME bucket + SAME SQLite projection: create_queue triggers snapshot-tail recovery.
-    let backend2 = Arc::new(open(s3.store(), &proj, cfg).expect("reopen backend"));
+    // Reopen on the same bucket and (for SQLite) the same durable projection path.
+    let backend2 = Arc::new(open(store, &proj, cfg).expect("reopen backend"));
     let t = Instant::now();
     backend2
         .create_queue(def.clone())
@@ -520,31 +642,16 @@ where
 
     let pending_after = backend2.metrics(&shard).await.unwrap().pending;
     let recovery_max_tail = env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000);
-    let Some((start_seq, tail_replayed, snapshot_used)) = backend2.recovery_probe(&shard) else {
-        let _ = std::fs::remove_file(&proj);
-        return RecoveryResult {
-            resident,
-            load_batch,
-            command_count,
-            total_commands,
-            start_seq: 0,
-            tail_replayed: 0,
-            snapshot_used: false,
-            recovery_max_tail,
-            recovery_wall_ms: round3(recovery_wall_ms),
-            pending_after,
-            bar_met: false,
-        };
-    };
+    let (start_seq, tail_replayed, snapshot_used) = backend2.recovery_probe(&shard, total_commands);
 
-    // The recovery bar: resumed from the persisted snapshot high-water (NOT genesis), replayed a tail within
-    // the documented recovery-window budget AND strictly less than the total committed log (proving it did
-    // not re-replay genesis), and the recovered pending state equals the pre-restart state.
-    let bar_met = snapshot_used
-        && start_seq > 0
-        && tail_replayed <= recovery_max_tail
-        && (tail_replayed as u128) < (total_commands as u128)
-        && pending_after == resident;
+    // SQLite must prove snapshot-bounded replay. The ephemeral in-memory projection must prove the opposite
+    // exact contract: a full durable-log replay, still bounded by the same command budget.
+    let mode_met = if requires_snapshot {
+        snapshot_used && start_seq > 0 && tail_replayed < total_commands
+    } else {
+        !snapshot_used && start_seq == 0 && tail_replayed == total_commands
+    };
+    let bar_met = mode_met && tail_replayed <= recovery_max_tail && pending_after == resident;
 
     let _ = std::fs::remove_file(&proj);
 
@@ -559,10 +666,12 @@ where
         recovery_max_tail,
         recovery_wall_ms: round3(recovery_wall_ms),
         pending_after,
+        store_operations: store_counters.snapshot().since(recovery_baseline),
         bar_met,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_profile_run<B, F>(
     s3: &S3Env,
     profile: &'static str,
@@ -571,7 +680,7 @@ async fn run_profile_run<B, F>(
     load_batch: u64,
     ack_pushes: u64,
     ack_concurrency: u64,
-    include_recovery: bool,
+    requires_snapshot: bool,
     open: F,
 ) -> ProfileRun
 where
@@ -585,11 +694,9 @@ where
             run_ack_config::<B, _>(s3, profile, bound, ack_pushes, ack_concurrency, open).await,
         );
     }
-    let recovery = if include_recovery {
-        Some(run_recovery::<B, _>(s3, profile, resident, load_batch, open).await)
-    } else {
-        None
-    };
+    let recovery = Some(
+        run_recovery::<B, _>(s3, profile, resident, load_batch, requires_snapshot, open).await,
+    );
     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
     let bars_met = ack_results.iter().all(|result| result.bar_met)
         && recovery.as_ref().is_none_or(|r| r.bar_met);
@@ -678,7 +785,27 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                         run.backend_profile
                     ));
                 }
-            } else if run.backend_profile == "object_log_sqlite_projection" {
+                if let Some(spec) = E3_PROFILE_SPECS
+                    .iter()
+                    .find(|spec| spec.backend_profile == run.backend_profile)
+                {
+                    let mode_met = if spec.requires_snapshot {
+                        recovery.snapshot_used
+                            && recovery.start_seq > 0
+                            && recovery.tail_replayed < recovery.total_commands
+                    } else {
+                        !recovery.snapshot_used
+                            && recovery.start_seq == 0
+                            && recovery.tail_replayed == recovery.total_commands
+                    };
+                    if !mode_met {
+                        errors.push(format!(
+                            "profile {} recovery mode does not match projection contract",
+                            run.backend_profile
+                        ));
+                    }
+                }
+            } else {
                 errors.push(format!(
                     "profile {} is missing required recovery evidence",
                     run.backend_profile
@@ -768,6 +895,22 @@ fn profile_row(
                 serde_json::json!(recovery.pending_after),
             );
             values.insert(
+                "recovery_store_put_requests".into(),
+                serde_json::json!(recovery.store_operations.puts),
+            );
+            values.insert(
+                "recovery_store_get_requests".into(),
+                serde_json::json!(recovery.store_operations.gets),
+            );
+            values.insert(
+                "recovery_store_list_requests".into(),
+                serde_json::json!(recovery.store_operations.lists),
+            );
+            values.insert(
+                "recovery_store_delete_requests".into(),
+                serde_json::json!(recovery.store_operations.deletes),
+            );
+            values.insert(
                 "recovery_bar_met".into(),
                 serde_json::json!(recovery.bar_met),
             );
@@ -799,6 +942,22 @@ fn profile_row(
         values.insert(
             format!("{prefix}_objects_put"),
             serde_json::json!(result.objects_put),
+        );
+        values.insert(
+            format!("{prefix}_store_put_requests"),
+            serde_json::json!(result.store_operations.puts),
+        );
+        values.insert(
+            format!("{prefix}_store_get_requests"),
+            serde_json::json!(result.store_operations.gets),
+        );
+        values.insert(
+            format!("{prefix}_store_list_requests"),
+            serde_json::json!(result.store_operations.lists),
+        );
+        values.insert(
+            format!("{prefix}_store_delete_requests"),
+            serde_json::json!(result.store_operations.deletes),
         );
         values.insert(
             format!("{prefix}_commands_committed"),
@@ -849,22 +1008,43 @@ fn profile_row(
         "throughput_floor_per_s".into(),
         serde_json::json!(E3_THROUGHPUT_FLOOR_PER_SEC),
     );
+    let recovery_contract = if profile_run.backend_profile == "object_log_sqlite_projection" {
+        "10M SQLite projection rebuilt from durable snapshot high-water plus bounded tail"
+    } else {
+        "10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay"
+    };
+    let storage_topology = std::env::var("PQUEUE_E3_STORAGE_TOPOLOGY").unwrap_or_else(|_| {
+        "operator-provided live S3-compatible endpoint; storage medium not declared".into()
+    });
+    let topology_id =
+        std::env::var("PQUEUE_E3_STORAGE_TOPOLOGY_ID").unwrap_or_else(|_| "undeclared".into());
+    let durability_claim =
+        std::env::var("PQUEUE_E3_STORAGE_DURABILITY_CLAIM").unwrap_or_else(|_| "undeclared".into());
+    let source_revision =
+        std::env::var("PQUEUE_E3_SOURCE_REVISION").unwrap_or_else(|_| "undeclared".into());
+    values.insert("storage_topology_id".into(), serde_json::json!(topology_id));
+    values.insert(
+        "storage_durability_claim".into(),
+        serde_json::json!(durability_claim),
+    );
+    values.insert("source_revision".into(), serde_json::json!(source_revision));
 
     pqueue_release::LedgerRow {
         suite: "performance_object_log_e3_live_tests".into(),
-        command: "PQUEUE_S3_TEST_ENDPOINT=http://<minio-ip>:9000 scripts/perf/tp002-e3-minio.sh".into(),
+        command: "PQUEUE_E3_MINIO_CONTAINER=<fresh-minio-container> PQUEUE_S3_TEST_ENDPOINT=http://<minio-ip>:9000 scripts/perf/tp002-e3-minio.sh".into(),
         backend_profile: profile_run.backend_profile.into(),
         scale,
         seed: 0,
         environment: format!(
-            "live {} over S3-compatible MinIO at {}, single deployment, resident={resident}, load_batch={load_batch}, perf_env={perf_env}; both committed object-log projection variants are exercised at 1/5/20/100ms bounds",
-            profile_run.projection_label,
-            s3_endpoint
+            "live {} over S3-compatible MinIO at {}, single deployment, resident={resident}, load_batch={load_batch}, perf_env={perf_env}; {storage_topology}; both committed object-log projection variants are exercised at 1/5/20/100ms bounds",
+            profile_run.projection_label, s3_endpoint
         ),
         exit_status: 0,
         ac_ids: vec![],
         inv_ids: vec![],
-        pass_bar: "E3: 1/5/20/100ms bounds; group-commit ack p50/p95/p99 within bound; throughput >= E0 floor; 10M-item projection rebuilt via snapshot+bounded-tail with recovered pending == resident".into(),
+        pass_bar: format!(
+            "E3: 1/5/20/100ms bounds; group-commit ack p50/p95/p99 within bound; throughput >= E0 floor; {recovery_contract}; recovered pending == resident"
+        ),
         evidence_tier: tier,
         measurements: pqueue_release::Measurements {
             tp002_evidence_ids: vec!["E3".into()],
@@ -910,6 +1090,25 @@ async fn performance_object_log_e3_live_tests() {
     let ack_concurrency = env_u64("PQUEUE_E3_ACK_CONCURRENCY", 384).max(1);
     let release_shape = resident >= RELEASE_RESIDENT;
     let require_bars = perf_env && release_shape;
+    if require_bars {
+        let source_revision = std::env::var("PQUEUE_E3_SOURCE_REVISION")
+            .expect("release E3 evidence requires an exact committed source revision");
+        assert!(
+            source_revision.len() == 40
+                && source_revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "release E3 source revision must be a full 40-character Git SHA"
+        );
+        assert_eq!(
+            std::env::var("PQUEUE_E3_STORAGE_TOPOLOGY_ID").as_deref(),
+            Ok("minio-tmpfs-8g"),
+            "release E3 evidence requires wrapper-verified MinIO /data tmpfs topology"
+        );
+        assert_eq!(
+            std::env::var("PQUEUE_E3_STORAGE_DURABILITY_CLAIM").as_deref(),
+            Ok("excluded"),
+            "tmpfs evidence must exclude object-store host durability/restart claims"
+        );
+    }
 
     let runs = [
         run_profile_run::<SegmentedObjectLogInMemoryBackend, _>(
@@ -965,7 +1164,7 @@ async fn performance_object_log_e3_live_tests() {
         for a in &run.ack_results {
             println!(
                 "    [{:>4}] target_bytes={:>9} max_latency_ms={:>5} throughput={:>9.1}/s \
-                 segments_sealed={:>6} objects_put={:>6} commands={:>6} mean_batch={:>7.1} max_batch={:>5} \
+                 segments_sealed={:>6} objects_put={:>6} store_ops=P{}/G{}/L{}/D{} commands={:>6} mean_batch={:>7.1} max_batch={:>5} \
                  ack_p50={:>8.2}ms ack_p95={:>8.2}ms ack_p99={:>8.2}ms bar<={:.2}ms -> {}",
                 a.label,
                 a.target_bytes,
@@ -973,6 +1172,10 @@ async fn performance_object_log_e3_live_tests() {
                 a.throughput_per_s,
                 a.segments_sealed,
                 a.objects_put,
+                a.store_operations.puts,
+                a.store_operations.gets,
+                a.store_operations.lists,
+                a.store_operations.deletes,
                 a.commands_committed,
                 a.mean_batch,
                 a.max_batch,
@@ -985,7 +1188,8 @@ async fn performance_object_log_e3_live_tests() {
         }
         println!(
             "    [recover] resident={} load_batch={} commands_loaded={} total_committed={} \
-             start_seq={} tail_replayed={} snapshot_used={} (budget {}) wall={:.1}ms pending_after={} -> {}",
+             start_seq={} tail_replayed={} snapshot_used={} (budget {}) wall={:.1}ms pending_after={} \
+             store_ops=P{}/G{}/L{}/D{} -> {}",
             run.recovery
                 .as_ref()
                 .map_or(0, |recovery| recovery.resident),
@@ -1016,6 +1220,18 @@ async fn performance_object_log_e3_live_tests() {
             run.recovery
                 .as_ref()
                 .map_or(0, |recovery| recovery.pending_after),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.store_operations.puts),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.store_operations.gets),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.store_operations.lists),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.store_operations.deletes),
             match &run.recovery {
                 Some(recovery) if recovery.bar_met => "PASS",
                 Some(_) => "FAIL",
@@ -1068,6 +1284,12 @@ fn synthetic_ack(label: &'static str, throughput_per_s: f64, ack_bar_ms: f64) ->
         max_latency_ms: 100,
         segments_sealed: 1,
         objects_put: 1,
+        store_operations: StoreOperations {
+            puts: 1,
+            gets: 1,
+            lists: 1,
+            deletes: 0,
+        },
         commands_committed: 1,
         mean_batch: 1.0,
         max_batch: 1,
@@ -1082,18 +1304,24 @@ fn synthetic_ack(label: &'static str, throughput_per_s: f64, ack_bar_ms: f64) ->
     }
 }
 
-fn synthetic_recovery(bar_met: bool) -> RecoveryResult {
+fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult {
     RecoveryResult {
         resident: 10_000_000,
         load_batch: 1_000,
         command_count: 10,
         total_commands: 100,
-        start_seq: 10,
-        tail_replayed: 0,
-        snapshot_used: true,
+        start_seq: if requires_snapshot { 10 } else { 0 },
+        tail_replayed: if requires_snapshot { 0 } else { 100 },
+        snapshot_used: requires_snapshot,
         recovery_max_tail: 1_000_000,
         recovery_wall_ms: 5.0,
         pending_after: 10_000_000,
+        store_operations: StoreOperations {
+            puts: 20,
+            gets: 10,
+            lists: 2,
+            deletes: 0,
+        },
         bar_met,
     }
 }
@@ -1101,17 +1329,13 @@ fn synthetic_recovery(bar_met: bool) -> RecoveryResult {
 fn synthetic_profile_run(
     backend_profile: &'static str,
     projection_label: &'static str,
-    include_recovery: bool,
+    requires_snapshot: bool,
 ) -> ProfileRun {
     let ack_results = E3_BOUND_CONFIGS
         .iter()
         .map(|bound| synthetic_ack(bound.label, 3_000.0, 10.0))
         .collect::<Vec<_>>();
-    let recovery = if include_recovery {
-        Some(synthetic_recovery(true))
-    } else {
-        None
-    };
+    let recovery = Some(synthetic_recovery(true, requires_snapshot));
     let bars_met = ack_results.iter().all(|result| result.bar_met)
         && recovery.as_ref().is_none_or(|r| r.bar_met);
     ProfileRun {

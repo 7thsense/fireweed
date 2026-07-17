@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *IPAddress*) echo "127.0.0.2" ;;
+  *Tmpfs*) echo "rw,size=8g" ;;
+  *) echo "unexpected docker test invocation: $*" >&2; exit 1 ;;
+esac

@@ -1,7 +1,7 @@
 //! `pqueue-cost-model` — turn ADR-001's directional S3 cost claim into release EVIDENCE.
 //!
-//! Computes `$/billion-commands` for `object_log_sqlite_projection` (from the REAL E3 measured segment/object
-//! counts scaled to a billion commands, cited S3 prices, and stated retention/recovery assumptions) and
+//! Computes `$/billion-commands` for every governed E3 projection/bound (from the live measured request and
+//! segment counters scaled to a billion commands, cited S3 prices, and stated retention/recovery assumptions) and
 //! compares it against the `postgres_native` high-volume baseline (always-on instance at the measured E0
 //! throughput + DB storage + provisioned IOPS). It writes a markdown evidence ARTIFACT (full breakdown, cited
 //! prices, sensitivity/crossover table) and appends the E3 **cost-model** ledger row.
@@ -9,27 +9,32 @@
 //! Usage:
 //!   pqueue-cost-model [--out <doc.md>] [--ledger <ledger.jsonl>] [--print]
 //!
-//! Defaults: `--out docs/perf/tp002-e3-cost-model.md`. With `--ledger` it appends the smoke-tier E3 cost row.
+//! Defaults: `--out docs/perf/tp002-e3-cost-model.md` and consumes the governed live E3 ledger. With
+//! `--ledger` it writes the eight release-tier E3 cost rows.
 //! The model is a deterministic calculation, so the doc + row regenerate identically. Reproducible command:
 //!   cargo run -p pqueue-release --bin pqueue-cost-model -- \
 //!     --out docs/perf/tp002-e3-cost-model.md --ledger docs/perf/evidence/tp002-e3-cost-model.jsonl
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::io::{BufRead, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use pqueue_release::append_row;
+use pqueue_release::LedgerRow;
 use pqueue_release::cost::{
-    CostComparison, ObjectLogCounts, PriceInputs, WorkloadAssumptions, build_cost_row,
-    compute_comparison,
+    CostComparison, ObjectLogCounts, PriceInputs, RecoveryMode, ReleaseCostInput,
+    WorkloadAssumptions, build_release_cost_rows, compute_comparison, release_cost_inputs,
+    validate_release_cost_rows,
 };
 
 const REPRO_COMMAND: &str = "cargo run -p pqueue-release --bin pqueue-cost-model -- \
+    --e3-ledger docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl \
     --out docs/perf/tp002-e3-cost-model.md --ledger docs/perf/evidence/tp002-e3-cost-model.jsonl";
 
 fn main() -> ExitCode {
     let mut out = PathBuf::from("docs/perf/tp002-e3-cost-model.md");
     let mut ledger: Option<PathBuf> = None;
+    let mut e3_ledger = PathBuf::from("docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl");
     let mut print = false;
 
     let mut args = std::env::args().skip(1);
@@ -43,57 +48,154 @@ fn main() -> ExitCode {
                 Some(p) => ledger = Some(PathBuf::from(p)),
                 None => return fail("--ledger requires a path"),
             },
+            "--e3-ledger" => match args.next() {
+                Some(p) => e3_ledger = PathBuf::from(p),
+                None => return fail("--e3-ledger requires a path"),
+            },
             "--print" => print = true,
             other => return fail(&format!("unknown argument: {other}")),
         }
     }
 
     let prices = PriceInputs::adr_001_us_east_1();
-    let workload = WorkloadAssumptions::tp002_high_volume_baseline();
-    let headline_counts = ObjectLogCounts::e3_size_dominant();
-    let headline = compute_comparison(&headline_counts, &workload, &prices);
+    let workload = WorkloadAssumptions::tp002_e3_push_baseline();
+    let source_rows = match read_rows(&e3_ledger) {
+        Ok(rows) => rows,
+        Err(error) => return fail(&error),
+    };
+    let inputs = match release_cost_inputs(&source_rows) {
+        Ok(inputs) => inputs,
+        Err(errors) => return fail(&format!("invalid E3 release source: {}", errors.join("; "))),
+    };
+    let headline_input = inputs
+        .iter()
+        .min_by(|left, right| {
+            compute_comparison(&left.counts, &workload, &prices)
+                .objectlog_per_billion
+                .partial_cmp(
+                    &compute_comparison(&right.counts, &workload, &prices).objectlog_per_billion,
+                )
+                .expect("finite cost")
+        })
+        .expect("validated matrix is non-empty");
+    let headline_counts = &headline_input.counts;
+    let headline = compute_comparison(headline_counts, &workload, &prices);
+    if !headline.objectlog_wins {
+        return fail("cost-optimized E3 point does not beat postgres_native");
+    }
 
-    let doc = render_artifact(&headline_counts, &headline, &workload, &prices);
+    // Prepare and validate every governed output before touching either destination. A bad source,
+    // stale price, failed recovery, or inconsistent derived value must leave existing evidence intact.
+    let rows = match build_release_cost_rows(&inputs, &workload, &prices, REPRO_COMMAND) {
+        Ok(rows) => rows,
+        Err(errors) => return fail(&errors.join("; ")),
+    };
+    if let Err(errors) = validate_release_cost_rows(&rows) {
+        return fail(&format!(
+            "generated invalid release cost matrix: {}",
+            errors.join("; ")
+        ));
+    }
+    let ledger_json = match serialize_rows(&rows) {
+        Ok(json) => json,
+        Err(error) => return fail(&error),
+    };
+
+    let doc = render_artifact(headline_input, &inputs, &headline, &workload, &prices);
 
     if print {
         println!("{doc}");
     }
 
-    if let Some(parent) = out.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        return fail(&format!("cannot create {parent:?}: {e}"));
-    }
-    if let Err(e) = std::fs::write(&out, &doc) {
+    if let Err(e) = atomic_write(&out, doc.as_bytes()) {
         return fail(&format!("cannot write {out:?}: {e}"));
     }
     eprintln!("wrote cost-model artifact: {}", out.display());
 
     if let Some(path) = ledger {
-        let row = build_cost_row(
-            &headline,
-            &headline_counts,
-            &workload,
-            &prices,
-            REPRO_COMMAND,
-        );
-        if let Err(e) = append_row(&path, &row) {
-            return fail(&format!("cannot append ledger row to {path:?}: {e}"));
+        if let Err(e) = atomic_write(&path, ledger_json.as_bytes()) {
+            return fail(&format!("cannot write ledger {path:?}: {e}"));
         }
         eprintln!(
-            "appended E3 cost-model row (smoke-tier): {}",
+            "wrote {} E3 cost-model rows (release-tier): {}",
+            rows.len(),
             path.display()
         );
     }
 
     eprintln!(
-        "object_log_sqlite_projection ${:.2}/B  vs  postgres_native ${:.2}/B  ({:.2}x cheaper; objectlog_below_postgres={})",
+        "{} {} ${:.2}/B  vs  postgres_native ${:.2}/B  ({:.2}x cheaper; objectlog_below_postgres={})",
+        headline_input.backend_profile,
+        headline_input.bound,
         headline.objectlog_per_billion,
         headline.postgres_per_billion,
         headline.ratio,
         headline.objectlog_wins,
     );
     ExitCode::SUCCESS
+}
+
+fn serialize_rows(rows: &[LedgerRow]) -> Result<String, String> {
+    let mut output = String::new();
+    for row in rows {
+        output.push_str(
+            &serde_json::to_string(row)
+                .map_err(|error| format!("cannot serialize release cost row: {error}"))?,
+        );
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("evidence");
+    let temp = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+fn read_rows(path: &std::path::Path) -> Result<Vec<LedgerRow>, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot open E3 ledger {}: {error}", path.display()))?;
+    std::io::BufReader::new(file)
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| match line {
+            Ok(line) if line.trim().is_empty() => None,
+            Ok(line) => Some(
+                serde_json::from_str(&line)
+                    .map_err(|error| format!("{} line {}: {error}", path.display(), index + 1)),
+            ),
+            Err(error) => Some(Err(format!(
+                "{} line {}: {error}",
+                path.display(),
+                index + 1
+            ))),
+        })
+        .collect()
 }
 
 /// One sensitivity scenario: a label for the input that changed, and the computed comparison.
@@ -187,11 +289,13 @@ fn winner(c: &CostComparison) -> &'static str {
 }
 
 fn render_artifact(
-    counts: &ObjectLogCounts,
+    headline_input: &ReleaseCostInput,
+    inputs: &[ReleaseCostInput],
     headline: &CostComparison,
     w: &WorkloadAssumptions,
     p: &PriceInputs,
 ) -> String {
+    let counts = &headline_input.counts;
     let ol = &headline.objectlog;
     let pg = &headline.postgres;
     let mut s = String::new();
@@ -214,27 +318,35 @@ fn render_artifact(
     );
 
     let _ = writeln!(s, "## Reproducible command\n\n```\n{REPRO_COMMAND}\n```\n");
+    let _ = writeln!(
+        s,
+        "**Measured source revision:** `{}` (the clean Git HEAD captured and rechecked by the live wrapper).\n",
+        headline_input.source_revision
+    );
 
     // Headline.
     let _ = writeln!(s, "## Headline\n");
     let _ = writeln!(
         s,
-        "At the documented TP-002 high-volume baseline, using the REAL E3 measured counts \
-         (`{label}`) and the cited prices below:\n",
-        label = counts.label
+        "At the documented TP-002 high-volume baseline, the cost-optimized measured point is \
+         `{profile}` / `{bound}` (`{label}`), using the cited prices below:\n",
+        profile = headline_input.backend_profile,
+        bound = headline_input.bound,
+        label = counts.label,
     );
     let _ = writeln!(
         s,
-        "| Backend | $/billion-commands |\n|---|---|\n| `object_log_sqlite_projection` | **${ol_t:.2}** |\n| \
+        "| Backend | $/billion-commands |\n|---|---|\n| `{profile}` | **${ol_t:.2}** |\n| \
          `postgres_native` | **${pg_t:.2}** |\n",
+        profile = headline_input.backend_profile,
         ol_t = headline.objectlog_per_billion,
         pg_t = headline.postgres_per_billion,
     );
     let verdict = if headline.objectlog_wins {
         format!(
-            "`object_log_sqlite_projection` is **{:.2}x cheaper** than `postgres_native` at this baseline \
+            "`{}` is **{:.2}x cheaper** than `postgres_native` at this baseline \
              — the ADR-001 direction holds with honest, cited inputs.",
-            headline.ratio
+            headline_input.backend_profile, headline.ratio
         )
     } else {
         format!(
@@ -246,32 +358,82 @@ fn render_artifact(
     };
     let _ = writeln!(s, "{verdict}\n");
 
+    let _ = writeln!(s, "## Resolved live E3 cost matrix\n");
+    let _ = writeln!(
+        s,
+        "Every row below is calculated from the governed live E3 row's measured PUT/GET/LIST/DELETE and \
+         segment counters. The bold row is the cost-optimized point; no modeled throughput replaces the \
+         measured bound counters.\n"
+    );
+    let _ = writeln!(
+        s,
+        "| profile | bound | PUT/B | GET/B | LIST/B | DELETE/B | segment commands | object-log $/B | postgres $/B |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+    );
+    for input in inputs {
+        let comparison = compute_comparison(&input.counts, w, p);
+        let optimized = input.backend_profile == headline_input.backend_profile
+            && input.bound == headline_input.bound;
+        let profile = if optimized {
+            format!("**{}**", input.backend_profile)
+        } else {
+            input.backend_profile.clone()
+        };
+        let _ = writeln!(
+            s,
+            "| {profile} | {} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | ${:.2} | ${:.2} |",
+            input.bound,
+            comparison.objectlog.put_requests,
+            comparison.objectlog.get_requests,
+            comparison.objectlog.list_requests,
+            comparison.objectlog.delete_requests,
+            input.counts.commands_per_segment(),
+            comparison.objectlog_per_billion,
+            comparison.postgres_per_billion,
+        );
+    }
+    let _ = writeln!(s);
+
     // Breakdown.
     let _ = writeln!(s, "## Breakdown\n");
     let _ = writeln!(
         s,
-        "### `object_log_sqlite_projection`\n\n| Line | Quantity | Cost |\n|---|---|---|"
+        "### `{}`\n\n| Line | Quantity | Cost |\n|---|---|---|",
+        headline_input.backend_profile,
     );
     let _ = writeln!(
         s,
-        "| Segment + manifest PUTs | {:.0} requests/B ({:.4} objects/command) | ${:.2} |",
+        "| Measured steady-state + fixed-10M recovery PUTs | {:.0} requests/B ({:.4} sealed objects/command) | ${:.2} |",
         ol.put_requests,
         counts.objects_put / counts.commands,
         ol.put_cost
     );
     let _ = writeln!(
         s,
-        "| Durable storage (snapshot + {rw}h recovery-window log) | {:.1} GB | ${:.2} |",
+        "| Durable storage ({storage_shape}; {rw}h recovery window) | {:.1} GB | ${:.2} |",
         ol.storage_gb,
         ol.storage_cost,
+        storage_shape = match counts.recovery_mode {
+            RecoveryMode::SnapshotTail => "snapshot + bounded tail",
+            RecoveryMode::FullGenesis => "full durable genesis log; no snapshot",
+        },
         rw = w.recovery_window_hours
     );
     let _ = writeln!(
         s,
-        "| Recovery GETs ({rc} rebuild/window) | {:.0} requests | ${:.2} |",
+        "| Measured recovery GETs ({rc} rebuild/window) | {:.0} requests | ${:.2} |",
         ol.get_requests,
         ol.get_cost,
         rc = w.recoveries_per_window
+    );
+    let _ = writeln!(
+        s,
+        "| Measured LISTs | {:.0} requests/B | ${:.2} |",
+        ol.list_requests, ol.list_cost
+    );
+    let _ = writeln!(
+        s,
+        "| Measured DELETEs | {:.0} requests/B | ${:.2} |",
+        ol.delete_requests, ol.delete_cost
     );
     let _ = writeln!(
         s,
@@ -341,13 +503,13 @@ fn render_artifact(
         "| Normalization | $/billion durable commands |\n\
          | Billing window | {win:.0} h (always-on month) |\n\
          | Bytes per command | {bpc:.0} (ADR-001 1 KiB record) |\n\
-         | Commands per item | {cpi:.0} (push + claim + finalize) |\n\
+         | Commands per item | {cpi:.0} (push only; the measured E3 operation) |\n\
          | Resident working set | {res:.0} items (E0/E3 shape) |\n\
          | Recovery window | {rw:.0} h of committed log behind the latest snapshot |\n\
          | Recoveries per window | {rc:.0} |\n\
          | Measured E0 ingest | {ing:.0} items/s |\n\
-         | Measured E0 claim+finalize | {drn:.0} items/s |\n\
-         | Folded command throughput | {tput:.0} commands/s |\n\
+         | Measured E0 claim+finalize | excluded from this push-only comparator ({drn:.0} items/s reference) |\n\
+         | Comparator command throughput | {tput:.0} push commands/s |\n\
          | Postgres provisioned IOPS | {iops:.0} |\n\
          | Postgres index overhead | {ov}x |",
         win = w.billing_window_hours,
@@ -445,6 +607,77 @@ fn render_artifact(
 
 fn fail(msg: &str) -> ExitCode {
     eprintln!("pqueue-cost-model: {msg}");
-    eprintln!("usage: pqueue-cost-model [--out <doc.md>] [--ledger <ledger.jsonl>] [--print]");
+    eprintln!(
+        "usage: pqueue-cost-model [--e3-ledger <source.jsonl>] [--out <doc.md>] [--ledger <ledger.jsonl>] [--print]"
+    );
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_replaces_complete_file_and_leaves_no_temporary_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "pqueue-cost-model-atomic-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ledger.jsonl");
+        std::fs::write(&path, b"old\n").unwrap();
+
+        atomic_write(&path, b"row-1\nrow-2\n").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"row-1\nrow-2\n");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_failure_preserves_destination_and_cleans_temporary_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "pqueue-cost-model-atomic-failure-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let destination = dir.join("ledger.jsonl");
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("sentinel"), b"old").unwrap();
+
+        assert!(atomic_write(&destination, b"new\n").is_err());
+
+        assert_eq!(std::fs::read(destination.join("sentinel")).unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rendered_report_names_the_exact_measured_source_revision() {
+        let counts = ObjectLogCounts::e3_size_dominant();
+        let input = ReleaseCostInput {
+            backend_profile: "object_log_sqlite_projection".into(),
+            bound: "100ms".into(),
+            counts: counts.clone(),
+            source_command: "wrapper".into(),
+            source_environment: "test".into(),
+            source_revision: "1111111111111111111111111111111111111111".into(),
+        };
+        let workload = WorkloadAssumptions::tp002_e3_push_baseline();
+        let prices = PriceInputs::adr_001_us_east_1();
+        let comparison = compute_comparison(&counts, &workload, &prices);
+        let report = render_artifact(
+            &input,
+            std::slice::from_ref(&input),
+            &comparison,
+            &workload,
+            &prices,
+        );
+        assert!(
+            report
+                .contains("Measured source revision:** `1111111111111111111111111111111111111111`")
+        );
+    }
 }
