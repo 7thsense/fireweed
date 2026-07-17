@@ -153,6 +153,7 @@ fn claim_due_scheduled_actions_request() -> ClaimByQueryRequest {
         },
         max_items: 2,
         lease_duration_ms: 30_000,
+        now: UtcTimestamp::new(1_783_004_400, 0).expect("valid ts"),
         worker_id: pqueue_core::WorkerId::new("query-worker").expect("worker id"),
         request_id: None,
     }

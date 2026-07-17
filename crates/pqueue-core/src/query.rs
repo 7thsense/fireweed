@@ -329,8 +329,40 @@ pub struct ClaimByQueryRequest {
     pub order_by: OrderField,
     pub max_items: u32,
     pub lease_duration_ms: u64,
+    /// Caller-resolved operational and eligibility time. Query selection evaluates due-ness at this
+    /// instant and the resulting lease starts here, keeping retries/tests independent of the host clock.
+    pub now: UtcTimestamp,
     pub worker_id: WorkerId,
     pub request_id: Option<RequestId>,
+}
+
+impl ClaimByQueryRequest {
+    /// The lease deadline derived from [`Self::now`], saturating at the largest representable timestamp.
+    pub fn lease_expires_at(&self) -> UtcTimestamp {
+        let nanos = u64::from(self.now.nanoseconds)
+            .saturating_add((self.lease_duration_ms % 1_000).saturating_mul(1_000_000));
+        let seconds_to_add = self
+            .lease_duration_ms
+            .saturating_div(1_000)
+            .saturating_add(nanos / 1_000_000_000);
+        let nanoseconds = (nanos % 1_000_000_000) as u32;
+        let Some(seconds_to_add) = i64::try_from(seconds_to_add).ok() else {
+            return UtcTimestamp {
+                seconds: i64::MAX,
+                nanoseconds: 999_999_999,
+            };
+        };
+        let Some(seconds) = self.now.seconds.checked_add(seconds_to_add) else {
+            return UtcTimestamp {
+                seconds: i64::MAX,
+                nanoseconds: 999_999_999,
+            };
+        };
+        UtcTimestamp {
+            seconds,
+            nanoseconds,
+        }
+    }
 }
 
 /// Advertised hot-projection query capabilities for a queue/backend (API-004 Query Capability Names).
@@ -594,6 +626,7 @@ mod core_domain_tests_hot_projection_query_types {
             },
             max_items: 25,
             lease_duration_ms: 30_000,
+            now: ts(1_800_000_000),
             worker_id: WorkerId::new("worker-1").unwrap(),
             request_id: Some(RequestId::new("req-1").unwrap()),
         };
