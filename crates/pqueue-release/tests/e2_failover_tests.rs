@@ -48,16 +48,16 @@ fn e2_failover_validator_accepts_release_row() {
 
 #[test]
 fn e2_failover_validator_rejects_missing_or_failed_assertions() {
-    let mutations: Vec<Box<dyn Fn(&mut FailoverEvidence)>> = vec![
-        Box::new(|r| r.new_epoch = r.old_epoch),
-        Box::new(|r| r.stale_append_rejected_before_mutation = false),
-        Box::new(|r| r.snapshot_tail_recovered = false),
-        Box::new(|r| r.lost_work = 1),
-        Box::new(|r| r.double_leases = 1),
-        Box::new(|r| r.corrupt_writes = 1),
-        Box::new(|r| r.moved_count = 0),
-        Box::new(|r| r.retry_count = 2),
-        Box::new(|r| r.retry_succeeded = false),
+    let mutations: Vec<fn(&mut FailoverEvidence)> = vec![
+        |r| r.new_epoch = r.old_epoch,
+        |r| r.stale_append_rejected_before_mutation = false,
+        |r| r.snapshot_tail_recovered = false,
+        |r| r.lost_work = 1,
+        |r| r.double_leases = 1,
+        |r| r.corrupt_writes = 1,
+        |r| r.moved_count = 0,
+        |r| r.retry_count = 2,
+        |r| r.retry_succeeded = false,
     ];
     for mutate in mutations {
         let mut row = valid();
