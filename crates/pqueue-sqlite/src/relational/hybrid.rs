@@ -92,14 +92,23 @@ pub trait HybridFaultHook: Send + Sync {
     fn fault_point(&self, cut: HybridFaultCutPoint) -> EngineResult<()>;
 }
 
+struct DeferredCheckpoint {
+    position: CommandPosition,
+    command: CommandEnvelope,
+    encoded_bytes: u64,
+    enqueued_at_ms: i64,
+}
+
 pub struct HybridProjectionStore {
     sqlite: SqliteProjectionStore,
     memory: InMemoryProjection,
     hydrated: HashSet<QueueKey>,
     memory_next_seq: HashMap<QueueKey, u64>,
-    deferred: VecDeque<(CommandPosition, CommandEnvelope)>,
+    deferred: VecDeque<DeferredCheckpoint>,
     deferred_commands: usize,
     deferred_flush_chunk: usize,
+    /// Deterministic clock seam for async-debt tests. Production samples the wall clock.
+    async_debt_now_override_ms: Option<i64>,
     /// `objectlog/hybrid-strict` (TD-004): when set, the group-commit write path (`apply_live`,
     /// `apply_live_owned`, `apply_recovery`) commits the sealed batch DURABLY to SQLite BEFORE applying it to
     /// hot memory — the `apply_durable_then_memory` ordering — instead of the default `objectlog/hybrid`
@@ -107,8 +116,8 @@ pub struct HybridProjectionStore {
     /// poison cut and the durable-before-visible barrier on the real server write pipeline.
     strict: bool,
     /// The disposable SQLite image was deliberately removed and has not yet completed an authoritative
-    /// rebuild. Async writes may continue against object-log + hot memory, but checkpoint flush is withheld;
-    /// strict writes fail admission because their response barrier includes SQLite durability.
+    /// rebuild. Every mutation fails admission while it is offline; otherwise a new append could create an
+    /// ordered checkpoint suffix against the deliberately reset image.
     durable_projection_offline: bool,
     last_checkpoint_error: Option<String>,
     poisoned: Option<String>,
@@ -142,6 +151,7 @@ impl HybridProjectionStore {
             deferred: VecDeque::new(),
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
+            async_debt_now_override_ms: None,
             strict: false,
             durable_projection_offline: false,
             last_checkpoint_error: None,
@@ -161,6 +171,7 @@ impl HybridProjectionStore {
             deferred: VecDeque::new(),
             deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
+            async_debt_now_override_ms: None,
             strict: false,
             durable_projection_offline: false,
             last_checkpoint_error: None,
@@ -229,27 +240,75 @@ impl HybridProjectionStore {
     /// Fold the store's CURRENT async-apply debt into the armed monitor (no-op when unarmed). The genuine
     /// debt signal for `objectlog/hybrid-async` is the deferred-checkpoint backlog — committed commands
     /// already durable on the object log and applied to hot memory but not yet checkpointed into the durable
-    /// SQLite image — which is exactly `deferred_commands` (the count of committed sequences trailing the
-    /// SQLite high-water). This is NOT a test-only poke: it is called from the real `apply_live` /
+    /// SQLite image. Each queued checkpoint retains its encoded command size and enqueue timestamp, so the
+    /// monitor sees the actual command count, bytes, queue depth, and oldest age trailing the SQLite
+    /// high-water. This is NOT a test-only poke: it is called from the real `apply_live` /
     /// `apply_live_owned` / `apply_recovery` write path (backlog grows) and from `flush_deferred` (backlog
     /// drains), so production apply-lag drives the backpressure level.
+    fn async_debt_now_ms(&self) -> i64 {
+        self.async_debt_now_override_ms.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0)
+        })
+    }
+
     fn observe_async_debt(&mut self) {
         let lag = self.deferred_commands as u64;
+        let now_ms = self.async_debt_now_ms();
+        let apply_debt_bytes = self.deferred.iter().fold(0_u64, |total, entry| {
+            total.saturating_add(entry.encoded_bytes)
+        });
+        let oldest_unapplied_age_ms = self.deferred.front().map_or(0, |entry| {
+            now_ms.saturating_sub(entry.enqueued_at_ms).max(0) as u64
+        });
         if let Some(monitor) = self.async_monitor.as_mut() {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
-                .unwrap_or(0);
             monitor.observe(
                 HybridAsyncDebt {
                     apply_lag_commands: lag,
-                    apply_debt_bytes: 0,
+                    apply_debt_bytes,
                     apply_queue_depth: lag,
-                    oldest_unapplied_age_ms: 0,
+                    oldest_unapplied_age_ms,
                 },
                 now_ms,
             );
         }
+    }
+
+    fn deferred_entries(
+        &self,
+        positions: impl IntoIterator<Item = CommandPosition>,
+        commands: impl IntoIterator<Item = CommandEnvelope>,
+    ) -> EngineResult<Vec<DeferredCheckpoint>> {
+        let enqueued_at_ms = self.async_debt_now_ms();
+        positions
+            .into_iter()
+            .zip(commands)
+            .map(|(position, command)| {
+                let encoded_bytes = serde_json::to_vec(&command)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?
+                    .len() as u64;
+                Ok(DeferredCheckpoint {
+                    position,
+                    command,
+                    encoded_bytes,
+                    enqueued_at_ms,
+                })
+            })
+            .collect()
+    }
+
+    /// Deterministic test seam for byte/age debt classification. Production callers never set it.
+    #[doc(hidden)]
+    pub fn set_async_debt_now_ms_for_test(&mut self, now_ms: Option<i64>) {
+        self.async_debt_now_override_ms = now_ms;
+        self.observe_async_debt();
+    }
+
+    /// Export the armed async monitor's current measured backlog metrics.
+    pub fn async_metrics(&self) -> Option<HybridAsyncMetrics> {
+        self.async_monitor.as_ref().map(HybridAsyncMonitor::metrics)
     }
 
     /// Install (or clear, with `None`) a test-only fault hook (TP-003 §3.10 AC-TXN-5/5A). Never called from
@@ -504,9 +563,10 @@ impl ProjectionStore for HybridProjectionStore {
         if self.strict {
             return self.apply_durable_then_memory(positions, commands);
         }
+        let deferred =
+            self.deferred_entries(positions.iter().cloned(), commands.iter().cloned())?;
         self.apply_memory(positions, commands)?;
-        self.deferred
-            .extend(positions.iter().cloned().zip(commands.iter().cloned()));
+        self.deferred.extend(deferred);
         self.deferred_commands = self.deferred.len();
         self.observe_async_debt();
         Ok(())
@@ -532,8 +592,10 @@ impl ProjectionStore for HybridProjectionStore {
         if self.strict {
             return self.apply_durable_then_memory(&positions, &commands);
         }
+        let deferred =
+            self.deferred_entries(positions.iter().cloned(), commands.iter().cloned())?;
         self.apply_memory(&positions, &commands)?;
-        self.deferred.extend(positions.into_iter().zip(commands));
+        self.deferred.extend(deferred);
         self.deferred_commands = self.deferred.len();
         self.observe_async_debt();
         Ok(())
@@ -558,9 +620,10 @@ impl ProjectionStore for HybridProjectionStore {
         if self.strict {
             return self.apply_durable_then_memory(positions, commands);
         }
+        let deferred =
+            self.deferred_entries(positions.iter().cloned(), commands.iter().cloned())?;
         self.apply_memory(positions, commands)?;
-        self.deferred
-            .extend(positions.iter().cloned().zip(commands.iter().cloned()));
+        self.deferred.extend(deferred);
         self.deferred_commands = self.deferred.len();
         self.observe_async_debt();
         Ok(())
@@ -585,13 +648,13 @@ impl ProjectionStore for HybridProjectionStore {
             .deferred
             .iter()
             .take(take)
-            .map(|(pos, _)| pos.clone())
+            .map(|entry| entry.position.clone())
             .collect();
         let commands: Vec<CommandEnvelope> = self
             .deferred
             .iter()
             .take(take)
-            .map(|(_, env)| env.clone())
+            .map(|entry| entry.command.clone())
             .collect();
         if let Err(e) = self.fault(HybridFaultCutPoint::DuringAsyncSqliteApply) {
             // The deferred batch is untouched (still queued for the next flush attempt) but the async
@@ -715,7 +778,7 @@ impl ProjectionStore for HybridProjectionStore {
     /// profiles arm no monitor and admit unconditionally (the default trait impl semantics).
     fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
         self.check_healthy()?;
-        if self.strict && self.durable_projection_offline {
+        if self.durable_projection_offline {
             return Err(EngineError::Unavailable);
         }
         match self.async_monitor.as_ref() {

@@ -16,8 +16,8 @@ use pqueue_engine::{
 };
 use pqueue_projection::InMemoryProjection;
 use pqueue_sqlite::{
-    HybridAsyncThresholds, HybridFaultCutPoint, HybridFaultHook, HybridProjectionStore,
-    SqliteProjectionStore,
+    BackpressureLevel, HybridAsyncThresholds, HybridFaultCutPoint, HybridFaultHook,
+    HybridProjectionStore, SqliteProjectionStore,
 };
 use rusqlite::Connection;
 
@@ -695,4 +695,54 @@ fn async_checkpoint_worker_failure_is_visible_and_fails_closed() {
     assert!(pqueue_engine::ProjectionStore::flush_deferred(&mut store).is_err());
     assert!(store.poison_reason().is_some());
     assert!(pqueue_engine::ProjectionStore::metrics(&store, &shard()).is_err());
+}
+
+#[test]
+fn async_debt_uses_real_encoded_bytes_and_oldest_queue_age() {
+    let command = envelope(
+        "measured-debt-push",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("1", "measured-debt-key")],
+        }),
+        vec![ItemId::new("1").unwrap()],
+        0,
+    );
+
+    let mut byte_limited = HybridProjectionStore::in_memory()
+        .unwrap()
+        .with_async_monitor(HybridAsyncThresholds::new(100, 1, 100, 10_000, 3).unwrap());
+    pqueue_engine::ProjectionStore::ensure_shard(&mut byte_limited, &qdef()).unwrap();
+    byte_limited.set_async_debt_now_ms_for_test(Some(1_000));
+    pqueue_engine::ProjectionStore::apply_live(
+        &mut byte_limited,
+        &[pos(0)],
+        std::slice::from_ref(&command),
+    )
+    .unwrap();
+    let metrics = byte_limited.async_metrics().unwrap();
+    assert!(metrics.apply_debt_bytes > 1);
+    assert_eq!(metrics.backpressure_level, BackpressureLevel::Hard);
+    assert!(
+        pqueue_engine::ProjectionStore::admit_mutation(&byte_limited, &shard()).is_err(),
+        "the real encoded-byte bound must reject subsequent mutations"
+    );
+
+    let mut age_limited = HybridProjectionStore::in_memory()
+        .unwrap()
+        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 50, 3).unwrap());
+    pqueue_engine::ProjectionStore::ensure_shard(&mut age_limited, &qdef()).unwrap();
+    age_limited.set_async_debt_now_ms_for_test(Some(2_000));
+    pqueue_engine::ProjectionStore::apply_live(&mut age_limited, &[pos(0)], &[command]).unwrap();
+    assert_eq!(
+        age_limited.async_metrics().unwrap().oldest_unapplied_age_ms,
+        0
+    );
+    age_limited.set_async_debt_now_ms_for_test(Some(2_050));
+    let metrics = age_limited.async_metrics().unwrap();
+    assert_eq!(metrics.oldest_unapplied_age_ms, 50);
+    assert_eq!(metrics.backpressure_level, BackpressureLevel::Hard);
+    assert!(
+        pqueue_engine::ProjectionStore::admit_mutation(&age_limited, &shard()).is_err(),
+        "the oldest-unapplied age bound must reject subsequent mutations"
+    );
 }

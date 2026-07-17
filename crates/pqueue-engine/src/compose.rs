@@ -604,14 +604,10 @@ pub trait ProjectionStore: Send {
     /// new-work command is enqueued/sealed/acked while the backlog is at risk of an SLO violation. Called on
     /// the pre-commit path with the unit-of-work lock held, so a rejection leaves NO durable effect.
     ///
-    /// Gated ops (the operations that ADMIT NEW WORK, growing the async-apply backlog): `push` (and
-    /// `push_with_request_id` on its non-replay PROCEED path — an idempotent replay of already-committed work
-    /// adds zero debt and is NOT gated) and a non-empty `claim`. Lifecycle/drain ops on in-flight work
-    /// (`finalize`, `renew`, `reassign`, `reclaim_expired`, `update`) are intentionally NOT gated: they
-    /// complete or recover work already admitted, gating them would not reduce async-apply debt (only ordered
-    /// `flush_deferred` does) and could stall lease lifecycle/recovery, whereas TD-004's clear threshold is
-    /// reached by DRAINING, not by blocking completion. Default: always admit — only the
-    /// `objectlog/hybrid-async` projection (with an armed monitor) gates.
+    /// Every newly appended mutation is gated at the shared append/group-buffer boundary. Idempotent replays
+    /// that return without appending remain available, but push, claim, finalize, renew, reassign, purge,
+    /// upsert/update, and future mutation kinds all fail closed while the projection is offline, poisoned, or
+    /// under Hard async debt. Default: always admit — only guarded projection profiles override this.
     fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
         Ok(())
     }
@@ -1156,6 +1152,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         (self.inner.lock().expect("poisoned").log.gc_max_latency_ms() / 4).max(1)
     }
 
+    /// Observability/test seam: number of accepted commands still buffered ahead of a durable seal.
+    pub fn buffered_group_commit_commands(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .coords
+            .values()
+            .map(|coordinator| coordinator.pending.len())
+            .sum()
+    }
+
     /// Observability/test seam: run `f` against the log axis under the unit-of-work lock (e.g. to read the
     /// substrate's group-commit segment counters for the co-buffering proof).
     pub fn with_log<R>(&self, f: impl FnOnce(&L) -> R) -> R {
@@ -1173,6 +1180,36 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// to interleave between reset, replay, and verification.
     pub fn with_log_and_projection_mut<R>(&self, f: impl FnOnce(&L, &mut P) -> R) -> R {
         let mut inner = self.inner.lock().expect("poisoned");
+        let Inner {
+            log, projection, ..
+        } = &mut *inner;
+        f(log, projection)
+    }
+
+    /// Run lifecycle/repair work after synchronously sealing every group-commit write that was accepted
+    /// before the lifecycle lock was acquired. This closes the gap between the coordinator's buffered
+    /// commands and the authoritative log: reset/replay can only begin once all earlier waiters have a
+    /// durable position and their live projection apply has completed.
+    pub fn with_quiesced_log_and_projection_mut<R>(
+        &self,
+        f: impl FnOnce(&L, &mut P) -> EngineResult<R>,
+    ) -> EngineResult<R> {
+        let mut inner = self.inner.lock().expect("poisoned");
+        if self.gc_active(&inner) {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0);
+            let shards: Vec<QueueKey> = inner
+                .coords
+                .iter()
+                .filter(|(_, coordinator)| !coordinator.pending.is_empty())
+                .map(|(shard, _)| shard.clone())
+                .collect();
+            for shard in shards {
+                Self::gc_force_seal(&mut inner, &shard, now_ms)?;
+            }
+        }
         let Inner {
             log, projection, ..
         } = &mut *inner;
@@ -1452,6 +1489,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         expected_epoch: Option<u64>,
         now: UtcTimestamp,
     ) -> EngineResult<Arc<SealSlot>> {
+        // The group-commit buffer is itself a durable-write admission boundary. Centralizing the gate here
+        // covers every buffered command, even when a caller omitted an operation-specific preflight.
+        inner.projection.admit_mutation(shard)?;
         let slot = Arc::new(SealSlot::new());
         let now_ms = ts_to_ms(now);
         let resolved_epoch = match expected_epoch {
@@ -1592,6 +1632,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         if envs.is_empty() {
             return Ok(());
         }
+        inner.projection.admit_mutation(shard)?;
         let now_ms = ts_to_ms(envs[0].created_at);
         let seal_epoch = match expected_epoch {
             Some(e) => e,
@@ -2157,6 +2198,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         if envs.is_empty() {
             return Ok(());
         }
+        // Every non-group-commit mutation funnels through this append boundary. Admission belongs here so
+        // lifecycle-offline, async poison, and hard-debt state reject finalize/renew/reassign/purge/upsert
+        // and future mutation kinds just as reliably as push/claim.
+        inner.projection.admit_mutation(shard)?;
         let epoch = inner.log.current_epoch(shard)?;
         // ADR-009 / TD-003: an owner that supplies its cached acquire-time epoch (`Some`) is fenced here if
         // superseded; `None` is the degenerate sole-owner path (stamp current, never fence).
@@ -5309,6 +5354,49 @@ mod ordered_tests {
         let waker = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
         Pin::new(future).poll(&mut cx)
+    }
+
+    #[test]
+    fn lifecycle_quiescence_seals_accepted_group_commit_writes_before_reset_work() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true);
+        let shard = queue();
+        assert!(matches!(
+            poll_once(&mut backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+        let epoch = match poll_once(&mut backend.current_epoch(&shard)) {
+            Poll::Ready(Ok(epoch)) => epoch,
+            other => panic!("unexpected current_epoch result: {other:?}"),
+        };
+
+        let mut push = backend.push(&shard, vec![PushSpec::default()], ts(0), Some(epoch));
+        assert!(matches!(poll_once(&mut push), Poll::Pending));
+        assert_eq!(backend.buffered_group_commit_commands(), 1);
+
+        backend
+            .with_quiesced_log_and_projection_mut(|log, projection| {
+                assert_eq!(log.sealed_batches(), vec![1]);
+                assert_eq!(
+                    projection
+                        .state
+                        .lock()
+                        .expect("fake projection poisoned")
+                        .pending
+                        .len(),
+                    1,
+                    "live apply completes before lifecycle reset work starts"
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(backend.buffered_group_commit_commands(), 0);
+        assert!(matches!(poll_once(&mut push), Poll::Ready(Ok(_))));
     }
 
     #[test]
