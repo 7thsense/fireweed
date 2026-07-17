@@ -207,15 +207,15 @@ wait_owner_usable "${OWNER_POD}"
 stop_pf
 [[ "$(owner_row)" == "${OLD}" ]] || die "owner changed while establishing routing readiness"
 start_pf "pod/${NONOWNER_POD}" "${PORT}" 8080
-resp "${RUN_DIR}/moved.resp" XLEN t1:q1
+resp "${RUN_DIR}/moved.resp" XADD t1:q1 '*' priority 9
 grep -Eq "^-MOVED .* ${OWNER_IP}:8080" "${RUN_DIR}/moved.resp" || { cat "${RUN_DIR}/moved.resp" >&2; die "non-owner did not return owner MOVED"; }
 stop_pf
 start_pf "pod/${OWNER_POD}" "${PORT}" 8080
-resp "${RUN_DIR}/retry.resp" XLEN t1:q1
-grep -Eq '^:0' "${RUN_DIR}/retry.resp" || die "one-hop retry failed"
+resp "${RUN_DIR}/retry.resp" XADD t1:q1 '*' priority 9
+grep -Eq '^\$[0-9]+' "${RUN_DIR}/retry.resp" || die "one-hop retry failed"
 for p in 1 2 3; do resp "${RUN_DIR}/push-${p}.resp" XADD t1:q1 '*' priority "${p}"; grep -Eq '^\$[0-9]+' "${RUN_DIR}/push-${p}.resp" || die "pre-fault push failed"; done
 resp "${RUN_DIR}/before.resp" XLEN t1:q1
-BEFORE="$(tr -dc '0-9' <"${RUN_DIR}/before.resp")"; [[ "${BEFORE}" == 3 ]] || die "expected 3 visible items, got ${BEFORE}"
+BEFORE="$(tr -dc '0-9' <"${RUN_DIR}/before.resp")"; [[ "${BEFORE}" == 4 ]] || die "expected 4 visible items, got ${BEFORE}"
 stop_pf
 
 # Kill the active owner and require a different Kubernetes UID at a strictly larger control-plane epoch.
@@ -271,7 +271,7 @@ row = {
  "moved_endpoint":${OWNER_IP@Q}+":8080",
  "topology":"kind: 3 pqueue pods; shared MinIO S3 object log; Postgres ownership; per-pod SQLite projection",
  "hardware":${HARDWARE@Q},"seed":int(${SEED@Q}),"duration_ms":int(${DURATION_MS@Q}),
- "fault_schedule":"after one redirected/retried read plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
+ "fault_schedule":"after one redirected/retried push plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
  "exclusions":"density throughput and managed-cloud S3/Postgres; performance is covered by the separate E3 lane"
 }
 with open(sys.argv[1], "w") as f: json.dump(row, f, indent=2); f.write("\n")
