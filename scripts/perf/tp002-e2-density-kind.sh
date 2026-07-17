@@ -16,6 +16,7 @@ THREAD_LIMIT=4
 CONNECTION_LIMIT=32
 TASK_LIMIT=64
 LEDGER_OUT=${LEDGER_OUT:-$REPO_ROOT/target/pqueue-ledger/tp002-e2-density-kind.jsonl}
+DIAGNOSTICS_DIR=${DIAGNOSTICS_DIR:-$REPO_ROOT/target/pqueue-ledger/tp002-e2-density-kind-diagnostics}
 KUBECONFIG_FILE=$(mktemp)
 RESULT_FILE=$(mktemp)
 RESOURCE_FILE=$(mktemp)
@@ -24,24 +25,38 @@ rm -f "$SAMPLER_STOP"
 NAMESPACE="pqueue-density-${RANDOM}"
 SAMPLER_PID=
 LOG_WATCH_PID=
-PHASE_LOG=$(mktemp)
+OWNER_BASHPID=$BASHPID
+mkdir -p "$DIAGNOSTICS_DIR"
+PHASE_LOG="$DIAGNOSTICS_DIR/load-follow.log"
+rm -f "$PHASE_LOG"
 
 assert_source_unchanged() {
   [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" == "$REVISION" ]]
   [[ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]]
 }
 
+capture_diagnostics() {
+  kubectl -n "$NAMESPACE" get job density-load -o yaml >"$DIAGNOSTICS_DIR/job.yaml" 2>"$DIAGNOSTICS_DIR/job.err" || true
+  kubectl -n "$NAMESPACE" get pods -o wide >"$DIAGNOSTICS_DIR/pods.txt" 2>"$DIAGNOSTICS_DIR/pods.err" || true
+  kubectl -n "$NAMESPACE" logs job/density-load >"$DIAGNOSTICS_DIR/load.log" 2>"$DIAGNOSTICS_DIR/load.err" || true
+  kubectl -n "$NAMESPACE" logs deployment/pqueue >"$DIAGNOSTICS_DIR/server.log" 2>"$DIAGNOSTICS_DIR/server.err" || true
+}
+
 cleanup() {
+  # Bash subshells inherit EXIT traps. Only the original script process may own cluster cleanup.
+  [[ "$BASHPID" == "$OWNER_BASHPID" ]] || return
   if [[ -n "$SAMPLER_PID" ]]; then
     touch "$SAMPLER_STOP"
+    kill "$SAMPLER_PID" 2>/dev/null || true
     wait "$SAMPLER_PID" 2>/dev/null || true
   fi
   if [[ -n "$LOG_WATCH_PID" ]]; then
     kill "$LOG_WATCH_PID" 2>/dev/null || true
     wait "$LOG_WATCH_PID" 2>/dev/null || true
   fi
+  capture_diagnostics
   KUBECONFIG="$KUBECONFIG_FILE" kubectl delete namespace "$NAMESPACE" --wait=false >/dev/null 2>&1 || true
-  rm -f "$KUBECONFIG_FILE" "$RESULT_FILE" "$RESOURCE_FILE" "$SAMPLER_STOP" "$PHASE_LOG"
+  rm -f "$KUBECONFIG_FILE" "$RESULT_FILE" "$RESOURCE_FILE" "$SAMPLER_STOP"
 }
 trap cleanup EXIT
 
@@ -168,6 +183,7 @@ LOG_WATCH_PID=$!
 # Sample only between the load generator's explicit HOT_START/HOT_END markers. Worker/task counts come
 # from Tokio's live RuntimeMetrics reporter; connections come from the server network namespace.
 (
+  trap - EXIT
   while [[ ! -e "$SAMPLER_STOP" ]]; do
     if grep -q '^DENSITY_PHASE HOT_START ' "$PHASE_LOG" && ! grep -q '^DENSITY_PHASE HOT_END ' "$PHASE_LOG"; then
       runtime=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/pqueue-runtime-resources.json 2>/dev/null) || continue
@@ -184,16 +200,24 @@ SAMPLER_PID=$!
 
 deadline=$((SECONDS + 1800))
 while true; do
-  succeeded=$(kubectl -n "$NAMESPACE" get job density-load -o jsonpath='{.status.succeeded}' 2>/dev/null || true)
-  failed=$(kubectl -n "$NAMESPACE" get job density-load -o jsonpath='{.status.failed}' 2>/dev/null || true)
+  if ! job_json=$(kubectl -n "$NAMESPACE" get job density-load -o json 2>"$DIAGNOSTICS_DIR/job-poll.err"); then
+    capture_diagnostics
+    echo "density Job or namespace disappeared; diagnostics retained at $DIAGNOSTICS_DIR" >&2
+    exit 1
+  fi
+  printf '%s\n' "$job_json" >"$DIAGNOSTICS_DIR/job-latest.json"
+  succeeded=$(jq -r '.status.succeeded // 0' <<<"$job_json")
+  failed=$(jq -r '.status.failed // 0' <<<"$job_json")
   [[ "$succeeded" == "1" ]] && break
-  if [[ -n "$failed" && "$failed" != "0" ]]; then
-    kubectl -n "$NAMESPACE" logs job/density-load || true
+  if [[ "$failed" != "0" ]]; then
+    capture_diagnostics
+    cat "$DIAGNOSTICS_DIR/load.log" || true
     exit 1
   fi
   if (( SECONDS >= deadline )); then
-    kubectl -n "$NAMESPACE" logs job/density-load || true
-    echo "density load timed out" >&2
+    capture_diagnostics
+    cat "$DIAGNOSTICS_DIR/load.log" || true
+    echo "density load timed out; diagnostics retained at $DIAGNOSTICS_DIR" >&2
     exit 1
   fi
   sleep 2

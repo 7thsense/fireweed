@@ -35,6 +35,10 @@ command, Git revision and image digest, seed, measured duration, one-node kind
 topology and node image, host/node/container CPU and RAM descriptions,
 active/progress-eligible queue counts, both hot throughput rates, maximum
 progress latency and violations, and both noisy-neighbor retention percentages.
+The wrapper retains the latest Job object plus load/server logs under
+`target/pqueue-ledger/tp002-e2-density-kind-diagnostics/` before deleting its
+namespace. Only the top-level wrapper process owns cleanup; background log and
+sampler subshells cannot fire the namespace-deletion trap.
 The load generator emits explicit `HOT_START` and `HOT_END` phase markers. A
 separate sampler must record at least one sample strictly between those markers.
 The load pod and sampling host share the kind node's system clock; the row
