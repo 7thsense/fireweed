@@ -48,6 +48,24 @@ fn qdef() -> QueueDefinition {
     }
 }
 
+fn sqlite_test_path(test_name: &str) -> String {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir()
+        .join(format!(
+            "pqueue-{test_name}-{}-{nonce}.sqlite",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn retain_static<T: 'static>(value: T) -> Arc<T> {
+    Arc::new(value)
+}
+
 #[test]
 fn facade_exports_queue_definition_construction_surface() {
     let key = qkey();
@@ -116,6 +134,46 @@ async fn open_sqlite_builds_a_usable_pqueue() {
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&qkey(), pqueue::NewItem::default()).await.unwrap();
     assert_eq!(pq.metrics(&qkey()).await.unwrap().pending, 1);
+}
+
+/// Rust 2024 return-position `impl Trait` must not capture the borrowed path: the backend owns all
+/// state needed by the returned handle.
+#[tokio::test]
+async fn open_sqlite_retained_handle_owns_path() {
+    let path = sqlite_test_path("retained-handle-owns-path");
+    let cleanup_path = std::path::PathBuf::from(&path);
+    let pq =
+        retain_static(pqueue::open_sqlite(path.as_str(), Arc::new(ManualClock::at(0))).unwrap());
+    drop(path);
+
+    pq.create_queue(qdef()).await.unwrap();
+    pq.push(&qkey(), pqueue::NewItem::default()).await.unwrap();
+    assert_eq!(pq.metrics(&qkey()).await.unwrap().pending, 1);
+    drop(pq);
+    std::fs::remove_file(cleanup_path).unwrap();
+}
+
+/// Dropping every handle closes SQLite cleanly; the same caller-owned path can then reopen the durable
+/// queue without leaking the path to manufacture a `'static` borrow.
+#[tokio::test]
+async fn open_sqlite_owned_path_reopens_after_all_handles_drop() {
+    let path = sqlite_test_path("owned-path-reopens");
+    {
+        let pq = retain_static(
+            pqueue::open_sqlite(path.as_str(), Arc::new(ManualClock::at(0))).unwrap(),
+        );
+        pq.create_queue(qdef()).await.unwrap();
+        pq.push(&qkey(), pqueue::NewItem::default()).await.unwrap();
+        let second_handle = Arc::clone(&pq);
+        drop(pq);
+        assert_eq!(second_handle.metrics(&qkey()).await.unwrap().pending, 1);
+    }
+
+    let reopened =
+        retain_static(pqueue::open_sqlite(path.as_str(), Arc::new(ManualClock::at(1))).unwrap());
+    assert_eq!(reopened.metrics(&qkey()).await.unwrap().pending, 1);
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
 }
 
 /// GUARD (ADR-009 L6): `pqueue` must not re-export a port trait on its public surface, and must not expose
