@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_release::e3_contract::{
-    E3FenceObservation, build_e3_fence_evidence, verify_e3_contract,
+    E3FenceObservation, build_e3_fence_evidence, verify_e3_contract, write_e3_fence_evidence,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
+const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
 struct Fixture {
     root: PathBuf,
@@ -41,7 +42,7 @@ impl Fixture {
     }
 
     fn errors(&self) -> String {
-        verify_e3_contract(&self.manifest())
+        verify_e3_contract(&self.manifest(), REVISION)
             .unwrap_err()
             .into_iter()
             .map(|error| error.0)
@@ -59,7 +60,7 @@ impl Drop for Fixture {
 #[test]
 fn accepts_all_profiles_bounds_transaction_authorities_and_fence() {
     let fixture = Fixture::new();
-    let summary = verify_e3_contract(&fixture.manifest()).unwrap();
+    let summary = verify_e3_contract(&fixture.manifest(), REVISION).unwrap();
     assert_eq!(summary.entries, 8);
     assert_eq!(summary.transaction_rows, 9);
 }
@@ -148,6 +149,105 @@ fn rejects_source_revision_mismatch() {
     let errors = fixture.errors();
     assert!(errors.contains("requires source_revision"));
     assert!(errors.contains("fencing evidence"));
+}
+
+#[test]
+fn rejects_wrong_expected_revision() {
+    let fixture = Fixture::new();
+    let errors = verify_e3_contract(
+        &fixture.manifest(),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.0.contains("does not match expected revision"))
+    );
+}
+
+#[test]
+fn rejects_non_governed_backend_suite_and_ac7_binding() {
+    let fixture = Fixture::new();
+    fixture.mutate_json("contract.json", |value| {
+        value["entries"][0]["transaction_authorities"][0]["backend"] = serde_json::json!("forged");
+        value["ac7_binding"]["bounds_ms"] = serde_json::json!([1, 5, 20]);
+    });
+    let errors = fixture.errors();
+    assert!(errors.contains("is not the governed authority"));
+    assert!(errors.contains("AC-TXN-7 binding must name the governed"));
+
+    let fixture = Fixture::new();
+    let path = fixture.root.join("tp003.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "external_transaction_contract_matrix_tests",
+        "forged_suite",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("TP-003 authority is not a complete passing row")
+    );
+}
+
+#[test]
+fn rejects_extra_tp002_evidence_id() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"tp002_evidence_ids\":[\"E3\"]",
+        "\"tp002_evidence_ids\":[\"E3\",\"E0\"]",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(fixture.errors().contains("must substantiate exactly E3"));
+}
+
+#[test]
+fn rejects_non_governed_e3_producer() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "performance_object_log_e3_live_tests",
+        "forged_producer",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("must come from governed producer suite")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlink_authority_and_writer_target() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    fs::rename(
+        fixture.root.join("fencing.json"),
+        fixture.root.join("real-fencing.json"),
+    )
+    .unwrap();
+    symlink("real-fencing.json", fixture.root.join("fencing.json")).unwrap();
+    assert!(fixture.errors().contains("contains a symlink"));
+
+    let output = fixture.root.join("output.json");
+    let victim = fixture.root.join("victim.json");
+    fs::write(&victim, "unchanged").unwrap();
+    symlink(&victim, &output).unwrap();
+    let row = build_e3_fence_evidence(E3FenceObservation {
+        source_revision: REVISION.into(),
+        stale_epoch_rejected: true,
+        current_epoch_committed: true,
+    })
+    .unwrap();
+    assert!(write_e3_fence_evidence(&output, &row).is_err());
+    assert_eq!(fs::read_to_string(victim).unwrap(), "unchanged");
 }
 
 #[test]

@@ -219,7 +219,36 @@ fn verify_digest_binding(
         errors.push(format!("{label} path {path:?} has an invalid SHA-256"));
         return;
     }
-    match digest_path(&repo_root.join(path)) {
+    let canonical_root = match repo_root.canonicalize() {
+        Ok(root) => root,
+        Err(error) => {
+            errors.push(format!("cannot canonicalize repo root: {error}"));
+            return;
+        }
+    };
+    let candidate = repo_root.join(path);
+    let mut cursor = repo_root.to_path_buf();
+    for component in Path::new(path).components() {
+        cursor.push(component.as_os_str());
+        if fs::symlink_metadata(&cursor).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            errors.push(format!("{label} path {path:?} contains a symlink"));
+            return;
+        }
+    }
+    let canonical = match candidate.canonicalize() {
+        Ok(candidate) if candidate.starts_with(&canonical_root) => candidate,
+        Ok(_) => {
+            errors.push(format!("{label} path {path:?} escapes the repo root"));
+            return;
+        }
+        Err(error) => {
+            errors.push(format!(
+                "cannot canonicalize {label} path {path:?}: {error}"
+            ));
+            return;
+        }
+    };
+    match digest_path(&canonical) {
         Ok(actual) if actual != expected => errors.push(format!(
             "{label} digest mismatch for {path:?}: expected {expected}, actual {actual}; refresh the evidence attestation"
         )),

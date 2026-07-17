@@ -170,3 +170,31 @@ fn traversal_and_missing_input_class_fail_closed() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn symlinked_digest_ancestor_cannot_escape_repo_root() {
+    use std::os::unix::fs::symlink;
+
+    let root = temp_repo("symlink-ancestor");
+    let outside =
+        std::env::temp_dir().join(format!("pqueue-attestation-outside-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("evidence.json"), "{}\n").unwrap();
+    symlink(&outside, root.join("linked-outside")).unwrap();
+
+    let mut attestation = manifest(&root);
+    attestation.evidence[0] = DigestBinding {
+        path: "linked-outside/evidence.json".into(),
+        sha256: digest_path(&outside.join("evidence.json")).unwrap(),
+    };
+    let errors = verify_attestation(&attestation, &root, TAG, COMMIT).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.0.contains("contains a symlink"))
+    );
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(outside).unwrap();
+}

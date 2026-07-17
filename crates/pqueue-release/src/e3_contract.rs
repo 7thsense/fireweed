@@ -1,8 +1,10 @@
 //! Host-independent verification for the E3 object-log projection contract.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +23,10 @@ pub const FENCE_SUITE: &str = "segmented_object_log_commits_through_minio";
 pub const FENCE_PROFILE: &str = "minio_create_only_cas";
 pub const FENCE_MODE: &str = "create_only_put_if_absent";
 pub const NO_CAS_REASON: &str = "release_profile_requires_create_only_cas";
+pub const TRANSACTION_SUITE: &str = "external_transaction_contract_matrix_tests";
+pub const E3_PRODUCER_SUITE: &str = "performance_object_log_e3_live_tests";
+pub const E3_PRODUCER_COMMAND: &str = "scripts/perf/tp002-e3-minio.sh";
+static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,7 +36,17 @@ pub struct E3ContractManifest {
     pub e3_ledger: String,
     pub transaction_evidence: String,
     pub fencing_evidence: String,
+    pub ac7_binding: Ac7Binding,
     pub entries: Vec<E3ContractEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ac7Binding {
+    pub suite: String,
+    pub backend: String,
+    pub bounds_ms: Vec<u64>,
+    pub request_id_timing: RequestIdTiming,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -146,14 +162,56 @@ pub fn build_e3_fence_evidence(
 pub fn write_e3_fence_evidence(path: &Path, row: &E3FenceEvidenceRow) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+        let mut cursor = PathBuf::new();
+        for component in parent.components() {
+            cursor.push(component.as_os_str());
+            if fs::symlink_metadata(&cursor).is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(std::io::Error::other(
+                    "refusing a symlinked fence-evidence parent path",
+                ));
+            }
+        }
     }
-    let temp = path.with_extension("tmp");
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(std::io::Error::other(
+            "refusing to replace a symlink fence-evidence target",
+        ));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("fence-evidence path requires a UTF-8 file name"))?;
+    let (temp, mut file) = loop {
+        let nonce = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
     let body = serde_json::to_vec_pretty(row).expect("E3FenceEvidenceRow serializes");
-    fs::write(&temp, body)?;
-    fs::rename(temp, path)
+    if let Err(error) = file.write_all(&body).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error);
+    }
+    Ok(())
 }
 
-pub fn verify_e3_contract(manifest_path: &Path) -> Result<E3ContractSummary, Vec<E3ContractError>> {
+pub fn verify_e3_contract(
+    manifest_path: &Path,
+    expected_revision: &str,
+) -> Result<E3ContractSummary, Vec<E3ContractError>> {
     let body = match fs::read_to_string(manifest_path) {
         Ok(body) => body,
         Err(error) => {
@@ -184,20 +242,47 @@ pub fn verify_e3_contract(manifest_path: &Path) -> Result<E3ContractSummary, Vec
             "source_revision must be a 40-character lowercase hex revision".into(),
         ));
     }
+    if !valid_revision(expected_revision) {
+        errors.push(E3ContractError(
+            "expected revision must be a 40-character lowercase hex revision".into(),
+        ));
+    } else if manifest.source_revision != expected_revision {
+        errors.push(E3ContractError(format!(
+            "contract source_revision {} does not match expected revision {expected_revision}",
+            manifest.source_revision
+        )));
+    }
     let Some(base) = manifest_path.parent() else {
         return Err(vec![E3ContractError(
             "manifest has no parent directory".into(),
         )]);
     };
-    let ledger_path = resolve_authority(base, &manifest.e3_ledger, "e3_ledger", &mut errors);
+    let canonical_base = match base.canonicalize() {
+        Ok(base) => base,
+        Err(error) => {
+            return Err(vec![E3ContractError(format!(
+                "cannot canonicalize manifest directory {}: {error}",
+                base.display()
+            ))]);
+        }
+    };
+    let ledger_path = resolve_authority(
+        base,
+        &canonical_base,
+        &manifest.e3_ledger,
+        "e3_ledger",
+        &mut errors,
+    );
     let txn_path = resolve_authority(
         base,
+        &canonical_base,
         &manifest.transaction_evidence,
         "transaction_evidence",
         &mut errors,
     );
     let fence_path = resolve_authority(
         base,
+        &canonical_base,
         &manifest.fencing_evidence,
         "fencing_evidence",
         &mut errors,
@@ -213,7 +298,12 @@ pub fn verify_e3_contract(manifest_path: &Path) -> Result<E3ContractSummary, Vec
     if let Some(path) = fence_path {
         verify_fence(&path, &manifest.source_revision, &mut errors);
     }
-    verify_entries(&manifest.entries, &txn_rows, &mut errors);
+    verify_entries(
+        &manifest.entries,
+        &manifest.ac7_binding,
+        &txn_rows,
+        &mut errors,
+    );
 
     if errors.is_empty() {
         Ok(E3ContractSummary {
@@ -234,6 +324,7 @@ fn valid_revision(value: &str) -> bool {
 
 fn resolve_authority(
     base: &Path,
+    canonical_base: &Path,
     relative: &str,
     field: &str,
     errors: &mut Vec<E3ContractError>,
@@ -250,7 +341,43 @@ fn resolve_authority(
         )));
         None
     } else {
-        Some(base.join(path))
+        let candidate = base.join(path);
+        let mut cursor = base.to_path_buf();
+        for component in path.components() {
+            cursor.push(component.as_os_str());
+            match fs::symlink_metadata(&cursor) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    errors.push(E3ContractError(format!(
+                        "{field} path {relative:?} contains a symlink"
+                    )));
+                    return None;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    errors.push(E3ContractError(format!(
+                        "cannot inspect {field} path {}: {error}",
+                        cursor.display()
+                    )));
+                    return None;
+                }
+            }
+        }
+        match candidate.canonicalize() {
+            Ok(canonical) if canonical.starts_with(canonical_base) => Some(canonical),
+            Ok(_) => {
+                errors.push(E3ContractError(format!(
+                    "{field} path {relative:?} escapes the manifest directory"
+                )));
+                None
+            }
+            Err(error) => {
+                errors.push(E3ContractError(format!(
+                    "cannot canonicalize {field} path {}: {error}",
+                    candidate.display()
+                )));
+                None
+            }
+        }
     }
 }
 
@@ -305,14 +432,14 @@ fn verify_e3_ledger(path: &Path, revision: &str, errors: &mut Vec<E3ContractErro
                 "E3 ledger profile {profile} must be release tier and scale"
             )));
         }
-        if !row
-            .measurements
-            .tp002_evidence_ids
-            .iter()
-            .any(|id| id == "E3")
-        {
+        if row.suite != E3_PRODUCER_SUITE || !row.command.contains(E3_PRODUCER_COMMAND) {
             errors.push(E3ContractError(format!(
-                "E3 ledger profile {profile} does not substantiate E3"
+                "E3 ledger profile {profile} must come from governed producer suite {E3_PRODUCER_SUITE} via {E3_PRODUCER_COMMAND}"
+            )));
+        }
+        if row.measurements.tp002_evidence_ids.as_slice() != ["E3"] {
+            errors.push(E3ContractError(format!(
+                "E3 ledger profile {profile} must substantiate exactly E3"
             )));
         }
         require_value(&row, "source_revision", serde_json::json!(revision), errors);
@@ -387,9 +514,17 @@ fn read_transaction_rows(
 
 fn verify_entries(
     entries: &[E3ContractEntry],
+    ac7_binding: &Ac7Binding,
     rows: &[TransactionEvidenceRow],
     errors: &mut Vec<E3ContractError>,
 ) {
+    if ac7_binding.suite != TRANSACTION_SUITE
+        || ac7_binding.backend != "objectlog(force-seal|group-commit)"
+        || ac7_binding.bounds_ms.as_slice() != REQUIRED_BOUNDS_MS
+        || ac7_binding.request_id_timing != RequestIdTiming::ForceSealedConfigIndependent
+    {
+        errors.push(E3ContractError("AC-TXN-7 binding must name the governed suite/backend, exact [1,5,20,100]ms bounds, and force-sealed config-independent request-id timing".into()));
+    }
     let mut pairs = BTreeSet::new();
     for entry in entries {
         let context = format!("profile={} bound={}ms", entry.profile, entry.bound_ms);
@@ -423,6 +558,14 @@ fn verify_entries(
                 )));
                 continue;
             }
+            let expected_backend = governed_backend(&entry.profile, &authority.ac);
+            if expected_backend != Some(authority.backend.as_str()) {
+                errors.push(E3ContractError(format!(
+                    "{context}: {} backend {:?} is not the governed authority {:?}",
+                    authority.ac, authority.backend, expected_backend
+                )));
+                continue;
+            }
             if let Applicability::CapabilityNa { reason } = &authority.applicability {
                 errors.push(E3ContractError(format!(
                     "{context}: {} capability n/a is not authorized ({reason})",
@@ -444,7 +587,7 @@ fn verify_entries(
                 continue;
             }
             let row = candidates[0];
-            if row.suite.trim().is_empty()
+            if row.suite != TRANSACTION_SUITE
                 || row.spec != "TP-003 §3.10"
                 || row.result != "pass"
                 || row.assertions.is_empty()
@@ -456,16 +599,6 @@ fn verify_entries(
                 errors.push(E3ContractError(format!(
                     "{context}: {} TP-003 authority is not a complete passing row",
                     authority.ac
-                )));
-            }
-            if authority.ac == "AC-TXN-7"
-                && !row
-                    .assertions
-                    .iter()
-                    .any(|assertion| assertion.contains(&format!("bound={}ms", entry.bound_ms)))
-            {
-                errors.push(E3ContractError(format!(
-                    "{context}: AC-TXN-7 row lacks the selected bound assertion"
                 )));
             }
         }
@@ -485,6 +618,21 @@ fn verify_entries(
                 )));
             }
         }
+    }
+}
+
+fn governed_backend<'a>(profile: &str, ac: &str) -> Option<&'a str> {
+    match (profile, ac) {
+        ("object_log_inmemory_projection", "AC-TXN-1" | "AC-TXN-2" | "AC-TXN-3" | "AC-TXN-4") => {
+            Some("objectlog")
+        }
+        ("object_log_sqlite_projection", "AC-TXN-1" | "AC-TXN-2" | "AC-TXN-3") => {
+            Some("object_log_sqlite")
+        }
+        ("object_log_sqlite_projection", "AC-TXN-4") => Some("objectlog"),
+        (_, "AC-TXN-6") => Some("sqlite_log|object_log_sqlite"),
+        (_, "AC-TXN-7") => Some("objectlog(force-seal|group-commit)"),
+        _ => None,
     }
 }
 
