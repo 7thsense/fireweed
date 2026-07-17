@@ -91,6 +91,18 @@ pod_for_uid() {
 
 pod_ip() { k -n "${NS}" get pod "$1" -o jsonpath='{.status.podIP}'; }
 
+wait_owner_usable() {
+  local pod="$1" response="${RUN_DIR}/owner-ready.resp"
+  start_pf "pod/${pod}" "${PORT}" 8080
+  for _ in {1..60}; do
+    resp "${response}" XLEN t1:q1
+    if grep -Eq '^:[0-9]+' "${response}"; then return 0; fi
+    sleep 1
+  done
+  cat "${response}" >&2
+  die "assigned owner never became locally usable"
+}
+
 for tool in docker kind kubectl helm python3 cargo git; do need "${tool}"; done
 
 SOURCE_REV="$(git -C "${ROOT}" rev-parse HEAD)"
@@ -104,6 +116,8 @@ kind create cluster --name "${CLUSTER}"
 CLUSTER_CREATED=1
 kind load docker-image "${IMAGE}" --name "${CLUSTER}"
 for dep in "${PG_IMAGE}" "${MINIO_IMAGE}" "${MC_IMAGE}"; do docker pull "${dep}"; kind load docker-image "${dep}" --name "${CLUSTER}"; done
+PG_IMAGE_REF="${PG_IMAGE}@$(docker image inspect "${PG_IMAGE}" --format '{{index .RepoDigests 0}}' | cut -d@ -f2)"
+MINIO_IMAGE_REF="${MINIO_IMAGE}@$(docker image inspect "${MINIO_IMAGE}" --format '{{index .RepoDigests 0}}' | cut -d@ -f2)"
 k create namespace "${NS}"
 
 k -n "${NS}" apply -f - <<EOF
@@ -184,6 +198,8 @@ NONOWNER_POD="$(k -n "${NS}" get pods -l app.kubernetes.io/instance=pqueue -o na
 [[ -n "${NONOWNER_POD}" ]] || die "no non-owner pod"
 
 # One request to a non-owner must redirect to the pod-reachable active endpoint; retry exactly once.
+wait_owner_usable "${OWNER_POD}"
+stop_pf
 start_pf "pod/${NONOWNER_POD}" "${PORT}" 8080
 resp "${RUN_DIR}/moved.resp" XADD t1:q1 '*' priority 9
 grep -Eq "^-MOVED .* ${OWNER_IP}:8080" "${RUN_DIR}/moved.resp" || { cat "${RUN_DIR}/moved.resp" >&2; die "non-owner did not return owner MOVED"; }
@@ -241,7 +257,7 @@ row = {
  "evidence_id":"E2_FAILOVER","evidence_tier":"release","scale":"release",
  "backend_profile":"object_log_sqlite_projection","bars_met":True,"replicas":3,
  "image":${IMAGE@Q},"image_id":${IMAGE_ID@Q},"source_revision":${SOURCE_REV@Q},
- "chart_revision":${CHART_REV@Q},"postgres_image":${PG_IMAGE@Q},"minio_image":${MINIO_IMAGE@Q},
+ "chart_revision":${CHART_REV@Q},"postgres_image":${PG_IMAGE_REF@Q},"minio_image":${MINIO_IMAGE_REF@Q},
  "old_owner_id":${OLD_OWNER@Q},"new_owner_id":${NEW_OWNER@Q},"old_epoch":int(${OLD_EPOCH@Q}),"new_epoch":int(${NEW_EPOCH@Q}),
  "stale_append_rejected_before_mutation":True,"snapshot_tail_recovered":True,
  "visible_items_before":int(${BEFORE@Q}),"visible_items_after":int(${AFTER@Q}),
