@@ -7,8 +7,8 @@ use pqueue_core::{
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, QueueDefinition,
     UtcTimestamp,
 };
-use pqueue_engine::ProjectionStore;
 use pqueue_engine::TerminalEmissionMetrics;
+use pqueue_engine::{AsOfProjectionStore, ProjectionSnapshot, ProjectionStore};
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogLineageIdentity, PushItem,
@@ -956,5 +956,18 @@ impl ProjectionStore for HybridProjectionStore {
     ) -> EngineResult<Vec<IndexHit>> {
         self.require_hydrated(shard)?;
         self.memory.index_lookup(shard, index, key)
+    }
+}
+
+impl AsOfProjectionStore for HybridProjectionStore {
+    type AsOfProjection = InMemoryProjection;
+
+    fn reconstruct_as_of(
+        &self,
+        definition: &QueueDefinition,
+        snapshot: Option<ProjectionSnapshot>,
+    ) -> EngineResult<Self::AsOfProjection> {
+        self.check_healthy()?;
+        self.sqlite.reconstruct_as_of(definition, snapshot)
     }
 }

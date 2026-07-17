@@ -41,6 +41,54 @@ impl SqliteProjectionStore {
         })
     }
 
+    /// Delete and recreate the disposable projection schema in place.
+    ///
+    /// This is a lifecycle seam for compositions whose authoritative history lives outside SQLite. It
+    /// deliberately keeps the connection open (and therefore works for both file-backed and in-memory
+    /// stores), removes every application table atomically, recreates the current schema, and clears the
+    /// process-local definition/token caches. Callers must replay authoritative queue definitions and
+    /// commands before treating the durable projection as current again.
+    pub fn reset_projection(&self) -> EngineResult<()> {
+        let mut g = self.inner.lock().expect("projection store poisoned");
+        let tables: Vec<String> = {
+            let mut stmt = st(g.conn.prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            ))?;
+            let rows = st(stmt.query_map([], |row| row.get::<_, String>(0)))?;
+            let mut tables = Vec::new();
+            for row in rows {
+                tables.push(st(row)?);
+            }
+            tables
+        };
+
+        st(g.conn.execute_batch("BEGIN IMMEDIATE"))?;
+        let reset = (|| -> EngineResult<()> {
+            for table in tables {
+                let quoted = table.replace('"', "\"\"");
+                st(g.conn.execute_batch(&format!("DROP TABLE \"{quoted}\"")))?;
+            }
+            st(g.conn.execute_batch(RELATIONAL_SCHEMA))?;
+            Ok(())
+        })();
+        match reset {
+            Ok(()) => st(g.conn.execute_batch("COMMIT"))?,
+            Err(error) => {
+                let _ = g.conn.execute_batch("ROLLBACK");
+                return Err(error);
+            }
+        }
+
+        g.queues.clear();
+        g.schemas.clear();
+        g.grouped_shards.clear();
+        g.claim_scan_hints.clear();
+        g.claim_scan_default_fifo.clear();
+        g.live_tokens.clear();
+        Ok(())
+    }
+
     /// Create or validate queue projection metadata.
     pub fn create_queue_projection(
         &self,

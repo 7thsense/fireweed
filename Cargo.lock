@@ -2034,6 +2034,7 @@ version = "0.16.0"
 dependencies = [
  "bytes",
  "futures",
+ "pqueue",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-memory",
