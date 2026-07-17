@@ -608,7 +608,7 @@ pub trait ProjectionStore: Send {
     /// that return without appending remain available, but push, claim, finalize, renew, reassign, purge,
     /// upsert/update, and future mutation kinds all fail closed while the projection is offline, poisoned, or
     /// under Hard async debt. Default: always admit — only guarded projection profiles override this.
-    fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
+    fn admit_mutation(&mut self, _shard: &QueueKey) -> EngineResult<()> {
         Ok(())
     }
 
@@ -1012,6 +1012,9 @@ struct Inner<L, P> {
     /// path; populated only when the composition runs the ack-after-seal write path against a group-commit
     /// log. Protected by the SAME `Mutex<Inner>` as `log`/`projection` — no async lock.
     coords: HashMap<QueueKey, ShardCoord>,
+    /// Queue keys known to this composition, used to pre-bind per-queue admission for the raw UoW writer
+    /// before Rust's disjoint log/projection borrows are handed to the closure.
+    known_shards: HashSet<QueueKey>,
     /// Per-queue IN-MEMORY watermark of the highest sequence whose below-floor segment objects this process
     /// has already fully deleted (bead pqueue-b5cc2bc7). Empty on process start, so the FIRST trim tick after
     /// a (re)open re-runs `expire_segments_through` up to the durable floor to FINISH any deletion a crash
@@ -1100,6 +1103,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 commit_idempotency: HashMap::new(),
                 cmd_seq: 0,
                 coords: HashMap::new(),
+                known_shards: HashSet::new(),
                 trim_completed_through: HashMap::new(),
             }),
             control,
@@ -1774,8 +1778,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 idempotency,
                 claim_by_query_idempotency,
                 commit_idempotency,
+                known_shards,
                 ..
             } = &mut *g;
+            known_shards.insert(key.clone());
             log.ensure_shard(&key)?;
             projection.ensure_shard(&def)?;
             // Seed counters from the durable projection snapshot (no-op for the in-memory projection).
@@ -2517,6 +2523,10 @@ struct LogWriterView<'a, L> {
     /// The composition's gate capability (the projection axis' `supports_gates`), so the raw-write append
     /// path refuses gate-bearing commands on a non-gate backend exactly like the port write paths.
     supports_gates: bool,
+    /// Admission is sampled under the composed UoW lock before log/projection are split. Each queue's
+    /// reservation is single-use, binding raw `Backend::write` to one admitted append batch per queue.
+    admissions: HashMap<QueueKey, EngineResult<()>>,
+    used_admissions: HashSet<QueueKey>,
 }
 
 impl<L: LogStore> LogWriter for LogWriterView<'_, L> {
@@ -2526,6 +2536,13 @@ impl<L: LogStore> LogWriter for LogWriterView<'_, L> {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
+        if !self.used_admissions.insert(shard.clone()) {
+            return Err(EngineError::Unavailable);
+        }
+        self.admissions
+            .get(shard)
+            .cloned()
+            .unwrap_or(Err(EngineError::NotFound))?;
         for env in commands {
             validate_gate_command(self.supports_gates, &env.command)?;
         }
@@ -2623,6 +2640,14 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
             .clone();
         let result = {
             let mut g = self.inner.lock().expect("composed backend poisoned");
+            let admission_keys: Vec<QueueKey> = g.known_shards.iter().cloned().collect();
+            let admissions = admission_keys
+                .into_iter()
+                .map(|shard| {
+                    let result = g.projection.admit_mutation(&shard);
+                    (shard, result)
+                })
+                .collect();
             let Inner {
                 log, projection, ..
             } = &mut *g;
@@ -2630,6 +2655,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
             let mut lw = LogWriterView {
                 log,
                 supports_gates,
+                admissions,
+                used_admissions: HashSet::new(),
             };
             let mut pw = ProjectionWriterView {
                 projection,
@@ -2658,10 +2685,14 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
             if outcome.created {
                 let mut g = self.inner.lock().expect("poisoned");
                 let Inner {
-                    log, projection, ..
+                    log,
+                    projection,
+                    known_shards,
+                    ..
                 } = &mut *g;
                 log.ensure_shard(&key)?;
                 projection.ensure_shard(&outcome.definition)?;
+                known_shards.insert(key.clone());
                 // Record the definition in the log's durable catalog so a reopened composition can recover
                 // this queue without a re-`create_queue` (no-op for in-process / unified-relational logs).
                 log.persist_definition(&outcome.definition)?;
@@ -4799,6 +4830,10 @@ mod ordered_tests {
                 .clone()
         }
 
+        fn entry_count(&self) -> usize {
+            self.state.lock().expect("fake log poisoned").entries.len()
+        }
+
         fn set_entries(
             &self,
             shard: &QueueKey,
@@ -5078,6 +5113,7 @@ mod ordered_tests {
         paused: bool,
         pause_drain_intake: bool,
         apply_batches: Vec<Vec<&'static str>>,
+        reject_admission: bool,
     }
 
     #[derive(Clone)]
@@ -5118,6 +5154,19 @@ mod ordered_tests {
     impl ProjectionStore for FakeProjection {
         fn ensure_shard(&mut self, _definition: &QueueDefinition) -> EngineResult<()> {
             Ok(())
+        }
+
+        fn admit_mutation(&mut self, _shard: &QueueKey) -> EngineResult<()> {
+            if self
+                .state
+                .get_mut()
+                .expect("fake projection poisoned")
+                .reject_admission
+            {
+                Err(EngineError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
 
         fn apply(
@@ -5540,6 +5589,38 @@ mod ordered_tests {
         let waker = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
         Pin::new(future).poll(&mut cx)
+    }
+
+    #[test]
+    fn raw_backend_write_consumes_projection_admission_before_append() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        );
+        let shard = queue();
+        assert!(matches!(
+            poll_once(&mut backend.create_queue(qdef())),
+            Poll::Ready(Ok(_))
+        ));
+        backend.with_projection(|projection| {
+            projection
+                .state
+                .lock()
+                .expect("fake projection poisoned")
+                .reject_admission = true;
+        });
+        let envelope = pause_envelope(false, "raw-admission", ItemId::new("1").unwrap(), ts(0));
+        let write_shard = shard.clone();
+        let mut write = backend.write(move |log, _projection| {
+            log.append(&write_shard, &[envelope], 0)?;
+            Ok(())
+        });
+        assert!(matches!(
+            poll_once(&mut write),
+            Poll::Ready(Err(EngineError::Unavailable))
+        ));
+        assert_eq!(backend.with_log(FakeGroupCommitLog::entry_count), 0);
     }
 
     #[test]

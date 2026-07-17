@@ -96,6 +96,11 @@ struct DeferredCheckpoint {
     position: CommandPosition,
     command: CommandEnvelope,
     encoded_bytes: u64,
+}
+
+struct DeferredBatch {
+    shard: QueueKey,
+    entries: VecDeque<DeferredCheckpoint>,
     enqueued_at_ms: i64,
 }
 
@@ -104,8 +109,7 @@ pub struct HybridProjectionStore {
     memory: InMemoryProjection,
     hydrated: HashSet<QueueKey>,
     memory_next_seq: HashMap<QueueKey, u64>,
-    deferred: VecDeque<DeferredCheckpoint>,
-    deferred_commands: usize,
+    deferred: VecDeque<DeferredBatch>,
     deferred_flush_chunk: usize,
     /// Deterministic clock seam for async-debt tests. Production samples the wall clock.
     async_debt_now_override_ms: Option<i64>,
@@ -119,18 +123,19 @@ pub struct HybridProjectionStore {
     /// rebuild. Every mutation fails admission while it is offline; otherwise a new append could create an
     /// ordered checkpoint suffix against the deliberately reset image.
     durable_projection_offline: bool,
-    last_checkpoint_error: Option<String>,
+    checkpoint_errors: HashMap<QueueKey, String>,
     poisoned: Option<String>,
     /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-5/5A). `None` in every production path.
     fault_hook: Mutex<Option<Arc<dyn HybridFaultHook>>>,
     /// `objectlog/hybrid-async` (TD-004) admission/high-water/retention gate. `Some` ONLY for the
     /// `hybrid-async` server profile (wired by `with_async_monitor`); `None` for `objectlog/hybrid` and
-    /// `objectlog/hybrid-strict`, which do not gate on async-apply debt. When present, the store-wide async
-    /// apply debt (the deferred-checkpoint backlog) is folded into this monitor on every live apply and
-    /// deferred flush, so [`ProjectionStore::admit_mutation`] fails new mutating admission closed under Hard
+    /// `objectlog/hybrid-strict`, which do not gate on async-apply debt. When present, each queue's async
+    /// apply debt (the deferred-checkpoint backlog) is folded into its monitor on live apply, admission, and
+    /// every deferred flush attempt, so [`ProjectionStore::admit_mutation`] fails new admission under Hard
     /// backpressure and [`ProjectionStore::recovery_high_water`] withholds the lagging high-water until debt
     /// drains below the release band.
-    async_monitor: Option<HybridAsyncMonitor>,
+    async_thresholds: Option<HybridAsyncThresholds>,
+    async_monitors: HashMap<QueueKey, HybridAsyncMonitor>,
 }
 
 impl HybridProjectionStore {
@@ -149,15 +154,15 @@ impl HybridProjectionStore {
             hydrated: HashSet::new(),
             memory_next_seq: HashMap::new(),
             deferred: VecDeque::new(),
-            deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             async_debt_now_override_ms: None,
             strict: false,
             durable_projection_offline: false,
-            last_checkpoint_error: None,
+            checkpoint_errors: HashMap::new(),
             poisoned: None,
             fault_hook: Mutex::new(None),
-            async_monitor: None,
+            async_thresholds: None,
+            async_monitors: HashMap::new(),
         }
     }
 
@@ -169,15 +174,15 @@ impl HybridProjectionStore {
             hydrated: HashSet::new(),
             memory_next_seq: HashMap::new(),
             deferred: VecDeque::new(),
-            deferred_commands: 0,
             deferred_flush_chunk: DEFAULT_DEFERRED_FLUSH_CHUNK,
             async_debt_now_override_ms: None,
             strict: false,
             durable_projection_offline: false,
-            last_checkpoint_error: None,
+            checkpoint_errors: HashMap::new(),
             poisoned: None,
             fault_hook: Mutex::new(None),
-            async_monitor: None,
+            async_thresholds: None,
+            async_monitors: HashMap::new(),
         }
     }
 
@@ -196,26 +201,41 @@ impl HybridProjectionStore {
     }
 
     /// Install the `objectlog/hybrid-async` async-apply debt/backpressure/poison monitor (TD-004) with the
-    /// server-configured `thresholds`. This is the ONLY constructor that arms the monitor: the default
-    /// `objectlog/hybrid` and `objectlog/hybrid-strict` profiles leave `async_monitor == None` and are
-    /// unaffected. Once armed, every live apply and deferred flush folds the store's async-apply debt (the
-    /// deferred-checkpoint backlog) into the monitor, so [`ProjectionStore::admit_mutation`] fails new
+    /// server-configured `thresholds`. This is the ONLY constructor that arms monitoring: the default
+    /// `objectlog/hybrid` and `objectlog/hybrid-strict` profiles have no thresholds and are unaffected. Once
+    /// armed, live apply, admission, and flush attempts fold each queue's async-apply debt (the deferred-
+    /// checkpoint backlog) into its monitor, so [`ProjectionStore::admit_mutation`] fails new
     /// mutating admission closed under Hard backpressure and [`ProjectionStore::recovery_high_water`]
     /// withholds the lagging high-water until the backlog drains below the release band.
     pub fn with_async_monitor(mut self, thresholds: HybridAsyncThresholds) -> Self {
-        self.async_monitor = Some(HybridAsyncMonitor::new(thresholds));
+        self.async_thresholds = Some(thresholds);
+        for shard in &self.hydrated {
+            self.async_monitors
+                .insert(shard.clone(), HybridAsyncMonitor::new(thresholds));
+        }
         self
     }
 
     /// Whether the `objectlog/hybrid-async` debt monitor is armed on this store (test/observability seam).
     pub fn has_async_monitor(&self) -> bool {
-        self.async_monitor.is_some()
+        self.async_thresholds.is_some()
     }
 
     /// The current async-apply backpressure level, or `None` when no monitor is armed (test/observability
     /// seam for the AC-TXN-5A server-wired proof).
     pub fn async_backpressure_level(&self) -> Option<BackpressureLevel> {
-        self.async_monitor.as_ref().map(HybridAsyncMonitor::level)
+        self.async_thresholds?;
+        Some(
+            self.async_monitors
+                .values()
+                .map(HybridAsyncMonitor::level)
+                .max_by_key(|level| match level {
+                    BackpressureLevel::Clear => 0,
+                    BackpressureLevel::Soft => 1,
+                    BackpressureLevel::Hard => 2,
+                })
+                .unwrap_or(BackpressureLevel::Clear),
+        )
     }
 
     /// Whether segment expiry / retention advancement is currently allowed under the async-apply monitor
@@ -223,9 +243,9 @@ impl HybridProjectionStore {
     /// async retention gate); otherwise deferred to [`HybridAsyncMonitor::retention_may_advance`], which is
     /// `false` while debt is over budget or the worker is poisoned.
     pub fn async_retention_may_advance(&self) -> bool {
-        self.async_monitor
-            .as_ref()
-            .is_none_or(HybridAsyncMonitor::retention_may_advance)
+        self.async_monitors
+            .values()
+            .all(HybridAsyncMonitor::retention_may_advance)
     }
 
     /// The count of terminal (Complete/Failed) items currently resident in the DURABLE, checkpointed SQLite
@@ -254,35 +274,61 @@ impl HybridProjectionStore {
         })
     }
 
-    fn observe_async_debt(&mut self) {
-        let lag = self.deferred_commands as u64;
-        let now_ms = self.async_debt_now_ms();
-        let apply_debt_bytes = self.deferred.iter().fold(0_u64, |total, entry| {
-            total.saturating_add(entry.encoded_bytes)
-        });
-        let oldest_unapplied_age_ms = self.deferred.front().map_or(0, |entry| {
-            now_ms.saturating_sub(entry.enqueued_at_ms).max(0) as u64
-        });
-        if let Some(monitor) = self.async_monitor.as_mut() {
-            monitor.observe(
-                HybridAsyncDebt {
-                    apply_lag_commands: lag,
-                    apply_debt_bytes,
-                    apply_queue_depth: lag,
-                    oldest_unapplied_age_ms,
-                },
-                now_ms,
-            );
+    fn ensure_async_monitor(&mut self, shard: &QueueKey) {
+        if let Some(thresholds) = self.async_thresholds {
+            self.async_monitors
+                .entry(shard.clone())
+                .or_insert_with(|| HybridAsyncMonitor::new(thresholds));
         }
     }
 
-    fn deferred_entries(
+    fn debt_for(&self, shard: &QueueKey, now_ms: i64) -> HybridAsyncDebt {
+        let batches: Vec<&DeferredBatch> = self
+            .deferred
+            .iter()
+            .filter(|batch| &batch.shard == shard)
+            .collect();
+        let apply_lag_commands = batches.iter().map(|batch| batch.entries.len() as u64).sum();
+        let apply_debt_bytes = batches.iter().fold(0_u64, |total, batch| {
+            batch.entries.iter().fold(total, |subtotal, entry| {
+                subtotal.saturating_add(entry.encoded_bytes)
+            })
+        });
+        let oldest_unapplied_age_ms = batches.first().map_or(0, |batch| {
+            now_ms.saturating_sub(batch.enqueued_at_ms).max(0) as u64
+        });
+        HybridAsyncDebt {
+            apply_lag_commands,
+            apply_debt_bytes,
+            apply_queue_depth: batches.len() as u64,
+            oldest_unapplied_age_ms,
+        }
+    }
+
+    fn observe_async_debt(&mut self, shard: &QueueKey) {
+        self.ensure_async_monitor(shard);
+        let now_ms = self.async_debt_now_ms();
+        let debt = self.debt_for(shard, now_ms);
+        if let Some(monitor) = self.async_monitors.get_mut(shard) {
+            monitor.observe(debt, now_ms);
+        }
+    }
+
+    fn observe_all_async_debt(&mut self) {
+        let mut shards: HashSet<QueueKey> = self.async_monitors.keys().cloned().collect();
+        shards.extend(self.deferred.iter().map(|batch| batch.shard.clone()));
+        for shard in shards {
+            self.observe_async_debt(&shard);
+        }
+    }
+
+    fn deferred_batch(
         &self,
         positions: impl IntoIterator<Item = CommandPosition>,
         commands: impl IntoIterator<Item = CommandEnvelope>,
-    ) -> EngineResult<Vec<DeferredCheckpoint>> {
+    ) -> EngineResult<DeferredBatch> {
         let enqueued_at_ms = self.async_debt_now_ms();
-        positions
+        let entries: VecDeque<DeferredCheckpoint> = positions
             .into_iter()
             .zip(commands)
             .map(|(position, command)| {
@@ -293,22 +339,47 @@ impl HybridProjectionStore {
                     position,
                     command,
                     encoded_bytes,
-                    enqueued_at_ms,
                 })
             })
-            .collect()
+            .collect::<EngineResult<_>>()?;
+        let shard = entries
+            .front()
+            .map(|entry| entry.position.queue.clone())
+            .ok_or_else(|| EngineError::Storage("deferred batch must not be empty".into()))?;
+        if entries.iter().any(|entry| entry.position.queue != shard) {
+            return Err(EngineError::Storage(
+                "deferred batch spans multiple queue shards".into(),
+            ));
+        }
+        Ok(DeferredBatch {
+            shard,
+            entries,
+            enqueued_at_ms,
+        })
     }
 
     /// Deterministic test seam for byte/age debt classification. Production callers never set it.
     #[doc(hidden)]
     pub fn set_async_debt_now_ms_for_test(&mut self, now_ms: Option<i64>) {
         self.async_debt_now_override_ms = now_ms;
-        self.observe_async_debt();
     }
 
     /// Export the armed async monitor's current measured backlog metrics.
     pub fn async_metrics(&self) -> Option<HybridAsyncMetrics> {
-        self.async_monitor.as_ref().map(HybridAsyncMonitor::metrics)
+        (self.async_monitors.len() == 1)
+            .then(|| {
+                self.async_monitors
+                    .values()
+                    .next()
+                    .map(HybridAsyncMonitor::metrics)
+            })
+            .flatten()
+    }
+
+    pub fn async_metrics_for(&self, shard: &QueueKey) -> Option<HybridAsyncMetrics> {
+        self.async_monitors
+            .get(shard)
+            .map(HybridAsyncMonitor::metrics)
     }
 
     /// Install (or clear, with `None`) a test-only fault hook (TP-003 §3.10 AC-TXN-5/5A). Never called from
@@ -348,9 +419,8 @@ impl HybridProjectionStore {
     pub fn delete_durable_projection(&mut self) -> EngineResult<()> {
         self.sqlite.reset_projection()?;
         self.deferred.clear();
-        self.deferred_commands = 0;
         self.durable_projection_offline = true;
-        self.observe_async_debt();
+        self.observe_all_async_debt();
         Ok(())
     }
 
@@ -364,11 +434,10 @@ impl HybridProjectionStore {
     /// Mark a fully replayed and verified SQLite image online and clear async worker poison/debt.
     pub fn finish_durable_rebuild(&mut self) {
         self.deferred.clear();
-        self.deferred_commands = 0;
         self.durable_projection_offline = false;
-        self.last_checkpoint_error = None;
+        self.checkpoint_errors.clear();
         self.poisoned = None;
-        if let Some(monitor) = self.async_monitor.as_mut() {
+        for monitor in self.async_monitors.values_mut() {
             monitor.clear_after_rebuild();
         }
     }
@@ -378,14 +447,18 @@ impl HybridProjectionStore {
     }
 
     pub fn checkpoint_error(&self) -> Option<&str> {
-        self.last_checkpoint_error.as_deref()
+        self.checkpoint_errors.values().next().map(String::as_str)
     }
 
     /// The latched poison reason, or `None` when healthy. Fed to the composition's recovery gate via
     /// [`ProjectionStore::recovery_poison`] so a poisoned store fails closed instead of serving a divergent
     /// image.
     pub fn poison_reason(&self) -> Option<&str> {
-        self.poisoned.as_deref()
+        self.poisoned.as_deref().or_else(|| {
+            self.async_monitors
+                .values()
+                .find_map(HybridAsyncMonitor::poison_reason)
+        })
     }
 
     /// Latch poison from an out-of-band failure the async apply pipeline detected (persistent checkpoint
@@ -419,6 +492,13 @@ impl HybridProjectionStore {
 
     fn require_hydrated(&self, shard: &QueueKey) -> EngineResult<()> {
         self.check_healthy()?;
+        if let Some(reason) = self
+            .async_monitors
+            .get(shard)
+            .and_then(HybridAsyncMonitor::poison_reason)
+        {
+            return Err(Self::poison_error(reason));
+        }
         if self.hydrated.contains(shard) {
             Ok(())
         } else {
@@ -525,13 +605,14 @@ impl HybridProjectionStore {
 
     /// Number of committed commands waiting for SQLite checkpoint apply. Test/observability seam.
     pub fn deferred_command_count(&self) -> usize {
-        self.deferred_commands
+        self.deferred.iter().map(|batch| batch.entries.len()).sum()
     }
 }
 
 impl ProjectionStore for HybridProjectionStore {
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         self.check_healthy()?;
+        self.ensure_async_monitor(&Self::shard_for(definition));
         self.sqlite.create_queue_projection(definition.clone())?;
         self.hydrate_from_sqlite(definition)
     }
@@ -563,12 +644,11 @@ impl ProjectionStore for HybridProjectionStore {
         if self.strict {
             return self.apply_durable_then_memory(positions, commands);
         }
-        let deferred =
-            self.deferred_entries(positions.iter().cloned(), commands.iter().cloned())?;
+        let deferred = self.deferred_batch(positions.iter().cloned(), commands.iter().cloned())?;
+        let shard = deferred.shard.clone();
         self.apply_memory(positions, commands)?;
-        self.deferred.extend(deferred);
-        self.deferred_commands = self.deferred.len();
-        self.observe_async_debt();
+        self.deferred.push_back(deferred);
+        self.observe_async_debt(&shard);
         Ok(())
     }
 
@@ -592,12 +672,11 @@ impl ProjectionStore for HybridProjectionStore {
         if self.strict {
             return self.apply_durable_then_memory(&positions, &commands);
         }
-        let deferred =
-            self.deferred_entries(positions.iter().cloned(), commands.iter().cloned())?;
+        let deferred = self.deferred_batch(positions.iter().cloned(), commands.iter().cloned())?;
+        let shard = deferred.shard.clone();
         self.apply_memory(&positions, &commands)?;
-        self.deferred.extend(deferred);
-        self.deferred_commands = self.deferred.len();
-        self.observe_async_debt();
+        self.deferred.push_back(deferred);
+        self.observe_async_debt(&shard);
         Ok(())
     }
 
@@ -620,12 +699,11 @@ impl ProjectionStore for HybridProjectionStore {
         if self.strict {
             return self.apply_durable_then_memory(positions, commands);
         }
-        let deferred =
-            self.deferred_entries(positions.iter().cloned(), commands.iter().cloned())?;
+        let deferred = self.deferred_batch(positions.iter().cloned(), commands.iter().cloned())?;
+        let shard = deferred.shard.clone();
         self.apply_memory(positions, commands)?;
-        self.deferred.extend(deferred);
-        self.deferred_commands = self.deferred.len();
-        self.observe_async_debt();
+        self.deferred.push_back(deferred);
+        self.observe_async_debt(&shard);
         Ok(())
     }
 
@@ -636,6 +714,9 @@ impl ProjectionStore for HybridProjectionStore {
     /// backlog over several calls instead of one unbounded transaction.
     fn flush_deferred(&mut self) -> EngineResult<()> {
         self.check_healthy()?;
+        // A flush tick is also a debt observation tick, even when the worker is idle/offline or the
+        // attempted checkpoint fails. This lets quiet backlog age into Hard without another mutation.
+        self.observe_all_async_debt();
         if self.durable_projection_offline {
             return Ok(());
         }
@@ -643,46 +724,80 @@ impl ProjectionStore for HybridProjectionStore {
             return Ok(());
         }
 
-        let take = self.deferred.len().min(self.deferred_flush_chunk);
-        let positions: Vec<CommandPosition> = self
+        let shard = self
+            .deferred
+            .front()
+            .expect("checked non-empty")
+            .shard
+            .clone();
+        let mut remaining = self.deferred_flush_chunk;
+        let mut positions = Vec::new();
+        let mut commands = Vec::new();
+        for batch in self
             .deferred
             .iter()
-            .take(take)
-            .map(|entry| entry.position.clone())
-            .collect();
-        let commands: Vec<CommandEnvelope> = self
-            .deferred
-            .iter()
-            .take(take)
-            .map(|entry| entry.command.clone())
-            .collect();
+            .take_while(|batch| batch.shard == shard)
+        {
+            let take = batch.entries.len().min(remaining);
+            positions.extend(
+                batch
+                    .entries
+                    .iter()
+                    .take(take)
+                    .map(|entry| entry.position.clone()),
+            );
+            commands.extend(
+                batch
+                    .entries
+                    .iter()
+                    .take(take)
+                    .map(|entry| entry.command.clone()),
+            );
+            remaining -= take;
+            if remaining == 0 {
+                break;
+            }
+        }
         if let Err(e) = self.fault(HybridFaultCutPoint::DuringAsyncSqliteApply) {
             // The deferred batch is untouched (still queued for the next flush attempt) but the async
             // apply pipeline is no longer trustworthy: poison so it fails closed instead of silently
             // retrying forever against a possibly-corrupt SQLite image.
             let reason = format!("async SQLite checkpoint apply faulted: {e}");
-            self.last_checkpoint_error = Some(reason.clone());
+            self.checkpoint_errors.insert(shard.clone(), reason.clone());
+            if let Some(monitor) = self.async_monitors.get_mut(&shard) {
+                monitor.poison(reason.clone());
+                self.observe_async_debt(&shard);
+                return Err(EngineError::Storage(reason));
+            }
             return self.poison(reason);
         }
         if let Err(error) = self.sqlite.apply_committed_batch(&positions, &commands) {
-            self.last_checkpoint_error = Some(error.to_string());
-            if let Some(monitor) = self.async_monitor.as_mut()
-                && monitor.record_checkpoint_error(error.to_string())
-            {
-                self.poisoned = monitor.poison_reason().map(str::to_owned);
+            self.checkpoint_errors
+                .insert(shard.clone(), error.to_string());
+            if let Some(monitor) = self.async_monitors.get_mut(&shard) {
+                monitor.record_checkpoint_error(error.to_string());
             }
+            self.observe_async_debt(&shard);
             return Err(error);
         }
-        self.deferred.drain(..take);
-        self.deferred_commands = self.deferred.len();
-        self.last_checkpoint_error = None;
+        let mut applied = positions.len();
+        while applied > 0 {
+            let batch = self.deferred.front_mut().expect("applied prefix exists");
+            let drained = batch.entries.len().min(applied);
+            batch.entries.drain(..drained);
+            applied -= drained;
+            if batch.entries.is_empty() {
+                self.deferred.pop_front();
+            }
+        }
+        self.checkpoint_errors.remove(&shard);
         // An ordered batch checkpointed cleanly into the durable SQLite image: satisfy the clean-batch
         // precondition for releasing Hard backpressure, then re-fold the (now-smaller) backlog so the level
         // can drop once debt falls below the release band. Only the `hybrid-async` profile arms the monitor.
-        if let Some(monitor) = self.async_monitor.as_mut() {
+        if let Some(monitor) = self.async_monitors.get_mut(&shard) {
             monitor.record_apply_success();
         }
-        self.observe_async_debt();
+        self.observe_all_async_debt();
         Ok(())
     }
 
@@ -693,7 +808,7 @@ impl ProjectionStore for HybridProjectionStore {
         // Hard (or the worker is poisoned) the lagging SQLite high-water MUST NOT be advertised as a safe
         // replay-skip point, so the monitor withholds it (returns `None`) until the backlog drains below the
         // release band. The non-async profiles have no monitor and pass the high-water through unchanged.
-        Ok(match self.async_monitor.as_ref() {
+        Ok(match self.async_monitors.get(shard) {
             Some(monitor) => monitor.recovery_high_water_safe(high_water),
             None => high_water,
         })
@@ -757,31 +872,39 @@ impl ProjectionStore for HybridProjectionStore {
     /// Surface the hybrid store's latched poison to the composition's recovery gate: a poisoned hybrid
     /// projection must stop serving (fail closed) rather than hydrate + advertise a divergent image
     /// (TD-004 §backpressure/poison). Feeds [`pqueue_engine::resolve_recovery_start`].
-    fn recovery_poison(&self, _shard: &QueueKey) -> Option<String> {
-        self.poisoned.clone()
+    fn recovery_poison(&self, shard: &QueueKey) -> Option<String> {
+        self.poisoned.clone().or_else(|| {
+            self.async_monitors
+                .get(shard)
+                .and_then(HybridAsyncMonitor::poison_reason)
+                .map(str::to_owned)
+        })
     }
 
     /// `objectlog/hybrid-async` (TD-004 "Recovery/high-water backpressure"): a store whose async-apply debt
     /// is Hard reports backpressure so recovery-on-open replays from an earlier authoritative source instead
     /// of trusting the lagging SQLite high-water. `false` when no monitor is armed (the non-async profiles).
-    fn recovery_backpressured(&self, _shard: &QueueKey) -> bool {
+    fn recovery_backpressured(&self, shard: &QueueKey) -> bool {
         matches!(
-            self.async_monitor.as_ref().map(HybridAsyncMonitor::level),
+            self.async_monitors
+                .get(shard)
+                .map(HybridAsyncMonitor::level),
             Some(BackpressureLevel::Hard)
         )
     }
 
     /// The `objectlog/hybrid-async` mutation-admission gate (TD-004 "Hard debt threshold"). Fails new
     /// mutating admission CLOSED — with the typed retryable [`EngineError::Unavailable`] backpressure error
-    /// (or a `Storage` poison error) — once the store-wide async-apply backlog is over its hard budget, so a
+    /// (or a `Storage` poison error) — once that queue's async-apply backlog is over its hard budget, so a
     /// push/claim cannot pile more debt onto a queue already at risk of an SLO violation. The non-async
     /// profiles arm no monitor and admit unconditionally (the default trait impl semantics).
-    fn admit_mutation(&self, _shard: &QueueKey) -> EngineResult<()> {
+    fn admit_mutation(&mut self, shard: &QueueKey) -> EngineResult<()> {
+        self.observe_async_debt(shard);
         self.check_healthy()?;
         if self.durable_projection_offline {
             return Err(EngineError::Unavailable);
         }
-        match self.async_monitor.as_ref() {
+        match self.async_monitors.get(shard) {
             Some(monitor) => monitor.admit_mutation(),
             None => Ok(()),
         }
@@ -790,9 +913,9 @@ impl ProjectionStore for HybridProjectionStore {
     /// `objectlog/hybrid-async` (TD-004 "Retention backpressure"): withhold terminal-item retention /
     /// segment-expiry advancement while async-apply debt is over budget or the worker is poisoned. `true`
     /// when no monitor is armed (the non-async profiles have no async retention gate).
-    fn retention_may_advance(&self, _shard: &QueueKey) -> bool {
-        self.async_monitor
-            .as_ref()
+    fn retention_may_advance(&self, shard: &QueueKey) -> bool {
+        self.async_monitors
+            .get(shard)
             .is_none_or(HybridAsyncMonitor::retention_may_advance)
     }
 
@@ -821,7 +944,7 @@ impl ProjectionStore for HybridProjectionStore {
         emit_change_records: bool,
         emission_cursor: Option<&CommandPosition>,
     ) -> EngineResult<Vec<ItemId>> {
-        if self.async_monitor.is_none() {
+        if self.async_thresholds.is_none() {
             return Ok(Vec::new());
         }
         self.check_healthy()?;

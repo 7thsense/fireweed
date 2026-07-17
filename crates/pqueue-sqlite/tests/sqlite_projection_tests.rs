@@ -6,12 +6,12 @@ use bytes::Bytes;
 use pqueue_conformance::{item, qdef, shard, ts};
 use pqueue_core::{
     ClientItemKey, GroupKey, IndexSpec, ItemId, LeaseToken, Metadata, MetadataValue, PriorityValue,
-    QueueDefinition,
+    QueueDefinition, QueueId,
 };
 use pqueue_engine::{
     AdvanceInstanceFenceCommand, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
     CommandPosition, EngineError, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    PauseQueueCommand, ProjectionRead, PushCommand, PushItem, QueueCommand, SideRecord,
+    PauseQueueCommand, ProjectionRead, PushCommand, PushItem, QueueCommand, QueueKey, SideRecord,
     WriteSideRecordsCommand,
 };
 use pqueue_projection::InMemoryProjection;
@@ -41,6 +41,21 @@ fn envelope(
 
 fn pos(sequence: u64) -> CommandPosition {
     CommandPosition::new(shard(), 0, sequence)
+}
+
+fn named_qdef(name: &str) -> QueueDefinition {
+    let mut definition = qdef();
+    definition.queue_id = QueueId::new(name).unwrap();
+    definition
+}
+
+fn named_shard(name: &str) -> QueueKey {
+    let definition = named_qdef(name);
+    QueueKey::new(definition.tenant_id, definition.queue_id)
+}
+
+fn named_pos(name: &str, sequence: u64) -> CommandPosition {
+    CommandPosition::new(named_shard(name), 0, sequence)
 }
 
 fn rich_item(id: &str, key: &str) -> PushItem {
@@ -727,7 +742,7 @@ fn async_debt_uses_real_encoded_bytes_and_oldest_queue_age() {
     assert!(metrics.apply_debt_bytes > 1);
     assert_eq!(metrics.backpressure_level, BackpressureLevel::Hard);
     assert!(
-        pqueue_engine::ProjectionStore::admit_mutation(&byte_limited, &shard()).is_err(),
+        pqueue_engine::ProjectionStore::admit_mutation(&mut byte_limited, &shard()).is_err(),
         "the real encoded-byte bound must reject subsequent mutations"
     );
 
@@ -742,11 +757,148 @@ fn async_debt_uses_real_encoded_bytes_and_oldest_queue_age() {
         0
     );
     age_limited.set_async_debt_now_ms_for_test(Some(2_050));
+    assert!(
+        pqueue_engine::ProjectionStore::admit_mutation(&mut age_limited, &shard()).is_err(),
+        "admission must resample oldest-unapplied age"
+    );
     let metrics = age_limited.async_metrics().unwrap();
     assert_eq!(metrics.oldest_unapplied_age_ms, 50);
     assert_eq!(metrics.backpressure_level, BackpressureLevel::Hard);
-    assert!(
-        pqueue_engine::ProjectionStore::admit_mutation(&age_limited, &shard()).is_err(),
-        "the oldest-unapplied age bound must reject subsequent mutations"
+}
+
+#[test]
+fn async_debt_is_per_queue_and_depth_counts_sealed_batches() {
+    let mut store = HybridProjectionStore::in_memory()
+        .unwrap()
+        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 2, 10_000, 3).unwrap());
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &named_qdef("debt-a")).unwrap();
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &named_qdef("debt-b")).unwrap();
+    store.set_async_debt_now_ms_for_test(Some(1_000));
+
+    let first_batch = vec![
+        envelope(
+            "a-1",
+            QueueCommand::Push(PushCommand {
+                items: vec![rich_item("101", "a-key-1")],
+            }),
+            vec![ItemId::new("101").unwrap()],
+            0,
+        ),
+        envelope(
+            "a-2",
+            QueueCommand::Push(PushCommand {
+                items: vec![rich_item("102", "a-key-2")],
+            }),
+            vec![ItemId::new("102").unwrap()],
+            0,
+        ),
+    ];
+    pqueue_engine::ProjectionStore::apply_live(
+        &mut store,
+        &[named_pos("debt-a", 0), named_pos("debt-a", 1)],
+        &first_batch,
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .async_metrics_for(&named_shard("debt-a"))
+            .unwrap()
+            .apply_queue_depth,
+        1,
+        "one sealed two-command apply is one queued batch"
     );
+
+    let a3 = envelope(
+        "a-3",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("103", "a-key-3")],
+        }),
+        vec![ItemId::new("103").unwrap()],
+        0,
+    );
+    pqueue_engine::ProjectionStore::apply_live(&mut store, &[named_pos("debt-a", 2)], &[a3])
+        .unwrap();
+    let b1 = envelope(
+        "b-1",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("201", "b-key-1")],
+        }),
+        vec![ItemId::new("201").unwrap()],
+        0,
+    );
+    pqueue_engine::ProjectionStore::apply_live(&mut store, &[named_pos("debt-b", 0)], &[b1])
+        .unwrap();
+
+    let a = named_shard("debt-a");
+    let b = named_shard("debt-b");
+    let a_metrics = store.async_metrics_for(&a).unwrap();
+    let b_metrics = store.async_metrics_for(&b).unwrap();
+    assert_eq!(a_metrics.apply_lag_commands, 3);
+    assert_eq!(a_metrics.apply_queue_depth, 2);
+    assert_eq!(a_metrics.backpressure_level, BackpressureLevel::Hard);
+    assert_eq!(b_metrics.apply_lag_commands, 1);
+    assert_eq!(b_metrics.apply_queue_depth, 1);
+    assert_ne!(b_metrics.backpressure_level, BackpressureLevel::Hard);
+    assert!(pqueue_engine::ProjectionStore::admit_mutation(&mut store, &a).is_err());
+    assert!(pqueue_engine::ProjectionStore::admit_mutation(&mut store, &b).is_ok());
+}
+
+#[test]
+fn failed_flush_resamples_quiet_oldest_age_before_returning() {
+    let mut store = HybridProjectionStore::in_memory()
+        .unwrap()
+        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 50, 3).unwrap());
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
+    store.set_async_debt_now_ms_for_test(Some(5_000));
+    let command = envelope(
+        "quiet-age",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("301", "quiet-key")],
+        }),
+        vec![ItemId::new("301").unwrap()],
+        0,
+    );
+    pqueue_engine::ProjectionStore::apply_live(&mut store, &[pos(0)], &[command]).unwrap();
+    store.set_fault_hook(Some(Arc::new(AsyncCheckpointFailure)));
+    store.set_async_debt_now_ms_for_test(Some(5_050));
+    assert!(pqueue_engine::ProjectionStore::flush_deferred(&mut store).is_err());
+    let metrics = store.async_metrics_for(&shard()).unwrap();
+    assert_eq!(metrics.oldest_unapplied_age_ms, 50);
+    assert_eq!(metrics.backpressure_level, BackpressureLevel::Hard);
+}
+
+#[test]
+fn async_poison_rejects_future_admission_but_not_an_already_admitted_apply() {
+    let mut store = HybridProjectionStore::in_memory()
+        .unwrap()
+        .with_async_monitor(HybridAsyncThresholds::new(100, u64::MAX, 100, 10_000, 1).unwrap());
+    pqueue_engine::ProjectionStore::ensure_shard(&mut store, &qdef()).unwrap();
+    let first = envelope(
+        "poison-race-first",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("401", "race-key-1")],
+        }),
+        vec![ItemId::new("401").unwrap()],
+        0,
+    );
+    pqueue_engine::ProjectionStore::apply_live(&mut store, &[pos(0)], &[first]).unwrap();
+    assert!(pqueue_engine::ProjectionStore::admit_mutation(&mut store, &shard()).is_ok());
+
+    store.set_fault_hook(Some(Arc::new(AsyncCheckpointFailure)));
+    assert!(pqueue_engine::ProjectionStore::flush_deferred(&mut store).is_err());
+    store.set_fault_hook(None);
+    assert!(store.async_metrics_for(&shard()).unwrap().poisoned);
+
+    let admitted_before_poison = envelope(
+        "poison-race-admitted",
+        QueueCommand::Push(PushCommand {
+            items: vec![rich_item("402", "race-key-2")],
+        }),
+        vec![ItemId::new("402").unwrap()],
+        0,
+    );
+    pqueue_engine::ProjectionStore::apply_live(&mut store, &[pos(1)], &[admitted_before_poison])
+        .expect("an admitted group-commit buffer must finish its live apply after async poison");
+    assert_eq!(store.deferred_command_count(), 2);
+    assert!(pqueue_engine::ProjectionStore::admit_mutation(&mut store, &shard()).is_err());
 }
