@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "suite": "segmented_object_log_commits_through_minio",
+  "source_revision": "0123456789abcdef0123456789abcdef01234567",
+  "store_profile": "minio_create_only_cas",
+  "result": "pass",
+  "stale_epoch_rejected": true,
+  "current_epoch_committed": true,
+  "cas_mode": "create_only_put_if_absent",
+  "no_cas": {
+    "status": "excluded",
+    "reason": "release_profile_requires_create_only_cas"
+  }
+}
