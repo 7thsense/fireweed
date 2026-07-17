@@ -112,6 +112,19 @@ impl<O: Clone> QueueIdempotencyCache<O> {
             .any(|entry| entry.expires_at > now && predicate(&entry.outcome))
     }
 
+    /// Extend retained matching outcomes without shortening any existing retention horizon.
+    pub fn extend_expiry_matching(
+        &mut self,
+        expires_at: UtcTimestamp,
+        predicate: impl Fn(&O) -> bool,
+    ) {
+        for entry in self.entries.values_mut() {
+            if predicate(&entry.outcome) {
+                entry.expires_at = entry.expires_at.max(expires_at);
+            }
+        }
+    }
+
     /// Record the outcome of a freshly-executed request. Only call after `check` returned `Proceed`
     /// or `Expired` (never overwrite a live `Replay`/`Conflict` record; that would corrupt the
     /// idempotency guarantee).

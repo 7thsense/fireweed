@@ -1,7 +1,7 @@
 use super::*;
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -455,6 +455,55 @@ pub(crate) fn record_claim_by_query_idempotency(
             ts_nanos(now),
         ],
     ))?;
+    Ok(())
+}
+
+pub(crate) fn extend_claim_by_query_idempotency_for_renewal(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    renewed_item_ids: &[ItemId],
+    renewed_expires_at: UtcTimestamp,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let renewed: HashSet<ItemId> = renewed_item_ids.iter().copied().collect();
+    let mut stmt = st(tx.prepare(
+        "SELECT request_id,response_payload FROM pqueue_request_idempotency \
+         WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3",
+    ))?;
+    let rows = st(
+        stmt.query_map(params![t, q, IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }),
+    )?;
+    let mut matching_request_ids = Vec::new();
+    for row in rows {
+        let (request_id, payload) = st(row)?;
+        let replay: ClaimByQueryReplay =
+            serde_json::from_str(&payload).map_err(|e| EngineError::Storage(e.to_string()))?;
+        if !replay.item_ids.is_empty()
+            && replay
+                .item_ids
+                .iter()
+                .all(|item_id| renewed.contains(item_id))
+        {
+            matching_request_ids.push(request_id);
+        }
+    }
+    drop(stmt);
+    let renewed_expires_at = ts_nanos(renewed_expires_at);
+    for request_id in matching_request_ids {
+        st(tx.execute(
+            "UPDATE pqueue_request_idempotency SET expires_at=max(expires_at,?5) \
+             WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+            params![
+                t,
+                q,
+                IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY,
+                request_id,
+                renewed_expires_at
+            ],
+        ))?;
+    }
     Ok(())
 }
 

@@ -8,7 +8,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimByQueryContext, ClaimPort, ClaimRequest, ControlPlaneStore, EngineError, FinalizeKind,
-    FinalizeOutcome, FinalizePort, HotProjectionQueryPort, PushPort, PushSpec, UpsertPort,
+    FinalizeOutcome, FinalizePort, HotProjectionQueryPort, PushPort, PushSpec, RenewLeasePort,
+    UpsertPort,
 };
 use pqueue_sqlite::SqliteRelationalBackend;
 
@@ -319,11 +320,24 @@ async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
         .unwrap();
     assert_eq!(worker, "query-worker");
 
+    reopened
+        .renew(
+            &shard(),
+            vec![first.items[0].item_id],
+            ts(160),
+            ts(105),
+            None,
+        )
+        .await
+        .unwrap();
+    drop(reopened);
+    let reopened = SqliteRelationalBackend::open(&path_string).unwrap();
+
     let active_after_retention = reopened
         .claim_by_query(
             &shard(),
             query_request("durable-replay"),
-            query_context(115),
+            query_context(145),
         )
         .await
         .unwrap();
@@ -336,7 +350,7 @@ async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
     conflict.worker_id = WorkerId::new("different-worker").unwrap();
     assert_eq!(
         reopened
-            .claim_by_query(&shard(), conflict, query_context(115))
+            .claim_by_query(&shard(), conflict, query_context(145))
             .await
             .unwrap_err(),
         EngineError::RequestIdConflict
@@ -346,7 +360,7 @@ async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
             .claim_by_query(
                 &shard(),
                 query_request("durable-replay"),
-                query_context(131),
+                query_context(161),
             )
             .await
             .unwrap_err(),

@@ -946,6 +946,12 @@ pub(crate) fn apply_command_sql(
                 &q,
                 &ids,
             )?;
+            extend_claim_by_query_idempotency_for_renewal(
+                tx,
+                shard,
+                &c.item_ids,
+                c.lease_expires_at,
+            )?;
             Ok(())
         }
         QueueCommand::CohortRenewLease(c) => {
@@ -1156,7 +1162,7 @@ pub(crate) fn apply_command_sql(
                 token_ops.push(TokenOp::Clear(o.item_id));
             }
             const FINALIZE_SET: &str = "UPDATE pqueue_items SET lifecycle_state=?, lease_token_hash=NULL, \
-                 lease_expires_at=NULL, fenced=0, item_version=item_version+1, \
+                 lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
                  retry_count=CASE WHEN ? THEN 0 ELSE retry_count END, terminal_at=?, \
                  terminal_command_epoch=?, updated_at=?, last_command_sequence=? \
                  WHERE tenant_id=? AND queue_id=? AND item_id IN";
@@ -1198,7 +1204,7 @@ pub(crate) fn apply_command_sql(
                 {
                     let changed = st(tx.execute(
                         "UPDATE pqueue_items SET lifecycle_state=?1, lease_token_hash=NULL, \
-                         lease_expires_at=NULL, fenced=0, item_version=item_version+1, \
+                         lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
                          retry_count=CASE WHEN ?2 THEN 0 ELSE retry_count END, terminal_at=?3, \
                          terminal_command_epoch=?4, updated_at=?5, last_command_sequence=?6 \
                          WHERE tenant_id=?7 AND queue_id=?8 AND rowid BETWEEN ?9 AND ?10",
@@ -1359,7 +1365,7 @@ pub(crate) fn apply_command_sql(
             exec_items_in(
                 tx,
                 "UPDATE pqueue_items SET lifecycle_state='Pending', lease_token_hash=NULL, \
-                 lease_expires_at=NULL, item_version=item_version+1, updated_at=?, \
+                 lease_expires_at=NULL, worker_id=NULL, item_version=item_version+1, updated_at=?, \
                  last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
                 &[Value::Integer(now_n), Value::Integer(seq as i64)],
                 &t,

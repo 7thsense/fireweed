@@ -782,6 +782,15 @@ async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(p
         .claim_by_query(&q, claim_due_scheduled_actions_request())
         .await
         .unwrap();
+    let mut invalid_changed_body = claim_due_scheduled_actions_request();
+    invalid_changed_body.index = Some("missing-index".to_string());
+    assert_eq!(
+        pq.claim_by_query(&q, invalid_changed_body)
+            .await
+            .unwrap_err(),
+        EngineError::RequestIdConflict,
+        "retained request ids use conflict-first precedence before structural query validation"
+    );
     assert!(
         claimed
             .items
