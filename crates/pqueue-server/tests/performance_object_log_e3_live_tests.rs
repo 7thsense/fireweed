@@ -47,7 +47,7 @@
 //! Optional overrides: `PQUEUE_S3_TEST_BUCKET` (default `pqueue-test`), `PQUEUE_S3_TEST_ACCESS_KEY` /
 //! `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`), `PQUEUE_E3_LOAD_BATCH` (items per push command during
 //! the recovery-load phase, default 1000), `PQUEUE_E3_ACK_PUSHES` (pushes per ack-latency config, default
-//! 2000), `PQUEUE_E3_ACK_CONCURRENCY` (concurrent push tasks, default 64), `PQUEUE_E3_LOAD_CONCURRENCY`
+//! 4000), `PQUEUE_E3_ACK_CONCURRENCY` (concurrent push tasks, default 512), `PQUEUE_E3_LOAD_CONCURRENCY`
 //! (concurrent recovery-load tasks, default 8).
 
 use std::collections::BTreeMap;
@@ -62,7 +62,7 @@ use pqueue_core::{
     UtcTimestamp,
 };
 use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey};
-use pqueue_objectlog::segmented::{BlobStore, SegmentCounters, S3BlobStore, SegmentConfig};
+use pqueue_objectlog::segmented::{BlobStore, S3BlobStore, SegmentConfig, SegmentCounters};
 use pqueue_server::{SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend};
 
 /// Fixed seal-cost slack (ms) added to the latency-cap-derived ack bar: covers one segment-object PUT + one
@@ -331,9 +331,7 @@ where
     let proj = projection_path(&format!("ack-{profile}-{}", bound.label));
     let cfg = SegmentConfig::new(bound.target_bytes, bound.max_latency_ms).unwrap();
 
-    let backend = Arc::new(
-        open(s3.store(), &proj, cfg).expect("open segmented backend over S3"),
-    );
+    let backend = Arc::new(open(s3.store(), &proj, cfg).expect("open segmented backend over S3"));
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
     let started = Instant::now();
@@ -414,11 +412,7 @@ struct RecoveryResult {
 /// Push with a bounded retry on the substrate's documented same-epoch manifest-CAS `Conflict` (the seal doc
 /// says such a transient race is "surfaced as a conflict so it is not mistaken for an ack" and the caller
 /// retries). After the S3 `list` pagination fix this is rare, but a bounded retry keeps a long load robust.
-async fn push_with_retry<B: PushPort>(
-    backend: &B,
-    shard: &QueueKey,
-    items: Vec<PushSpec>,
-) {
+async fn push_with_retry<B: PushPort>(backend: &B, shard: &QueueKey, items: Vec<PushSpec>) {
     let mut attempt = 0u64;
     loop {
         match backend.push(shard, items.clone(), ts(), None).await {
@@ -458,9 +452,7 @@ where
     let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
 
     let (command_count, total_commands, pending_loaded) = {
-        let backend = Arc::new(
-            open(s3.store(), &proj, cfg).expect("open backend for load"),
-        );
+        let backend = Arc::new(open(s3.store(), &proj, cfg).expect("open backend for load"));
         backend
             .create_queue(def.clone())
             .await
@@ -599,8 +591,8 @@ where
         None
     };
     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let bars_met =
-        ack_results.iter().all(|result| result.bar_met) && recovery.as_ref().is_none_or(|r| r.bar_met);
+    let bars_met = ack_results.iter().all(|result| result.bar_met)
+        && recovery.as_ref().is_none_or(|r| r.bar_met);
     ProfileRun {
         backend_profile: profile,
         projection_label,
@@ -681,7 +673,10 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
         if require_bars {
             if let Some(recovery) = &run.recovery {
                 if !recovery.bar_met {
-                    errors.push(format!("profile {} recovery bar not met", run.backend_profile));
+                    errors.push(format!(
+                        "profile {} recovery bar not met",
+                        run.backend_profile
+                    ));
                 }
             } else if run.backend_profile == "object_log_sqlite_projection" {
                 errors.push(format!(
@@ -725,7 +720,10 @@ fn profile_row(
     }
     .to_string();
     let mut values: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-    values.insert("bound_count".into(), serde_json::json!(profile_run.ack_results.len()));
+    values.insert(
+        "bound_count".into(),
+        serde_json::json!(profile_run.ack_results.len()),
+    );
     values.insert("duration_ms".into(), serde_json::json!(profile_run.wall_ms));
     values.insert("resident".into(), serde_json::json!(resident));
     values.insert("load_batch".into(), serde_json::json!(load_batch));
@@ -733,7 +731,10 @@ fn profile_row(
     match &profile_run.recovery {
         Some(recovery) => {
             values.insert("recovery_excluded".into(), serde_json::json!(false));
-            values.insert("recovery_resident".into(), serde_json::json!(recovery.resident));
+            values.insert(
+                "recovery_resident".into(),
+                serde_json::json!(recovery.resident),
+            );
             values.insert(
                 "recovery_command_count".into(),
                 serde_json::json!(recovery.command_count),
@@ -775,7 +776,9 @@ fn profile_row(
             values.insert("recovery_excluded".into(), serde_json::json!(true));
             values.insert(
                 "recovery_exclusion_reason".into(),
-                serde_json::json!("in-memory projection variant does not expose the SQLite reopen telemetry seam"),
+                serde_json::json!(
+                    "in-memory projection variant does not expose the SQLite reopen telemetry seam"
+                ),
             );
         }
     }
@@ -849,7 +852,7 @@ fn profile_row(
 
     pqueue_release::LedgerRow {
         suite: "performance_object_log_e3_live_tests".into(),
-        command: "PQUEUE_PERF_ENV=1 PQUEUE_E3_RESIDENT=10000000 PQUEUE_S3_TEST_ENDPOINT=http://<minio-ip>:9000 cargo test -p pqueue-server --release --test performance_object_log_e3_live_tests -- --nocapture".into(),
+        command: "PQUEUE_S3_TEST_ENDPOINT=http://<minio-ip>:9000 scripts/perf/tp002-e3-minio.sh".into(),
         backend_profile: profile_run.backend_profile.into(),
         scale,
         seed: 0,
@@ -903,8 +906,8 @@ async fn performance_object_log_e3_live_tests() {
     let perf_env = std::env::var("PQUEUE_PERF_ENV").is_ok();
     let resident = env_u64("PQUEUE_E3_RESIDENT", 4_000);
     let load_batch = env_u64("PQUEUE_E3_LOAD_BATCH", 1_000).max(1);
-    let ack_pushes = env_u64("PQUEUE_E3_ACK_PUSHES", 2_000).max(1);
-    let ack_concurrency = env_u64("PQUEUE_E3_ACK_CONCURRENCY", 64).max(1);
+    let ack_pushes = env_u64("PQUEUE_E3_ACK_PUSHES", 4_000).max(1);
+    let ack_concurrency = env_u64("PQUEUE_E3_ACK_CONCURRENCY", 512).max(1);
     let release_shape = resident >= RELEASE_RESIDENT;
     let require_bars = perf_env && release_shape;
 
@@ -939,8 +942,7 @@ async fn performance_object_log_e3_live_tests() {
         .await,
     ];
 
-    validate_e3_profile_matrix(&runs, require_bars)
-        .expect("E3 profile matrix shape and bars");
+    validate_e3_profile_matrix(&runs, require_bars).expect("E3 profile matrix shape and bars");
 
     println!(
         "\nTP-002 E3 live object-log projection matrix over MinIO ({}) — perf_env={perf_env}, resident={resident}:",
@@ -984,20 +986,36 @@ async fn performance_object_log_e3_live_tests() {
         println!(
             "    [recover] resident={} load_batch={} commands_loaded={} total_committed={} \
              start_seq={} tail_replayed={} snapshot_used={} (budget {}) wall={:.1}ms pending_after={} -> {}",
-            run.recovery.as_ref().map_or(0, |recovery| recovery.resident),
-            run.recovery.as_ref().map_or(0, |recovery| recovery.load_batch),
-            run.recovery.as_ref().map_or(0, |recovery| recovery.command_count),
-            run.recovery.as_ref().map_or(0, |recovery| recovery.total_commands),
-            run.recovery.as_ref().map_or(0, |recovery| recovery.start_seq),
-            run.recovery.as_ref().map_or(0, |recovery| recovery.tail_replayed),
-            run.recovery.as_ref().is_some_and(|recovery| recovery.snapshot_used),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.resident),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.load_batch),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.command_count),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.total_commands),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.start_seq),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.tail_replayed),
+            run.recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.snapshot_used),
             run.recovery
                 .as_ref()
                 .map_or(0, |recovery| recovery.recovery_max_tail),
             run.recovery
                 .as_ref()
                 .map_or(0.0, |recovery| recovery.recovery_wall_ms),
-            run.recovery.as_ref().map_or(0, |recovery| recovery.pending_after),
+            run.recovery
+                .as_ref()
+                .map_or(0, |recovery| recovery.pending_after),
             match &run.recovery {
                 Some(recovery) if recovery.bar_met => "PASS",
                 Some(_) => "FAIL",
@@ -1094,8 +1112,8 @@ fn synthetic_profile_run(
     } else {
         None
     };
-    let bars_met =
-        ack_results.iter().all(|result| result.bar_met) && recovery.as_ref().is_none_or(|r| r.bar_met);
+    let bars_met = ack_results.iter().all(|result| result.bar_met)
+        && recovery.as_ref().is_none_or(|r| r.bar_met);
     ProfileRun {
         backend_profile,
         projection_label,
@@ -1108,9 +1126,11 @@ fn synthetic_profile_run(
 
 #[test]
 fn e3_matrix_rejects_missing_profile() {
-    let runs = vec![
-        synthetic_profile_run("object_log_inmemory_projection", "inmemory", false),
-    ];
+    let runs = vec![synthetic_profile_run(
+        "object_log_inmemory_projection",
+        "inmemory",
+        false,
+    )];
     let errors = validate_e3_profile_matrix(&runs, true).unwrap_err();
     assert!(
         errors
