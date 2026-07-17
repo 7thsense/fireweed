@@ -1181,6 +1181,17 @@ pub trait ControlPlaneStore: Send + Sync {
             Ok(current)
         }
     }
+
+    /// Hydrate the local serving projection from durable storage after the ownership fence is installed
+    /// and before the control plane publishes the new owner as serving. Backends whose serving state is
+    /// already authoritative may use this default no-op. Derived, pod-local projections must override it
+    /// and replay from their durable high-water so a greater-epoch owner never serves a stale/empty image.
+    fn hydrate_projection_for_ownership(
+        &self,
+        _shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        std::future::ready(Ok(()))
+    }
 }
 
 // ---------------------------------------------------------------------------

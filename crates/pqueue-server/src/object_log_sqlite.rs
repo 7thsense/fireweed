@@ -353,6 +353,13 @@ impl ControlPlaneStore for ObjectLogSqliteBackend {
         std::future::ready(Ok(result))
     }
 
+    fn hydrate_projection_for_ownership(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        self.replay_queue(shard)
+    }
+
     fn current_epoch(
         &self,
         shard: &QueueKey,
@@ -1234,6 +1241,13 @@ impl ControlPlaneStore for SegmentedObjectLogSqliteBackend {
             .map(|key| key.queue_id.clone())
             .collect();
         std::future::ready(Ok(result))
+    }
+
+    fn hydrate_projection_for_ownership(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        std::future::ready(self.replay_queue(shard))
     }
 
     fn current_epoch(
