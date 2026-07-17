@@ -11,6 +11,7 @@ manifest=""
 attestation=""
 tag=""
 commit=""
+declare -A seen=()
 
 usage() {
     cat >&2 <<'EOF'
@@ -26,6 +27,8 @@ while (($# > 0)); do
     case "$1" in
         --mode|--manifest|--attestation|--tag|--commit)
             (($# >= 2)) || usage
+            [[ -z "${seen[$1]:-}" ]] || usage
+            seen[$1]=1
             case "$1" in
                 --mode) mode="$2" ;;
                 --manifest) manifest="$2" ;;
@@ -47,16 +50,25 @@ case "${mode}" in
     exact-tag)
         [[ -n "${attestation}" && -f "${attestation}" && -n "${tag}" ]] || usage
         [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || usage
+        head_commit="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+        [[ "${commit}" == "${head_commit}" ]] || {
+            echo "governed-release-evidence-gate: --commit must equal checked-out HEAD (${head_commit})" >&2
+            exit 1
+        }
+        tag_commit="$(git -C "${REPO_ROOT}" rev-parse --verify "refs/tags/${tag}^{commit}" 2>/dev/null)" || {
+            echo "governed-release-evidence-gate: release tag ${tag@Q} does not resolve to a commit" >&2
+            exit 1
+        }
+        [[ "${tag_commit}" == "${commit}" ]] || {
+            echo "governed-release-evidence-gate: release tag ${tag@Q} targets ${tag_commit}, not ${commit}" >&2
+            exit 1
+        }
         ;;
     *) usage ;;
 esac
 
 run_cargo() {
-    if [[ -n "${PQUEUE_CARGO_BIN:-}" ]]; then
-        "${PQUEUE_CARGO_BIN}" "$@"
-    else
-        rustup run 1.92.0 cargo "$@"
-    fi
+    rustup run 1.92.0 cargo "$@"
 }
 
 echo "--- governed TP-002 semantic release manifest ---"

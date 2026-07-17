@@ -1,8 +1,0 @@
-# Contract fixture for the eventual .github/workflows/release.yml integration.
-bash scripts/ci/release-gate.sh
-bash scripts/ci/governed-release-evidence-gate.sh \
-  --mode exact-tag \
-  --manifest "${PQUEUE_GOVERNED_RELEASE_MANIFEST}" \
-  --attestation "${PQUEUE_GOVERNED_RELEASE_ATTESTATION}" \
-  --tag "${{ steps.release.outputs.tag }}" \
-  --commit "${GITHUB_SHA}"
