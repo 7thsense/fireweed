@@ -1434,7 +1434,10 @@ pub fn open_memory(clock: Arc<dyn Clock>) -> Pqueue<impl LibBackend> {
 /// Open a **sole-owner**, sqlite-backed pqueue (durable log + projection rebuilt from the log) at `path`.
 /// Requires the `sqlite` feature (default).
 #[cfg(feature = "sqlite")]
-pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Pqueue<impl LibBackend>> {
+pub fn open_sqlite(
+    path: &str,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Pqueue<impl LibBackend + use<>>> {
     Ok(Pqueue::new(
         Arc::new(pqueue_sqlite::composed_sqlite_backend(path)?),
         clock,
