@@ -4037,23 +4037,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
                 return Ok(Claimed::default());
             }
 
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let lease_token =
-                LeaseToken::new(format!("cbq-{nanos}")).expect("generated lease token is valid");
-            let created_at = UtcTimestamp::new(
-                (nanos / 1_000_000_000) as i64,
-                (nanos % 1_000_000_000) as u32,
-            )
-            .expect("valid timestamp");
-            let lease_nanos = nanos + u128::from(request.lease_duration_ms) * 1_000_000;
-            let lease_expires_at = UtcTimestamp::new(
-                (lease_nanos / 1_000_000_000) as i64,
-                (lease_nanos % 1_000_000_000) as u32,
-            )
-            .expect("valid lease timestamp");
+            let created_at = request.now;
+            let lease_expires_at = request.lease_expires_at();
+            let lease_token = LeaseToken::new(format!(
+                "cbq-{}-{}-{}",
+                created_at.seconds, created_at.nanoseconds, g.cmd_seq
+            ))
+            .expect("generated lease token is valid");
             let env = Self::make_envelope(
                 &mut g,
                 self.node_id,

@@ -30,7 +30,7 @@ use pqueue_engine::{
     build_push_items, validate_api001_reserved_write_fields, validate_claim_compatibility,
     validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value as JsonValue;
 
 use super::*;
@@ -1623,18 +1623,47 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 return Err(EngineError::Invalid("unindexed-field"));
             }
 
+            let created_at = request.now;
+            let lease_expires_at = request.lease_expires_at();
+            let eligibility_nanos = ts_nanos(created_at);
+            let Inner {
+                conn,
+                live_tokens,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                ..
+            } = &mut *g;
             let (t, q) = parts(shard);
-            let mut stmt = st(g.conn.prepare(
-                "SELECT item_id, entity_document FROM pqueue_items \
-                 WHERE tenant_id=?1 AND queue_id=?2",
+            // Acquire the SQLite writer reservation before reading candidates. Separate backend handles
+            // therefore cannot both select the same observed version and race their lease transitions.
+            let tx = st(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            if queue_paused(&tx, shard)? {
+                return Ok(Claimed::default());
+            }
+            let mut stmt = st(tx.prepare(
+                "SELECT item_id, entity_document, item_version FROM pqueue_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' \
+                 AND superseded=0 AND fenced=0 AND cohort_size IS NULL \
+                 AND (not_before IS NULL OR not_before<=?3) AND eligible_since IS NOT NULL \
+                 AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                     ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+                     AND gs.gate_key=ig.gate_key \
+                     WHERE ig.tenant_id=pqueue_items.tenant_id \
+                     AND ig.queue_id=pqueue_items.queue_id \
+                     AND ig.item_id=pqueue_items.item_id)",
             ))?;
-            let rows = st(stmt.query_map(params![t, q], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            let rows = st(stmt.query_map(params![t, q, eligibility_nanos], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             }))?;
 
             let mut matched = Vec::new();
             for row in rows {
-                let (item_id, entity_json): (String, Option<String>) = st(row)?;
+                let (item_id, entity_json, item_version): (String, Option<String>, i64) = st(row)?;
                 let item_id =
                     ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
                 let Some(entity_json) = entity_json else {
@@ -1733,55 +1762,26 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     }
                 }
                 if accepted {
-                    matched.push(row);
+                    matched.push((row, item_version));
                 }
             }
 
             matched.sort_by(|lhs, rhs| {
-                compare_rows(lhs, rhs, std::slice::from_ref(&request.order_by))
+                compare_rows(&lhs.0, &rhs.0, std::slice::from_ref(&request.order_by))
                     .expect("typed order compare")
             });
 
-            let selected: Vec<ItemId> = matched
+            let selected: Vec<(ItemId, i64)> = matched
                 .into_iter()
                 .take(request.max_items as usize)
-                .map(|row| row.item_id)
+                .map(|(row, version)| (row.item_id, version))
                 .collect();
 
             if selected.is_empty() {
                 return Ok(Claimed::default());
             }
 
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let lease_token =
-                LeaseToken::new(format!("cbq-{nanos}")).expect("generated lease token is valid");
-            let created_at = UtcTimestamp::new(
-                (nanos / 1_000_000_000) as i64,
-                (nanos % 1_000_000_000) as u32,
-            )
-            .expect("valid timestamp");
-            let lease_nanos = nanos + u128::from(request.lease_duration_ms) * 1_000_000;
-            let lease_expires_at = UtcTimestamp::new(
-                (lease_nanos / 1_000_000_000) as i64,
-                (lease_nanos % 1_000_000_000) as u32,
-            )
-            .expect("valid lease timestamp");
-
             drop(stmt);
-            let Inner {
-                conn,
-                live_tokens,
-                queues,
-                grouped_shards,
-                claim_scan_hints,
-                claim_scan_default_fifo,
-                ..
-            } = &mut *g;
-            let (t, q) = parts(shard);
-            let tx = st(conn.transaction())?;
             let seq: i64 = st(tx
                 .query_row(
                     "SELECT next_seq FROM relational_cursor WHERE tenant=?1 AND queue=?2",
@@ -1790,34 +1790,66 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 )
                 .optional())?
             .ok_or(EngineError::NotFound)?;
-
-            let claim_command = QueueCommand::Claim(ClaimCommand {
-                item_ids: selected.clone(),
-                lease_token: lease_token.clone(),
-                lease_expires_at,
-            });
+            let lease_token = LeaseToken::new(format!(
+                "cbq-{}-{}-{seq}",
+                created_at.seconds, created_at.nanoseconds
+            ))
+            .expect("generated lease token is valid");
+            let hash = lease_hash(&lease_token);
+            let lease_expires_nanos = ts_nanos(lease_expires_at);
             let mut token_ops = Vec::new();
-            apply_command_sql(
-                &tx,
-                queues,
-                grouped_shards,
-                claim_scan_hints,
-                claim_scan_default_fifo,
-                &mut token_ops,
-                shard,
-                &CommandPosition::new(shard.clone(), 0, seq as u64),
-                seq as u64,
-                created_at,
-                &claim_command,
-            )?;
+            let mut claimed_ids = Vec::with_capacity(selected.len());
+            for (item_id, expected_version) in selected {
+                let changed = st(tx.execute(
+                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
+                     lease_expires_at=?2, retry_count=retry_count+1, item_version=item_version+1, \
+                     updated_at=?3, last_command_sequence=?4 \
+                     WHERE tenant_id=?5 AND queue_id=?6 AND item_id=?7 AND item_version=?8 \
+                     AND lifecycle_state='Pending' AND superseded=0 AND fenced=0 \
+                     AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?9) \
+                     AND eligible_since IS NOT NULL \
+                     AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                         ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+                         AND gs.gate_key=ig.gate_key \
+                         WHERE ig.tenant_id=pqueue_items.tenant_id \
+                         AND ig.queue_id=pqueue_items.queue_id \
+                         AND ig.item_id=pqueue_items.item_id)",
+                    params![
+                        hash,
+                        lease_expires_nanos,
+                        eligibility_nanos,
+                        seq,
+                        t,
+                        q,
+                        item_id.to_string(),
+                        expected_version,
+                        eligibility_nanos,
+                    ],
+                ))?;
+                if changed == 1 {
+                    token_ops.push(TokenOp::Set(item_id, lease_token.clone()));
+                    claimed_ids.push(item_id);
+                }
+            }
+            if claimed_ids.is_empty() {
+                return Ok(Claimed::default());
+            }
+            let groups = groups_of(&tx, shard, &claimed_ids)?;
+            if !groups.is_empty() {
+                grouped_shards.insert(shard.clone());
+            }
+            for group in &groups {
+                refresh_group_summary(&tx, shard, group, created_at)?;
+            }
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             st(tx.execute(
                 "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
                 params![t, q, seq + 1],
             ))?;
-            let items = render_claimed(&tx, shard, &selected, |_| Some(lease_token.clone()))?;
+            let items = render_claimed(&tx, shard, &claimed_ids, |_| Some(lease_token.clone()))?;
             debug_assert_eq!(
                 items.len(),
-                selected.len(),
+                claimed_ids.len(),
                 "every queried claim candidate must render"
             );
             st(tx.commit())?;
