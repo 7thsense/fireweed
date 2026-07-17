@@ -169,7 +169,7 @@ fn release_manifest_accepts_exact_semantic_e0_e3_authorities() {
 }
 
 #[test]
-fn release_manifest_rejects_missing_file_and_missing_id_even_with_unlisted_substitute() {
+fn release_manifest_rejects_missing_file() {
     let dir = release_manifest_dir("missing");
     let mut missing_file = valid_release_manifest();
     missing_file.authorities[0].path = "absent.jsonl".into();
@@ -177,17 +177,56 @@ fn release_manifest_rejects_missing_file_and_missing_id_even_with_unlisted_subst
     let errors = verify_release_manifest(&path).unwrap_err();
     assert!(errors.iter().any(|error| error.0.contains("cannot open")));
 
-    let mut missing_id = valid_release_manifest();
-    missing_id
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn release_manifest_rejects_each_missing_e0_e3_authority_even_with_unlisted_substitute() {
+    for missing in ["E0", "E1", "E2", "E3"] {
+        let dir = release_manifest_dir(&format!("missing-{missing}"));
+        let mut manifest = valid_release_manifest();
+        manifest
+            .authorities
+            .retain(|authority| authority.evidence_id != missing);
+
+        // The omitted row still exists beside the manifest. Exact manifest authority, not directory
+        // presence, controls the governed set, so this unlisted substitute must never satisfy the ID.
+        let path = write_release_case(&dir, &manifest, all_release_rows());
+        let errors = verify_release_manifest(&path).unwrap_err();
+        assert!(
+            errors.iter().any(|error| error
+                .0
+                .contains(&format!("missing authority for {missing}"))),
+            "missing {missing}: {errors:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn release_manifest_ignores_coexisting_tp003_jsonl_and_unlisted_tp002_substitution() {
+    let dir = release_manifest_dir("mixed-contracts");
+    let path = write_release_case(&dir, &valid_release_manifest(), all_release_rows());
+    std::fs::write(
+        dir.join("tp003-transaction-evidence.jsonl"),
+        r#"{"suite":"external_transaction_contract_matrix_tests","spec":"TP-003 §3.10","ac":"AC-TXN-1","backend":"postgres/sqlite","result":"pass","detail":"fixture","assertions":["proof"],"recorded_at":"fixture"}
+"#,
+    )
+    .unwrap();
+    verify_release_manifest(&path)
+        .expect("coexisting unlisted TP-003 is outside the TP-002 manifest");
+
+    let mut manifest = valid_release_manifest();
+    manifest
         .authorities
-        .retain(|authority| authority.evidence_id != "E3");
-    // E3.jsonl still exists beside the manifest, but an unlisted file cannot substitute for authority.
-    let path = write_release_case(&dir, &missing_id, all_release_rows());
+        .retain(|authority| authority.evidence_id != "E2");
+    std::fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    // Both an unlisted E2 LedgerRow and an unrelated TP-003 JSONL remain in the directory.
     let errors = verify_release_manifest(&path).unwrap_err();
     assert!(
         errors
             .iter()
-            .any(|error| error.0.contains("missing authority for E3"))
+            .any(|error| error.0.contains("missing authority for E2"))
     );
     std::fs::remove_dir_all(dir).unwrap();
 }

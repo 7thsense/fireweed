@@ -1,0 +1,8 @@
+# Contract fixture for the eventual scripts/ci/release-gate.sh integration.
+cargo run -p pqueue-release --bin pqueue-verify-ledger -- \
+  --ledger-dir "${PQUEUE_LEDGER_DIR}" \
+  --strict \
+  --require-smoke-evidence E2,E3
+bash scripts/ci/governed-release-evidence-gate.sh \
+  --mode semantic \
+  --manifest "${PQUEUE_GOVERNED_RELEASE_MANIFEST}"
