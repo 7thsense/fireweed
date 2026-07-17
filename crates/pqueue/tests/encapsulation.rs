@@ -8,9 +8,12 @@
 use std::sync::Arc;
 
 use pqueue::{
-    CohortPolicy, CreateQueue, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueCreationPolicy, QueueDefinition,
-    QueueId, QueueKey, RecurrencePolicy, RetryPolicy, TenantId,
+    CohortPolicy, CreateQueue, EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedHandle,
+    EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryAction,
+    EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
+    EngineError, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, QueueCreationPolicy, QueueDefinition, QueueId, QueueKey,
+    RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_memory::ManualClock;
 
@@ -64,6 +67,117 @@ fn sqlite_test_path(test_name: &str) -> String {
 
 fn retain_static<T: 'static>(value: T) -> Arc<T> {
     Arc::new(value)
+}
+
+fn embedded_config(inputs: &mut [String]) -> EmbeddedDurabilityConfig {
+    EmbeddedDurabilityConfig {
+        object_log: EmbeddedObjectLogConfig::S3Compatible {
+            endpoint: std::mem::take(&mut inputs[0]),
+            bucket: std::mem::take(&mut inputs[1]),
+            region: std::mem::take(&mut inputs[2]),
+            access_key_id: EmbeddedSecret::new(std::mem::take(&mut inputs[3])),
+            secret_access_key: EmbeddedSecret::new(std::mem::take(&mut inputs[4])),
+            allow_insecure_http: true,
+        },
+        projection: EmbeddedProjectionConfig::Postgres {
+            url: EmbeddedSecret::new(std::mem::take(&mut inputs[5])),
+        },
+        response_barrier: EmbeddedResponseBarrier::Strict,
+        segments: EmbeddedSegmentConfig::new(8 * 1024 * 1024, 20).unwrap(),
+        namespace: std::mem::take(&mut inputs[6]),
+        recovery: EmbeddedRecoveryPolicy {
+            incompatible_projection: EmbeddedRecoveryAction::FailClosed,
+            verify_checksums: true,
+            max_tail_commands: 10_000,
+        },
+    }
+}
+
+#[test]
+fn embedded_durability_config_is_owned_and_opaque() {
+    let mut inputs = vec![
+        "http://127.0.0.1:9000".to_owned(),
+        "queue-log".to_owned(),
+        "us-east-1".to_owned(),
+        "visible-access-key".to_owned(),
+        "visible-secret-key".to_owned(),
+        "postgres://user:password@localhost/projection".to_owned(),
+        "integration-test".to_owned(),
+    ];
+    let config = embedded_config(&mut inputs);
+    drop(inputs);
+
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("visible-access-key"));
+    assert!(!debug.contains("visible-secret-key"));
+    assert!(!debug.contains("password"));
+    assert!(debug.contains("queue-log"));
+    config.validate().unwrap();
+
+    let local = EmbeddedDurabilityConfig {
+        object_log: EmbeddedObjectLogConfig::Local {
+            root: "local-log".into(),
+        },
+        projection: EmbeddedProjectionConfig::Sqlite {
+            path: "projection.sqlite".into(),
+        },
+        response_barrier: EmbeddedResponseBarrier::AsyncProjection,
+        segments: EmbeddedSegmentConfig::new(1024, 5).unwrap(),
+        namespace: "local-test".to_owned(),
+        recovery: EmbeddedRecoveryPolicy {
+            incompatible_projection: EmbeddedRecoveryAction::RehydrateProjection,
+            ..Default::default()
+        },
+    };
+    local.validate().unwrap();
+}
+
+#[tokio::test]
+async fn embedded_lifecycle_rejects_unsupported_operations() {
+    let mut inputs = vec![
+        "http://127.0.0.1:9000".to_owned(),
+        "queue-log".to_owned(),
+        "us-east-1".to_owned(),
+        "access".to_owned(),
+        "secret".to_owned(),
+        "postgres://projection".to_owned(),
+        "integration-test".to_owned(),
+    ];
+    let handle = embedded_config(&mut inputs).into_handle().unwrap();
+    assert_eq!(
+        handle.verify_projection().await,
+        Err(EngineError::Unavailable)
+    );
+    assert_eq!(
+        handle.delete_projection().await,
+        Err(EngineError::Unavailable)
+    );
+    assert_eq!(
+        handle.rehydrate_projection().await,
+        Err(EngineError::Unavailable)
+    );
+}
+
+#[tokio::test]
+async fn embedded_handle_is_static_and_opaque() {
+    fn retain_opaque(value: EmbeddedHandle) -> Arc<EmbeddedHandle> {
+        Arc::new(value)
+    }
+
+    let mut inputs = vec![
+        "http://127.0.0.1:9000".to_owned(),
+        "queue-log".to_owned(),
+        "us-east-1".to_owned(),
+        "access".to_owned(),
+        "secret".to_owned(),
+        "postgres://projection".to_owned(),
+        "integration-test".to_owned(),
+    ];
+    let handle = retain_opaque(embedded_config(&mut inputs).into_handle().unwrap());
+    drop(inputs);
+
+    assert_eq!(handle.lifecycle_capabilities(), Default::default());
+    assert!(format!("{handle:?}").starts_with("EmbeddedHandle"));
 }
 
 #[test]

@@ -13,6 +13,10 @@
 //! [`EngineError`]; nothing is stringly-typed.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -67,6 +71,358 @@ impl Clock for SystemClock {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid unix ts")
+    }
+}
+
+/// An owned secret used by embedded durability configuration. Its value is redacted from `Debug` and has
+/// no public accessor; the composition root consumes it internally.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EmbeddedSecret(String);
+
+impl EmbeddedSecret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for EmbeddedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EmbeddedSecret(<redacted>)")
+    }
+}
+
+/// Authoritative command-log storage selected by an embedded deployment.
+#[derive(Clone, PartialEq, Eq)]
+pub enum EmbeddedObjectLogConfig {
+    Local {
+        root: PathBuf,
+    },
+    S3Compatible {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: EmbeddedSecret,
+        secret_access_key: EmbeddedSecret,
+        allow_insecure_http: bool,
+    },
+}
+
+impl fmt::Debug for EmbeddedObjectLogConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local { root } => f.debug_struct("Local").field("root", root).finish(),
+            Self::S3Compatible {
+                endpoint,
+                bucket,
+                region,
+                allow_insecure_http,
+                ..
+            } => f
+                .debug_struct("S3Compatible")
+                .field("endpoint", endpoint)
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field("allow_insecure_http", allow_insecure_http)
+                .finish(),
+        }
+    }
+}
+
+/// Disposable materialized projection selected by an embedded deployment.
+#[derive(Clone, PartialEq, Eq)]
+pub enum EmbeddedProjectionConfig {
+    Sqlite {
+        path: PathBuf,
+    },
+    /// The URL may contain credentials and is therefore redacted from diagnostics.
+    Postgres {
+        url: EmbeddedSecret,
+    },
+}
+
+impl fmt::Debug for EmbeddedProjectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sqlite { path } => f.debug_struct("Sqlite").field("path", path).finish(),
+            Self::Postgres { .. } => f
+                .debug_struct("Postgres")
+                .field("url", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+/// The acknowledgement barrier for embedded object-log compositions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedResponseBarrier {
+    /// Success requires both the authoritative manifest and durable projection.
+    Strict,
+    /// Success requires the authoritative manifest and hot projection; durable projection apply may lag.
+    AsyncProjection,
+}
+
+/// Group-commit segment settings for the authoritative object log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedSegmentConfig {
+    pub target_bytes: usize,
+    pub max_latency_ms: u64,
+}
+
+impl EmbeddedSegmentConfig {
+    pub fn new(target_bytes: usize, max_latency_ms: u64) -> EngineResult<Self> {
+        if target_bytes == 0 || max_latency_ms == 0 {
+            return Err(EngineError::Invalid(
+                "embedded segment target and latency must be non-zero",
+            ));
+        }
+        Ok(Self {
+            target_bytes,
+            max_latency_ms,
+        })
+    }
+}
+
+/// Action taken when a disposable projection is absent or incompatible with the authoritative log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedRecoveryAction {
+    FailClosed,
+    /// Delete only the disposable projection namespace and rebuild from authoritative history.
+    RehydrateProjection,
+}
+
+/// Recovery bounds and validation policy for an embedded durability composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedRecoveryPolicy {
+    pub incompatible_projection: EmbeddedRecoveryAction,
+    pub verify_checksums: bool,
+    pub max_tail_commands: u64,
+}
+
+impl Default for EmbeddedRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            incompatible_projection: EmbeddedRecoveryAction::FailClosed,
+            verify_checksums: true,
+            max_tail_commands: 1_000_000,
+        }
+    }
+}
+
+/// Fully owned public configuration for an embedded authoritative-log plus disposable-projection pair.
+/// Concrete adapter types remain private and credential-bearing fields are redacted from `Debug`.
+///
+/// ```no_run
+/// use std::{path::PathBuf, sync::Arc};
+/// use pqueue::{
+///     EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
+///     EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSegmentConfig,
+/// };
+///
+/// let root = String::from("./object-log");
+/// let projection = String::from("./projection.sqlite");
+/// let config = EmbeddedDurabilityConfig {
+///     object_log: EmbeddedObjectLogConfig::Local { root: PathBuf::from(root) },
+///     projection: EmbeddedProjectionConfig::Sqlite { path: PathBuf::from(projection) },
+///     response_barrier: EmbeddedResponseBarrier::Strict,
+///     segments: EmbeddedSegmentConfig::new(8 * 1024 * 1024, 20)?,
+///     namespace: "example".to_owned(),
+///     recovery: EmbeddedRecoveryPolicy::default(),
+/// };
+/// let handle = Arc::new(config.into_handle()?);
+/// # let _: Arc<pqueue::EmbeddedHandle> = handle;
+/// # Ok::<(), pqueue::EngineError>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddedDurabilityConfig {
+    pub object_log: EmbeddedObjectLogConfig,
+    pub projection: EmbeddedProjectionConfig,
+    pub response_barrier: EmbeddedResponseBarrier,
+    pub segments: EmbeddedSegmentConfig,
+    pub namespace: String,
+    pub recovery: EmbeddedRecoveryPolicy,
+}
+
+impl EmbeddedDurabilityConfig {
+    pub fn validate(&self) -> EngineResult<()> {
+        if self.namespace.trim().is_empty() {
+            return Err(EngineError::Invalid(
+                "embedded durability namespace must not be empty",
+            ));
+        }
+        match &self.object_log {
+            EmbeddedObjectLogConfig::Local { root } if root.as_os_str().is_empty() => {
+                return Err(EngineError::Invalid(
+                    "embedded local object-log root must not be empty",
+                ));
+            }
+            EmbeddedObjectLogConfig::S3Compatible {
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_access_key,
+                ..
+            } if endpoint.is_empty()
+                || bucket.is_empty()
+                || region.is_empty()
+                || access_key_id.is_empty()
+                || secret_access_key.is_empty() =>
+            {
+                return Err(EngineError::Invalid(
+                    "embedded S3-compatible configuration fields must not be empty",
+                ));
+            }
+            _ => {}
+        }
+        match &self.projection {
+            EmbeddedProjectionConfig::Sqlite { path } if path.as_os_str().is_empty() => {
+                return Err(EngineError::Invalid(
+                    "embedded SQLite projection path must not be empty",
+                ));
+            }
+            EmbeddedProjectionConfig::Postgres { url } if url.is_empty() => {
+                return Err(EngineError::Invalid(
+                    "embedded PostgreSQL projection URL must not be empty",
+                ));
+            }
+            _ => {}
+        }
+        if self.recovery.max_tail_commands == 0 {
+            return Err(EngineError::Invalid(
+                "embedded recovery tail bound must be non-zero",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Move this configuration into the opaque lifecycle ownership boundary.
+    ///
+    /// Backend-specific follow-up beads install concrete lifecycle behavior. Until then capabilities are
+    /// false and every operation rejects fail-closed instead of claiming an unperformed repair.
+    pub fn into_handle(self) -> EngineResult<EmbeddedHandle> {
+        self.validate()?;
+        Ok(EmbeddedHandle {
+            inner: Arc::new(EmbeddedHandleInner {
+                _config: self,
+                lifecycle: Box::new(UnsupportedEmbeddedLifecycle),
+            }),
+        })
+    }
+}
+
+/// Projection lifecycle operations supported by an [`EmbeddedHandle`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmbeddedLifecycleCapabilities {
+    pub verify_projection: bool,
+    pub delete_projection: bool,
+    pub rehydrate_projection: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedProjectionVerification {
+    pub compatible: bool,
+    pub projection_sequence: u64,
+    pub authoritative_sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddedRehydration {
+    pub snapshot_used: bool,
+    pub tail_commands_replayed: u64,
+    pub projection_sequence: u64,
+}
+
+struct EmbeddedHandleInner {
+    _config: EmbeddedDurabilityConfig,
+    lifecycle: Box<dyn EmbeddedLifecycle>,
+}
+
+type EmbeddedLifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>;
+
+trait EmbeddedLifecycle: Send + Sync {
+    fn capabilities(&self) -> EmbeddedLifecycleCapabilities;
+    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification>;
+    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()>;
+    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration>;
+    fn shutdown(&mut self);
+}
+
+struct UnsupportedEmbeddedLifecycle;
+
+impl EmbeddedLifecycle for UnsupportedEmbeddedLifecycle {
+    fn capabilities(&self) -> EmbeddedLifecycleCapabilities {
+        EmbeddedLifecycleCapabilities::default()
+    }
+
+    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+
+    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+
+    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+
+    fn shutdown(&mut self) {}
+}
+
+impl Drop for EmbeddedHandleInner {
+    fn drop(&mut self) {
+        self.lifecycle.shutdown();
+    }
+}
+
+/// Opaque, cloneable ownership boundary for embedded durability lifecycle state.
+///
+/// The handle owns its configuration and, when a concrete composition is installed, its background
+/// flusher/checkpoint lifecycle. Dropping the last clone is the shutdown boundary. No concrete adapter
+/// type appears in the public signature.
+#[derive(Clone)]
+pub struct EmbeddedHandle {
+    inner: Arc<EmbeddedHandleInner>,
+}
+
+impl fmt::Debug for EmbeddedHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmbeddedHandle")
+            .field("capabilities", &self.lifecycle_capabilities())
+            .finish_non_exhaustive()
+    }
+}
+
+impl EmbeddedHandle {
+    pub fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
+        self.inner.lifecycle.capabilities()
+    }
+
+    pub async fn verify_projection(&self) -> EngineResult<EmbeddedProjectionVerification> {
+        if !self.lifecycle_capabilities().verify_projection {
+            return Err(EngineError::Unavailable);
+        }
+        self.inner.lifecycle.verify_projection().await
+    }
+
+    pub async fn delete_projection(&self) -> EngineResult<()> {
+        if !self.lifecycle_capabilities().delete_projection {
+            return Err(EngineError::Unavailable);
+        }
+        self.inner.lifecycle.delete_projection().await
+    }
+
+    pub async fn rehydrate_projection(&self) -> EngineResult<EmbeddedRehydration> {
+        if !self.lifecycle_capabilities().rehydrate_projection {
+            return Err(EngineError::Unavailable);
+        }
+        self.inner.lifecycle.rehydrate_projection().await
     }
 }
 
