@@ -1018,6 +1018,47 @@ pub trait DiscoveryPort: Send + Sync {
 /// Query Capability Names). `side_record_query` is deferred beyond epic pqueue-45e13e4d for every
 /// backend (API-004 Side/Projection Records) — no override in this epic may advertise it `true`.
 #[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimByQueryContext {
+    /// Server-owned operational time used to stamp the lease and idempotency retention window.
+    pub now: UtcTimestamp,
+    /// Optional caller-selected eligibility epoch. This can widen/narrow due selection, but never changes
+    /// the operational lease start; public facade calls leave it absent and use the injected clock for both.
+    pub eligibility_time: Option<UtcTimestamp>,
+}
+
+impl ClaimByQueryContext {
+    pub fn eligibility_at(self) -> UtcTimestamp {
+        self.eligibility_time.unwrap_or(self.now)
+    }
+
+    pub fn lease_expires_at(self, lease_duration_ms: u64) -> UtcTimestamp {
+        let nanos = u64::from(self.now.nanoseconds)
+            .saturating_add((lease_duration_ms % 1_000).saturating_mul(1_000_000));
+        let seconds_to_add = lease_duration_ms
+            .saturating_div(1_000)
+            .saturating_add(nanos / 1_000_000_000);
+        let nanoseconds = (nanos % 1_000_000_000) as u32;
+        let Some(seconds_to_add) = i64::try_from(seconds_to_add).ok() else {
+            return UtcTimestamp {
+                seconds: i64::MAX,
+                nanoseconds: 999_999_999,
+            };
+        };
+        let Some(seconds) = self.now.seconds.checked_add(seconds_to_add) else {
+            return UtcTimestamp {
+                seconds: i64::MAX,
+                nanoseconds: 999_999_999,
+            };
+        };
+        UtcTimestamp {
+            seconds,
+            nanoseconds,
+        }
+    }
+}
+
+#[doc(hidden)]
 pub trait HotProjectionQueryPort: Send + Sync {
     /// Advertised capability flags for `shard`. The default advertises every capability
     /// unavailable.
@@ -1064,6 +1105,7 @@ pub trait HotProjectionQueryPort: Send + Sync {
         &self,
         _shard: &QueueKey,
         _request: ClaimByQueryRequest,
+        _context: ClaimByQueryContext,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }

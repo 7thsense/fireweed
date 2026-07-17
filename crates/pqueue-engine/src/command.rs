@@ -1018,6 +1018,12 @@ pub enum RequestOutcome {
     Push {
         item_ids: Vec<ItemId>,
     },
+    /// Durable replay payload for API-004 ClaimByQuery. The clear lease token is part of the response and
+    /// must be returned unchanged on same-body request-id replay while the recorded leases remain active.
+    ClaimByQuery {
+        item_ids: Vec<ItemId>,
+        lease_token: LeaseToken,
+    },
     /// The full per-entry outcome of a `commit_transition` (committed AND rejected entries), recorded on a
     /// terminal marker envelope so recovery can rebuild the whole `Vec<EntryRecovery>` — not just the
     /// committed, `Finalize`-delimited subset — for a mixed committed+rejected commit (bead pqueue-db60657d).

@@ -2272,7 +2272,16 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         request: ClaimByQueryRequest,
     ) -> EngineResult<Claimed> {
-        self.backend.claim_by_query(queue, request).await
+        self.backend
+            .claim_by_query(
+                queue,
+                request,
+                pqueue_engine::ClaimByQueryContext {
+                    now: self.clock.now(),
+                    eligibility_time: None,
+                },
+            )
+            .await
     }
 }
 
