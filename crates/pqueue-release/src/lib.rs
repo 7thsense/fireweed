@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod attestation;
 pub mod e2_failover;
+pub mod e3_contract;
 pub mod transaction;
 
 /// One verification-ledger row: a single measured release-evidence run.
@@ -943,6 +944,28 @@ pub mod cost {
         pub objects_put: f64,
         /// Segments sealed for those commands.
         pub segments_sealed: f64,
+        /// Billable PUT-class requests observed through the live blob-store seam.
+        pub put_requests: f64,
+        /// Billable GET requests observed through the live blob-store seam.
+        pub get_requests: f64,
+        /// Billable LIST requests observed through the live blob-store seam.
+        pub list_requests: f64,
+        /// DELETE requests observed through the live blob-store seam.
+        pub delete_requests: f64,
+        /// Projection-specific rebuild mode proven by the source row.
+        pub recovery_mode: RecoveryMode,
+        /// Durable commands represented by the measured 10M recovery run.
+        pub recovery_commands: f64,
+        pub recovery_put_requests: f64,
+        pub recovery_get_requests: f64,
+        pub recovery_list_requests: f64,
+        pub recovery_delete_requests: f64,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RecoveryMode {
+        SnapshotTail,
+        FullGenesis,
     }
 
     impl ObjectLogCounts {
@@ -956,6 +979,16 @@ pub mod cost {
                 commands: 2048.0,
                 objects_put: 68.0,
                 segments_sealed: 34.0,
+                put_requests: 68.0,
+                get_requests: 0.0,
+                list_requests: 0.0,
+                delete_requests: 0.0,
+                recovery_mode: RecoveryMode::SnapshotTail,
+                recovery_commands: 0.0,
+                recovery_put_requests: 0.0,
+                recovery_get_requests: 0.0,
+                recovery_list_requests: 0.0,
+                recovery_delete_requests: 0.0,
             }
         }
 
@@ -967,6 +1000,16 @@ pub mod cost {
                 commands: 2048.0,
                 objects_put: 100.0,
                 segments_sealed: 50.0,
+                put_requests: 100.0,
+                get_requests: 0.0,
+                list_requests: 0.0,
+                delete_requests: 0.0,
+                recovery_mode: RecoveryMode::SnapshotTail,
+                recovery_commands: 0.0,
+                recovery_put_requests: 0.0,
+                recovery_get_requests: 0.0,
+                recovery_list_requests: 0.0,
+                recovery_delete_requests: 0.0,
             }
         }
 
@@ -986,12 +1029,247 @@ pub mod cost {
                 commands: commands_per_segment * segments,
                 objects_put: objects_per_segment * segments,
                 segments_sealed: segments,
+                put_requests: objects_per_segment * segments,
+                get_requests: 0.0,
+                list_requests: 0.0,
+                delete_requests: 0.0,
+                recovery_mode: RecoveryMode::SnapshotTail,
+                recovery_commands: 0.0,
+                recovery_put_requests: 0.0,
+                recovery_get_requests: 0.0,
+                recovery_list_requests: 0.0,
+                recovery_delete_requests: 0.0,
             }
         }
 
         /// Mean commands per sealed segment (segment fill, for display).
         pub fn commands_per_segment(&self) -> f64 {
             self.commands / self.segments_sealed
+        }
+    }
+
+    /// Version tag for the cited price bundle. Validators reject rows from any older/different bundle.
+    pub const PRICE_SOURCE_REVISION: &str = "aws-us-east-1-offers-2026-06-29";
+    const E3_PROFILES: [&str; 2] = [
+        "object_log_inmemory_projection",
+        "object_log_sqlite_projection",
+    ];
+    const E3_BOUNDS: [&str; 4] = ["1ms", "5ms", "20ms", "100ms"];
+
+    /// One release E3 profile/bound translated into measured cost inputs.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ReleaseCostInput {
+        pub backend_profile: String,
+        pub bound: String,
+        pub counts: ObjectLogCounts,
+        pub source_command: String,
+        pub source_environment: String,
+        pub source_revision: String,
+    }
+
+    fn value_u64(row: &LedgerRow, key: &str, errors: &mut Vec<String>) -> Option<u64> {
+        match row
+            .measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+        {
+            Some(value) => Some(value),
+            None => {
+                errors.push(format!(
+                    "profile {} missing measured {key}",
+                    row.backend_profile
+                ));
+                None
+            }
+        }
+    }
+
+    fn value_true(row: &LedgerRow, key: &str) -> bool {
+        row.measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+
+    /// Validate governed live E3 rows and extract every profile/bound's measured request counters.
+    pub fn release_cost_inputs(rows: &[LedgerRow]) -> Result<Vec<ReleaseCostInput>, Vec<String>> {
+        let mut errors = Vec::new();
+        let mut inputs = Vec::new();
+        for profile in E3_PROFILES {
+            let matching = rows
+                .iter()
+                .filter(|row| row.backend_profile == profile)
+                .collect::<Vec<_>>();
+            let [row] = matching.as_slice() else {
+                if matching.is_empty() {
+                    errors.push(format!("missing profile {profile}"));
+                } else {
+                    errors.push(format!(
+                        "profile {profile} has {} source rows; expected exactly one",
+                        matching.len()
+                    ));
+                }
+                continue;
+            };
+            if row.suite != "performance_object_log_e3_live_tests"
+                || row.exit_status != 0
+                || row.measurements.tp002_evidence_ids != ["E3"]
+            {
+                errors.push(format!(
+                    "profile {profile} has invalid source identity/status/E3 linkage"
+                ));
+            }
+            if row.backend_profile != profile {
+                errors.push(format!("missing profile {profile}"));
+                continue;
+            }
+            if row.scale != "release" || row.evidence_tier != "release" {
+                errors.push(format!("profile {profile} cost source is not release-tier"));
+            }
+            if !value_true(row, "bars_met") {
+                errors.push(format!("profile {profile} bars_met is not true"));
+            }
+            if row
+                .measurements
+                .values
+                .get("storage_topology_id")
+                .and_then(serde_json::Value::as_str)
+                != Some("minio-tmpfs-8g")
+                || row
+                    .measurements
+                    .values
+                    .get("storage_durability_claim")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("excluded")
+            {
+                errors.push(format!(
+                    "profile {profile} lacks wrapper-verified tmpfs topology/exclusion"
+                ));
+            }
+            let source_revision = row
+                .measurements
+                .values
+                .get("source_revision")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if source_revision.len() != 40
+                || !source_revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                errors.push(format!(
+                    "profile {profile} lacks an exact committed source revision"
+                ));
+            }
+            if !value_true(row, "recovery_bar_met") {
+                errors.push(format!(
+                    "profile {profile} recovery bar failed or is missing"
+                ));
+            }
+            if value_u64(row, "recovery_resident", &mut errors) != Some(10_000_000) {
+                errors.push(format!("profile {profile} recovery is not the 10M shape"));
+            }
+            let snapshot = value_true(row, "recovery_snapshot_used");
+            let start = value_u64(row, "recovery_start_seq", &mut errors);
+            let tail = value_u64(row, "recovery_tail_replayed", &mut errors);
+            let total = value_u64(row, "recovery_total_commands", &mut errors);
+            let recovery_puts = value_u64(row, "recovery_store_put_requests", &mut errors);
+            let recovery_gets = value_u64(row, "recovery_store_get_requests", &mut errors);
+            let recovery_lists = value_u64(row, "recovery_store_list_requests", &mut errors);
+            let recovery_deletes = value_u64(row, "recovery_store_delete_requests", &mut errors);
+            let recovery_mode_ok = if profile == "object_log_sqlite_projection" {
+                snapshot
+                    && start.is_some_and(|value| value > 0)
+                    && tail.zip(total).is_some_and(|(t, n)| t < n)
+            } else {
+                !snapshot && start == Some(0) && tail.zip(total).is_some_and(|(t, n)| t == n)
+            };
+            if !recovery_mode_ok {
+                errors.push(format!(
+                    "profile {profile} recovery mode does not match projection contract"
+                ));
+            }
+
+            for bound in E3_BOUNDS {
+                let prefix = format!("bound_{bound}");
+                if !value_true(row, &format!("{prefix}_bar_met")) {
+                    errors.push(format!("profile {profile} bound {bound} bar failed"));
+                }
+                let commands = value_u64(row, &format!("{prefix}_commands_committed"), &mut errors);
+                let objects = value_u64(row, &format!("{prefix}_objects_put"), &mut errors);
+                let segments = value_u64(row, &format!("{prefix}_segments_sealed"), &mut errors);
+                let puts = value_u64(row, &format!("{prefix}_store_put_requests"), &mut errors);
+                let gets = value_u64(row, &format!("{prefix}_store_get_requests"), &mut errors);
+                let lists = value_u64(row, &format!("{prefix}_store_list_requests"), &mut errors);
+                let deletes =
+                    value_u64(row, &format!("{prefix}_store_delete_requests"), &mut errors);
+                let Some((commands, objects, segments, puts, gets, lists, deletes)) = commands
+                    .zip(objects)
+                    .zip(segments)
+                    .zip(puts)
+                    .zip(gets)
+                    .zip(lists)
+                    .zip(deletes)
+                    .map(
+                        |((((((commands, objects), segments), puts), gets), lists), deletes)| {
+                            (commands, objects, segments, puts, gets, lists, deletes)
+                        },
+                    )
+                else {
+                    continue;
+                };
+                if commands == 0 || segments == 0 || puts == 0 {
+                    errors.push(format!(
+                        "profile {profile} bound {bound} has empty measured counters"
+                    ));
+                    continue;
+                }
+                inputs.push(ReleaseCostInput {
+                    backend_profile: profile.to_string(),
+                    bound: bound.to_string(),
+                    counts: ObjectLogCounts {
+                        label: format!("live E3 {profile} {bound}"),
+                        commands: commands as f64,
+                        objects_put: objects as f64,
+                        segments_sealed: segments as f64,
+                        put_requests: puts as f64,
+                        get_requests: gets as f64,
+                        list_requests: lists as f64,
+                        delete_requests: deletes as f64,
+                        recovery_mode: if profile == "object_log_sqlite_projection" {
+                            RecoveryMode::SnapshotTail
+                        } else {
+                            RecoveryMode::FullGenesis
+                        },
+                        recovery_commands: total.unwrap_or(0) as f64,
+                        recovery_put_requests: recovery_puts.unwrap_or(0) as f64,
+                        recovery_get_requests: recovery_gets.unwrap_or(0) as f64,
+                        recovery_list_requests: recovery_lists.unwrap_or(0) as f64,
+                        recovery_delete_requests: recovery_deletes.unwrap_or(0) as f64,
+                    },
+                    source_command: row.command.clone(),
+                    source_environment: row.environment.clone(),
+                    source_revision: source_revision.to_string(),
+                });
+            }
+        }
+        if inputs.len() != E3_PROFILES.len() * E3_BOUNDS.len() {
+            errors.push(format!(
+                "extracted {} release cost inputs; expected 8",
+                inputs.len()
+            ));
+        }
+        let revisions = inputs
+            .iter()
+            .map(|input| input.source_revision.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if revisions.len() != 1 {
+            errors.push("release cost inputs do not share one exact source revision".into());
+        }
+        if errors.is_empty() {
+            Ok(inputs)
+        } else {
+            Err(errors)
         }
     }
 
@@ -1027,6 +1305,9 @@ pub mod cost {
         pub pg_ingest_per_s: f64,
         /// MEASURED E0 claim+finalize (drain) throughput, items/s.
         pub pg_claim_finalize_per_s: f64,
+        /// Whether normalization includes claim+finalize. Live E3 request density measures push commands,
+        /// so release cost rows set this false and compare against postgres ingest throughput.
+        pub pg_claim_finalize_in_scope: bool,
     }
 
     impl WorkloadAssumptions {
@@ -1045,13 +1326,26 @@ pub mod cost {
                 recoveries_per_window: 1.0,
                 pg_ingest_per_s: 20_431.0,
                 pg_claim_finalize_per_s: 6_145.0,
+                pg_claim_finalize_in_scope: true,
             }
+        }
+
+        /// Release E3 request accounting is normalized to one billion durable push commands; it does not
+        /// extrapolate push segment density across claim/finalize command types that were not measured.
+        pub fn tp002_e3_push_baseline() -> Self {
+            let mut workload = Self::tp002_high_volume_baseline();
+            workload.commands_per_item = 1.0;
+            workload.pg_claim_finalize_in_scope = false;
+            workload
         }
 
         /// End-to-end command throughput (commands/s) folded from the measured per-item E0 rates: each item is
         /// one push (at the ingest rate) plus a claim+finalize pair (at the drain rate); the per-item wall time
         /// is the sum, and the command rate is `commands_per_item / per_item_seconds`.
         pub fn pg_command_throughput_per_s(&self) -> f64 {
+            if !self.pg_claim_finalize_in_scope {
+                return self.pg_ingest_per_s;
+            }
             let per_item_seconds = 1.0 / self.pg_ingest_per_s + 1.0 / self.pg_claim_finalize_per_s;
             self.commands_per_item / per_item_seconds
         }
@@ -1068,6 +1362,14 @@ pub mod cost {
         pub get_requests: f64,
         /// Object-log: cost of those recovery GETs. Postgres: 0.
         pub get_cost: f64,
+        /// Object-log: LIST requests scaled to a billion commands. Postgres: 0.
+        pub list_requests: f64,
+        /// Object-log: cost of those LISTs. Postgres: 0.
+        pub list_cost: f64,
+        /// Object-log: DELETE requests scaled to a billion commands. Postgres: 0.
+        pub delete_requests: f64,
+        /// Object-log: cost of those DELETEs. Postgres: 0 (S3 Standard currently prices DELETE at zero).
+        pub delete_cost: f64,
         /// Durable bytes retained (GB): object-log = snapshot + recovery-window log; postgres = resident heap
         /// + index overhead.
         pub storage_gb: f64,
@@ -1117,24 +1419,55 @@ pub mod cost {
         let month_fraction = w.billing_window_hours / HOURS_PER_MONTH;
 
         // ----- object_log_sqlite_projection -----
-        let objects_per_command = counts.objects_put / counts.commands;
-        let put_requests = objects_per_command * BILLION;
+        let has_measured_recovery = counts.recovery_commands > 0.0;
+        let put_requests = counts.put_requests / counts.commands * BILLION
+            + if has_measured_recovery {
+                counts.recovery_put_requests * w.recoveries_per_window
+            } else {
+                0.0
+            };
         let put_cost = put_requests / 1000.0 * p.s3_put_per_1k;
 
         // Durable storage: the projection snapshot (resident working set) + the committed log retained behind
         // it for the recovery window. The command rate at a billion-per-window sets how much log a window holds.
-        let snapshot_bytes = w.resident_items * w.bytes_per_command;
         let command_rate_per_hour = BILLION / w.billing_window_hours;
-        let recovery_log_commands = command_rate_per_hour * w.recovery_window_hours;
+        let (snapshot_bytes, recovery_log_commands) = match counts.recovery_mode {
+            RecoveryMode::SnapshotTail => (
+                w.resident_items * w.bytes_per_command,
+                command_rate_per_hour * w.recovery_window_hours,
+            ),
+            RecoveryMode::FullGenesis => (0.0, BILLION),
+        };
         let recovery_log_bytes = recovery_log_commands * w.bytes_per_command;
         let ol_storage_gb = (snapshot_bytes + recovery_log_bytes) / BYTES_PER_GB;
         let ol_storage_cost = ol_storage_gb * p.s3_storage_per_gb_month * month_fraction;
 
-        // Recovery GETs: rebuild reads the snapshot (≈1 manifest+snapshot fetch) plus the recovery-window
-        // segments, once per recovery. Tiny next to PUTs but modelled for completeness.
-        let recovery_segments = recovery_log_commands / counts.commands_per_segment();
-        let get_requests = (recovery_segments + 1.0) * w.recoveries_per_window;
+        // The governed recovery probe rebuilds the fixed 10M resident shape. Its load uses batched push
+        // commands solely to keep the live run tractable, so `recovery_commands` is provenance, not a valid
+        // denominator for push-only billion-command normalization. Charge the exact measured 10M rebuild once
+        // per configured recovery; extrapolating by batched load commands would invent request volume.
+        let measured_get_requests = counts.get_requests / counts.commands * BILLION;
+        let recovery_get_requests = if has_measured_recovery {
+            counts.recovery_get_requests * w.recoveries_per_window
+        } else {
+            (recovery_log_commands / counts.commands_per_segment() + 1.0) * w.recoveries_per_window
+        };
+        let get_requests = measured_get_requests + recovery_get_requests;
         let get_cost = get_requests / 1000.0 * p.s3_get_per_1k;
+        let list_requests = counts.list_requests / counts.commands * BILLION
+            + if has_measured_recovery {
+                counts.recovery_list_requests * w.recoveries_per_window
+            } else {
+                0.0
+            };
+        let list_cost = list_requests / 1000.0 * p.s3_put_per_1k;
+        let delete_requests = counts.delete_requests / counts.commands * BILLION
+            + if has_measured_recovery {
+                counts.recovery_delete_requests * w.recoveries_per_window
+            } else {
+                0.0
+            };
+        let delete_cost = delete_requests / 1000.0 * p.s3_delete_per_1k;
 
         let ol_compute_hours = w.billing_window_hours;
         let processing_hours = BILLION / w.pg_command_throughput_per_s() / 3600.0;
@@ -1145,6 +1478,10 @@ pub mod cost {
             put_cost,
             get_requests,
             get_cost,
+            list_requests,
+            list_cost,
+            delete_requests,
+            delete_cost,
             storage_gb: ol_storage_gb,
             storage_cost: ol_storage_cost,
             provisioned_iops: 0.0,
@@ -1152,7 +1489,12 @@ pub mod cost {
             compute_hours: ol_compute_hours,
             processing_hours,
             compute_cost: ol_compute_cost,
-            total: put_cost + get_cost + ol_storage_cost + ol_compute_cost,
+            total: put_cost
+                + get_cost
+                + list_cost
+                + delete_cost
+                + ol_storage_cost
+                + ol_compute_cost,
         };
 
         // ----- postgres_native -----
@@ -1167,6 +1509,10 @@ pub mod cost {
             put_cost: 0.0,
             get_requests: 0.0,
             get_cost: 0.0,
+            list_requests: 0.0,
+            list_cost: 0.0,
+            delete_requests: 0.0,
+            delete_cost: 0.0,
             storage_gb: pg_storage_gb,
             storage_cost: pg_storage_cost,
             provisioned_iops: w.pg_provisioned_iops,
@@ -1309,6 +1655,411 @@ pub mod cost {
         }
     }
 
+    /// Build one release-tier cost row for every governed E3 profile/bound input.
+    pub fn build_release_cost_rows(
+        inputs: &[ReleaseCostInput],
+        w: &WorkloadAssumptions,
+        p: &PriceInputs,
+        command: &str,
+    ) -> Result<Vec<LedgerRow>, Vec<String>> {
+        if inputs.len() != 8 {
+            return Err(vec![format!(
+                "expected 8 release cost inputs, got {}",
+                inputs.len()
+            )]);
+        }
+        let comparisons = inputs
+            .iter()
+            .map(|input| compute_comparison(&input.counts, w, p))
+            .collect::<Vec<_>>();
+        let optimized = comparisons
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.objectlog_per_billion
+                    .partial_cmp(&right.objectlog_per_billion)
+                    .expect("finite cost")
+            })
+            .map(|(index, _)| index)
+            .expect("non-empty inputs");
+        if !comparisons[optimized].objectlog_wins {
+            return Err(vec![format!(
+                "cost-optimized point does not beat postgres_native: objectlog={:.2} postgres={:.2}",
+                comparisons[optimized].objectlog_per_billion,
+                comparisons[optimized].postgres_per_billion
+            )]);
+        }
+
+        let round2 = |value: f64| (value * 100.0).round() / 100.0;
+        Ok(inputs
+            .iter()
+            .zip(comparisons)
+            .enumerate()
+            .map(|(index, (input, comparison))| {
+                let per_billion = |requests: f64| requests / input.counts.commands * BILLION;
+                let put_requests = per_billion(input.counts.put_requests);
+                let get_requests = per_billion(input.counts.get_requests);
+                let list_requests = per_billion(input.counts.list_requests);
+                let delete_requests = per_billion(input.counts.delete_requests);
+                let values = BTreeMap::from([
+                    ("bars_met".into(), serde_json::json!(true)),
+                    ("cost_model".into(), serde_json::json!(true)),
+                    ("cost_bound".into(), serde_json::json!(input.bound)),
+                    ("cost_optimized_point".into(), serde_json::json!(index == optimized)),
+                    ("measured_counter_linked".into(), serde_json::json!(true)),
+                    ("source_evidence_tier".into(), serde_json::json!("release")),
+                    ("source_suite".into(), serde_json::json!("performance_object_log_e3_live_tests")),
+                    ("source_revision".into(), serde_json::json!(input.source_revision)),
+                    ("measured_commands".into(), serde_json::json!(input.counts.commands as u64)),
+                    ("measured_objects_put".into(), serde_json::json!(input.counts.objects_put as u64)),
+                    ("measured_segments_sealed".into(), serde_json::json!(input.counts.segments_sealed as u64)),
+                    ("measured_store_put_requests".into(), serde_json::json!(input.counts.put_requests as u64)),
+                    ("measured_store_get_requests".into(), serde_json::json!(input.counts.get_requests as u64)),
+                    ("measured_store_list_requests".into(), serde_json::json!(input.counts.list_requests as u64)),
+                    ("measured_store_delete_requests".into(), serde_json::json!(input.counts.delete_requests as u64)),
+                    ("recovery_mode".into(), serde_json::json!(match input.counts.recovery_mode { RecoveryMode::SnapshotTail => "snapshot_tail", RecoveryMode::FullGenesis => "full_genesis" })),
+                    ("measured_recovery_commands".into(), serde_json::json!(input.counts.recovery_commands as u64)),
+                    ("measured_recovery_put_requests".into(), serde_json::json!(input.counts.recovery_put_requests as u64)),
+                    ("measured_recovery_get_requests".into(), serde_json::json!(input.counts.recovery_get_requests as u64)),
+                    ("measured_recovery_list_requests".into(), serde_json::json!(input.counts.recovery_list_requests as u64)),
+                    ("measured_recovery_delete_requests".into(), serde_json::json!(input.counts.recovery_delete_requests as u64)),
+                    ("steady_state_put_requests_per_billion".into(), serde_json::json!(round2(put_requests))),
+                    ("put_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.put_requests))),
+                    ("steady_state_get_requests_per_billion".into(), serde_json::json!(round2(get_requests))),
+                    ("steady_state_list_requests_per_billion".into(), serde_json::json!(round2(list_requests))),
+                    ("steady_state_delete_requests_per_billion".into(), serde_json::json!(round2(delete_requests))),
+                    ("get_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.get_requests))),
+                    ("list_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.list_requests))),
+                    ("delete_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.delete_requests))),
+                    ("put_usd_per_billion".into(), serde_json::json!(round2(comparison.objectlog.put_cost))),
+                    ("get_usd_per_billion".into(), serde_json::json!(round2(comparison.objectlog.get_cost))),
+                    ("list_usd_per_billion".into(), serde_json::json!(round2(comparison.objectlog.list_cost))),
+                    ("delete_usd_per_billion".into(), serde_json::json!(round2(comparison.objectlog.delete_cost))),
+                    ("objectlog_usd_per_billion_commands".into(), serde_json::json!(round2(comparison.objectlog_per_billion))),
+                    ("postgres_usd_per_billion_commands".into(), serde_json::json!(round2(comparison.postgres_per_billion))),
+                    ("objectlog_below_postgres".into(), serde_json::json!(comparison.objectlog_wins)),
+                    ("price_source".into(), serde_json::json!(p.instance_source)),
+                    ("iops_price_source".into(), serde_json::json!(p.iops_source)),
+                    ("price_source_revision".into(), serde_json::json!(PRICE_SOURCE_REVISION)),
+                ]);
+                LedgerRow {
+                    suite: "tp002_e3_release_cost_model".into(),
+                    command: command.into(),
+                    backend_profile: input.backend_profile.clone(),
+                    scale: "release".into(),
+                    seed: 0,
+                    environment: format!(
+                        "release cost calculation linked to live E3 bound {} [{}]; {}",
+                        input.bound, input.source_command, input.source_environment
+                    ),
+                    exit_status: 0,
+                    ac_ids: vec![],
+                    inv_ids: vec![],
+                    pass_bar: "measured request costs at this bound; optimized E3 point must beat documented postgres_native comparator".into(),
+                    evidence_tier: "release".into(),
+                    measurements: Measurements {
+                        tp002_evidence_ids: vec!["E3".into()],
+                        values,
+                    },
+                }
+            })
+            .collect())
+    }
+
+    /// Semantic validator for the release cost matrix.
+    pub fn validate_release_cost_rows(rows: &[LedgerRow]) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut source_revisions = std::collections::BTreeSet::new();
+        let mut computed = Vec::new();
+        let prices = PriceInputs::adr_001_us_east_1();
+        let workload = WorkloadAssumptions::tp002_e3_push_baseline();
+        let number = |row: &LedgerRow, key: &str| {
+            row.measurements.values.get(key).and_then(|value| {
+                value
+                    .as_f64()
+                    .or_else(|| value.as_u64().map(|value| value as f64))
+            })
+        };
+        for row in rows {
+            let bound = row
+                .measurements
+                .values
+                .get("cost_bound")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if row.scale != "release" || row.evidence_tier != "release" {
+                errors.push(format!(
+                    "{} {bound} cost row is not release-tier",
+                    row.backend_profile
+                ));
+            }
+            if !E3_PROFILES.contains(&row.backend_profile.as_str()) {
+                errors.push(format!("unexpected profile {}", row.backend_profile));
+            }
+            if row.suite != "tp002_e3_release_cost_model"
+                || row.exit_status != 0
+                || row.measurements.tp002_evidence_ids != ["E3"]
+            {
+                errors.push(format!(
+                    "{} {bound} has invalid cost-row identity/status/E3 linkage",
+                    row.backend_profile
+                ));
+            }
+            if !E3_BOUNDS.contains(&bound) {
+                errors.push(format!(
+                    "{} has unknown/missing bound {bound}",
+                    row.backend_profile
+                ));
+            }
+            if !seen.insert((row.backend_profile.clone(), bound.to_string())) {
+                errors.push(format!(
+                    "duplicate cost row {} {bound}",
+                    row.backend_profile
+                ));
+            }
+            if !value_true(row, "measured_counter_linked")
+                || row
+                    .measurements
+                    .values
+                    .get("measured_commands")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                    == 0
+                || row
+                    .measurements
+                    .values
+                    .get("measured_store_put_requests")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                    == 0
+            {
+                errors.push(format!(
+                    "{} {bound} missing measured-counter linkage",
+                    row.backend_profile
+                ));
+            }
+            if !value_true(row, "bars_met")
+                || row
+                    .measurements
+                    .values
+                    .get("source_evidence_tier")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("release")
+                || row
+                    .measurements
+                    .values
+                    .get("source_suite")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("performance_object_log_e3_live_tests")
+            {
+                errors.push(format!(
+                    "{} {bound} missing governed release source linkage",
+                    row.backend_profile
+                ));
+            }
+            let source_revision = row
+                .measurements
+                .values
+                .get("source_revision")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            source_revisions.insert(source_revision.to_string());
+            if source_revision.len() != 40
+                || !source_revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                errors.push(format!(
+                    "{} {bound} lacks exact source revision linkage",
+                    row.backend_profile
+                ));
+            }
+            if row
+                .measurements
+                .values
+                .get("price_source_revision")
+                .and_then(serde_json::Value::as_str)
+                != Some(PRICE_SOURCE_REVISION)
+            {
+                errors.push(format!(
+                    "{} {bound} has stale price provenance",
+                    row.backend_profile
+                ));
+            }
+            if row
+                .measurements
+                .values
+                .get("price_source")
+                .and_then(serde_json::Value::as_str)
+                != Some(prices.instance_source)
+                || row
+                    .measurements
+                    .values
+                    .get("iops_price_source")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(prices.iops_source)
+            {
+                errors.push(format!(
+                    "{} {bound} price provenance text does not match the governed bundle",
+                    row.backend_profile
+                ));
+            }
+
+            let recovery_mode = match row
+                .measurements
+                .values
+                .get("recovery_mode")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("snapshot_tail") => Some(RecoveryMode::SnapshotTail),
+                Some("full_genesis") => Some(RecoveryMode::FullGenesis),
+                _ => None,
+            };
+            let expected_recovery_mode = if row.backend_profile == "object_log_sqlite_projection" {
+                RecoveryMode::SnapshotTail
+            } else {
+                RecoveryMode::FullGenesis
+            };
+            if recovery_mode.is_some_and(|mode| mode != expected_recovery_mode) {
+                errors.push(format!(
+                    "{} {bound} recovery mode does not match profile",
+                    row.backend_profile
+                ));
+            }
+            let required = [
+                "measured_commands",
+                "measured_objects_put",
+                "measured_segments_sealed",
+                "measured_store_put_requests",
+                "measured_store_get_requests",
+                "measured_store_list_requests",
+                "measured_store_delete_requests",
+                "measured_recovery_commands",
+                "measured_recovery_put_requests",
+                "measured_recovery_get_requests",
+                "measured_recovery_list_requests",
+                "measured_recovery_delete_requests",
+            ];
+            let measured = required
+                .iter()
+                .map(|key| number(row, key))
+                .collect::<Vec<_>>();
+            if recovery_mode.is_none() || measured.iter().any(Option::is_none) {
+                errors.push(format!(
+                    "{} {bound} lacks inputs required to recompute cost",
+                    row.backend_profile
+                ));
+                continue;
+            }
+            let counts = ObjectLogCounts {
+                label: format!("recomputed {} {bound}", row.backend_profile),
+                commands: measured[0].unwrap(),
+                objects_put: measured[1].unwrap(),
+                segments_sealed: measured[2].unwrap(),
+                put_requests: measured[3].unwrap(),
+                get_requests: measured[4].unwrap(),
+                list_requests: measured[5].unwrap(),
+                delete_requests: measured[6].unwrap(),
+                recovery_mode: recovery_mode.unwrap(),
+                recovery_commands: measured[7].unwrap(),
+                recovery_put_requests: measured[8].unwrap(),
+                recovery_get_requests: measured[9].unwrap(),
+                recovery_list_requests: measured[10].unwrap(),
+                recovery_delete_requests: measured[11].unwrap(),
+            };
+            let comparison = compute_comparison(&counts, &workload, &prices);
+            let expected = [
+                (
+                    "put_requests_per_billion",
+                    comparison.objectlog.put_requests,
+                ),
+                (
+                    "get_requests_per_billion",
+                    comparison.objectlog.get_requests,
+                ),
+                (
+                    "list_requests_per_billion",
+                    comparison.objectlog.list_requests,
+                ),
+                (
+                    "delete_requests_per_billion",
+                    comparison.objectlog.delete_requests,
+                ),
+                ("put_usd_per_billion", comparison.objectlog.put_cost),
+                ("get_usd_per_billion", comparison.objectlog.get_cost),
+                ("list_usd_per_billion", comparison.objectlog.list_cost),
+                ("delete_usd_per_billion", comparison.objectlog.delete_cost),
+                (
+                    "objectlog_usd_per_billion_commands",
+                    comparison.objectlog_per_billion,
+                ),
+                (
+                    "postgres_usd_per_billion_commands",
+                    comparison.postgres_per_billion,
+                ),
+            ];
+            for (key, expected_value) in expected {
+                if number(row, key).is_none_or(|actual| (actual - expected_value).abs() > 0.011) {
+                    errors.push(format!(
+                        "{} {bound} derived {key} does not recompute",
+                        row.backend_profile
+                    ));
+                }
+            }
+            if value_true(row, "objectlog_below_postgres") != comparison.objectlog_wins {
+                errors.push(format!(
+                    "{} {bound} comparator result does not recompute",
+                    row.backend_profile
+                ));
+            }
+            computed.push((
+                row.backend_profile.clone(),
+                bound.to_string(),
+                comparison.objectlog_per_billion,
+                comparison.objectlog_wins,
+                value_true(row, "cost_optimized_point"),
+            ));
+        }
+        for profile in E3_PROFILES {
+            for bound in E3_BOUNDS {
+                if !seen.contains(&(profile.to_string(), bound.to_string())) {
+                    errors.push(format!("missing profile/bound {profile} {bound}"));
+                }
+            }
+        }
+        if source_revisions.len() != 1 {
+            errors.push("release cost rows do not share one exact source revision".into());
+        }
+        if let Some(expected_optimized) = computed
+            .iter()
+            .min_by(|left, right| left.2.partial_cmp(&right.2).unwrap())
+        {
+            let marked = computed.iter().filter(|row| row.4).collect::<Vec<_>>();
+            if marked.len() != 1
+                || marked[0].0 != expected_optimized.0
+                || marked[0].1 != expected_optimized.1
+            {
+                errors
+                    .push("cost-optimized marker does not identify the recomputed minimum".into());
+            }
+            if !expected_optimized.3 {
+                errors.push("recomputed cost-optimized point does not beat postgres_native".into());
+            }
+        } else {
+            errors.push("no recomputable cost rows".into());
+        }
+        if rows.len() != 8 {
+            errors.push(format!(
+                "release cost matrix has {} rows; expected 8",
+                rows.len()
+            ));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -1435,6 +2186,33 @@ pub mod cost {
             assert!((t - 14_172.6).abs() < 5.0, "throughput={t:.1}");
         }
 
+        #[test]
+        fn e3_release_comparator_normalizes_only_the_measured_push_operation() {
+            let w = WorkloadAssumptions::tp002_e3_push_baseline();
+            assert_eq!(w.commands_per_item, 1.0);
+            assert!(!w.pg_claim_finalize_in_scope);
+            assert_eq!(w.pg_command_throughput_per_s(), w.pg_ingest_per_s);
+        }
+
+        #[test]
+        fn measured_10m_recovery_requests_are_charged_once_not_scaled_by_batch_commands() {
+            let mut counts = ObjectLogCounts::e3_size_dominant();
+            counts.get_requests = 100.0;
+            counts.list_requests = 50.0;
+            counts.recovery_commands = 10_000.0;
+            counts.recovery_put_requests = 4.0;
+            counts.recovery_get_requests = 20.0;
+            counts.recovery_list_requests = 3.0;
+            let w = WorkloadAssumptions::tp002_e3_push_baseline();
+            let comparison = compute_comparison(&counts, &w, &PriceInputs::adr_001_us_east_1());
+            let steady_puts = counts.put_requests / counts.commands * BILLION;
+            let steady_gets = counts.get_requests / counts.commands * BILLION;
+            let steady_lists = counts.list_requests / counts.commands * BILLION;
+            assert_eq!(comparison.objectlog.put_requests - steady_puts, 4.0);
+            assert_eq!(comparison.objectlog.get_requests - steady_gets, 20.0);
+            assert_eq!(comparison.objectlog.list_requests - steady_lists, 3.0);
+        }
+
         /// The smoke-tier cost row is traceable and strict-valid, and never masquerades as release evidence.
         #[test]
         fn cost_row_is_smoke_tier_and_traceable() {
@@ -1446,6 +2224,356 @@ pub mod cost {
             assert_eq!(row.evidence_tier, "smoke");
             assert_eq!(row.measurements.tp002_evidence_ids, vec!["E3".to_string()]);
             assert!(super::super::strict_row_errors(&row).is_empty());
+        }
+
+        fn synthetic_release_source(profile: &str) -> LedgerRow {
+            let sqlite = profile == "object_log_sqlite_projection";
+            let mut values = BTreeMap::from([
+                ("bars_met".into(), serde_json::json!(true)),
+                (
+                    "storage_topology_id".into(),
+                    serde_json::json!("minio-tmpfs-8g"),
+                ),
+                (
+                    "storage_durability_claim".into(),
+                    serde_json::json!("excluded"),
+                ),
+                (
+                    "source_revision".into(),
+                    serde_json::json!("1111111111111111111111111111111111111111"),
+                ),
+                ("recovery_bar_met".into(), serde_json::json!(true)),
+                ("recovery_resident".into(), serde_json::json!(10_000_000)),
+                ("recovery_snapshot_used".into(), serde_json::json!(sqlite)),
+                (
+                    "recovery_start_seq".into(),
+                    serde_json::json!(if sqlite { 100 } else { 0 }),
+                ),
+                (
+                    "recovery_tail_replayed".into(),
+                    serde_json::json!(if sqlite { 0 } else { 100 }),
+                ),
+                ("recovery_total_commands".into(), serde_json::json!(100)),
+                ("recovery_store_put_requests".into(), serde_json::json!(1)),
+                ("recovery_store_get_requests".into(), serde_json::json!(10)),
+                ("recovery_store_list_requests".into(), serde_json::json!(2)),
+                (
+                    "recovery_store_delete_requests".into(),
+                    serde_json::json!(0),
+                ),
+            ]);
+            for bound in E3_BOUNDS {
+                let prefix = format!("bound_{bound}");
+                values.insert(format!("{prefix}_bar_met"), serde_json::json!(true));
+                values.insert(
+                    format!("{prefix}_commands_committed"),
+                    serde_json::json!(100_000),
+                );
+                values.insert(format!("{prefix}_objects_put"), serde_json::json!(500));
+                values.insert(format!("{prefix}_segments_sealed"), serde_json::json!(250));
+                values.insert(
+                    format!("{prefix}_store_put_requests"),
+                    serde_json::json!(500),
+                );
+                values.insert(
+                    format!("{prefix}_store_get_requests"),
+                    serde_json::json!(10),
+                );
+                values.insert(
+                    format!("{prefix}_store_list_requests"),
+                    serde_json::json!(5),
+                );
+                values.insert(
+                    format!("{prefix}_store_delete_requests"),
+                    serde_json::json!(0),
+                );
+            }
+            LedgerRow {
+                suite: "performance_object_log_e3_live_tests".into(),
+                command: "live-e3".into(),
+                backend_profile: profile.into(),
+                scale: "release".into(),
+                seed: 0,
+                environment: "live MinIO test fixture".into(),
+                exit_status: 0,
+                ac_ids: vec![],
+                inv_ids: vec![],
+                pass_bar: "all E3 bars".into(),
+                evidence_tier: "release".into(),
+                measurements: Measurements {
+                    tp002_evidence_ids: vec!["E3".into()],
+                    values,
+                },
+            }
+        }
+
+        fn synthetic_release_cost_rows() -> Vec<LedgerRow> {
+            let sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            let inputs = release_cost_inputs(&sources).unwrap();
+            build_release_cost_rows(
+                &inputs,
+                &WorkloadAssumptions::tp002_e3_push_baseline(),
+                &PriceInputs::adr_001_us_east_1(),
+                "pqueue-cost-model",
+            )
+            .unwrap()
+        }
+
+        #[test]
+        fn release_cost_validator_accepts_complete_measured_matrix() {
+            validate_release_cost_rows(&synthetic_release_cost_rows()).unwrap();
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_smoke_tier_cost() {
+            let mut rows = synthetic_release_cost_rows();
+            rows[0].evidence_tier = "smoke".into();
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("not release-tier"))
+            );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_missing_measured_counter_linkage() {
+            let mut rows = synthetic_release_cost_rows();
+            rows[0]
+                .measurements
+                .values
+                .insert("measured_counter_linked".into(), serde_json::json!(false));
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("missing measured-counter linkage"))
+            );
+            rows[1]
+                .measurements
+                .values
+                .remove("measured_recovery_put_requests");
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("lacks inputs required to recompute cost"))
+            );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_missing_profile() {
+            let mut rows = synthetic_release_cost_rows();
+            rows.retain(|row| row.backend_profile != "object_log_inmemory_projection");
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("missing profile/bound object_log_inmemory_projection"))
+            );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_stale_price_provenance() {
+            let mut rows = synthetic_release_cost_rows();
+            rows[0]
+                .measurements
+                .values
+                .insert("price_source_revision".into(), serde_json::json!("stale"));
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("stale price provenance"))
+            );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_wrong_recovery_mode_or_source_identity() {
+            let mut rows = synthetic_release_cost_rows();
+            let sqlite = rows
+                .iter_mut()
+                .find(|row| row.backend_profile == "object_log_sqlite_projection")
+                .unwrap();
+            sqlite
+                .measurements
+                .values
+                .insert("recovery_mode".into(), serde_json::json!("full_genesis"));
+            sqlite
+                .measurements
+                .values
+                .insert("source_suite".into(), serde_json::json!("untrusted"));
+            sqlite
+                .measurements
+                .values
+                .insert("source_revision".into(), serde_json::json!("dirty"));
+            let errors = validate_release_cost_rows(&rows).unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("recovery mode does not match profile"))
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("missing governed release source linkage"))
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("lacks exact source revision linkage"))
+            );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_mixed_source_revisions() {
+            let mut rows = synthetic_release_cost_rows();
+            rows[0].measurements.values.insert(
+                "source_revision".into(),
+                serde_json::json!("2222222222222222222222222222222222222222"),
+            );
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("do not share one exact source revision"))
+            );
+        }
+
+        #[test]
+        fn release_cost_inputs_reject_failed_recovery_bar() {
+            let mut sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            sources[0]
+                .measurements
+                .values
+                .insert("recovery_bar_met".into(), serde_json::json!(false));
+            assert!(
+                release_cost_inputs(&sources)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("recovery bar failed"))
+            );
+        }
+
+        #[test]
+        fn release_cost_inputs_require_measured_recovery_puts() {
+            let mut sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            sources[0]
+                .measurements
+                .values
+                .remove("recovery_store_put_requests");
+            assert!(
+                release_cost_inputs(&sources)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("missing measured recovery_store_put_requests"))
+            );
+        }
+
+        #[test]
+        fn release_cost_inputs_reject_duplicate_or_invalid_source_rows() {
+            let mut sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            sources.push(sources[0].clone());
+            assert!(
+                release_cost_inputs(&sources)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("expected exactly one"))
+            );
+            sources.pop();
+            sources[0].suite = "wrong-suite".into();
+            assert!(
+                release_cost_inputs(&sources)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("invalid source identity"))
+            );
+            sources[0].suite = "performance_object_log_e3_live_tests".into();
+            sources[0]
+                .measurements
+                .values
+                .insert("source_revision".into(), serde_json::json!("dirty"));
+            assert!(
+                release_cost_inputs(&sources)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("lacks an exact committed source revision"))
+            );
+        }
+
+        #[test]
+        fn release_cost_inputs_reject_unverified_or_overclaimed_storage_topology() {
+            let mut sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            sources[0].measurements.values.insert(
+                "storage_topology_id".into(),
+                serde_json::json!("operator-described"),
+            );
+            sources[1].measurements.values.insert(
+                "storage_durability_claim".into(),
+                serde_json::json!("host-restart-proven"),
+            );
+            let errors = release_cost_inputs(&sources).unwrap_err();
+            assert_eq!(
+                errors
+                    .iter()
+                    .filter(|e| e.contains("lacks wrapper-verified tmpfs topology/exclusion"))
+                    .count(),
+                2
+            );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_tampered_derived_cost() {
+            let mut rows = synthetic_release_cost_rows();
+            rows[0]
+                .measurements
+                .values
+                .insert("get_usd_per_billion".into(), serde_json::json!(999.0));
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("does not recompute"))
+            );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_wrong_optimized_marker() {
+            let mut rows = synthetic_release_cost_rows();
+            let actual = rows
+                .iter()
+                .position(|row| value_true(row, "cost_optimized_point"))
+                .unwrap();
+            let wrong = (actual + 1) % rows.len();
+            rows[actual]
+                .measurements
+                .values
+                .insert("cost_optimized_point".into(), serde_json::json!(false));
+            rows[wrong]
+                .measurements
+                .values
+                .insert("cost_optimized_point".into(), serde_json::json!(true));
+            assert!(
+                validate_release_cost_rows(&rows)
+                    .unwrap_err()
+                    .iter()
+                    .any(|e| e.contains("recomputed minimum"))
+            );
         }
     }
 }
