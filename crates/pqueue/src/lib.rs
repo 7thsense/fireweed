@@ -640,6 +640,250 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
     }
 }
 
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+type ObjectLogSqliteBackend = pqueue_engine::ComposedBackend<
+    pqueue_objectlog::ObjectLog,
+    pqueue_sqlite::HybridProjectionStore,
+    pqueue_engine::InProcessControlPlane,
+>;
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+struct ObjectLogSqliteLifecycle {
+    backend: Arc<ObjectLogSqliteBackend>,
+    max_tail_commands: u64,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+fn validate_objectlog_sqlite_catalog(
+    log: &pqueue_objectlog::ObjectLog,
+    projection: &pqueue_sqlite::SqliteProjectionStore,
+) -> EngineResult<Vec<QueueDefinition>> {
+    use pqueue_engine::{LogStore, ProjectionStore};
+
+    let definitions = LogStore::recover_definitions(log)?;
+    let log_by_key: HashMap<QueueKey, QueueDefinition> = definitions
+        .iter()
+        .cloned()
+        .map(|definition| {
+            (
+                QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                definition,
+            )
+        })
+        .collect();
+    for projected in ProjectionStore::recover_definitions(projection)? {
+        let key = QueueKey::new(projected.tenant_id.clone(), projected.queue_id.clone());
+        let Some(authoritative) = log_by_key.get(&key) else {
+            return Err(EngineError::Storage(
+                "projection contains a queue absent from the authoritative object log".into(),
+            ));
+        };
+        if authoritative != &projected {
+            return Err(EngineError::Storage(
+                "projection queue definition conflicts with the authoritative object log".into(),
+            ));
+        }
+        let projected_high_water = projection.recovery_high_water(&key)?;
+        let authoritative_high_water = LogStore::high_water(log, &key)?;
+        match (projected_high_water, authoritative_high_water) {
+            (Some(_), None) => {
+                return Err(EngineError::Storage(
+                    "projection is non-empty but the authoritative object log is empty".into(),
+                ));
+            }
+            (Some(projected), Some(authoritative))
+                if projected.backend_epoch > authoritative.backend_epoch
+                    || (projected.backend_epoch == authoritative.backend_epoch
+                        && projected.sequence > authoritative.sequence) =>
+            {
+                return Err(EngineError::Storage(
+                    "projection is ahead of the authoritative object log".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(definitions)
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+impl ObjectLogSqliteLifecycle {
+    fn flush_deferred(&self) -> EngineResult<()> {
+        while self
+            .backend
+            .with_projection(|projection| projection.deferred_command_count())
+            > 0
+        {
+            self.backend.flush_deferred_projection()?;
+        }
+        Ok(())
+    }
+
+    fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
+        use pqueue_engine::{LogStore, ProjectionStore};
+
+        let definitions = self.backend.with_log(LogStore::recover_definitions)?;
+        let log_by_key: HashMap<QueueKey, QueueDefinition> = definitions
+            .iter()
+            .cloned()
+            .map(|definition| {
+                (
+                    QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                    definition,
+                )
+            })
+            .collect();
+        let projected = self.backend.with_projection(|projection| {
+            ProjectionStore::recover_definitions(projection.sqlite())
+        })?;
+        for definition in projected {
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let Some(authoritative) = log_by_key.get(&key) else {
+                return Err(EngineError::Storage(
+                    "projection contains a queue absent from the authoritative object log".into(),
+                ));
+            };
+            if authoritative != &definition {
+                return Err(EngineError::Storage(
+                    "projection queue definition conflicts with the authoritative object log"
+                        .into(),
+                ));
+            }
+        }
+        let mut projection_sequence = 0;
+        let mut authoritative_sequence = 0;
+        for definition in definitions {
+            let key = QueueKey::new(definition.tenant_id, definition.queue_id);
+            let projected = self
+                .backend
+                .with_projection(|projection| projection.sqlite().recovery_high_water(&key))?;
+            let authoritative = self
+                .backend
+                .with_log(|log| LogStore::high_water(log, &key))?;
+            match (&projected, &authoritative) {
+                (Some(_), None) => {
+                    return Err(EngineError::Storage(
+                        "projection is non-empty but the authoritative object log is empty".into(),
+                    ));
+                }
+                (Some(projected), Some(authoritative))
+                    if projected.backend_epoch > authoritative.backend_epoch
+                        || (projected.backend_epoch == authoritative.backend_epoch
+                            && projected.sequence > authoritative.sequence) =>
+                {
+                    return Err(EngineError::Storage(
+                        "projection is ahead of the authoritative object log".into(),
+                    ));
+                }
+                _ => {}
+            }
+            projection_sequence =
+                projection_sequence.max(projected.map_or(0, |position| position.sequence));
+            authoritative_sequence =
+                authoritative_sequence.max(authoritative.map_or(0, |position| position.sequence));
+        }
+        Ok(EmbeddedProjectionVerification {
+            compatible: true,
+            projection_sequence,
+            authoritative_sequence,
+        })
+    }
+
+    fn rehydrate_now(&self) -> EngineResult<EmbeddedRehydration> {
+        use pqueue_engine::LogStore;
+
+        self.flush_deferred()?;
+        let definitions = self.backend.with_log(LogStore::recover_definitions)?;
+        let mut replayed = 0_u64;
+        for definition in &definitions {
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            self.backend.with_projection(|projection| {
+                projection
+                    .sqlite()
+                    .create_queue_projection(definition.clone())
+            })?;
+            let mut from = self
+                .backend
+                .with_projection(|projection| projection.sqlite().recovery_high_water(&key))?;
+            loop {
+                let page = self
+                    .backend
+                    .with_log(|log| log.read_from(&key, from.clone(), 1_024))?;
+                replayed = replayed.saturating_add(page.entries.len() as u64);
+                if replayed > self.max_tail_commands {
+                    return Err(EngineError::Storage(format!(
+                        "projection rehydrate exceeds configured tail bound {}",
+                        self.max_tail_commands
+                    )));
+                }
+                if !page.entries.is_empty() {
+                    let positions: Vec<_> = page
+                        .entries
+                        .iter()
+                        .map(|(position, _)| position.clone())
+                        .collect();
+                    let commands: Vec<_> = page
+                        .entries
+                        .iter()
+                        .map(|(_, command)| command.clone())
+                        .collect();
+                    self.backend.with_projection(|projection| {
+                        projection
+                            .sqlite()
+                            .apply_committed_batch(&positions, &commands)
+                    })?;
+                }
+                match page.next {
+                    Some(next) => from = Some(next),
+                    None => break,
+                }
+            }
+        }
+        let verification = self.verify_now()?;
+        Ok(EmbeddedRehydration {
+            snapshot_used: false,
+            tail_commands_replayed: replayed,
+            projection_sequence: verification.projection_sequence,
+        })
+    }
+}
+
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
+    fn capabilities(&self) -> EmbeddedLifecycleCapabilities {
+        EmbeddedLifecycleCapabilities {
+            verify_projection: true,
+            delete_projection: true,
+            rehydrate_projection: true,
+        }
+    }
+
+    fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
+        Box::pin(async { self.verify_now() })
+    }
+
+    fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
+        Box::pin(async {
+            self.flush_deferred()?;
+            self.backend
+                .with_projection(|projection| projection.sqlite().reset_projection())
+        })
+    }
+
+    fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
+        Box::pin(async { self.rehydrate_now() })
+    }
+
+    fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(flusher) = self.flusher.lock().expect("flusher poisoned").take() {
+            let _ = flusher.join();
+        }
+    }
+}
+
 /// The capabilities the library facade composes over (the worker + control-plane ports). This is an
 /// INTERNAL composition bound, not a consumer-facing trait: a backend satisfies it automatically (blanket
 /// impl over the engine ports) and a consumer never names or implements it. Hidden from the public docs.
@@ -2032,7 +2276,7 @@ pub fn open_objectlog(
 /// background thread, and dropping the last lifecycle handle shuts that thread down.
 ///
 /// This constructor requires both the `objectlog` and `postgres` features. The SQLite projection variant
-/// is reserved for its dedicated composition and currently returns [`EngineError::Unavailable`].
+/// uses its dedicated `open_embedded_sqlite` constructor.
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 pub fn open_embedded(
     config: EmbeddedDurabilityConfig,
@@ -2119,6 +2363,121 @@ pub fn open_embedded(
         inner: Arc::new(EmbeddedHandleInner {
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogPostgresLifecycle {
+                backend: Arc::clone(&backend),
+                max_tail_commands: config.recovery.max_tail_commands,
+                stop,
+                flusher: Mutex::new(Some(flusher)),
+            }),
+        }),
+    };
+    Ok(EmbeddedPqueue {
+        pqueue: Pqueue::new(backend, clock),
+        lifecycle,
+    })
+}
+
+/// Open an authoritative object log with a disposable SQLite projection behind the public embedded
+/// facade. Both local filesystem and S3-compatible object stores use the same production segmented-log
+/// path. [`EmbeddedResponseBarrier::Strict`] makes SQLite durable before success is visible;
+/// [`EmbeddedResponseBarrier::AsyncProjection`] acknowledges after the manifest and hot projection, with
+/// the owned background flusher checkpointing SQLite.
+///
+/// The SQLite file is a disposable cache: the returned lifecycle handle can verify it, delete it in place,
+/// and rebuild it exactly from authoritative object-log history without changing the live hot projection.
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+pub fn open_embedded_sqlite(
+    config: EmbeddedDurabilityConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
+    use pqueue_engine::{ComposedBackend, InProcessControlPlane};
+    use pqueue_objectlog::segmented::{BlobStore, S3BlobStore};
+
+    config.validate()?;
+    let projection_path = match &config.projection {
+        EmbeddedProjectionConfig::Sqlite { path } => path,
+        EmbeddedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),
+    };
+    let projection_path = projection_path.to_str().ok_or(EngineError::Invalid(
+        "embedded SQLite path must be valid UTF-8",
+    ))?;
+    if let Some(parent) = std::path::Path::new(projection_path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|error| EngineError::Storage(error.to_string()))?;
+    }
+    let projection = pqueue_sqlite::HybridProjectionStore::open(projection_path)?
+        .with_strict_apply(config.response_barrier == EmbeddedResponseBarrier::Strict);
+    let segment_config = pqueue_objectlog::SegmentConfig::new(
+        config.segments.target_bytes,
+        config.segments.max_latency_ms,
+    )?;
+    let log = match &config.object_log {
+        EmbeddedObjectLogConfig::Local { root } => {
+            pqueue_objectlog::ObjectLog::open_group_commit(root, segment_config)?
+        }
+        EmbeddedObjectLogConfig::S3Compatible {
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_access_key,
+            allow_insecure_http,
+        } => {
+            if endpoint.starts_with("http://") && !allow_insecure_http {
+                return Err(EngineError::Invalid(
+                    "insecure S3-compatible HTTP endpoint was not explicitly allowed",
+                ));
+            }
+            let store: Arc<dyn BlobStore> = Arc::new(S3BlobStore::new(
+                endpoint,
+                bucket,
+                &access_key_id.0,
+                &secret_access_key.0,
+                region,
+            )?);
+            pqueue_objectlog::ObjectLog::open_group_commit_with_blob_store(store, segment_config)?
+        }
+    };
+
+    if let Err(error) = validate_objectlog_sqlite_catalog(&log, projection.sqlite()) {
+        match config.recovery.incompatible_projection {
+            EmbeddedRecoveryAction::FailClosed => return Err(error),
+            EmbeddedRecoveryAction::RehydrateProjection => {
+                projection.sqlite().reset_projection()?
+            }
+        }
+    }
+    let backend = ComposedBackend::new(log, projection, InProcessControlPlane::new())
+        .with_recovery_max_tail(config.recovery.max_tail_commands)
+        .with_group_commit(true)
+        .recover()?;
+    let flush_interval = backend.group_commit_flush_interval_ms();
+    let backend = Arc::new(backend);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let weak_backend = Arc::downgrade(&backend);
+    let thread_stop = Arc::clone(&stop);
+    let flusher = std::thread::Builder::new()
+        .name(format!("pqueue-embedded-{}", config.namespace))
+        .spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(flush_interval));
+                let Some(backend) = weak_backend.upgrade() else {
+                    break;
+                };
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                let _ = backend.flush_tick(now_ms);
+                let _ = backend.try_flush_deferred_projection();
+            }
+        })
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let lifecycle = EmbeddedHandle {
+        inner: Arc::new(EmbeddedHandleInner {
+            _config: config.clone(),
+            lifecycle: Box::new(ObjectLogSqliteLifecycle {
                 backend: Arc::clone(&backend),
                 max_tail_commands: config.recovery.max_tail_commands,
                 stop,
