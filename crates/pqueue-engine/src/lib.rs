@@ -6,6 +6,7 @@
 //! hexagonal-migration-plan.md` (v4) and TD-007.
 
 mod active_scope;
+mod async_store;
 mod auth;
 mod claim_validation;
 mod command;
@@ -26,6 +27,7 @@ pub use active_scope::{
     ActiveScope, DiscoveryGranularity, project_scopes, resolve_granularity, roll_up_queue_scopes,
     validate_discovery_request,
 };
+pub use async_store::{AsyncControlPlane, AsyncLogStore, AsyncProjectionStore};
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,
