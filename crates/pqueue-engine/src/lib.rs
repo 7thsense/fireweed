@@ -31,9 +31,10 @@ pub use active_scope::{
 };
 pub use async_commit::{
     AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DispatchError, InvalidCommitStrategy,
-    KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, QueueGateAcquire, QueueGateError,
-    QueueGatePermit, SeparateReplayCommit, SeparateReplayCommitter, TaskOutcome, TaskOutcomeError,
-    TaskOutcomeSender, UnifiedAtomicCommit, UnifiedAtomicCommitter, task_outcome_channel,
+    KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory, QueueGateAcquire,
+    QueueGateError, QueueGatePermit, SeparateReplayCommit, SeparateReplayCommitter, TaskOutcome,
+    TaskOutcomeError, TaskOutcomeSender, UnifiedAtomicCommit, UnifiedAtomicCommitter,
+    task_outcome_channel,
 };
 pub use async_composed::{AsyncCommitSubmitError, AsyncComposedBackend};
 pub use async_store::{AsyncControlPlane, AsyncLogStore, AsyncProjectionStore};

@@ -1,15 +1,12 @@
 //! Narrow async mutation-path scaffolding from ADR-017.
-//!
-//! This type intentionally does not implement the legacy [`crate::Backend`] port. It proves the
-//! queue-admission, owned commit-task, and runtime-neutral dispatch boundaries without claiming
-//! read-path or operation-port parity.
+
+use std::sync::Arc;
 
 use crate::{
     AsyncCommitStrategy, DispatchError, DurabilityClass, KeyedQueueGate, OwnedTaskDispatcher,
     QueueGateError, RawCommitRequest, TaskOutcomeError,
 };
 
-/// Failure outside the strategy-owned commit result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsyncCommitSubmitError {
     Admission(QueueGateError),
@@ -19,7 +16,7 @@ pub enum AsyncCommitSubmitError {
 
 /// An ADR-017 mutation-path scaffold, not a full backend implementation.
 pub struct AsyncComposedBackend<S, D> {
-    strategy: S,
+    strategy: Arc<S>,
     dispatcher: D,
     admission: KeyedQueueGate<crate::QueueKey>,
     durability: DurabilityClass,
@@ -33,7 +30,7 @@ where
     pub fn new(strategy: S, dispatcher: D, max_queued_commits: usize) -> Self {
         let durability = strategy.durability_class();
         Self {
-            strategy,
+            strategy: Arc::new(strategy),
             dispatcher,
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
@@ -44,11 +41,7 @@ where
         self.durability
     }
 
-    /// Submit one typed raw commit through queue-local admission and backend-owned execution.
-    ///
-    /// Before `submit` succeeds, dropping this future cancels only its admission attempt. Once
-    /// submission succeeds, the dispatcher owns both the commit task and its queue permit; dropping
-    /// this caller future discards only the outcome receiver.
+    /// Acquire queue admission, then offer a lazy strategy-task factory to the dispatcher.
     pub async fn submit_commit(
         &self,
         request: RawCommitRequest,
@@ -58,19 +51,20 @@ where
             .acquire(request.shard().clone())
             .await
             .map_err(AsyncCommitSubmitError::Admission)?;
-        let commit = self.strategy.commit(request);
-        let owned = Box::pin(async move {
-            let _permit = permit;
-            commit.await
-        });
+        let strategy = Arc::clone(&self.strategy);
         let outcome = self
             .dispatcher
-            .submit(owned)
+            .submit(Box::new(move || {
+                let commit = strategy.commit(request);
+                Box::pin(async move {
+                    let _permit = permit;
+                    commit.await
+                })
+            }))
             .map_err(AsyncCommitSubmitError::Dispatch)?;
         outcome.await.map_err(AsyncCommitSubmitError::Outcome)
     }
 
-    /// Close queued admission and dispatcher submission. Accepted tasks remain dispatcher-owned.
     pub fn close(&self) {
         self.admission.close();
         self.dispatcher.close();
@@ -79,38 +73,271 @@ where
     pub fn is_closed(&self) -> bool {
         self.admission.is_closed() || self.dispatcher.is_closed()
     }
+
+    pub async fn drain(&self) -> Result<(), TaskOutcomeError> {
+        self.dispatcher.drain().await
+    }
+
+    pub async fn close_and_drain(&self) -> Result<(), TaskOutcomeError> {
+        self.close();
+        self.drain().await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::future::Future;
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::future::{Future, poll_fn};
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, Weak};
     use std::task::{Context, Poll, Wake, Waker};
 
     use pqueue_core::{QueueId, TenantId};
 
     use super::*;
     use crate::{
-        OwnedTask, TaskOutcome, TaskOutcomeSender, UnifiedAtomicCommit, UnifiedAtomicCommitter,
-        task_outcome_channel,
+        OwnedTask, OwnedTaskFactory, QueueKey, TaskOutcome, TaskOutcomeSender, UnifiedAtomicCommit,
+        UnifiedAtomicCommitter, task_outcome_channel,
     };
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
-        let waker = Waker::from(Arc::new(NoopWake));
-        future.poll(&mut Context::from_waker(&waker))
+        future.poll(&mut Context::from_waker(Waker::noop()))
     }
 
-    fn queue(name: &str) -> crate::QueueKey {
-        crate::QueueKey::new(
+    struct TaskSlot<T> {
+        task: OwnedTask<T>,
+        outcome: TaskOutcomeSender<T>,
+    }
+
+    struct DispatchState<T> {
+        closed: bool,
+        capacity: usize,
+        next_id: u64,
+        accepted: usize,
+        live: HashSet<u64>,
+        ready: VecDeque<u64>,
+        tasks: HashMap<u64, TaskSlot<T>>,
+        drainers: Vec<TaskOutcomeSender<()>>,
+    }
+
+    struct DispatchInner<T> {
+        state: Mutex<DispatchState<T>>,
+    }
+
+    #[derive(Clone)]
+    struct ControlledDispatcher<T> {
+        inner: Arc<DispatchInner<T>>,
+    }
+
+    struct TaskWake<T> {
+        id: u64,
+        dispatcher: Weak<DispatchInner<T>>,
+    }
+
+    impl<T: Send + 'static> Wake for TaskWake<T> {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            if let Some(dispatcher) = self.dispatcher.upgrade() {
+                let mut state = dispatcher.state.lock().unwrap();
+                if state.live.contains(&self.id) {
+                    state.ready.push_back(self.id);
+                }
+            }
+        }
+    }
+
+    impl<T: Send + 'static> ControlledDispatcher<T> {
+        fn new(capacity: usize) -> Self {
+            Self {
+                inner: Arc::new(DispatchInner {
+                    state: Mutex::new(DispatchState {
+                        closed: false,
+                        capacity,
+                        next_id: 0,
+                        accepted: 0,
+                        live: HashSet::new(),
+                        ready: VecDeque::new(),
+                        tasks: HashMap::new(),
+                        drainers: Vec::new(),
+                    }),
+                }),
+            }
+        }
+
+        fn accepted(&self) -> usize {
+            self.inner.state.lock().unwrap().accepted
+        }
+
+        fn drive_next(&self) -> bool {
+            let (id, mut slot) = loop {
+                let candidate = {
+                    let mut state = self.inner.state.lock().unwrap();
+                    state
+                        .ready
+                        .pop_front()
+                        .and_then(|id| state.tasks.remove(&id).map(|slot| (id, slot)))
+                };
+                if let Some(candidate) = candidate {
+                    break candidate;
+                }
+                if self.inner.state.lock().unwrap().ready.is_empty() {
+                    return false;
+                }
+            };
+            let waker = Waker::from(Arc::new(TaskWake {
+                id,
+                dispatcher: Arc::downgrade(&self.inner),
+            }));
+            match slot.task.as_mut().poll(&mut Context::from_waker(&waker)) {
+                Poll::Pending => {
+                    self.inner.state.lock().unwrap().tasks.insert(id, slot);
+                }
+                Poll::Ready(value) => {
+                    let drainers = {
+                        let mut state = self.inner.state.lock().unwrap();
+                        state.live.remove(&id);
+                        state.accepted -= 1;
+                        if state.closed && state.accepted == 0 {
+                            std::mem::take(&mut state.drainers)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+                    slot.outcome.send(value);
+                    for drainer in drainers {
+                        drainer.send(());
+                    }
+                }
+            }
+            true
+        }
+    }
+
+    impl<T: Send + 'static> OwnedTaskDispatcher<T> for ControlledDispatcher<T> {
+        fn submit(&self, factory: OwnedTaskFactory<T>) -> Result<TaskOutcome<T>, DispatchError> {
+            let id = {
+                let mut state = self.inner.state.lock().unwrap();
+                if state.closed {
+                    return Err(DispatchError::Closed);
+                }
+                if state.accepted >= state.capacity {
+                    return Err(DispatchError::AtCapacity);
+                }
+                let id = state.next_id;
+                state.next_id = state.next_id.wrapping_add(1);
+                state.accepted += 1;
+                state.live.insert(id);
+                id
+            };
+            let task = factory();
+            let (outcome_sender, outcome) = task_outcome_channel();
+            let mut state = self.inner.state.lock().unwrap();
+            state.tasks.insert(
+                id,
+                TaskSlot {
+                    task,
+                    outcome: outcome_sender,
+                },
+            );
+            state.ready.push_back(id);
+            Ok(outcome)
+        }
+
+        fn close(&self) {
+            let drainers = {
+                let mut state = self.inner.state.lock().unwrap();
+                state.closed = true;
+                if state.accepted == 0 {
+                    std::mem::take(&mut state.drainers)
+                } else {
+                    Vec::new()
+                }
+            };
+            for drainer in drainers {
+                drainer.send(());
+            }
+        }
+
+        fn is_closed(&self) -> bool {
+            self.inner.state.lock().unwrap().closed
+        }
+
+        fn drain(&self) -> TaskOutcome<()> {
+            let (sender, outcome) = task_outcome_channel();
+            let immediate = {
+                let mut state = self.inner.state.lock().unwrap();
+                if state.closed && state.accepted == 0 {
+                    Some(sender)
+                } else {
+                    state.drainers.push(sender);
+                    None
+                }
+            };
+            if let Some(sender) = immediate {
+                sender.send(());
+            }
+            outcome
+        }
+    }
+
+    struct Phase {
+        started: AtomicBool,
+        released: AtomicBool,
+        waker: Mutex<Option<Waker>>,
+    }
+
+    impl Phase {
+        fn new(released: bool) -> Arc<Self> {
+            Arc::new(Self {
+                started: AtomicBool::new(false),
+                released: AtomicBool::new(released),
+                waker: Mutex::new(None),
+            })
+        }
+
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            if let Some(waker) = self.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ControlledCommitter {
+        constructed: Arc<AtomicUsize>,
+        phases: Arc<Mutex<HashMap<QueueKey, Arc<Phase>>>>,
+        completed: Arc<Mutex<Vec<QueueKey>>>,
+    }
+
+    impl UnifiedAtomicCommitter for ControlledCommitter {
+        type Request = RawCommitRequest;
+        type Output = QueueKey;
+
+        fn commit_atomic(&self, request: Self::Request) -> OwnedTask<Self::Output> {
+            self.constructed.fetch_add(1, Ordering::AcqRel);
+            let key = request.shard().clone();
+            let phase = Arc::clone(self.phases.lock().unwrap().get(&key).unwrap());
+            let completed = Arc::clone(&self.completed);
+            Box::pin(poll_fn(move |context| {
+                phase.started.store(true, Ordering::Release);
+                if phase.released.load(Ordering::Acquire) {
+                    completed.lock().unwrap().push(key.clone());
+                    Poll::Ready(key.clone())
+                } else {
+                    *phase.waker.lock().unwrap() = Some(context.waker().clone());
+                    Poll::Pending
+                }
+            }))
+        }
+    }
+
+    fn queue(name: &str) -> QueueKey {
+        QueueKey::new(
             TenantId::new("tenant").unwrap(),
             QueueId::new(name).unwrap(),
         )
@@ -120,218 +347,134 @@ mod tests {
         RawCommitRequest::new(queue(name), Vec::new(), 1)
     }
 
-    #[derive(Clone)]
-    struct ControlledCommitter {
-        committed: Arc<Mutex<Vec<crate::QueueKey>>>,
-    }
-
-    impl UnifiedAtomicCommitter for ControlledCommitter {
-        type Request = RawCommitRequest;
-        type Output = crate::QueueKey;
-
-        fn commit_atomic(&self, request: Self::Request) -> OwnedTask<Self::Output> {
-            let committed = Arc::clone(&self.committed);
-            Box::pin(async move {
-                let key = request.shard().clone();
-                committed.lock().unwrap().push(key.clone());
-                key
-            })
-        }
-    }
-
-    struct DispatchState<T> {
-        closed: AtomicBool,
-        capacity: usize,
-        tasks: Mutex<VecDeque<(OwnedTask<T>, TaskOutcomeSender<T>)>>,
-    }
-
-    #[derive(Clone)]
-    struct ControlledDispatcher<T> {
-        state: Arc<DispatchState<T>>,
-    }
-
-    impl<T: Send + 'static> ControlledDispatcher<T> {
-        fn new(capacity: usize) -> Self {
-            Self {
-                state: Arc::new(DispatchState {
-                    closed: AtomicBool::new(false),
-                    capacity,
-                    tasks: Mutex::new(VecDeque::new()),
-                }),
-            }
-        }
-
-        fn queued(&self) -> usize {
-            self.state.tasks.lock().unwrap().len()
-        }
-
-        fn run(&self, index: usize) {
-            let (mut task, sender) = self.state.tasks.lock().unwrap().remove(index).unwrap();
-            match poll_once(task.as_mut()) {
-                Poll::Ready(value) => sender.send(value),
-                Poll::Pending => panic!("controlled commit unexpectedly pending"),
-            }
-        }
-    }
-
-    impl<T: Send + 'static> OwnedTaskDispatcher<T> for ControlledDispatcher<T> {
-        fn submit(&self, task: OwnedTask<T>) -> Result<TaskOutcome<T>, DispatchError> {
-            if self.state.closed.load(Ordering::Acquire) {
-                return Err(DispatchError::Closed);
-            }
-            let mut tasks = self.state.tasks.lock().unwrap();
-            if tasks.len() >= self.state.capacity {
-                return Err(DispatchError::AtCapacity);
-            }
-            let (sender, outcome) = task_outcome_channel();
-            tasks.push_back((task, sender));
-            Ok(outcome)
-        }
-
-        fn close(&self) {
-            self.state.closed.store(true, Ordering::Release);
-        }
-
-        fn is_closed(&self) -> bool {
-            self.state.closed.load(Ordering::Acquire)
-        }
-    }
-
     type TestBackend = AsyncComposedBackend<
         UnifiedAtomicCommit<ControlledCommitter>,
-        ControlledDispatcher<crate::QueueKey>,
+        ControlledDispatcher<QueueKey>,
     >;
 
-    fn backend(
-        capacity: usize,
-        max_queued: usize,
-    ) -> (
-        TestBackend,
-        ControlledDispatcher<crate::QueueKey>,
-        Arc<Mutex<Vec<crate::QueueKey>>>,
-    ) {
-        let committed = Arc::new(Mutex::new(Vec::new()));
-        let strategy = UnifiedAtomicCommit::for_profile(
-            DurabilityClass::Atomic,
-            ControlledCommitter {
-                committed: Arc::clone(&committed),
-            },
-        )
-        .unwrap();
+    struct Fixture {
+        backend: TestBackend,
+        dispatcher: ControlledDispatcher<QueueKey>,
+        constructed: Arc<AtomicUsize>,
+        completed: Arc<Mutex<Vec<QueueKey>>>,
+        phases: Arc<Mutex<HashMap<QueueKey, Arc<Phase>>>>,
+    }
+
+    fn fixture(capacity: usize) -> Fixture {
+        let constructed = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let phases = Arc::new(Mutex::new(HashMap::new()));
+        let committer = ControlledCommitter {
+            constructed: Arc::clone(&constructed),
+            phases: Arc::clone(&phases),
+            completed: Arc::clone(&completed),
+        };
+        let strategy =
+            UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, committer).unwrap();
         let dispatcher = ControlledDispatcher::new(capacity);
-        (
-            AsyncComposedBackend::new(strategy, dispatcher.clone(), max_queued),
+        Fixture {
+            backend: AsyncComposedBackend::new(strategy, dispatcher.clone(), 8),
             dispatcher,
-            committed,
-        )
+            constructed,
+            completed,
+            phases,
+        }
     }
 
     #[test]
-    fn before_first_poll_has_no_admission_or_submission_effect() {
-        let (backend, dispatcher, committed) = backend(1, 1);
-        let future = Box::pin(backend.submit_commit(request("q")));
-        assert_eq!(backend.admission.entry_count(), 0);
-        assert_eq!(backend.admission.queued(), 0);
-        assert_eq!(dispatcher.queued(), 0);
-        drop(future);
-        assert!(committed.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn queued_cancellation_removes_waiter_without_committing() {
-        let (backend, dispatcher, committed) = backend(2, 2);
-        let mut first = Box::pin(backend.submit_commit(request("q")));
-        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
-        let mut cancelled = Box::pin(backend.submit_commit(request("q")));
-        assert!(matches!(poll_once(cancelled.as_mut()), Poll::Pending));
-        assert_eq!(backend.admission.queued(), 1);
-        drop(cancelled);
-        assert_eq!(backend.admission.queued(), 0);
-        dispatcher.run(0);
-        assert!(matches!(poll_once(first.as_mut()), Poll::Ready(Ok(_))));
-        assert_eq!(committed.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn same_queue_serializes_through_the_entire_owned_task() {
-        let (backend, dispatcher, _) = backend(2, 2);
-        let mut first = Box::pin(backend.submit_commit(request("q")));
-        let mut second = Box::pin(backend.submit_commit(request("q")));
-        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
-        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
-        assert_eq!(dispatcher.queued(), 1);
-        dispatcher.run(0);
-        assert!(matches!(poll_once(first.as_mut()), Poll::Ready(Ok(_))));
-        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
-        assert_eq!(dispatcher.queued(), 1);
-        dispatcher.run(0);
-        assert!(matches!(poll_once(second.as_mut()), Poll::Ready(Ok(_))));
-    }
-
-    #[test]
-    fn unrelated_queue_can_progress_while_another_task_is_stalled() {
-        let (backend, dispatcher, committed) = backend(2, 2);
-        let mut stalled = Box::pin(backend.submit_commit(request("a")));
-        let mut unrelated = Box::pin(backend.submit_commit(request("b")));
-        assert!(matches!(poll_once(stalled.as_mut()), Poll::Pending));
-        assert!(matches!(poll_once(unrelated.as_mut()), Poll::Pending));
-        assert_eq!(dispatcher.queued(), 2);
-        dispatcher.run(1);
-        assert!(matches!(poll_once(unrelated.as_mut()), Poll::Ready(Ok(_))));
-        assert_eq!(committed.lock().unwrap().as_slice(), &[queue("b")]);
-        dispatcher.run(0);
-        assert!(matches!(poll_once(stalled.as_mut()), Poll::Ready(Ok(_))));
-    }
-
-    #[test]
-    fn dispatcher_capacity_and_close_rejections_release_queue_gate() {
-        let (full_backend, _, _) = backend(0, 1);
-        let mut full = Box::pin(full_backend.submit_commit(request("q")));
+    fn rejected_lazy_factory_has_no_construction_effects() {
+        let fixture = fixture(0);
+        fixture
+            .phases
+            .lock()
+            .unwrap()
+            .insert(queue("q"), Phase::new(true));
+        let mut caller = Box::pin(fixture.backend.submit_commit(request("q")));
         assert!(matches!(
-            poll_once(full.as_mut()),
+            poll_once(caller.as_mut()),
             Poll::Ready(Err(AsyncCommitSubmitError::Dispatch(
                 DispatchError::AtCapacity
             )))
         ));
-        assert_eq!(full_backend.admission.entry_count(), 0);
-
-        let (closed_backend, dispatcher, _) = backend(1, 1);
-        dispatcher.close();
-        let mut closed = Box::pin(closed_backend.submit_commit(request("q")));
-        assert!(matches!(
-            poll_once(closed.as_mut()),
-            Poll::Ready(Err(AsyncCommitSubmitError::Dispatch(DispatchError::Closed)))
-        ));
-        assert_eq!(closed_backend.admission.entry_count(), 0);
+        assert_eq!(fixture.constructed.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.backend.admission.entry_count(), 0);
     }
 
     #[test]
-    fn caller_drop_after_submission_does_not_cancel_commit() {
-        let (backend, dispatcher, committed) = backend(1, 1);
-        let mut caller = Box::pin(backend.submit_commit(request("q")));
+    fn started_caller_cancellation_does_not_cancel_accepted_task() {
+        let fixture = fixture(1);
+        let phase = Phase::new(false);
+        fixture
+            .phases
+            .lock()
+            .unwrap()
+            .insert(queue("q"), Arc::clone(&phase));
+        let mut caller = Box::pin(fixture.backend.submit_commit(request("q")));
         assert!(matches!(poll_once(caller.as_mut()), Poll::Pending));
-        assert_eq!(dispatcher.queued(), 1);
+        assert!(fixture.dispatcher.drive_next());
+        assert!(phase.started.load(Ordering::Acquire));
         drop(caller);
-        dispatcher.run(0);
-        assert_eq!(committed.lock().unwrap().as_slice(), &[queue("q")]);
-        assert_eq!(backend.admission.entry_count(), 0);
+        phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert_eq!(fixture.completed.lock().unwrap().as_slice(), &[queue("q")]);
     }
 
     #[test]
-    fn submission_future_is_send_and_close_stops_admission() {
-        fn assert_send<T: Send>(_: T) {}
+    fn stalled_queue_does_not_block_actual_unrelated_queue_progress() {
+        let fixture = fixture(2);
+        let stalled_phase = Phase::new(false);
+        fixture
+            .phases
+            .lock()
+            .unwrap()
+            .insert(queue("a"), Arc::clone(&stalled_phase));
+        fixture
+            .phases
+            .lock()
+            .unwrap()
+            .insert(queue("b"), Phase::new(true));
+        let mut stalled = Box::pin(fixture.backend.submit_commit(request("a")));
+        let mut unrelated = Box::pin(fixture.backend.submit_commit(request("b")));
+        assert!(matches!(poll_once(stalled.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(unrelated.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(stalled_phase.started.load(Ordering::Acquire));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(poll_once(unrelated.as_mut()), Poll::Ready(Ok(key)) if key == queue("b")));
+        assert_eq!(fixture.completed.lock().unwrap().as_slice(), &[queue("b")]);
+        stalled_phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(poll_once(stalled.as_mut()), Poll::Ready(Ok(_))));
+    }
 
-        let (backend, _, _) = backend(1, 1);
-        assert_eq!(backend.durability_class(), DurabilityClass::Atomic);
-        assert_send(backend.submit_commit(request("q")));
-        backend.close();
-        assert!(backend.is_closed());
-        let mut rejected = Box::pin(backend.submit_commit(request("q")));
+    #[test]
+    fn submit_close_is_linearizable_and_drain_waits_for_pending_task() {
+        let fixture = fixture(2);
+        let phase = Phase::new(false);
+        fixture
+            .phases
+            .lock()
+            .unwrap()
+            .insert(queue("q"), Arc::clone(&phase));
+        let mut caller = Box::pin(fixture.backend.submit_commit(request("q")));
+        assert!(matches!(poll_once(caller.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        fixture.backend.close();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let rejected_effects = Arc::clone(&effects);
         assert!(matches!(
-            poll_once(rejected.as_mut()),
-            Poll::Ready(Err(AsyncCommitSubmitError::Admission(
-                QueueGateError::Closed
-            )))
+            fixture.dispatcher.submit(Box::new(move || {
+                rejected_effects.fetch_add(1, Ordering::AcqRel);
+                Box::pin(async { queue("never") })
+            })),
+            Err(DispatchError::Closed)
         ));
+        assert_eq!(effects.load(Ordering::Acquire), 0);
+        let mut drain = Box::pin(fixture.backend.drain());
+        assert!(matches!(poll_once(drain.as_mut()), Poll::Pending));
+        phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(poll_once(drain.as_mut()), Poll::Ready(Ok(()))));
+        assert_eq!(fixture.dispatcher.accepted(), 0);
     }
 }

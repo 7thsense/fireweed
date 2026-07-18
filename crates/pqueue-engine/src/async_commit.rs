@@ -183,6 +183,9 @@ where
 /// A task whose request data and commit capability are fully owned by the dispatcher after submission.
 pub type OwnedTask<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+/// Lazy construction boundary invoked only after dispatcher acceptance linearizes.
+pub type OwnedTaskFactory<T> = Box<dyn FnOnce() -> OwnedTask<T> + Send + 'static>;
+
 /// Submission rejection. Rejection happens before ownership is accepted; submitted work is never cancelled
 /// by dropping its outcome receiver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,14 +279,17 @@ pub fn task_outcome_channel<T>() -> (TaskOutcomeSender<T>, TaskOutcome<T>) {
 
 /// Runtime-neutral owned-task submission. Implementations supply their executor/actor below this boundary.
 pub trait OwnedTaskDispatcher<T: Send + 'static>: Send + Sync {
-    /// Accept ownership of `task` or reject it synchronously. After `Ok`, caller cancellation may discard
-    /// only the returned outcome receiver; the dispatcher must drive the task to one resolution.
-    fn submit(&self, task: OwnedTask<T>) -> Result<TaskOutcome<T>, DispatchError>;
+    /// Accept `factory` or reject it without invoking it. After acceptance the dispatcher invokes the
+    /// factory exactly once and drives its task to one resolution.
+    fn submit(&self, factory: OwnedTaskFactory<T>) -> Result<TaskOutcome<T>, DispatchError>;
 
     /// Stop accepting new tasks. Already submitted work remains owned and must be drained by the adapter.
     fn close(&self);
 
     fn is_closed(&self) -> bool;
+
+    /// Resolve after close and after every accepted task has completed.
+    fn drain(&self) -> TaskOutcome<()>;
 }
 
 /// Keyed admission failure before work is submitted to an owned-task dispatcher.
@@ -293,16 +299,20 @@ pub enum QueueGateError {
     QueueFull,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WaiterStatus {
+    Waiting,
+    Granted,
+    Closed,
+}
+
 struct Waiter {
-    id: u64,
-    granted: bool,
-    closed: bool,
+    status: WaiterStatus,
     waker: Option<Waker>,
 }
 
 struct QueueEntry {
-    held: bool,
-    waiters: VecDeque<Arc<Mutex<Waiter>>>,
+    waiters: VecDeque<u64>,
 }
 
 struct GateState<K> {
@@ -310,6 +320,7 @@ struct GateState<K> {
     queued: usize,
     next_waiter_id: u64,
     entries: HashMap<K, QueueEntry>,
+    waiters: HashMap<u64, Waiter>,
 }
 
 struct GateInner<K> {
@@ -347,6 +358,7 @@ where
                     queued: 0,
                     next_waiter_id: 0,
                     entries: HashMap::new(),
+                    waiters: HashMap::new(),
                 }),
             }),
         }
@@ -357,7 +369,7 @@ where
         QueueGateAcquire {
             inner: Arc::clone(&self.inner),
             key,
-            waiter: None,
+            waiter_id: None,
             acquired: false,
             completed: false,
         }
@@ -370,16 +382,19 @@ where
             state.closed = true;
             state.queued = 0;
             let mut wakers = Vec::new();
-            for entry in state.entries.values_mut() {
-                for waiter in entry.waiters.drain(..) {
-                    let mut waiter = waiter.lock().expect("queue waiter poisoned");
-                    waiter.closed = true;
+            let waiter_ids: Vec<u64> = state
+                .entries
+                .values_mut()
+                .flat_map(|entry| entry.waiters.drain(..))
+                .collect();
+            for waiter_id in waiter_ids {
+                if let Some(waiter) = state.waiters.get_mut(&waiter_id) {
+                    waiter.status = WaiterStatus::Closed;
                     if let Some(waker) = waiter.waker.take() {
                         wakers.push(waker);
                     }
                 }
             }
-            state.entries.retain(|_, entry| entry.held);
             wakers
         };
         for waker in wakers {
@@ -412,7 +427,7 @@ where
 {
     inner: Arc<GateInner<K>>,
     key: K,
-    waiter: Option<Arc<Mutex<Waiter>>>,
+    waiter_id: Option<u64>,
     acquired: bool,
     completed: bool,
 }
@@ -430,32 +445,56 @@ where
             panic!("queue gate acquire polled after completion");
         }
 
-        if let Some(waiter) = self.waiter.as_ref().cloned() {
-            let mut waiter = waiter.lock().expect("queue waiter poisoned");
-            if waiter.closed {
-                drop(waiter);
-                self.completed = true;
-                return Poll::Ready(Err(QueueGateError::Closed));
+        if let Some(waiter_id) = self.waiter_id {
+            enum WaitResult {
+                Waiting,
+                Granted,
+                Closed,
             }
-            if waiter.granted {
-                drop(waiter);
-                self.acquired = true;
-                self.completed = true;
-                return Poll::Ready(Ok(QueueGatePermit {
-                    inner: Arc::clone(&self.inner),
-                    key: self.key.clone(),
-                    released: false,
-                }));
-            }
-            waiter.waker = Some(context.waker().clone());
-            return Poll::Pending;
+            let result = {
+                let mut state = self.inner.state.lock().expect("queue gate poisoned");
+                let waiter = state
+                    .waiters
+                    .get_mut(&waiter_id)
+                    .expect("registered queue waiter missing");
+                match waiter.status {
+                    WaiterStatus::Waiting => {
+                        waiter.waker = Some(context.waker().clone());
+                        WaitResult::Waiting
+                    }
+                    WaiterStatus::Granted => {
+                        state.waiters.remove(&waiter_id);
+                        WaitResult::Granted
+                    }
+                    WaiterStatus::Closed => {
+                        state.waiters.remove(&waiter_id);
+                        WaitResult::Closed
+                    }
+                }
+            };
+            return match result {
+                WaitResult::Waiting => Poll::Pending,
+                WaitResult::Granted => {
+                    self.acquired = true;
+                    self.completed = true;
+                    Poll::Ready(Ok(QueueGatePermit {
+                        inner: Arc::clone(&self.inner),
+                        key: self.key.clone(),
+                        released: false,
+                    }))
+                }
+                WaitResult::Closed => {
+                    self.completed = true;
+                    Poll::Ready(Err(QueueGateError::Closed))
+                }
+            };
         }
 
         enum Registration {
             Closed,
             Acquired,
             Full,
-            Queued(Arc<Mutex<Waiter>>),
+            Queued(u64),
         }
 
         let registration = {
@@ -463,15 +502,11 @@ where
             if state.closed {
                 Registration::Closed
             } else {
-                let immediately_available = state
-                    .entries
-                    .get(&self.key)
-                    .is_none_or(|entry| !entry.held && entry.waiters.is_empty());
+                let immediately_available = !state.entries.contains_key(&self.key);
                 if immediately_available {
                     state.entries.insert(
                         self.key.clone(),
                         QueueEntry {
-                            held: true,
                             waiters: VecDeque::new(),
                         },
                     );
@@ -481,20 +516,21 @@ where
                 } else {
                     let id = state.next_waiter_id;
                     state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                    let waiter = Arc::new(Mutex::new(Waiter {
+                    state.waiters.insert(
                         id,
-                        granted: false,
-                        closed: false,
-                        waker: Some(context.waker().clone()),
-                    }));
+                        Waiter {
+                            status: WaiterStatus::Waiting,
+                            waker: Some(context.waker().clone()),
+                        },
+                    );
                     state
                         .entries
                         .get_mut(&self.key)
                         .expect("held queue entry missing")
                         .waiters
-                        .push_back(Arc::clone(&waiter));
+                        .push_back(id);
                     state.queued += 1;
-                    Registration::Queued(waiter)
+                    Registration::Queued(id)
                 }
             }
         };
@@ -516,8 +552,8 @@ where
                 self.completed = true;
                 Poll::Ready(Err(QueueGateError::QueueFull))
             }
-            Registration::Queued(waiter) => {
-                self.waiter = Some(waiter);
+            Registration::Queued(waiter_id) => {
+                self.waiter_id = Some(waiter_id);
                 Poll::Pending
             }
         }
@@ -529,41 +565,33 @@ where
     K: Clone + Eq + Hash + Send + 'static,
 {
     fn drop(&mut self) {
-        if self.acquired || self.completed && self.waiter.is_none() {
+        if self.acquired || self.completed && self.waiter_id.is_none() {
             return;
         }
-        let Some(waiter) = self.waiter.take() else {
+        let Some(waiter_id) = self.waiter_id.take() else {
             return;
         };
-        let (id, granted) = {
-            let waiter = waiter.lock().expect("queue waiter poisoned");
-            (waiter.id, waiter.granted)
+        let waker = {
+            let mut state = self.inner.state.lock().expect("queue gate poisoned");
+            let Some(waiter) = state.waiters.remove(&waiter_id) else {
+                return;
+            };
+            match waiter.status {
+                WaiterStatus::Waiting => {
+                    if let Some(entry) = state.entries.get_mut(&self.key)
+                        && let Some(index) = entry.waiters.iter().position(|id| *id == waiter_id)
+                    {
+                        entry.waiters.remove(index);
+                        state.queued = state.queued.saturating_sub(1);
+                    }
+                    None
+                }
+                WaiterStatus::Granted => release_key_locked(&mut state, &self.key),
+                WaiterStatus::Closed => None,
+            }
         };
-        if granted {
-            release_key(&self.inner, &self.key);
-            return;
-        }
-
-        let mut state = self.inner.state.lock().expect("queue gate poisoned");
-        let removed =
-            state.entries.get_mut(&self.key).is_some_and(|entry| {
-                let Some(index) = entry.waiters.iter().position(|candidate| {
-                    candidate.lock().expect("queue waiter poisoned").id == id
-                }) else {
-                    return false;
-                };
-                entry.waiters.remove(index);
-                true
-            });
-        if removed {
-            state.queued = state.queued.saturating_sub(1);
-        }
-        let remove = state
-            .entries
-            .get(&self.key)
-            .is_some_and(|entry| !entry.held && entry.waiters.is_empty());
-        if remove {
-            state.entries.remove(&self.key);
+        if let Some(waker) = waker {
+            waker.wake();
         }
     }
 }
@@ -596,41 +624,44 @@ where
 {
     let waker = {
         let mut state = inner.state.lock().expect("queue gate poisoned");
-        let Some(entry) = state.entries.get_mut(key) else {
-            return;
-        };
-        let next_waiter = entry.waiters.pop_front();
-        if let Some(waiter) = next_waiter {
-            state.queued = state.queued.saturating_sub(1);
-            let mut waiter = waiter.lock().expect("queue waiter poisoned");
-            waiter.granted = true;
-            waiter.waker.take()
-        } else {
-            entry.held = false;
-            state.entries.remove(key);
-            None
-        }
+        release_key_locked(&mut state, key)
     };
     if let Some(waker) = waker {
         waker.wake();
     }
 }
 
+fn release_key_locked<K>(state: &mut GateState<K>, key: &K) -> Option<Waker>
+where
+    K: Clone + Eq + Hash + Send + 'static,
+{
+    let next_waiter = state
+        .entries
+        .get_mut(key)
+        .and_then(|entry| entry.waiters.pop_front());
+    if let Some(waiter_id) = next_waiter {
+        state.queued = state.queued.saturating_sub(1);
+        let waiter = state
+            .waiters
+            .get_mut(&waiter_id)
+            .expect("queued waiter state missing");
+        waiter.status = WaiterStatus::Granted;
+        waiter.waker.take()
+    } else {
+        state.entries.remove(key);
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Wake, Waker};
 
     use super::*;
 
-    struct NoopWake;
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
-        let waker = Waker::from(Arc::new(NoopWake));
-        future.poll_unpin(&mut Context::from_waker(&waker))
+        future.poll_unpin(&mut Context::from_waker(Waker::noop()))
     }
 
     trait PollUnpin: Future + Unpin {
@@ -717,89 +748,6 @@ mod tests {
         assert!(matches!(poll_once(&mut replay_work), Poll::Ready(42)));
         assert_eq!(atomic_calls.load(Ordering::Acquire), 1);
         assert_eq!(replay_calls.load(Ordering::Acquire), 1);
-    }
-
-    struct ControlledDispatcher<T> {
-        closed: AtomicBool,
-        capacity: usize,
-        queued: Mutex<VecDeque<(OwnedTask<T>, TaskOutcomeSender<T>)>>,
-    }
-
-    impl<T: Send + 'static> ControlledDispatcher<T> {
-        fn new(capacity: usize) -> Self {
-            Self {
-                closed: AtomicBool::new(false),
-                capacity,
-                queued: Mutex::new(VecDeque::new()),
-            }
-        }
-
-        fn run_next(&self) {
-            let Some((mut task, sender)) = self.queued.lock().unwrap().pop_front() else {
-                return;
-            };
-            match poll_once(&mut task) {
-                Poll::Ready(value) => sender.send(value),
-                Poll::Pending => panic!("controlled task unexpectedly pending"),
-            }
-        }
-    }
-
-    impl<T: Send + 'static> OwnedTaskDispatcher<T> for ControlledDispatcher<T> {
-        fn submit(&self, task: OwnedTask<T>) -> Result<TaskOutcome<T>, DispatchError> {
-            if self.closed.load(Ordering::Acquire) {
-                return Err(DispatchError::Closed);
-            }
-            let mut queued = self.queued.lock().unwrap();
-            if queued.len() >= self.capacity {
-                return Err(DispatchError::AtCapacity);
-            }
-            let (sender, outcome) = task_outcome_channel();
-            queued.push_back((task, sender));
-            Ok(outcome)
-        }
-
-        fn close(&self) {
-            self.closed.store(true, Ordering::Release);
-        }
-
-        fn is_closed(&self) -> bool {
-            self.closed.load(Ordering::Acquire)
-        }
-    }
-
-    #[test]
-    fn submitted_work_is_owned_after_outcome_cancellation() {
-        let dispatcher = ControlledDispatcher::new(1);
-        let ran = Arc::new(AtomicBool::new(false));
-        let task_ran = Arc::clone(&ran);
-        let outcome = dispatcher
-            .submit(Box::pin(async move {
-                task_ran.store(true, Ordering::Release);
-                7
-            }))
-            .unwrap();
-        assert_send(outcome);
-        assert!(matches!(
-            dispatcher.submit(Box::pin(async { 8 })),
-            Err(DispatchError::AtCapacity)
-        ));
-        dispatcher.run_next();
-        assert!(ran.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn dispatcher_close_stops_admission_but_not_submitted_work() {
-        let dispatcher = ControlledDispatcher::new(1);
-        let mut outcome = dispatcher.submit(Box::pin(async { 9 })).unwrap();
-        dispatcher.close();
-        assert!(dispatcher.is_closed());
-        assert!(matches!(
-            dispatcher.submit(Box::pin(async { 10 })),
-            Err(DispatchError::Closed)
-        ));
-        dispatcher.run_next();
-        assert!(matches!(poll_once(&mut outcome), Poll::Ready(Ok(9))));
     }
 
     #[test]
@@ -890,5 +838,73 @@ mod tests {
         ));
         let mut unrelated = gate.acquire("other");
         assert!(matches!(poll_once(&mut unrelated), Poll::Ready(Ok(_))));
+    }
+
+    struct CountingWake(AtomicUsize);
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn releasing_permit_actually_wakes_registered_waiter() {
+        let gate = KeyedQueueGate::new(1);
+        let mut first = gate.acquire("q");
+        let permit = match poll_once(&mut first) {
+            Poll::Ready(Ok(permit)) => permit,
+            _ => panic!("first permit not ready"),
+        };
+        let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake));
+        let mut waiter = gate.acquire("q");
+        assert!(matches!(
+            Pin::new(&mut waiter).poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        ));
+        drop(permit);
+        assert_eq!(wake.0.load(Ordering::Acquire), 1);
+        assert!(matches!(poll_once(&mut waiter), Poll::Ready(Ok(_))));
+    }
+
+    #[test]
+    fn grant_cancel_race_never_duplicates_or_strands_queue_permit() {
+        for _ in 0..250 {
+            let gate = KeyedQueueGate::new(1);
+            let mut first = gate.acquire("q");
+            let permit = match poll_once(&mut first) {
+                Poll::Ready(Ok(permit)) => permit,
+                _ => panic!("first permit not ready"),
+            };
+            let mut waiter = gate.acquire("q");
+            assert!(matches!(poll_once(&mut waiter), Poll::Pending));
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            std::thread::scope(|scope| {
+                let release_barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    release_barrier.wait();
+                    drop(permit);
+                });
+                let cancel_barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    cancel_barrier.wait();
+                    drop(waiter);
+                });
+                barrier.wait();
+            });
+            let mut successor = gate.acquire("q");
+            let successor = match poll_once(&mut successor) {
+                Poll::Ready(Ok(permit)) => permit,
+                _ => panic!("grant/cancel race stranded queue permit"),
+            };
+            drop(successor);
+            assert_eq!(gate.queued(), 0);
+            assert_eq!(gate.entry_count(), 0);
+        }
     }
 }
