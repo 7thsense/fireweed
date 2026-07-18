@@ -36,7 +36,10 @@ pub use async_commit::{
     TaskOutcomeError, TaskOutcomeSender, UnifiedAtomicCommit, UnifiedAtomicCommitter,
     task_outcome_channel,
 };
-pub use async_composed::{AsyncCommitSubmitError, AsyncComposedBackend};
+pub use async_composed::{
+    AsyncClaimError, AsyncClaimPlan, AsyncClaimPlanner, AsyncClaimPostCommitStage,
+    AsyncCommitSubmitError, AsyncComposedBackend, NoAsyncClaimPlanner,
+};
 pub use async_store::{AsyncControlPlane, AsyncLogStore, AsyncProjectionStore};
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
