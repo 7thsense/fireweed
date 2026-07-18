@@ -28,6 +28,10 @@ use std::thread;
 use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
+use pqueue_objectlog::object_store_observability::{
+    BlobBackendKind, BlobMetricsRecorder, BlobObjectClass, BlobOperation, BlobResultClass,
+    InstrumentedBlobStore,
+};
 use pqueue_objectlog::segmented::{
     BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
     PartialExpireVisibility, S3BlobStore, SegmentConfig, SegmentedObjectLog,
@@ -45,6 +49,193 @@ fn pushes(n: u64) -> Vec<pqueue_engine::CommandEnvelope> {
             )
         })
         .collect()
+}
+
+struct CasLossStore {
+    inner: InMemoryBlobStore,
+    manifest_losses: AtomicU64,
+    authority_losses: AtomicU64,
+}
+
+impl CasLossStore {
+    fn new(manifest_losses: u64, authority_losses: u64) -> Self {
+        Self {
+            inner: InMemoryBlobStore::new(),
+            manifest_losses: AtomicU64::new(manifest_losses),
+            authority_losses: AtomicU64::new(authority_losses),
+        }
+    }
+
+    fn consume(counter: &AtomicU64) -> bool {
+        counter
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                value.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
+impl BlobStore for CasLossStore {
+    fn backend_kind(&self) -> BlobBackendKind {
+        BlobBackendKind::Memory
+    }
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.inner.put(key, body)
+    }
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        if key.contains("/authority_head/") && Self::consume(&self.authority_losses) {
+            return Ok(false);
+        }
+        if key.contains("/manifest_head/") && Self::consume(&self.manifest_losses) {
+            return Ok(false);
+        }
+        self.inner.put_if_absent(key, body)
+    }
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.inner.delete(key)
+    }
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+    fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+        self.inner.stats(prefix)
+    }
+}
+
+fn assert_zero_primitive_retries(
+    snapshot: &pqueue_objectlog::object_store_observability::BlobMetricsSnapshot,
+) {
+    assert!(
+        snapshot
+            .rows
+            .iter()
+            .filter(|row| matches!(
+                row.operation,
+                BlobOperation::Put
+                    | BlobOperation::PutIfAbsent
+                    | BlobOperation::Get
+                    | BlobOperation::Delete
+                    | BlobOperation::List
+                    | BlobOperation::ListPage
+            ))
+            .all(|row| row.values.retries == 0)
+    );
+}
+
+#[test]
+fn acquire_and_fence_protocol_retries_are_logical_not_primitive() {
+    for (operation, manifest_losses, authority_losses, expected_attempts) in [
+        (BlobOperation::AcquireEpoch, 2, 0, 3),
+        (BlobOperation::FenceEpoch, 0, 2, 3),
+    ] {
+        let recorder = std::sync::Arc::new(BlobMetricsRecorder::new());
+        let fault_store = std::sync::Arc::new(CasLossStore::new(manifest_losses, 0));
+        let store = InstrumentedBlobStore::new(
+            fault_store.clone(),
+            recorder.clone(),
+            BlobBackendKind::Memory,
+        );
+        let log = SegmentedObjectLog::open(store, SegmentConfig::new(4096, 100).unwrap());
+        log.create_queue(&qdef()).unwrap();
+        if operation == BlobOperation::FenceEpoch {
+            // Establish genesis first: marker-without-head intentionally fails closed and is not retryable.
+            log.fence_epoch(&shard(), 1, 9).unwrap();
+            fault_store
+                .authority_losses
+                .store(authority_losses, Ordering::SeqCst);
+        }
+        let before = recorder.snapshot();
+        if operation == BlobOperation::AcquireEpoch {
+            log.acquire_epoch(&shard(), 10).unwrap();
+        } else {
+            log.fence_epoch(&shard(), 2, 10).unwrap();
+        }
+        let delta = recorder.snapshot().delta(&before);
+        let logical = delta.row(
+            operation,
+            BlobObjectClass::ManifestHead,
+            BlobResultClass::Success,
+            false,
+            BlobBackendKind::Memory,
+        );
+        assert_eq!(
+            (logical.completions, logical.attempts, logical.retries),
+            (1, expected_attempts, expected_attempts - 1)
+        );
+        assert_zero_primitive_retries(&delta);
+        let reconciled = log.counters_reconciled_since(&before);
+        let totals = delta.physical_totals();
+        assert_eq!(reconciled.put_count, totals.puts);
+        assert_eq!(reconciled.get_count, totals.gets);
+        assert_eq!(reconciled.list_count, totals.lists);
+        assert_eq!(reconciled.request_bytes, totals.request_bytes);
+        assert_eq!(reconciled.response_bytes, totals.response_bytes);
+    }
+}
+
+#[test]
+fn authoritative_acquire_reports_distinct_acquire_and_fence_spans() {
+    let recorder = std::sync::Arc::new(BlobMetricsRecorder::new());
+    let store = InstrumentedBlobStore::new(
+        CasLossStore::new(0, 0),
+        recorder.clone(),
+        BlobBackendKind::Memory,
+    );
+    let log = SegmentedObjectLog::open(store, SegmentConfig::new(4096, 100).unwrap());
+    log.create_queue(&qdef()).unwrap();
+    log.fence_epoch(&shard(), 1, 9).unwrap();
+    let before = recorder.snapshot();
+    assert_eq!(log.acquire_epoch(&shard(), 10).unwrap(), 2);
+    let delta = recorder.snapshot().delta(&before);
+    for operation in [BlobOperation::AcquireEpoch, BlobOperation::FenceEpoch] {
+        let row = delta.row(
+            operation,
+            BlobObjectClass::ManifestHead,
+            BlobResultClass::Success,
+            false,
+            BlobBackendKind::Memory,
+        );
+        assert_eq!((row.completions, row.attempts, row.retries), (1, 1, 0));
+    }
+}
+
+#[test]
+fn disabled_recorder_protocols_are_transparent_and_emit_no_rows() {
+    let recorder = std::sync::Arc::new(BlobMetricsRecorder::disabled());
+    let store = InstrumentedBlobStore::new(
+        InMemoryBlobStore::new(),
+        recorder.clone(),
+        BlobBackendKind::Memory,
+    );
+    let log = SegmentedObjectLog::open(store, SegmentConfig::new(4096, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    log.enqueue(&source, &pushes(1), 0, 1).unwrap();
+    log.seal(&source, 0, 1).unwrap();
+    let branch_def = branch_qdef("disabled-observability");
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), 0, 0),
+        1_000,
+        2,
+    )
+    .unwrap();
+    // Authority-head adoption deliberately rejects a queue that already has a legacy manifest tail.
+    // Exercise the fence/acquire paths on a second, empty queue so this test isolates recorder
+    // transparency instead of depending on that migration guard.
+    let authority_def = branch_qdef("disabled-authority-observability");
+    let authority =
+        pqueue_engine::QueueKey::new(source.tenant_id.clone(), authority_def.queue_id.clone());
+    log.create_queue(&authority_def).unwrap();
+    log.fence_epoch(&authority, 1, 3).unwrap();
+    assert_eq!(log.acquire_epoch(&authority, 4).unwrap(), 2);
+    let snapshot = recorder.snapshot();
+    assert!(snapshot.rows.is_empty());
+    assert_eq!((snapshot.in_flight, snapshot.peak_in_flight), (0, 0));
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -1535,8 +1726,14 @@ impl<S: BlobStore + 'static> FaultHook for PeerTrimBoundedAdvances<S> {
 /// — `read_all(branch)` returns the expected retained commands with NO missing segment.
 #[test]
 fn branch_retries_a_bounded_concurrent_floor_advance_and_succeeds() {
-    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+    let recorder = std::sync::Arc::new(BlobMetricsRecorder::new());
+    let store = InstrumentedBlobStore::new(
         InMemoryBlobStore::new(),
+        recorder.clone(),
+        BlobBackendKind::Memory,
+    );
+    let log = std::sync::Arc::new(SegmentedObjectLog::open(
+        store,
         SegmentConfig::new(10_000_000, 100).unwrap(),
     ));
     let source = shard();
@@ -1561,6 +1758,7 @@ fn branch_retries_a_bounded_concurrent_floor_advance_and_succeeds() {
         pqueue_engine::QueueKey::new(branch_def.tenant_id.clone(), branch_def.queue_id.clone());
     // Cut at 5 stays ABOVE the peer's final floor (2), so the retry SUCCEEDS (transparently — the caller never
     // sees the intermediate Conflicts).
+    let metrics_before = recorder.snapshot();
     log.branch(
         &source,
         &branch_def,
@@ -1570,6 +1768,29 @@ fn branch_retries_a_bounded_concurrent_floor_advance_and_succeeds() {
     )
     .expect("the bounded concurrent-trim race is retried transparently and succeeds");
     log.set_fault_hook(None);
+    let metrics = recorder.snapshot().delta(&metrics_before);
+    let logical = metrics.row(
+        BlobOperation::Branch,
+        BlobObjectClass::BranchPin,
+        BlobResultClass::Success,
+        false,
+        BlobBackendKind::Memory,
+    );
+    assert_eq!(
+        (logical.completions, logical.attempts, logical.retries),
+        (1, 3, 2)
+    );
+    assert!(
+        metrics
+            .rows
+            .iter()
+            .filter(|row| matches!(
+                row.operation,
+                BlobOperation::Put | BlobOperation::PutIfAbsent
+            ))
+            .all(|row| row.values.retries == 0),
+        "branch retries are logical iterations; winner/mirror PUTs are never labeled retries"
+    );
 
     // The committed branch INHERITED the advanced floor (2) and reads ONLY the retained [3,4,5] — no missing
     // segment, no reclaimed object is ever GET.

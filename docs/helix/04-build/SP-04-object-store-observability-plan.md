@@ -6,11 +6,11 @@ ddx:
     - {kind: part_of, to: build-slatedb-pattern-adoption-roadmap}
     - {kind: verified_by, to: tp-scale-substantiation}
   review:
-    self_hash: 8b8a380a443ed798b0fb8fe0a5fa9884e0ead76418df42af8ba99f910773b4ca
+    self_hash: 7fc689fb0f1334fee08304160a66d3215372c754dddf679ae4411c4c0d625926
     deps:
-      build-sp03-sequenced-metadata-boundary: c212bb092c036690b331e446a3b53ee8d5d5ae47eb6237524d038b6e7fdb53db
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-    reviewed_at: "2026-07-18T16:20:32Z"
+      build-sp03-sequenced-metadata-boundary: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
+      td-s3-object-log-sqlite-projection-mode: 94855c909aac4f1a362bce18f1720e58d524945eba5a4dda495e46ed9a0c1116
+    reviewed_at: "2026-07-18T22:13:09Z"
 ---
 
 # Implementation Plan: SP-04 Object-Store Observability Below Retries
@@ -65,7 +65,7 @@ and the live E3 harness uses the production recorder rather than a third counter
 | `put`, `put_if_absent`, `get`, `delete` | instrument as one physical trait call with bytes/result class |
 | `list_with_request_count`, `list_from_with_request_count` | instrument once; charge returned page/request count as physical attempts |
 | `list`, `list_from` | wrapper routes through the corresponding count-returning method; no second event |
-| `list_page` | instrument as one bounded LIST call; local default and remote override both report one request |
+| `list_page` | instrument as one bounded LIST call; local default and remote override report one request when `limit > 0`, while `limit=0` performs and reports zero physical attempts |
 | `stats` | logical span only; delegate to the provider's optimized stats implementation and do not attribute its introspection reads as workload GETs |
 | `read_manifest_head` | logical span only; extracted helper invokes instrumented list/get primitives |
 | `update_manifest_head_if_version` | logical span only; extracted helper invokes read-head and CAS primitives |
@@ -102,3 +102,23 @@ revert without durable-state changes.
 
 All blob implementations share one instrumented path, recorder snapshots are the reconciled request/byte/cost
 source for TP-002 E3, no endpoint/vendor dependency is introduced, and the hot path stays within budget.
+
+## Implementation Status (2026-07-18)
+
+Slices 2–5 are implemented: structured provider-boundary faults, fixed atomic snapshots/deltas, the universal
+segmented-log construction funnel, composite head accounting, bounded protocol retry rows, reconciled
+`SegmentCounters`, and E3 migration from `MeasuredBlobStore` to a scoped production recorder. Deterministic
+tests cover hostile cardinality, disabled/nested transparency, in-flight calls, exact bytes/attempts,
+pagination without fabricated retries, S3 HTTP/transport/corruption classes, stats isolation, acquire/fence
+CAS retries, bounded branch floor retries, and legacy mirror zero-retry behavior.
+
+The quiet-host timing gate in slice 6 is deliberately deferred. Functional evidence proves the disabled path
+uses no clock or atomic recording and allocates no bucket table, but does not claim the 2% median bar here.
+
+The implemented schema uses counts for completions/attempts/retries/errors/throttles/timeouts, bytes for
+request/response payload bodies, and monotonic nanoseconds for summed latency. Request bytes exclude keys,
+paths, queries, and headers. S3 response bytes are actual post-header bodies accumulated across all LIST pages
+and terminal error pages; generic providers report zero when wire payload size is unknowable. Paged LIST
+attempts are not retries, zero-limit pages perform zero attempts, and only physical provider calls affect the
+in-flight gauge. GET/DELETE misses and create precondition loss are non-error completions. Logical
+head/acquire/fence/branch rows remain separate from billable primitive totals.

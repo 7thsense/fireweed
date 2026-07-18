@@ -14,7 +14,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 8bacf6c79d2e3b82ee35cf5be4528818f720eed51bf9cfcbe200de48fc373caa
+    self_hash: 94855c909aac4f1a362bce18f1720e58d524945eba5a4dda495e46ed9a0c1116
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -27,7 +27,7 @@ ddx:
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-18T21:09:02Z"
+    reviewed_at: "2026-07-18T22:13:08Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -219,6 +219,48 @@ waiting requests, wait/reject counts, and adapter-measured wait duration. Tenant
 metric labels; tenant attribution is limited to rate-limited diagnostics. Every live object-log profile emits
 these fields, including total/max wait nanoseconds and the queue cap, on its opt-in `[seg]` debug telemetry
 line; the snapshot formatter is shared with focused visibility tests.
+
+### Object-store attempt telemetry
+
+Every `SegmentedObjectLog` construction path installs exactly one instrumented `BlobStore` boundary above
+namespacing and below protocol retries. Metric identity is the fixed product of operation, object class,
+result class, retryable, and backend kind. Tenant, queue, key, URL, and error text are prohibited labels.
+Primitive PUT/create, GET, DELETE, bounded LIST, ranged LIST, and LIST pagination record physical attempts;
+pagination increases attempts but never retry count. Manifest-head read/update record one logical span while
+their LIST/GET/create calls remain visible exactly once. Provider-optimized `stats` is one introspection span.
+
+Provider adapters classify errors before preserving the outward `EngineError`: S3 socket/TLS I/O is
+retryable transport, malformed HTTP is non-retryable corruption, 429/503 is throttling, other 5xx/408 is
+retryable transport, and other HTTP status is non-retryable. Timeout remains reserved-zero until the
+transport exposes a real typed timeout. Display strings are never parsed. Bounded acquire, fence, and branch
+loops record a separate logical completion with iterations and `iterations - 1` retries; physical calls and
+legacy winner mirrors remain zero-retry primitive rows.
+
+The default enabled recorder is fixed-cardinality and process-shared; a disabled shared recorder has no
+bucket allocation and bypasses clocks and atomics. Evidence harnesses inject a scoped recorder when isolation
+is required. Nested-wrapper detection disables outer attribution and reports the inner recorder. Pull
+snapshots and monotonic deltas are the request/response byte and request-count source of truth, and legacy
+`SegmentCounters` are reconciled to an explicit recorder baseline during migration.
+
+| Field | Unit and exact meaning |
+|---|---|
+| `completions` | Count of completed trait calls or named logical protocol calls. One row increment per returned `Ok` or `Err`; GET/DELETE miss and create precondition loss are successful completions, not errors. |
+| `attempts` | Count of physical provider requests for primitive rows. Each S3 LIST page is one attempt; `list_page(limit=0)` is zero. For logical acquire/fence/branch rows it is loop iterations, not provider calls. |
+| `retries` | Count of logical protocol re-attempts (`iterations - 1`) on acquire/fence/branch rows. Primitive calls, S3 pagination, composite primitives, and legacy winner mirrors always record zero. |
+| `request_bytes` | Bytes in provider request bodies, summed over attempts. PUT/create uses the exact body length. GET/DELETE/LIST keys, paths, query strings, and HTTP headers are excluded. Unknown generic-provider payloads are zero. |
+| `response_bytes` | Bytes in provider response bodies after HTTP headers, summed over all attempts, including prior LIST pages and a terminal error page. S3 GET uses object-body length; S3 LIST uses XML-body length; PUT/DELETE use their actual response-body lengths. Key-length estimates are prohibited. Unknown generic-provider payloads are zero. |
+| `latency_ns` | Monotonic elapsed nanoseconds summed once per completed row. A paged LIST records one aggregate duration across all pages. Logical head/protocol span duration is separate from primitive duration and is never added to the physical in-flight gauge. |
+| `errors`, `throttles`, `timeouts` | Completion counts. `errors` increments only for outward `Err`; `throttles` follows typed provider classification; `timeouts` remains zero until a typed timeout exists. |
+| `in_flight`, `peak_in_flight` | Current and maximum concurrent physical provider trait calls. Logical composite nesting and protocol spans do not affect this gauge. |
+
+| Method/operation identity | Recording policy |
+|---|---|
+| `put`, `put_if_absent`, `get`, `delete` | One primitive completion and provider attempt. |
+| `list`, `list_from`, counted variants | One `list` completion; attempts equal physical pages; aggregate latency/bytes recorded once. |
+| `list_page` | One completion; attempts are one for a nonzero bounded request and zero for `limit=0`. |
+| `stats` | One logical introspection completion; provider-internal metadata walking is not workload GET/LIST attribution. |
+| `read_manifest_head`, `update_manifest_head_if_version` | One logical completion each; invoked LIST/GET/create primitives are recorded once beneath them. |
+| `acquire_epoch`, `fence_epoch`, `branch` | One logical completion with loop iterations/retries. A head-backed acquire also records its distinct nested fence completion; their iterations are not shared or double-counted. |
 
 ### Object Layout (logical)
 

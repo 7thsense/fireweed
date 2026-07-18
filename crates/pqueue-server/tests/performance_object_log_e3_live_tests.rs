@@ -62,6 +62,9 @@ use pqueue_core::{
     UtcTimestamp,
 };
 use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey};
+use pqueue_objectlog::object_store_observability::{
+    BlobBackendKind, BlobMetricsRecorder, BlobPhysicalTotals, InstrumentedBlobStore,
+};
 use pqueue_objectlog::segmented::{BlobStore, S3BlobStore, SegmentConfig, SegmentCounters};
 use pqueue_server::{SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend};
 
@@ -187,7 +190,7 @@ struct S3Env {
 }
 
 impl S3Env {
-    fn measured_store(&self) -> (Arc<dyn BlobStore>, Arc<StoreOperationCounters>) {
+    fn measured_store(&self) -> (Arc<dyn BlobStore>, Arc<BlobMetricsRecorder>) {
         let s3 = S3BlobStore::new(
             &self.endpoint,
             &self.bucket,
@@ -196,13 +199,14 @@ impl S3Env {
             "us-east-1",
         )
         .expect("build S3 client");
-        let counters = Arc::new(StoreOperationCounters::default());
+        let recorder = Arc::new(BlobMetricsRecorder::new());
         (
-            Arc::new(MeasuredBlobStore {
-                inner: s3,
-                counters: counters.clone(),
-            }),
-            counters,
+            Arc::new(InstrumentedBlobStore::new(
+                s3,
+                Arc::clone(&recorder),
+                BlobBackendKind::S3,
+            )),
+            recorder,
         )
     }
 }
@@ -215,97 +219,14 @@ struct StoreOperations {
     deletes: u64,
 }
 
-impl StoreOperations {
-    fn since(self, baseline: Self) -> Self {
+impl From<BlobPhysicalTotals> for StoreOperations {
+    fn from(value: BlobPhysicalTotals) -> Self {
         Self {
-            puts: self.puts.saturating_sub(baseline.puts),
-            gets: self.gets.saturating_sub(baseline.gets),
-            lists: self.lists.saturating_sub(baseline.lists),
-            deletes: self.deletes.saturating_sub(baseline.deletes),
+            puts: value.puts,
+            gets: value.gets,
+            lists: value.lists,
+            deletes: value.deletes,
         }
-    }
-}
-
-#[derive(Default)]
-struct StoreOperationCounters {
-    puts: AtomicU64,
-    gets: AtomicU64,
-    lists: AtomicU64,
-    deletes: AtomicU64,
-}
-
-impl StoreOperationCounters {
-    fn snapshot(&self) -> StoreOperations {
-        StoreOperations {
-            puts: self.puts.load(Ordering::Relaxed),
-            gets: self.gets.load(Ordering::Relaxed),
-            lists: self.lists.load(Ordering::Relaxed),
-            deletes: self.deletes.load(Ordering::Relaxed),
-        }
-    }
-}
-
-struct MeasuredBlobStore {
-    inner: S3BlobStore,
-    counters: Arc<StoreOperationCounters>,
-}
-
-impl BlobStore for MeasuredBlobStore {
-    fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
-        self.counters.puts.fetch_add(1, Ordering::Relaxed);
-        self.inner.put(key, body)
-    }
-
-    fn put_if_absent(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<bool> {
-        self.counters.puts.fetch_add(1, Ordering::Relaxed);
-        self.inner.put_if_absent(key, body)
-    }
-
-    fn get(&self, key: &str) -> pqueue_engine::EngineResult<Option<Vec<u8>>> {
-        self.counters.gets.fetch_add(1, Ordering::Relaxed);
-        self.inner.get(key)
-    }
-
-    fn delete(&self, key: &str) -> pqueue_engine::EngineResult<bool> {
-        self.counters.deletes.fetch_add(1, Ordering::Relaxed);
-        self.inner.delete(key)
-    }
-
-    fn list(&self, prefix: &str) -> pqueue_engine::EngineResult<Vec<String>> {
-        let (keys, requests) = self.inner.list_with_request_count(prefix)?;
-        self.counters.lists.fetch_add(requests, Ordering::Relaxed);
-        Ok(keys)
-    }
-
-    fn list_page(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        limit: usize,
-    ) -> pqueue_engine::EngineResult<Vec<String>> {
-        self.counters.lists.fetch_add(1, Ordering::Relaxed);
-        self.inner.list_page(prefix, start_after, limit)
-    }
-
-    fn list_from_with_request_count(
-        &self,
-        prefix: &str,
-        start_after: &str,
-    ) -> pqueue_engine::EngineResult<(Vec<String>, u64)> {
-        let (keys, requests) = self
-            .inner
-            .list_from_with_request_count(prefix, start_after)?;
-        self.counters.lists.fetch_add(requests, Ordering::Relaxed);
-        Ok((keys, requests))
-    }
-
-    fn list_with_request_count(
-        &self,
-        prefix: &str,
-    ) -> pqueue_engine::EngineResult<(Vec<String>, u64)> {
-        let (keys, requests) = self.inner.list_with_request_count(prefix)?;
-        self.counters.lists.fetch_add(requests, Ordering::Relaxed);
-        Ok((keys, requests))
     }
 }
 
@@ -447,11 +368,11 @@ where
     let proj = projection_path(&format!("ack-{profile}-{}", bound.label));
     let cfg = SegmentConfig::new(bound.target_bytes, bound.max_latency_ms).unwrap();
 
-    let (store, store_counters) = s3.measured_store();
+    let (store, recorder) = s3.measured_store();
     let backend = Arc::new(open(store, &proj, cfg).expect("open segmented backend over S3"));
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
-    let store_baseline = store_counters.snapshot();
+    let store_baseline = recorder.snapshot();
     let started = Instant::now();
 
     let per_task = pushes.div_ceil(concurrency);
@@ -499,7 +420,11 @@ where
         max_latency_ms: cfg.max_latency_ms,
         segments_sealed: c.segments_sealed,
         objects_put: c.objects_put,
-        store_operations: store_counters.snapshot().since(store_baseline),
+        store_operations: recorder
+            .snapshot()
+            .delta(&store_baseline)
+            .physical_totals()
+            .into(),
         commands_committed: c.commands_committed,
         mean_batch: round3(c.mean_batch_size()),
         max_batch: c.max_batch_size(),
@@ -570,7 +495,7 @@ where
     // one tiny segment per push.
     let cfg = SegmentConfig::new(8_388_608, 10_000).unwrap();
     let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
-    let (store, store_counters) = s3.measured_store();
+    let (store, recorder) = s3.measured_store();
 
     let (command_count, total_commands, pending_loaded) = {
         let backend = Arc::new(open(store.clone(), &proj, cfg).expect("open backend for load"));
@@ -629,7 +554,7 @@ where
         pending_loaded, resident,
         "every loaded item must be materialized + durable before the snapshot"
     );
-    let recovery_baseline = store_counters.snapshot();
+    let recovery_baseline = recorder.snapshot();
 
     // Reopen on the same bucket and (for SQLite) the same durable projection path.
     let backend2 = Arc::new(open(store, &proj, cfg).expect("reopen backend"));
@@ -666,7 +591,11 @@ where
         recovery_max_tail,
         recovery_wall_ms: round3(recovery_wall_ms),
         pending_after,
-        store_operations: store_counters.snapshot().since(recovery_baseline),
+        store_operations: recorder
+            .snapshot()
+            .delta(&recovery_baseline)
+            .physical_totals()
+            .into(),
         bar_met,
     }
 }

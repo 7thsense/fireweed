@@ -14,14 +14,14 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: c7f663e75e5e249d4e430faead6955fba5c905f1b1d994c08a34ef0711c954e9
+    self_hash: 8510cb604aacf3f0e222c7a0452e9c064465a5bd909586d688b8e1134a85ed9c
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      td-s3-object-log-sqlite-projection-mode: 8bacf6c79d2e3b82ee35cf5be4528818f720eed51bf9cfcbe200de48fc373caa
+      td-s3-object-log-sqlite-projection-mode: 94855c909aac4f1a362bce18f1720e58d524945eba5a4dda495e46ed9a0c1116
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      tp-scale-substantiation: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
+      tp-scale-substantiation: ff74b55a3869b335aa80e2e52abae5cea979d028c1c41559ab027e477a26c253
       tp-verification-acceptance-criteria: e4cdf81601d5246355ffc3ac09c4ac92ea0370f8fa9ce4cea801ec784e3717cb
-    reviewed_at: "2026-07-18T21:09:03Z"
+    reviewed_at: "2026-07-18T22:13:10Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption
@@ -109,6 +109,11 @@ beads without changing the acceptance contract here.
 | Durable-format migration strands old logs | Critical | Golden v2 fixtures, mixed-version replay, write-v3/read-v2-v3 | Keep v2 writer selectable until release gate |
 
 ## Exit Criteria
+
+SP-04 is implemented through deterministic gates: one construction funnel, typed S3 faults, physical-attempt
+and logical-retry separation, scoped E3 snapshots, and counter reconciliation. Its remaining release
+condition is the deferred quiet-host no-op median-overhead measurement; later functional iterations may
+proceed, but the release performance claim cannot be promoted without that record.
 
 - [ ] Every accepted iteration is individually committed and pushed with its tests and governing docs.
 - [ ] Any rejected spike has reproducible evidence, a recorded decision, and no dormant production code.

@@ -8,14 +8,14 @@ ddx:
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
-    self_hash: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
+    self_hash: ff74b55a3869b335aa80e2e52abae5cea979d028c1c41559ab027e477a26c253
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-18T18:16:00Z"
+    reviewed_at: "2026-07-18T22:13:09Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -261,6 +261,16 @@ envelope).
 | Pass: routing redirect | a client addressing a queue on the wrong node is redirected (`-MOVED`-style) to the current owner and converges in a single hop; a stale/misrouted write is fenced, never corrupting state (TD-006 §1A). |
 
 ### E3 — Object-log latency/cost + recovery (pass/fail)
+
+E3 request-cost rows MUST come from a test-scoped production `BlobMetricsRecorder` snapshot delta around the
+measured interval, not a separate counting `BlobStore`. PUT/create, GET, DELETE, and physical LIST page totals
+come from primitive attempts; logical head/acquire/fence/branch spans are excluded from billable totals.
+Tests assert LIST pages are attempts rather than retries, protocol retries equal loop iterations minus one,
+legacy manifest mirrors are not retries, and hostile key/error inputs cannot create new series.
+
+Disabled-recorder transparency and deterministic accounting are normal CI gates. The quiet-host no-op
+overhead measurement (median regression no greater than 2%) remains a release-host performance gate and MUST
+NOT be inferred from a contended development host.
 
 Backend: `object_log_inmemory_projection` and `object_log_sqlite_projection`
 (TD-004). Reported against the per-queue throughput floor E0.

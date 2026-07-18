@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::object_store_observability::ObservedBlobCall;
 use pqueue_core::QueueDefinition;
 use pqueue_engine::{
     CommandEnvelope, CommandPosition, EngineError, EngineResult, QueueCommand, QueueKey,
@@ -61,6 +62,182 @@ use pqueue_engine::sequenced_metadata::{
 /// The minimal S3-compatible object surface the segmented substrate drives. Implemented in-memory (unit
 /// tests, no network) and over a real S3 endpoint ([`S3BlobStore`], tested against MinIO).
 pub trait BlobStore: Send + Sync {
+    fn observed_put(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<()>,
+    > {
+        self.put(key, body)
+            .map(|value| {
+                crate::object_store_observability::ObservedBlobCall::new(
+                    value,
+                    1,
+                    body.len() as u64,
+                    0,
+                )
+            })
+            .map_err(|error| {
+                let mut error =
+                    crate::object_store_observability::ClassifiedBlobError::fallback(self, error);
+                error.request_bytes = body.len() as u64;
+                error
+            })
+    }
+
+    fn observed_put_if_absent(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<bool>,
+    > {
+        self.put_if_absent(key, body)
+            .map(|value| {
+                crate::object_store_observability::ObservedBlobCall::new(
+                    value,
+                    1,
+                    body.len() as u64,
+                    0,
+                )
+            })
+            .map_err(|error| {
+                let mut error =
+                    crate::object_store_observability::ClassifiedBlobError::fallback(self, error);
+                error.request_bytes = body.len() as u64;
+                error
+            })
+    }
+
+    fn observed_get(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<Option<Vec<u8>>>,
+    > {
+        self.get(key)
+            .map(|value| {
+                let bytes = value.as_ref().map_or(0, |v| v.len() as u64);
+                crate::object_store_observability::ObservedBlobCall::new(value, 1, 0, bytes)
+            })
+            .map_err(|error| {
+                crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+            })
+    }
+
+    fn observed_delete(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<bool>,
+    > {
+        self.delete(key)
+            .map(|value| crate::object_store_observability::ObservedBlobCall::new(value, 1, 0, 0))
+            .map_err(|error| {
+                crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+            })
+    }
+
+    fn observed_list_with_request_count(
+        &self,
+        prefix: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<Vec<String>>,
+    > {
+        self.list_with_request_count(prefix)
+            .map(|(value, attempts)| {
+                crate::object_store_observability::ObservedBlobCall::new(
+                    value,
+                    attempts.max(1),
+                    0,
+                    0,
+                )
+            })
+            .map_err(|error| {
+                crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+            })
+    }
+
+    fn observed_list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<Vec<String>>,
+    > {
+        self.list_from_with_request_count(prefix, start_after)
+            .map(|(value, attempts)| {
+                crate::object_store_observability::ObservedBlobCall::new(
+                    value,
+                    attempts.max(1),
+                    0,
+                    0,
+                )
+            })
+            .map_err(|error| {
+                crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+            })
+    }
+
+    fn observed_list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<Vec<String>>,
+    > {
+        self.list_page(prefix, start_after, limit)
+            .map(|value| {
+                crate::object_store_observability::ObservedBlobCall::new(
+                    value,
+                    u64::from(limit != 0),
+                    0,
+                    0,
+                )
+            })
+            .map_err(|error| {
+                crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+            })
+    }
+
+    fn observed_stats(
+        &self,
+        prefix: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<
+        crate::object_store_observability::ObservedBlobCall<ObjectStoreStats>,
+    > {
+        self.stats(prefix)
+            .map(|value| crate::object_store_observability::ObservedBlobCall::new(value, 1, 0, 0))
+            .map_err(|error| {
+                crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+            })
+    }
+
+    fn backend_kind(&self) -> crate::object_store_observability::BlobBackendKind {
+        crate::object_store_observability::BlobBackendKind::Other
+    }
+
+    fn instrumentation_depth(&self) -> u8 {
+        0
+    }
+
+    fn instrumentation_recorder(
+        &self,
+    ) -> Option<Arc<crate::object_store_observability::BlobMetricsRecorder>> {
+        None
+    }
+
+    /// Classify a provider error without parsing its display text. Providers with richer native errors
+    /// override this at the boundary; the default is a conservative structured projection.
+    fn classify_fault(
+        &self,
+        error: &EngineError,
+    ) -> crate::object_store_observability::BlobStoreFault {
+        crate::object_store_observability::BlobStoreFault::from_engine_error(error)
+    }
+
     /// Unconditional PUT (used for immutable, deterministically-keyed segment objects; a retried write
     /// re-puts identical bytes, so it is idempotent at a stable key — TD-004 "idempotent segment PUT").
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()>;
@@ -158,28 +335,7 @@ pub trait BlobStore: Send + Sync {
         &self,
         prefix: &str,
     ) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
-        let mut versions = Vec::new();
-        for key in self.list(prefix)? {
-            let Some(version) = parse_versioned_manifest_head_key(prefix, &key) else {
-                continue;
-            };
-            let Some(bytes) = self.get(&key)? else {
-                // Authority versions are permanent. A strongly-consistent LIST that names a missing object
-                // signals corruption; skipping it could downgrade the observed epoch/tail.
-                return Err(EngineError::Conflict);
-            };
-            let value: ManifestHeadBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
-            versions.push(VersionedHead { version, value });
-        }
-        versions.sort_by_key(|head| head.version);
-        if versions
-            .iter()
-            .enumerate()
-            .any(|(expected, head)| head.version != expected as u64)
-        {
-            return Err(EngineError::Conflict);
-        }
-        Ok(versions.pop())
+        read_manifest_head_via(self, prefix)
     }
 
     /// Conditionally advance the versioned manifest head.
@@ -193,34 +349,146 @@ pub trait BlobStore: Send + Sync {
         expected_version: Option<u64>,
         value: &ManifestHeadBlob,
     ) -> EngineResult<bool> {
-        let current = self.read_manifest_head(prefix)?;
-        let expected_version = expected_version.map(HeadVersion);
-        match (
-            expected_version,
-            current.as_ref().map(|head| HeadVersion(head.version)),
-        ) {
-            (None, None) => {}
-            (Some(expected), Some(current)) if current == expected => {}
-            _ => return Ok(false),
-        }
-        let next_version = current.as_ref().map_or(0, |head| head.version + 1);
-        let key = versioned_manifest_head_key(prefix, next_version);
-        let body = serde_json::to_vec(value).map_err(store_err)?;
-        match CreateOnlyPublication::<ManifestHeadClass, RetainedAddress>::publish(
-            &body,
-            || self.put_if_absent(&key, &body),
-            || self.get(&key),
-        )? {
-            resolution if resolution.applied() => Ok(true),
-            CreateOnlyResolution::PreconditionLost => Ok(false),
-            CreateOnlyResolution::Ambiguous(source) => Err(source),
-            _ => unreachable!("all applied resolutions handled by the guard"),
-        }
+        update_manifest_head_via(self, prefix, expected_version, value)
+    }
+}
+
+pub(crate) fn read_manifest_head_via<S: BlobStore + ?Sized>(
+    store: &S,
+    prefix: &str,
+) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
+    let mut versions = Vec::new();
+    for key in store.list(prefix)? {
+        let Some(version) = parse_versioned_manifest_head_key(prefix, &key) else {
+            continue;
+        };
+        let Some(bytes) = store.get(&key)? else {
+            return Err(EngineError::Conflict);
+        };
+        let value: ManifestHeadBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
+        versions.push(VersionedHead { version, value });
+    }
+    versions.sort_by_key(|head| head.version);
+    if versions
+        .iter()
+        .enumerate()
+        .any(|(expected, head)| head.version != expected as u64)
+    {
+        return Err(EngineError::Conflict);
+    }
+    Ok(versions.pop())
+}
+
+pub(crate) fn update_manifest_head_via<S: BlobStore + ?Sized>(
+    store: &S,
+    prefix: &str,
+    expected_version: Option<u64>,
+    value: &ManifestHeadBlob,
+) -> EngineResult<bool> {
+    let current = store.read_manifest_head(prefix)?;
+    let expected_version = expected_version.map(HeadVersion);
+    match (
+        expected_version,
+        current.as_ref().map(|head| HeadVersion(head.version)),
+    ) {
+        (None, None) => {}
+        (Some(expected), Some(current)) if current == expected => {}
+        _ => return Ok(false),
+    }
+    let next_version = current.as_ref().map_or(0, |head| head.version + 1);
+    let key = versioned_manifest_head_key(prefix, next_version);
+    let body = serde_json::to_vec(value).map_err(store_err)?;
+    match CreateOnlyPublication::<ManifestHeadClass, RetainedAddress>::publish(
+        &body,
+        || store.put_if_absent(&key, &body),
+        || store.get(&key),
+    )? {
+        resolution if resolution.applied() => Ok(true),
+        CreateOnlyResolution::PreconditionLost => Ok(false),
+        CreateOnlyResolution::Ambiguous(source) => Err(source),
+        _ => unreachable!("all applied resolutions handled by the guard"),
     }
 }
 
 /// Share one store between several owners (e.g. two competing epoch holders) — delegates through the `Arc`.
 impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
+    fn observed_put(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<()>> {
+        (**self).observed_put(key, body)
+    }
+    fn observed_put_if_absent(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        (**self).observed_put_if_absent(key, body)
+    }
+    fn observed_get(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Option<Vec<u8>>>>
+    {
+        (**self).observed_get(key)
+    }
+    fn observed_delete(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        (**self).observed_delete(key)
+    }
+    fn observed_list_with_request_count(
+        &self,
+        prefix: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        (**self).observed_list_with_request_count(prefix)
+    }
+    fn observed_list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        (**self).observed_list_from_with_request_count(prefix, start_after)
+    }
+    fn observed_list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        (**self).observed_list_page(prefix, start_after, limit)
+    }
+    fn observed_stats(
+        &self,
+        prefix: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<ObjectStoreStats>>
+    {
+        (**self).observed_stats(prefix)
+    }
+    fn backend_kind(&self) -> crate::object_store_observability::BlobBackendKind {
+        (**self).backend_kind()
+    }
+
+    fn instrumentation_depth(&self) -> u8 {
+        (**self).instrumentation_depth()
+    }
+
+    fn instrumentation_recorder(
+        &self,
+    ) -> Option<Arc<crate::object_store_observability::BlobMetricsRecorder>> {
+        (**self).instrumentation_recorder()
+    }
+    fn classify_fault(
+        &self,
+        error: &EngineError,
+    ) -> crate::object_store_observability::BlobStoreFault {
+        (**self).classify_fault(error)
+    }
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         (**self).put(key, body)
     }
@@ -314,6 +582,117 @@ impl NamespacedBlobStore {
 }
 
 impl BlobStore for NamespacedBlobStore {
+    fn observed_put(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<()>> {
+        self.inner.observed_put(&self.key(key), body)
+    }
+    fn observed_put_if_absent(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        self.inner.observed_put_if_absent(&self.key(key), body)
+    }
+    fn observed_get(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Option<Vec<u8>>>>
+    {
+        self.inner.observed_get(&self.key(key))
+    }
+    fn observed_delete(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        self.inner.observed_delete(&self.key(key))
+    }
+    fn observed_list_with_request_count(
+        &self,
+        prefix: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        let call = self
+            .inner
+            .observed_list_with_request_count(&self.key(prefix))?;
+        let value = self.strip_keys(call.value).map_err(|error| {
+            crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+        })?;
+        Ok(ObservedBlobCall::new(
+            value,
+            call.attempts,
+            call.request_bytes,
+            call.response_bytes,
+        ))
+    }
+    fn observed_list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        let call = self
+            .inner
+            .observed_list_from_with_request_count(&self.key(prefix), &self.key(start_after))?;
+        let value = self.strip_keys(call.value).map_err(|error| {
+            crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+        })?;
+        Ok(ObservedBlobCall::new(
+            value,
+            call.attempts,
+            call.request_bytes,
+            call.response_bytes,
+        ))
+    }
+    fn observed_list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        let cursor = start_after.map(|value| self.key(value));
+        let call = self
+            .inner
+            .observed_list_page(&self.key(prefix), cursor.as_deref(), limit)?;
+        let value = self.strip_keys(call.value).map_err(|error| {
+            crate::object_store_observability::ClassifiedBlobError::fallback(self, error)
+        })?;
+        Ok(ObservedBlobCall::new(
+            value,
+            call.attempts,
+            call.request_bytes,
+            call.response_bytes,
+        ))
+    }
+    fn observed_stats(
+        &self,
+        prefix: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<ObjectStoreStats>>
+    {
+        self.inner.observed_stats(&self.key(prefix))
+    }
+    fn backend_kind(&self) -> crate::object_store_observability::BlobBackendKind {
+        self.inner.backend_kind()
+    }
+
+    fn instrumentation_depth(&self) -> u8 {
+        self.inner.instrumentation_depth()
+    }
+
+    fn instrumentation_recorder(
+        &self,
+    ) -> Option<Arc<crate::object_store_observability::BlobMetricsRecorder>> {
+        self.inner.instrumentation_recorder()
+    }
+    fn classify_fault(
+        &self,
+        error: &EngineError,
+    ) -> crate::object_store_observability::BlobStoreFault {
+        self.inner.classify_fault(error)
+    }
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         self.inner.put(&self.key(key), body)
     }
@@ -394,6 +773,9 @@ impl InMemoryBlobStore {
 }
 
 impl BlobStore for InMemoryBlobStore {
+    fn backend_kind(&self) -> crate::object_store_observability::BlobBackendKind {
+        crate::object_store_observability::BlobBackendKind::Memory
+    }
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         self.objects
             .lock()
@@ -533,6 +915,9 @@ fn walk_keys(root: &Path, dir: &Path, out: &mut Vec<String>) -> EngineResult<()>
 }
 
 impl BlobStore for LocalFsBlobStore {
+    fn backend_kind(&self) -> crate::object_store_observability::BlobBackendKind {
+        crate::object_store_observability::BlobBackendKind::LocalFs
+    }
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         let path = self.key_path(key);
         if let Some(parent) = path.parent() {
@@ -683,6 +1068,10 @@ pub struct SegmentCounters {
     /// Count of object-store DELETE API calls issued by this process. The current append-only log does not
     /// delete objects during the release run, but retention cleanup must be visible when it is added.
     pub delete_count: u64,
+    /// Physical request payload bytes from the production recorder for an explicitly baselined interval.
+    pub request_bytes: u64,
+    /// Physical response payload bytes from the production recorder for an explicitly baselined interval.
+    pub response_bytes: u64,
 }
 
 impl SegmentCounters {
@@ -1185,7 +1574,7 @@ impl SerializedCommandEnvelope {
 
 /// Segmented, group-committing object log over an S3-compatible [`BlobStore`].
 pub struct SegmentedObjectLog<S: BlobStore> {
-    store: S,
+    store: crate::object_store_observability::InstrumentedBlobStore<S>,
     config: SegmentConfig,
     inner: Mutex<Inner>,
     /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-4). `None` in every production path.
@@ -1204,8 +1593,11 @@ pub struct SegmentedObjectLog<S: BlobStore> {
 impl<S: BlobStore> SegmentedObjectLog<S> {
     /// Open a segmented object log over `store` with `config`.
     pub fn open(store: S, config: SegmentConfig) -> Self {
+        let backend = store.backend_kind();
         Self {
-            store,
+            store: crate::object_store_observability::InstrumentedBlobStore::production(
+                store, backend,
+            ),
             config,
             inner: Mutex::new(Inner {
                 shards: BTreeMap::new(),
@@ -1216,6 +1608,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             create_gc_guard: Mutex::new(()),
             candidate_gc_cursors: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    pub fn object_store_metrics(&self) -> crate::object_store_observability::BlobMetricsSnapshot {
+        self.store.effective_recorder().snapshot()
     }
 
     /// Install (or clear, with `None`) a test-only fault hook (TP-003 §3.10 AC-TXN-4). Never called from
@@ -2078,6 +2474,29 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// retention; the durable head CAS is the fence, and the code only uses that wiring if a later proof
     /// establishes the bounded-window invariant there.
     pub fn acquire_epoch(&self, shard: &QueueKey, now_ms: i64) -> EngineResult<u64> {
+        if !self.store.effective_recorder().is_enabled() {
+            return self.acquire_epoch_inner(shard, now_ms, &mut 0);
+        }
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        let result = self.acquire_epoch_inner(shard, now_ms, &mut attempts);
+        self.store.effective_recorder().record_protocol(
+            crate::object_store_observability::BlobOperation::AcquireEpoch,
+            self.store.backend_kind(),
+            crate::object_store_observability::BlobObjectClass::ManifestHead,
+            attempts,
+            started.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    fn acquire_epoch_inner(
+        &self,
+        shard: &QueueKey,
+        now_ms: i64,
+        attempts: &mut u64,
+    ) -> EngineResult<u64> {
         {
             let g = self.inner.lock().expect("segmented log poisoned");
             if !g.shards.contains_key(shard) {
@@ -2089,6 +2508,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         // Bounded retry against concurrent acquirers (no consensus; the store CAS is the only primitive).
         for _ in 0..16 {
+            *attempts += 1;
             let (next_seq, next_index, cur_epoch, _) = self.recover_manifest(shard)?;
             let new_epoch = cur_epoch + 1;
             let entry = ManifestEntry {
@@ -2136,6 +2556,29 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         target_epoch: u64,
         _now_ms: i64,
     ) -> EngineResult<u64> {
+        if !self.store.effective_recorder().is_enabled() {
+            return self.fence_epoch_inner(shard, target_epoch, &mut 0);
+        }
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        let result = self.fence_epoch_inner(shard, target_epoch, &mut attempts);
+        self.store.effective_recorder().record_protocol(
+            crate::object_store_observability::BlobOperation::FenceEpoch,
+            self.store.backend_kind(),
+            crate::object_store_observability::BlobObjectClass::ManifestHead,
+            attempts,
+            started.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    fn fence_epoch_inner(
+        &self,
+        shard: &QueueKey,
+        target_epoch: u64,
+        attempts: &mut u64,
+    ) -> EngineResult<u64> {
         {
             let g = self.inner.lock().expect("segmented log poisoned");
             if !g.shards.contains_key(shard) {
@@ -2144,6 +2587,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         let prefix = Self::authoritative_head_prefix(shard);
         for _ in 0..16 {
+            *attempts += 1;
             let head = self.read_authoritative_head(shard)?;
             let (expected_version, next_head) = match head.as_ref() {
                 None => {
@@ -2861,6 +3305,50 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         now_ms: i64,
         emit_change_records: bool,
     ) -> EngineResult<u64> {
+        if !self.store.effective_recorder().is_enabled() {
+            return self.branch_with_emission_inner(
+                source,
+                branch_def,
+                position,
+                ttl_ms,
+                now_ms,
+                emit_change_records,
+                &mut 0,
+            );
+        }
+        let started = std::time::Instant::now();
+        let mut attempts = 0;
+        let result = self.branch_with_emission_inner(
+            source,
+            branch_def,
+            position,
+            ttl_ms,
+            now_ms,
+            emit_change_records,
+            &mut attempts,
+        );
+        self.store.effective_recorder().record_protocol(
+            crate::object_store_observability::BlobOperation::Branch,
+            self.store.backend_kind(),
+            crate::object_store_observability::BlobObjectClass::BranchPin,
+            attempts,
+            started.elapsed(),
+            &result,
+        );
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn branch_with_emission_inner(
+        &self,
+        source: &QueueKey,
+        branch_def: &QueueDefinition,
+        position: &CommandPosition,
+        ttl_ms: u64,
+        now_ms: i64,
+        emit_change_records: bool,
+        attempts: &mut u64,
+    ) -> EngineResult<u64> {
         // CREATE-vs-GC exclusion (bead pqueue-74f03d0e): hold the create/GC guard for the ENTIRE creation —
         // every attempt, the commit-marker write, and any rollback — so orphan GC can never run concurrently
         // with (and thus never mis-classify or destroy) an in-flight creation on this log instance. Outermost
@@ -2877,6 +3365,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // EngineError (never retried); only the private `FloorAdvanced` signal loops.
         const MAX_BRANCH_ATTEMPTS: u32 = 5;
         for _ in 1..MAX_BRANCH_ATTEMPTS {
+            *attempts += 1;
             match self.branch_attempt(
                 source,
                 branch_def,
@@ -2893,6 +3382,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // Final attempt: a still-`FloorAdvanced` outcome is the bounded give-up — map it to a clean terminal
         // public `Conflict` (no livelock; its rollback already released the pin so the source stays
         // reclaimable). A `Committed` succeeds; any `EngineError` propagates verbatim.
+        *attempts += 1;
         match self.branch_attempt(
             source,
             branch_def,
@@ -3467,6 +3957,26 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .expect("segmented log poisoned")
             .counters
             .clone()
+    }
+
+    /// Reconcile legacy release counters to the recorder source of truth for a caller-owned interval.
+    /// A scoped recorder is required when multiple logs run concurrently.
+    pub fn counters_reconciled_since(
+        &self,
+        baseline: &crate::object_store_observability::BlobMetricsSnapshot,
+    ) -> SegmentCounters {
+        let mut counters = self.counters();
+        let totals = self
+            .object_store_metrics()
+            .delta(baseline)
+            .physical_totals();
+        counters.put_count = totals.puts;
+        counters.get_count = totals.gets;
+        counters.list_count = totals.lists;
+        counters.delete_count = totals.deletes;
+        counters.request_bytes = totals.request_bytes;
+        counters.response_bytes = totals.response_bytes;
+        counters
     }
 
     // -- high-water + snapshots (ADR-012 LogStore facets stored as blobs in the object store) ----------
@@ -4141,7 +4651,91 @@ pub struct S3BlobStore {
     region: String,
 }
 
+struct S3RequestError {
+    outward: EngineError,
+    result: crate::object_store_observability::BlobResultClass,
+    retryable: bool,
+}
+
+impl S3RequestError {
+    fn transport(outward: EngineError) -> Self {
+        Self {
+            outward,
+            result: crate::object_store_observability::BlobResultClass::Transport,
+            retryable: true,
+        }
+    }
+
+    fn corrupt(outward: EngineError) -> Self {
+        Self {
+            outward,
+            result: crate::object_store_observability::BlobResultClass::Corrupt,
+            retryable: false,
+        }
+    }
+
+    fn other(outward: EngineError) -> Self {
+        Self {
+            outward,
+            result: crate::object_store_observability::BlobResultClass::OtherError,
+            retryable: false,
+        }
+    }
+}
+
 impl S3BlobStore {
+    fn request_error(
+        error: S3RequestError,
+    ) -> crate::object_store_observability::ClassifiedBlobError {
+        crate::object_store_observability::ClassifiedBlobError {
+            outward: error.outward,
+            fault: crate::object_store_observability::BlobStoreFault::new(
+                error.result,
+                error.retryable,
+                false,
+                false,
+            ),
+            attempts: 1,
+            request_bytes: 0,
+            response_bytes: 0,
+        }
+    }
+
+    fn http_error(
+        error: EngineError,
+        status: u16,
+    ) -> crate::object_store_observability::ClassifiedBlobError {
+        use crate::object_store_observability::{BlobResultClass, BlobStoreFault};
+        let fault = match status {
+            429 | 503 => BlobStoreFault::new(BlobResultClass::Throttled, true, true, false),
+            408 | 500..=599 => BlobStoreFault::new(BlobResultClass::Transport, true, false, false),
+            _ => BlobStoreFault::new(BlobResultClass::OtherError, false, false, false),
+        };
+        crate::object_store_observability::ClassifiedBlobError {
+            outward: error,
+            fault,
+            attempts: 1,
+            request_bytes: 0,
+            response_bytes: 0,
+        }
+    }
+
+    fn request_observed(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(String, String)],
+        body: &[u8],
+        extra_headers: &[(String, String)],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<(u16, Vec<u8>)> {
+        self.request_typed(method, path, query, body, extra_headers)
+            .map_err(|error| {
+                let mut error = Self::request_error(error);
+                error.request_bytes = body.len() as u64;
+                error
+            })
+    }
+
     /// Build a client. `endpoint` is `https://host[:port]` for production S3 or
     /// `http://host[:port]` for an explicitly permitted local S3-compatible fixture. The bucket must exist
     /// (or call [`S3BlobStore::create_bucket`]).
@@ -4212,6 +4806,18 @@ impl S3BlobStore {
         body: &[u8],
         extra_headers: &[(String, String)],
     ) -> EngineResult<(u16, Vec<u8>)> {
+        self.request_typed(method, path, query, body, extra_headers)
+            .map_err(|error| error.outward)
+    }
+
+    fn request_typed(
+        &self,
+        method: &str,
+        path: &str,
+        query: &[(String, String)],
+        body: &[u8],
+        extra_headers: &[(String, String)],
+    ) -> Result<(u16, Vec<u8>), S3RequestError> {
         let (amz_date, datestamp) = amz_dates();
         let payload_hash = hex_lower(&sha256(body));
         let host_header = format!("{}:{}", self.host, self.port);
@@ -4277,7 +4883,9 @@ impl S3BlobStore {
         req.push_str(&format!("Content-Length: {}\r\n", body.len()));
         req.push_str("Connection: close\r\n\r\n");
 
-        let tcp = TcpStream::connect((self.host.as_str(), self.port)).map_err(store_err)?;
+        let tcp = TcpStream::connect((self.host.as_str(), self.port))
+            .map_err(store_err)
+            .map_err(S3RequestError::transport)?;
         let raw = if self.tls {
             let roots =
                 rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -4285,16 +4893,18 @@ impl S3BlobStore {
                 .with_root_certificates(roots)
                 .with_no_client_auth();
             let server_name = rustls::pki_types::ServerName::try_from(self.host.clone())
-                .map_err(|_| EngineError::Invalid("bad TLS endpoint host"))?;
+                .map_err(|_| EngineError::Invalid("bad TLS endpoint host"))
+                .map_err(S3RequestError::other)?;
             let connection =
                 rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
-                    .map_err(store_err)?;
+                    .map_err(store_err)
+                    .map_err(S3RequestError::transport)?;
             let stream = rustls::StreamOwned::new(connection, tcp);
-            send_http_request(stream, req.as_bytes(), body)?
+            send_http_request(stream, req.as_bytes(), body).map_err(S3RequestError::transport)?
         } else {
-            send_http_request(tcp, req.as_bytes(), body)?
+            send_http_request(tcp, req.as_bytes(), body).map_err(S3RequestError::transport)?
         };
-        parse_http_response(&raw)
+        parse_http_response(&raw).map_err(S3RequestError::corrupt)
     }
 
     fn signing_key(&self, datestamp: &str) -> [u8; 32] {
@@ -4305,6 +4915,65 @@ impl S3BlobStore {
         let k_region = hmac_sha256(&k_date, self.region.as_bytes());
         let k_service = hmac_sha256(&k_region, b"s3");
         hmac_sha256(&k_service, b"aws4_request")
+    }
+
+    fn observed_list_impl(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        let path = format!("/{}", self.bucket);
+        let mut keys = Vec::new();
+        let mut continuation: Option<String> = None;
+        let mut request_count = 0u64;
+        let mut response_bytes = 0u64;
+        loop {
+            let mut query = vec![
+                ("list-type".to_string(), "2".to_string()),
+                ("prefix".to_string(), prefix.to_string()),
+            ];
+            match (&continuation, start_after) {
+                (Some(token), _) => query.push(("continuation-token".to_string(), token.clone())),
+                (None, Some(cursor)) => query.push(("start-after".to_string(), cursor.to_string())),
+                (None, None) => {}
+            }
+            let (status, body) = self
+                .request_observed("GET", &path, &query, &[], &[])
+                .map_err(|mut error| {
+                    error.attempts = request_count + 1;
+                    // A later-page transport/TLS/HTTP-decode failure still belongs to this one
+                    // logical LIST. Preserve all provider-known wire bytes from pages that completed
+                    // before the terminal request; the terminal request keeps its own typed byte
+                    // accounting from `request_observed`.
+                    error.response_bytes = error.response_bytes.saturating_add(response_bytes);
+                    error
+                })?;
+            request_count += 1;
+            response_bytes += body.len() as u64;
+            if status != 200 {
+                let outward = EngineError::Storage(format!(
+                    "S3 LIST {prefix} failed: HTTP {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ));
+                let mut error = Self::http_error(outward, status);
+                error.attempts = request_count;
+                error.response_bytes = response_bytes;
+                return Err(error);
+            }
+            let xml = String::from_utf8_lossy(&body);
+            keys.extend(scrape_keys(&xml));
+            match next_continuation_token(&xml) {
+                Some(token) => continuation = Some(token),
+                None => break,
+            }
+        }
+        Ok(ObservedBlobCall::new(
+            keys,
+            request_count,
+            0,
+            response_bytes,
+        ))
     }
 }
 
@@ -4321,54 +4990,189 @@ fn send_http_request(
 }
 
 impl BlobStore for S3BlobStore {
-    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
-        let (status, resp) = self.request("PUT", &self.object_path(key), &[], body, &[])?;
+    fn backend_kind(&self) -> crate::object_store_observability::BlobBackendKind {
+        crate::object_store_observability::BlobBackendKind::S3
+    }
+
+    fn observed_put(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<()>> {
+        let (status, resp) =
+            self.request_observed("PUT", &self.object_path(key), &[], body, &[])?;
         if status == 200 || status == 204 {
-            Ok(())
+            Ok(ObservedBlobCall::new(
+                (),
+                1,
+                body.len() as u64,
+                resp.len() as u64,
+            ))
         } else {
-            Err(EngineError::Storage(format!(
+            let error = EngineError::Storage(format!(
                 "S3 PUT {key} failed: HTTP {status}: {}",
                 String::from_utf8_lossy(&resp)
-            )))
+            ));
+            let mut error = Self::http_error(error, status);
+            error.request_bytes = body.len() as u64;
+            error.response_bytes = resp.len() as u64;
+            Err(error)
         }
+    }
+
+    fn observed_put_if_absent(
+        &self,
+        key: &str,
+        body: &[u8],
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        let extra = vec![("If-None-Match".to_string(), "*".to_string())];
+        let (status, resp) =
+            self.request_observed("PUT", &self.object_path(key), &[], body, &extra)?;
+        match status {
+            200 | 204 => Ok(ObservedBlobCall::new(
+                true,
+                1,
+                body.len() as u64,
+                resp.len() as u64,
+            )),
+            409 | 412 => Ok(ObservedBlobCall::new(
+                false,
+                1,
+                body.len() as u64,
+                resp.len() as u64,
+            )),
+            _ => {
+                let error = EngineError::Storage(format!(
+                    "S3 conditional PUT {key} failed: HTTP {status}: {}",
+                    String::from_utf8_lossy(&resp)
+                ));
+                let mut error = Self::http_error(error, status);
+                error.request_bytes = body.len() as u64;
+                error.response_bytes = resp.len() as u64;
+                Err(error)
+            }
+        }
+    }
+
+    fn observed_get(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Option<Vec<u8>>>>
+    {
+        let (status, body) = self.request_observed("GET", &self.object_path(key), &[], &[], &[])?;
+        match status {
+            200 => {
+                let len = body.len() as u64;
+                Ok(ObservedBlobCall::new(Some(body), 1, 0, len))
+            }
+            404 => Ok(ObservedBlobCall::new(None, 1, 0, body.len() as u64)),
+            _ => {
+                let error = EngineError::Storage(format!("S3 GET {key} failed: HTTP {status}"));
+                let mut error = Self::http_error(error, status);
+                error.response_bytes = body.len() as u64;
+                Err(error)
+            }
+        }
+    }
+
+    fn observed_delete(
+        &self,
+        key: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        let (status, resp) =
+            self.request_observed("DELETE", &self.object_path(key), &[], &[], &[])?;
+        match status {
+            204 | 200 => Ok(ObservedBlobCall::new(true, 1, 0, resp.len() as u64)),
+            404 => Ok(ObservedBlobCall::new(false, 1, 0, resp.len() as u64)),
+            _ => {
+                let error = EngineError::Storage(format!(
+                    "S3 DELETE {key} failed: HTTP {status}: {}",
+                    String::from_utf8_lossy(&resp)
+                ));
+                let mut error = Self::http_error(error, status);
+                error.response_bytes = resp.len() as u64;
+                Err(error)
+            }
+        }
+    }
+
+    fn observed_list_with_request_count(
+        &self,
+        prefix: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        self.observed_list_impl(prefix, None)
+    }
+
+    fn observed_list_from_with_request_count(
+        &self,
+        prefix: &str,
+        start_after: &str,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        self.observed_list_impl(prefix, Some(start_after))
+    }
+
+    fn observed_list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> crate::object_store_observability::ClassifiedBlobResult<ObservedBlobCall<Vec<String>>>
+    {
+        if limit == 0 {
+            return Ok(ObservedBlobCall::new(Vec::new(), 0, 0, 0));
+        }
+        let path = format!("/{}", self.bucket);
+        let mut query = vec![
+            ("list-type".to_string(), "2".to_string()),
+            ("prefix".to_string(), prefix.to_string()),
+            ("max-keys".to_string(), limit.min(1000).to_string()),
+        ];
+        if let Some(cursor) = start_after {
+            query.push(("start-after".to_string(), cursor.to_string()));
+        }
+        let (status, body) = self.request_observed("GET", &path, &query, &[], &[])?;
+        if status != 200 {
+            let outward = EngineError::Storage(format!(
+                "S3 bounded LIST {prefix} failed: HTTP {status}: {}",
+                String::from_utf8_lossy(&body)
+            ));
+            let mut error = Self::http_error(outward, status);
+            error.response_bytes = body.len() as u64;
+            return Err(error);
+        }
+        let bytes = body.len() as u64;
+        Ok(ObservedBlobCall::new(
+            scrape_keys(&String::from_utf8_lossy(&body)),
+            1,
+            0,
+            bytes,
+        ))
+    }
+
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.observed_put(key, body)
+            .map(|call| call.value)
+            .map_err(|error| error.outward)
     }
 
     fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
-        // Create-only conditional PUT: `If-None-Match: *` succeeds only if the object does not yet exist.
-        let extra = vec![("If-None-Match".to_string(), "*".to_string())];
-        let (status, resp) = self.request("PUT", &self.object_path(key), &[], body, &extra)?;
-        match status {
-            200 | 204 => Ok(true),
-            // 412 Precondition Failed (object exists) / 409 Conflict → the CAS lost.
-            409 | 412 => Ok(false),
-            _ => Err(EngineError::Storage(format!(
-                "S3 conditional PUT {key} failed: HTTP {status}: {}",
-                String::from_utf8_lossy(&resp)
-            ))),
-        }
+        self.observed_put_if_absent(key, body)
+            .map(|call| call.value)
+            .map_err(|error| error.outward)
     }
 
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
-        let (status, body) = self.request("GET", &self.object_path(key), &[], &[], &[])?;
-        match status {
-            200 => Ok(Some(body)),
-            404 => Ok(None),
-            _ => Err(EngineError::Storage(format!(
-                "S3 GET {key} failed: HTTP {status}"
-            ))),
-        }
+        self.observed_get(key)
+            .map(|call| call.value)
+            .map_err(|error| error.outward)
     }
 
     fn delete(&self, key: &str) -> EngineResult<bool> {
-        let (status, resp) = self.request("DELETE", &self.object_path(key), &[], &[], &[])?;
-        match status {
-            204 | 200 => Ok(true),
-            404 => Ok(false),
-            _ => Err(EngineError::Storage(format!(
-                "S3 DELETE {key} failed: HTTP {status}: {}",
-                String::from_utf8_lossy(&resp)
-            ))),
-        }
+        self.observed_delete(key)
+            .map(|call| call.value)
+            .map_err(|error| error.outward)
     }
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
@@ -4381,26 +5185,9 @@ impl BlobStore for S3BlobStore {
         start_after: Option<&str>,
         limit: usize,
     ) -> EngineResult<Vec<String>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        let path = format!("/{}", self.bucket);
-        let mut query = vec![
-            ("list-type".to_string(), "2".to_string()),
-            ("prefix".to_string(), prefix.to_string()),
-            ("max-keys".to_string(), limit.min(1000).to_string()),
-        ];
-        if let Some(cursor) = start_after {
-            query.push(("start-after".to_string(), cursor.to_string()));
-        }
-        let (status, body) = self.request("GET", &path, &query, &[], &[])?;
-        if status != 200 {
-            return Err(EngineError::Storage(format!(
-                "S3 bounded LIST {prefix} failed: HTTP {status}: {}",
-                String::from_utf8_lossy(&body)
-            )));
-        }
-        Ok(scrape_keys(&String::from_utf8_lossy(&body)))
+        self.observed_list_page(prefix, start_after, limit)
+            .map(|call| call.value)
+            .map_err(|error| error.outward)
     }
 
     fn list_with_request_count(&self, prefix: &str) -> EngineResult<(Vec<String>, u64)> {
@@ -4412,34 +5199,9 @@ impl BlobStore for S3BlobStore {
         // is no longer truncated, accumulating every page's keys. The returned request count feeds release
         // cost evidence: each page is a billable S3 LIST-class API request. (Exercised by the TP-002 E3
         // 10M-item live recovery run, whose recovery queue exceeds 1000 sealed segments.)
-        let path = format!("/{}", self.bucket);
-        let mut keys = Vec::new();
-        let mut continuation: Option<String> = None;
-        let mut request_count = 0u64;
-        loop {
-            let mut query = vec![
-                ("list-type".to_string(), "2".to_string()),
-                ("prefix".to_string(), prefix.to_string()),
-            ];
-            if let Some(token) = &continuation {
-                query.push(("continuation-token".to_string(), token.clone()));
-            }
-            let (status, body) = self.request("GET", &path, &query, &[], &[])?;
-            request_count += 1;
-            if status != 200 {
-                return Err(EngineError::Storage(format!(
-                    "S3 LIST {prefix} failed: HTTP {status}: {}",
-                    String::from_utf8_lossy(&body)
-                )));
-            }
-            let xml = String::from_utf8_lossy(&body);
-            keys.extend(scrape_keys(&xml));
-            match next_continuation_token(&xml) {
-                Some(token) => continuation = Some(token),
-                None => break,
-            }
-        }
-        Ok((keys, request_count))
+        self.observed_list_with_request_count(prefix)
+            .map(|call| (call.value, call.attempts))
+            .map_err(|error| error.outward)
     }
 
     fn list_from_with_request_count(
@@ -4454,35 +5216,9 @@ impl BlobStore for S3BlobStore {
         // S3 implementations reject start-after + continuation-token together). Pagination is otherwise
         // identical to `list_with_request_count`: follow `NextContinuationToken` until no longer truncated,
         // billing each page as a LIST-class request.
-        let path = format!("/{}", self.bucket);
-        let mut keys = Vec::new();
-        let mut continuation: Option<String> = None;
-        let mut request_count = 0u64;
-        loop {
-            let mut query = vec![
-                ("list-type".to_string(), "2".to_string()),
-                ("prefix".to_string(), prefix.to_string()),
-            ];
-            match &continuation {
-                Some(token) => query.push(("continuation-token".to_string(), token.clone())),
-                None => query.push(("start-after".to_string(), start_after.to_string())),
-            }
-            let (status, body) = self.request("GET", &path, &query, &[], &[])?;
-            request_count += 1;
-            if status != 200 {
-                return Err(EngineError::Storage(format!(
-                    "S3 LIST {prefix} (start-after {start_after}) failed: HTTP {status}: {}",
-                    String::from_utf8_lossy(&body)
-                )));
-            }
-            let xml = String::from_utf8_lossy(&body);
-            keys.extend(scrape_keys(&xml));
-            match next_continuation_token(&xml) {
-                Some(token) => continuation = Some(token),
-                None => break,
-            }
-        }
-        Ok((keys, request_count))
+        self.observed_list_from_with_request_count(prefix, start_after)
+            .map(|call| (call.value, call.attempts))
+            .map_err(|error| error.outward)
     }
 }
 
@@ -4747,7 +5483,51 @@ mod fs_blob_store_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod list_pagination_tests {
-    use super::{next_continuation_token, scrape_keys, scrape_tag};
+    use super::{
+        BlobStore, EngineError, S3BlobStore, S3RequestError, next_continuation_token, scrape_keys,
+        scrape_tag,
+    };
+    use crate::object_store_observability::{
+        BlobBackendKind, BlobMetricsRecorder, BlobObjectClass, BlobOperation, BlobResultClass,
+        InstrumentedBlobStore,
+    };
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    fn loopback(responses: Vec<(u16, String)>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 8192];
+                let _ = stream.read(&mut request).unwrap();
+                let reason = if status == 200 { "OK" } else { "Error" };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        (endpoint, handle)
+    }
+
+    fn loopback_raw(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 8192];
+                let _ = stream.read(&mut request).unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        (endpoint, handle)
+    }
 
     #[test]
     fn scrape_keys_reads_every_key_on_a_page() {
@@ -4774,6 +5554,159 @@ mod list_pagination_tests {
         assert_eq!(next_continuation_token(complete), None);
         let empty = "<ListBucketResult></ListBucketResult>";
         assert_eq!(next_continuation_token(empty), None);
+    }
+
+    #[test]
+    fn s3_status_and_request_failures_have_structured_bounded_classes() {
+        for (status, result, retryable, throttled) in [
+            (429, BlobResultClass::Throttled, true, true),
+            (503, BlobResultClass::Throttled, true, true),
+            (500, BlobResultClass::Transport, true, false),
+            (408, BlobResultClass::Transport, true, false),
+            (403, BlobResultClass::OtherError, false, false),
+        ] {
+            let error =
+                S3BlobStore::http_error(EngineError::Storage("same outward".into()), status);
+            assert_eq!(error.fault.result, result);
+            assert_eq!(error.fault.retryable, retryable);
+            assert_eq!(error.fault.throttled, throttled);
+            assert!(
+                !error.fault.timeout,
+                "timeout is reserved-zero in this slice"
+            );
+        }
+        let corrupt = S3BlobStore::request_error(S3RequestError::corrupt(EngineError::Storage(
+            "malformed HTTP response".into(),
+        )));
+        assert_eq!(corrupt.fault.result, BlobResultClass::Corrupt);
+        assert!(!corrupt.fault.retryable);
+        let transport = S3BlobStore::request_error(S3RequestError::transport(
+            EngineError::Storage("connection refused".into()),
+        ));
+        assert_eq!(transport.fault.result, BlobResultClass::Transport);
+        assert!(transport.fault.retryable);
+    }
+
+    #[test]
+    fn instrumented_s3_two_page_list_records_wire_body_bytes_and_no_retries() {
+        let first = "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>manifest/a</Key></Contents></ListBucketResult>".to_string();
+        let second = "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>manifest/b</Key></Contents></ListBucketResult>".to_string();
+        let expected_bytes = (first.len() + second.len()) as u64;
+        let (endpoint, server) = loopback(vec![(200, first), (200, second)]);
+        let recorder = Arc::new(BlobMetricsRecorder::new());
+        let store = InstrumentedBlobStore::new(
+            S3BlobStore::new(&endpoint, "bucket", "access", "secret", "us-east-1").unwrap(),
+            Arc::clone(&recorder),
+            BlobBackendKind::S3,
+        );
+        let (keys, attempts) = store.list_with_request_count("manifest/").unwrap();
+        server.join().unwrap();
+        assert_eq!(keys, vec!["manifest/a", "manifest/b"]);
+        assert_eq!(attempts, 2);
+        let row = recorder.snapshot().row(
+            BlobOperation::List,
+            BlobObjectClass::Manifest,
+            BlobResultClass::Success,
+            false,
+            BlobBackendKind::S3,
+        );
+        assert_eq!(
+            (
+                row.completions,
+                row.attempts,
+                row.retries,
+                row.response_bytes
+            ),
+            (1, 2, 0, expected_bytes)
+        );
+    }
+
+    #[test]
+    fn instrumented_s3_terminal_list_error_keeps_prior_and_terminal_wire_bytes() {
+        let first = "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken></ListBucketResult>".to_string();
+        let terminal = "slow-down".to_string();
+        let expected_bytes = (first.len() + terminal.len()) as u64;
+        let (endpoint, server) = loopback(vec![(200, first), (429, terminal)]);
+        let recorder = Arc::new(BlobMetricsRecorder::new());
+        let store = InstrumentedBlobStore::new(
+            S3BlobStore::new(&endpoint, "bucket", "access", "secret", "us-east-1").unwrap(),
+            Arc::clone(&recorder),
+            BlobBackendKind::S3,
+        );
+        assert!(store.list_with_request_count("manifest/").is_err());
+        server.join().unwrap();
+        let row = recorder.snapshot().row(
+            BlobOperation::List,
+            BlobObjectClass::Manifest,
+            BlobResultClass::Throttled,
+            true,
+            BlobBackendKind::S3,
+        );
+        assert_eq!(
+            (
+                row.completions,
+                row.attempts,
+                row.retries,
+                row.response_bytes,
+                row.errors
+            ),
+            (1, 2, 0, expected_bytes, 1)
+        );
+    }
+
+    #[test]
+    fn instrumented_s3_malformed_later_page_keeps_prior_wire_bytes() {
+        let first = "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken></ListBucketResult>";
+        let first_response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{first}",
+            first.len()
+        )
+        .into_bytes();
+        let (endpoint, server) = loopback_raw(vec![first_response, b"not-http".to_vec()]);
+        let recorder = Arc::new(BlobMetricsRecorder::new());
+        let store = InstrumentedBlobStore::new(
+            S3BlobStore::new(&endpoint, "bucket", "access", "secret", "us-east-1").unwrap(),
+            Arc::clone(&recorder),
+            BlobBackendKind::S3,
+        );
+        assert!(store.list_with_request_count("manifest/").is_err());
+        server.join().unwrap();
+        let row = recorder.snapshot().row(
+            BlobOperation::List,
+            BlobObjectClass::Manifest,
+            BlobResultClass::Corrupt,
+            false,
+            BlobBackendKind::S3,
+        );
+        assert_eq!(
+            (
+                row.completions,
+                row.attempts,
+                row.retries,
+                row.request_bytes,
+                row.response_bytes,
+                row.errors
+            ),
+            (1, 2, 0, 0, first.len() as u64, 1)
+        );
+    }
+
+    #[test]
+    fn s3_zero_limit_page_has_zero_attempts_without_connecting() {
+        let store = S3BlobStore::new(
+            "http://127.0.0.1:1",
+            "bucket",
+            "access",
+            "secret",
+            "us-east-1",
+        )
+        .unwrap();
+        let call = store.observed_list_page("manifest/", None, 0).unwrap();
+        assert!(call.value.is_empty());
+        assert_eq!(
+            (call.attempts, call.request_bytes, call.response_bytes),
+            (0, 0, 0)
+        );
     }
 }
 
