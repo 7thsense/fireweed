@@ -44,6 +44,7 @@ use tokio_util::sync::CancellationToken;
 
 mod change_record_sink;
 mod object_log_sqlite;
+mod tokio_dispatcher;
 pub use change_record_sink::{
     ChangeRecordSinkConfig, ChangeRecordSinkMode, FjordChangeRecordSink, NiflheimChangeRecordSink,
     emit_change_record_tick, spawn_change_record_emitter,
@@ -53,6 +54,7 @@ pub use object_log_sqlite::{
     SegmentedObjectLogSqliteBackend,
 };
 pub use pqueue_objectlog::segmented::SegmentConfig;
+pub use tokio_dispatcher::TokioTaskDispatcher;
 
 /// The single optional env-var populator for [`Config`] (`Config::from_env`) plus its [`ConfigError`]. Pure
 /// over a caller-supplied env map; the only process-env read lives in the `pqueue-service` bin's `main`.
