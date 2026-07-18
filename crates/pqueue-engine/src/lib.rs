@@ -6,6 +6,7 @@
 //! hexagonal-migration-plan.md` (v4) and TD-007.
 
 mod active_scope;
+mod async_commit;
 mod async_store;
 mod auth;
 mod claim_validation;
@@ -26,6 +27,12 @@ mod types;
 pub use active_scope::{
     ActiveScope, DiscoveryGranularity, project_scopes, resolve_granularity, roll_up_queue_scopes,
     validate_discovery_request,
+};
+pub use async_commit::{
+    AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DispatchError, InvalidCommitStrategy,
+    KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, QueueGateAcquire, QueueGateError,
+    QueueGatePermit, SeparateReplayCommit, SeparateReplayCommitter, TaskOutcome, TaskOutcomeError,
+    TaskOutcomeSender, UnifiedAtomicCommit, UnifiedAtomicCommitter, task_outcome_channel,
 };
 pub use async_store::{AsyncControlPlane, AsyncLogStore, AsyncProjectionStore};
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
