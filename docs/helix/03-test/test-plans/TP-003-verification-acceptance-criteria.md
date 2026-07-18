@@ -11,6 +11,7 @@ ddx:
     - adr-granularity-mapping-and-claim-domain
     - adr-queue-as-shard-unit-and-projection-families
     - adr-full-async-storage-boundaries
+    - adr-async-commit-strategy-and-dispatch
     - adr-turso-derived-projection
     - td-storage-architecture-backend-contracts
     - td-postgres-native-reference-mode
@@ -234,6 +235,7 @@ documented test/dev scope.
 | AC-TXN-7 latency-bound is not a correctness knob | Repeat AC-TXN-1..6 across the TP-002 E3 commit-latency-bound sweep | invariants unchanged by latency/cost setting | 0 invariant deltas across lower-latency vs cost-optimized settings |
 | AC-TXN-8 async cancellation cuts | For every backend class cancel before append, after staging/before commit, during commit, after durable append/before eventual apply, and while waiting for serialization; replay the same and conflicting `request_id` | ADR-015 cancellation and unknown-outcome contract | pre-commit cuts leave no durable effect; commit cancellation converges to exactly one outcome; eventual append repairs exactly once; conflicting replay fails; no stranded waiter or poisoned lock |
 | AC-TXN-9 runtime non-blocking boundary | Inject slow blocking-driver and native-async I/O for SQLite, Postgres, object-log, and Turso on a single-thread Tokio runtime with a heartbeat and bounded timeout | ADR-015 adapter boundary | heartbeat continues within its documented scheduling tolerance; no runtime-worker stall |
+| AC-TXN-11 async commit strategy and dispatch | Attempt atomic-profile construction with separate append/apply, cancel a caller after owned-task submission, stall one queue at each mutation phase, and drive another queue concurrently | ADR-017 strategy, submission, and queue-gate contract | invalid atomic composition is unrepresentable or rejected at construction; submitted commit resolves exactly once; stalled queue does not stop unrelated queue progress; no duplicate claim planning or stranded permit |
 | AC-TXN-10 forbidden lock/bridge structure | Search production storage paths and run the dependency guard | ADR-015 structural boundary | no `std::sync::MutexGuard` crosses an await; no nested runtime/block-on bridge; blocking adapters offload whole transactions rather than statements |
 
 ### 3.11 Product end-to-end workflow validation

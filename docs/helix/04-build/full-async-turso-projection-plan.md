@@ -3,12 +3,14 @@ ddx:
   id: build-full-async-turso-projection
   depends_on:
     - adr-full-async-storage-boundaries
+    - adr-async-commit-strategy-and-dispatch
     - adr-turso-derived-projection
     - td-storage-architecture-backend-contracts
     - td-object-log-turso-projection
     - tp-verification-acceptance-criteria
   links:
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
+    - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
     - {kind: informed_by, to: adr-turso-derived-projection}
     - {kind: informed_by, to: td-storage-architecture-backend-contracts}
     - {kind: informed_by, to: td-object-log-turso-projection}
@@ -28,7 +30,7 @@ ddx:
 
 ## Scope
 
-**Governing artifacts**: ADR-015, ADR-016, TD-001, TD-010, TP-003.
+**Governing artifacts**: ADR-015, ADR-016, ADR-017, TD-001, TD-010, TP-003.
 
 **Excluded**: Niflheim; quiet-host tests; Turso as log/control-plane authority; remote/sync/MVCC Turso;
 new broad Actions matrix dimensions; release/push activity.
@@ -36,6 +38,9 @@ new broad Actions matrix dimensions; release/push activity.
 ## Shared Constraints
 
 - Domain ports stay runtime-neutral and return `Send` futures.
+- Async axes use shared receivers; adapter-owned synchronization must permit unrelated queues to progress.
+- Composition injects `UnifiedAtomicCommit` or `SeparateReplayCommit` plus a runtime-neutral owned-task
+  dispatcher; durability metadata never substitutes for the commit strategy.
 - No standard mutex guard, blocking I/O, or borrowed blocking transaction crosses `.await`.
 - Blocking adapters offload a complete transaction; native Turso awaits directly.
 - ADR-013 log authority, response barrier, request-id replay, and retention rules remain unchanged.
@@ -47,7 +52,7 @@ new broad Actions matrix dimensions; release/push activity.
 |-------|------|------------|-----------------|
 | AT-01 | Typed raw commit request, owned-task lifecycle, and cancellation faults (`pqueue-engine`, conformance fault modules) | None | engine fault tests; cancellation before/start/during commit |
 | AT-02 | `AsyncLogStore`, `AsyncProjectionStore`, `AsyncControlPlane` plus explicit immediate/blocking adapters (`pqueue-engine`) | AT-01 | compile-time `Send` future tests; no blanket impl |
-| AT-03 | Async `ComposedBackend` and memory/reference projection (`pqueue-engine`, `pqueue-projection`, `pqueue-memory`) | AT-02 | engine/projection/memory conformance |
+| AT-03 | Async `ComposedBackend`, typed commit strategies, owned-task dispatcher, queue-local gates, and memory/reference projection (`pqueue-engine`, `pqueue-projection`, `pqueue-memory`) | AT-02 | engine/projection/memory conformance; AC-TXN-11 |
 | AT-04 | SQLite whole-transaction adapter (`pqueue-sqlite`) | AT-03 | SQLite tests plus single-thread heartbeat |
 | AT-05 | Object-log/Postgres whole-transaction adapters and composition-root consumer migration | AT-03 | object-log, Postgres, server focused tests; heartbeat |
 | AT-06 | Driver-neutral relational schema/codecs/rows (`pqueue-relational`, SQLite imports) | AT-04 | SQLite relational/conformance byte-for-byte parity |
@@ -62,9 +67,10 @@ exact file list and named test commands before it can be claimed.
 
 ## Issue Decomposition
 
-Every bead carries labels `helix`, `activity:build`, `kind:build`,
-`plan:full-async-turso`, exact file scope, named tests, and `spec-id` pointing to TD-010 or ADR-015.
-Dependencies mirror AT-01 through AT-07. Terra is an execution routing constraint, not a tracker label.
+The existing beads remain the audit decomposition. Because the configured DDx harness inventory has no
+Terra route, this implementation round executes the same slices through isolated sub-agents without DDx
+claims or tracker mutation. Each handoff records exact file scope and tests; the primary agent reviews and
+commits each non-overlapping slice and removes only worktrees/processes created by this round.
 
 ## Validation Plan
 
@@ -73,10 +79,8 @@ Dependencies mirror AT-01 through AT-07. Terra is an execution routing constrain
 - [ ] SQLite remains the differential reference and rollback path.
 - [ ] No Niflheim or quiet-host test file changes.
 - [ ] No new broad CI matrix dimension.
-- [ ] Final `cargo fmt`, workspace clippy/tests, `ddx doc validate`, and traceability checks pass.
-- [ ] `ddx doc stale` has no unclassified actionable item introduced by this change. Compatible direct
-      dependents are explicitly reviewed/stamped; unrelated historical dependents remain in a recorded
-      deferral list rather than being silently stamped.
+- [ ] Final `cargo fmt`, workspace clippy/tests, HELIX structure, and traceability checks pass without
+      relying on a DDx execution route.
 
 ## Risks and Rollbacks
 

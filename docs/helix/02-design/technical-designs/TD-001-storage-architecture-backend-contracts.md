@@ -8,6 +8,7 @@ ddx:
     - adr-granularity-mapping-and-claim-domain
     - adr-queue-as-shard-unit-and-projection-families
     - adr-full-async-storage-boundaries
+    - adr-async-commit-strategy-and-dispatch
     - adr-turso-derived-projection
     - concerns
     - prd
@@ -49,7 +50,8 @@ In scope:
 - The two projection families and conformance as the behavior contract.
 - Backend profiles and conformance requirements.
 - Runtime-neutral full-async storage boundaries, typed commit operations,
-  blocking-adapter rules, and cancellation outcomes (ADR-015).
+  blocking-adapter rules, commit-strategy/dispatcher injection, and cancellation outcomes (ADR-015,
+  ADR-017).
 
 Out of scope:
 
@@ -265,7 +267,7 @@ reject, reassignment recovery) are part of **core** and bind every backend; thei
 
 ## API/Interface Design
 
-### Full-async storage amendment (ADR-015)
+### Full-async storage amendment (ADR-015, ADR-017)
 
 The storage calls below are asynchronous through the complete engine path. Exact Rust syntax uses native
 return-position `impl Future<Output = Result<...>> + Send` (or an associated future where a transaction
@@ -296,6 +298,23 @@ Async traits are introduced additively during migration, with explicit immediate
 Blanket sync-to-async implementations are forbidden because they would prevent a substrate from later
 providing a native-async implementation. The legacy sync traits and composition-root blocking wrappers are
 removed after every adapter passes the async conformance suite.
+
+All async storage operations use shared `&self` receivers and `Send + Sync` stores. Per-queue and
+per-connection synchronization belongs inside adapters; the generic composition must not recover mutable
+access by placing all stores behind one awaited global lock.
+
+`AsyncComposedBackend` receives an explicit commit strategy and owned-task dispatcher (ADR-017). An atomic
+profile supplies `UnifiedAtomicCommit`, which owns the single transaction covering log, projection,
+cursor/frontier, and replay outcome. An object-log profile supplies `SeparateReplayCommit`, which is legal
+only for `EventualApply` and preserves the ADR-013 response barrier. The engine never infers a commit
+sequence from `durability_class()` and never implements an atomic mutation as sequential async append and
+apply calls.
+
+The dispatcher is runtime-neutral at the engine boundary. Admission and the queue-local gate complete
+before submission; submission transfers owned request and commit state to backend-owned execution. The
+caller then awaits only a result channel. Dropping that channel cannot cancel a submitted commit. The queue
+gate spans planning, selection, idempotency, commit, visibility, and replay recording, while bounded shared
+capacity and reclaimable keyed gates prevent one permanent task or connection per queue.
 
 The Rust trait shapes below are normative for design intent, not exact final
 syntax. Implementations may refine lifetimes and associated types, but must keep

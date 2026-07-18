@@ -3,6 +3,7 @@ ddx:
   id: td-object-log-turso-projection
   depends_on:
     - adr-full-async-storage-boundaries
+    - adr-async-commit-strategy-and-dispatch
     - adr-turso-derived-projection
     - adr-log-single-source-of-truth
     - td-storage-architecture-backend-contracts
@@ -11,6 +12,7 @@ ddx:
     - concerns
   links:
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
+    - {kind: informed_by, to: adr-async-commit-strategy-and-dispatch}
     - {kind: informed_by, to: adr-turso-derived-projection}
     - {kind: informed_by, to: adr-log-single-source-of-truth}
     - {kind: informed_by, to: td-storage-architecture-backend-contracts}
@@ -33,7 +35,7 @@ ddx:
 
 # Technical Design: TD-010 Object-log + Turso Projection
 
-**Contract**: API-001 | **ADR**: ADR-013, ADR-015, ADR-016 | **Scope**: native-async derived projection
+**Contract**: API-001 | **ADR**: ADR-013, ADR-015, ADR-016, ADR-017 | **Scope**: native-async derived projection
 
 ## Scope
 
@@ -66,6 +68,9 @@ whose manifest remains the acknowledged-command authority.
 **Key decisions**:
 
 - The engine owns typed async commit operations; no arbitrary async transaction closure is public.
+- Async axes use shared receivers. `AsyncComposedBackend` takes a typed `SeparateReplayCommit` strategy
+  for object-log profiles plus an injected runtime-neutral owned-task dispatcher; it never holds an
+  axis-wide async mutex or infers append/apply sequencing from a durability enum.
 - Shared SQL, schema, codecs, and typed rows live in `pqueue-relational`; Turso never depends on the
   SQLite adapter and the schema is not copied.
 - `TursoProjectionStore` owns `turso::Database` plus a connection/transaction coordinator using
@@ -88,7 +93,8 @@ build size require an exact pin and a focused validation lane.
 - **Current state**: operation ports return futures, while storage axes and `Backend::write` are
   synchronous under a standard mutex.
 - **Changes**: introduce native async axes, typed raw commit/fault controls, whole-transaction blocking
-  adapters, async recovery/inspection, and staged removal of the legacy sync seam.
+  adapters, explicit atomic-versus-replay commit strategies, injected owned-task dispatch, per-queue
+  mutation gates, async recovery/inspection, and staged removal of the legacy sync seam.
 - **Files**: `crates/pqueue-engine/src/port.rs`, `crates/pqueue-engine/src/compose.rs`,
   `crates/pqueue-engine/src/lib.rs`, conformance fault/scenario modules.
 
@@ -149,7 +155,7 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 
 | From | To | Method | Data |
 |------|----|--------|------|
-| `ComposedBackend` / segmented backend | async storage axes | awaited Rust call | typed commands, positions, expected epoch |
+| `AsyncComposedBackend` / segmented backend | `SeparateReplayCommit` + async storage axes | owned dispatched task | typed commands, positions, expected epoch, replay outcome |
 | `pqueue-turso` | Turso 0.7 local database | async driver | relational schema, transactions, queries |
 | object log | Turso projection | ordered replay/apply | sealed committed batches |
 | server config | feature-gated composition | validated construction | projection kind and local path |
@@ -187,6 +193,8 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
   manifest-sealed-before-apply crash.
 - [ ] **Cancellation**: before append, after staging, during commit, after durable eventual append, and
   cancelled lock waiter.
+- [ ] **Dispatch/strategy**: atomic profiles cannot construct with separate append/apply; object-log uses
+  `SeparateReplayCommit`; submitted tasks survive caller drop; a stalled queue does not stall another.
 - [ ] **Runtime**: blocking-reference wrappers and Turso both keep a single-thread heartbeat alive.
 - [ ] **Server**: create/push/claim/finalize/renew/reassign/read/reopen and feature-disabled config error.
 - [ ] **Concurrency**: 16 disjoint writers and deterministic same-active-key conflict.
@@ -204,7 +212,8 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 ## Implementation Sequence
 
 1. Add typed async commit and cancellation conformance; remove raw closure call sites.
-2. Add async storage axes and migrate reference composition/memory.
+2. Add shared-receiver async storage axes, typed commit strategies, an owned-task dispatcher, and migrate
+   reference composition/memory.
 3. Wrap blocking SQLite/object-log/Postgres transactions and remove composition-root blocking shims.
 4. Extract the driver-neutral relational substrate with SQLite parity.
 5. Implement and differentially test `pqueue-turso`.
