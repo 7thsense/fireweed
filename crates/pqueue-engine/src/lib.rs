@@ -7,6 +7,7 @@
 
 mod active_scope;
 mod async_claim_planner;
+mod async_cohort_lifecycle;
 mod async_commit;
 mod async_composed;
 mod async_lifecycle_planner;
@@ -34,6 +35,11 @@ pub use active_scope::{
     validate_discovery_request,
 };
 pub use async_claim_planner::ProjectionClaimPlanner;
+pub use async_cohort_lifecycle::{
+    AsyncCohortFinalizeRequest, AsyncCohortLifecyclePlan, AsyncCohortLifecyclePlanner,
+    AsyncCohortRenewRequest, CohortLeaseMember, NoAsyncCohortLifecyclePlanner,
+    ProjectionCohortLifecyclePlanner,
+};
 pub use async_commit::{
     AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DispatchError, InvalidCommitStrategy,
     KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory, QueueGateAcquire,
@@ -44,17 +50,19 @@ pub use async_commit::{
 pub use async_composed::{
     AsyncClaimError, AsyncClaimPlan, AsyncClaimPlanner, AsyncClaimPostCommitStage,
     AsyncCommitSubmitError, AsyncComposedBackend, AsyncFinalizeRequest, AsyncLifecycleError,
-    AsyncLifecyclePlan, AsyncLifecyclePlanner, AsyncLifecyclePostCommitStage, AsyncPushError,
-    AsyncPushPlan, AsyncPushPlanner, AsyncPushPostCommitStage, AsyncPushRequest, AsyncRenewRequest,
-    FinalizeTarget, NoAsyncClaimPlanner, NoAsyncLifecyclePlanner, NoAsyncPushPlanner,
-    NoAsyncReclaimPlanner, PushFingerprint, RenewTarget,
+    AsyncLifecyclePlan, AsyncLifecyclePlanner, AsyncLifecyclePostCommitStage, AsyncPurgeRequest,
+    AsyncPushError, AsyncPushPlan, AsyncPushPlanner, AsyncPushPostCommitStage, AsyncPushRequest,
+    AsyncRenewRequest, FinalizeTarget, NoAsyncClaimPlanner, NoAsyncLifecyclePlanner,
+    NoAsyncPushPlanner, NoAsyncReclaimPlanner, PushFingerprint, RenewTarget,
 };
 pub use async_lifecycle_planner::ProjectionLifecyclePlanner;
 pub use async_push_planner::ProjectionPushPlanner;
 pub use async_reclaim_planner::{
     AsyncReclaimPlan, AsyncReclaimPlanner, AsyncReclaimRequest, ProjectionReclaimPlanner,
 };
-pub use async_store::{AsyncControlPlane, AsyncLogStore, AsyncProjectionStore};
+pub use async_store::{
+    AsyncControlPlane, AsyncLogStore, AsyncProjectionStore, FinalizeLeaseMember,
+};
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
     ClaimCompatibility, ClaimUnit, GroupBatching, require_item_level_claim,

@@ -9,12 +9,13 @@ use pqueue_core::{
 };
 
 use crate::{
+    AsyncCohortFinalizeRequest, AsyncCohortLifecyclePlanner, AsyncCohortRenewRequest,
     AsyncCommitStrategy, AsyncReclaimPlanner, AsyncReclaimRequest, ClaimCommand, ClaimRequest,
     ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CommandChecksum, DispatchError,
-    DurabilityClass, EngineError, EngineResult, KeyedQueueGate, OwnedTask, OwnedTaskDispatcher,
-    PushCommand, PushItem, PushSpec, QueueCommand, QueueGateError, QueueKey, RawCommitFault,
-    RawCommitOutcome, RawCommitRequest, RequestOutcome, TaskOutcomeError, compile_entity_schema,
-    validate_claim_compatibility, validate_entity, validate_gate_push,
+    DurabilityClass, EngineError, EngineResult, KeyedQueueGate, NoAsyncCohortLifecyclePlanner,
+    OwnedTask, OwnedTaskDispatcher, PushCommand, PushItem, PushSpec, QueueCommand, QueueGateError,
+    QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest, RequestOutcome, TaskOutcomeError,
+    compile_entity_schema, validate_claim_compatibility, validate_entity, validate_gate_push,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +200,21 @@ pub struct AsyncFinalizeRequest {
 }
 
 #[derive(Debug, Clone)]
+/// Internal typed-composition request for [`crate::PurgePort`] parity.
+///
+/// This request carries the already-resolved item ids through the async planner/commit boundary and
+/// returns only the number removed. It is not the public API-001 `PurgeItems` request contract, whose
+/// key-or-id targeting, request-id replay, and per-item `purged`/`not_found` results belong at the API
+/// adapter boundary.
+pub struct AsyncPurgeRequest {
+    pub shard: QueueKey,
+    pub item_ids: Vec<ItemId>,
+    pub force: bool,
+    pub now: UtcTimestamp,
+    pub expected_epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct AsyncRenewRequest {
     pub shard: QueueKey,
     pub targets: Vec<RenewTarget>,
@@ -232,6 +248,13 @@ impl AsyncLifecyclePlan {
         }
     }
 
+    pub(crate) fn purge(request: RawCommitRequest) -> Self {
+        Self {
+            request,
+            expected_finalize_outcomes: None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn request(&self) -> &RawCommitRequest {
         &self.request
@@ -246,6 +269,12 @@ pub trait AsyncLifecyclePlanner: Send + Sync + 'static {
     fn plan_finalize(
         &self,
         _request: AsyncFinalizeRequest,
+    ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
+    fn plan_purge(
+        &self,
+        _request: AsyncPurgeRequest,
     ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
         Box::pin(async { Err(EngineError::Unavailable) })
     }
@@ -299,6 +328,7 @@ pub struct AsyncComposedBackend<
     U = NoAsyncPushPlanner,
     V = NoAsyncLifecyclePlanner,
     R = NoAsyncReclaimPlanner,
+    C = NoAsyncCohortLifecyclePlanner,
 > {
     strategy: Arc<S>,
     dispatcher: D,
@@ -306,6 +336,7 @@ pub struct AsyncComposedBackend<
     push_planner: Arc<U>,
     lifecycle_planner: Arc<V>,
     reclaim_planner: Arc<R>,
+    cohort_lifecycle_planner: Arc<C>,
     admission: KeyedQueueGate<crate::QueueKey>,
     durability: DurabilityClass,
 }
@@ -324,6 +355,7 @@ where
             push_planner: Arc::new(NoAsyncPushPlanner),
             lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
             reclaim_planner: Arc::new(NoAsyncReclaimPlanner),
+            cohort_lifecycle_planner: Arc::new(NoAsyncCohortLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
@@ -349,13 +381,14 @@ where
             push_planner: Arc::new(NoAsyncPushPlanner),
             lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
             reclaim_planner: Arc::new(NoAsyncReclaimPlanner),
+            cohort_lifecycle_planner: Arc::new(NoAsyncCohortLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
     }
 }
 
-impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
+impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest>,
     D: OwnedTaskDispatcher,
@@ -426,7 +459,7 @@ where
     }
 }
 
-impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
+impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -474,6 +507,187 @@ where
     }
 }
 
+impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C>
+where
+    S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
+    D: OwnedTaskDispatcher,
+    C: AsyncCohortLifecyclePlanner,
+{
+    pub async fn renew_cohort(
+        &self,
+        request: AsyncCohortRenewRequest,
+    ) -> Result<(), AsyncLifecycleError> {
+        let queue = request.shard.clone();
+        let planner = Arc::clone(&self.cohort_lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let plan = planner
+                    .plan_cohort_renew(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                validate_cohort_renew_plan(&request, &plan.request, &plan.item_ids)
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+
+    pub async fn finalize_cohort(
+        &self,
+        request: AsyncCohortFinalizeRequest,
+    ) -> Result<(), AsyncLifecycleError> {
+        let queue = request.shard.clone();
+        let planner = Arc::clone(&self.cohort_lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let plan = planner
+                    .plan_cohort_finalize(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let outcomes = plan.outcomes.as_deref().ok_or({
+                    LifecycleExecutionError::BeforeCommit(EngineError::Invalid(
+                        "cohort finalize plan omitted sealed outcomes",
+                    ))
+                })?;
+                validate_cohort_finalize_plan(&request, &plan.request, &plan.item_ids, outcomes)
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+}
+
+fn validate_cohort_envelope(
+    shard: &QueueKey,
+    expected_epoch: Option<u64>,
+    now: UtcTimestamp,
+    commit: &RawCommitRequest,
+) -> EngineResult<()> {
+    if commit.shard() != shard
+        || expected_epoch.is_some_and(|epoch| epoch != commit.expected_epoch())
+        || commit.fault() != RawCommitFault::None
+        || commit.commands().len() != 1
+    {
+        return Err(EngineError::Invalid("invalid async cohort lifecycle plan"));
+    }
+    let envelope = &commit.commands()[0];
+    let unique: HashSet<_> = envelope.item_ids.iter().copied().collect();
+    if envelope.item_ids.is_empty()
+        || unique.len() != envelope.item_ids.len()
+        || envelope.command_id.0.is_empty()
+        || envelope.created_at != now
+        || envelope.request_id.is_some()
+        || envelope.request_fingerprint.is_some()
+        || envelope.request_outcome.is_some()
+        || envelope.checksum != CommandChecksum(0)
+    {
+        return Err(EngineError::Invalid("invalid async cohort lifecycle plan"));
+    }
+    Ok(())
+}
+
+fn validate_cohort_renew_plan(
+    requested: &AsyncCohortRenewRequest,
+    commit: &RawCommitRequest,
+    sealed_ids: &[ItemId],
+) -> EngineResult<()> {
+    validate_cohort_envelope(
+        &requested.shard,
+        requested.expected_epoch,
+        requested.now,
+        commit,
+    )?;
+    let QueueCommand::CohortRenewLease(command) = &commit.commands()[0].command else {
+        return Err(EngineError::Invalid("invalid async cohort renew plan"));
+    };
+    if sealed_ids != commit.commands()[0].item_ids
+        || command.cohort_id != requested.cohort_id
+        || command.lease_expires_at != requested.new_lease_expires_at
+    {
+        return Err(EngineError::Invalid("invalid async cohort renew plan"));
+    }
+    Ok(())
+}
+
+fn validate_cohort_finalize_plan(
+    requested: &AsyncCohortFinalizeRequest,
+    commit: &RawCommitRequest,
+    sealed_ids: &[ItemId],
+    sealed_outcomes: &[crate::FinalizeOutcome],
+) -> EngineResult<()> {
+    validate_cohort_envelope(
+        &requested.shard,
+        requested.expected_epoch,
+        requested.now,
+        commit,
+    )?;
+    let QueueCommand::CohortFinalize(command) = &commit.commands()[0].command else {
+        return Err(EngineError::Invalid("invalid async cohort finalize plan"));
+    };
+    let outcome_ids = sealed_outcomes
+        .iter()
+        .map(|outcome| outcome.item_id)
+        .collect::<Vec<_>>();
+    let effective_kind = sealed_outcomes.first().map(|outcome| outcome.kind);
+    let effective_not_before = sealed_outcomes
+        .first()
+        .and_then(|outcome| outcome.not_before);
+    if sealed_ids != commit.commands()[0].item_ids
+        || outcome_ids != sealed_ids
+        || command.cohort_id != requested.cohort_id
+        || Some(command.kind) != effective_kind
+        || command.not_before != effective_not_before
+        || sealed_outcomes.iter().any(|outcome| {
+            Some(outcome.kind) != effective_kind
+                || outcome.not_before != effective_not_before
+                || match outcome.kind {
+                    crate::FinalizeKind::Complete => {
+                        outcome.applied_state != Some(pqueue_core::ItemState::Complete)
+                    }
+                    crate::FinalizeKind::Fail => {
+                        outcome.applied_state != Some(pqueue_core::ItemState::Failed)
+                    }
+                    crate::FinalizeKind::Retry => !matches!(
+                        outcome.applied_state,
+                        Some(pqueue_core::ItemState::Pending | pqueue_core::ItemState::Failed)
+                    ),
+                    crate::FinalizeKind::Release => {
+                        outcome.applied_state != Some(pqueue_core::ItemState::Pending)
+                    }
+                    crate::FinalizeKind::Rearm => true,
+                }
+        })
+        || (command.kind != requested.kind
+            && !(requested.kind == crate::FinalizeKind::Retry
+                && command.kind == crate::FinalizeKind::Fail
+                && command.not_before.is_none()))
+        || (command.kind == requested.kind && command.not_before != requested.not_before)
+    {
+        return Err(EngineError::Invalid("invalid async cohort finalize plan"));
+    }
+    Ok(())
+}
+
 fn validate_reclaim_plan(
     requested: &AsyncReclaimRequest,
     commit: &RawCommitRequest,
@@ -510,7 +724,7 @@ fn validate_reclaim_plan(
     Ok(())
 }
 
-impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
+impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -931,18 +1145,19 @@ where
             push_planner: Arc::new(push_planner),
             lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
             reclaim_planner: Arc::new(NoAsyncReclaimPlanner),
+            cohort_lifecycle_planner: Arc::new(NoAsyncCohortLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
     }
 }
 
-impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R> {
+impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C> {
     /// Add a separately injected lifecycle capability while preserving the existing claim/push profile.
     pub fn with_lifecycle_planner<W>(
         self,
         lifecycle_planner: W,
-    ) -> AsyncComposedBackend<S, D, P, U, W, R> {
+    ) -> AsyncComposedBackend<S, D, P, U, W, R, C> {
         AsyncComposedBackend {
             strategy: self.strategy,
             dispatcher: self.dispatcher,
@@ -950,6 +1165,7 @@ impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R> {
             push_planner: self.push_planner,
             lifecycle_planner: Arc::new(lifecycle_planner),
             reclaim_planner: self.reclaim_planner,
+            cohort_lifecycle_planner: self.cohort_lifecycle_planner,
             admission: self.admission,
             durability: self.durability,
         }
@@ -958,7 +1174,7 @@ impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R> {
     pub fn with_reclaim_planner<W>(
         self,
         reclaim_planner: W,
-    ) -> AsyncComposedBackend<S, D, P, U, V, W> {
+    ) -> AsyncComposedBackend<S, D, P, U, V, W, C> {
         AsyncComposedBackend {
             strategy: self.strategy,
             dispatcher: self.dispatcher,
@@ -966,13 +1182,31 @@ impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R> {
             push_planner: self.push_planner,
             lifecycle_planner: self.lifecycle_planner,
             reclaim_planner: Arc::new(reclaim_planner),
+            cohort_lifecycle_planner: self.cohort_lifecycle_planner,
+            admission: self.admission,
+            durability: self.durability,
+        }
+    }
+
+    pub fn with_cohort_lifecycle_planner<W>(
+        self,
+        cohort_lifecycle_planner: W,
+    ) -> AsyncComposedBackend<S, D, P, U, V, R, W> {
+        AsyncComposedBackend {
+            strategy: self.strategy,
+            dispatcher: self.dispatcher,
+            claim_planner: self.claim_planner,
+            push_planner: self.push_planner,
+            lifecycle_planner: self.lifecycle_planner,
+            reclaim_planner: self.reclaim_planner,
+            cohort_lifecycle_planner: Arc::new(cohort_lifecycle_planner),
             admission: self.admission,
             durability: self.durability,
         }
     }
 }
 
-impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
+impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -1037,6 +1271,77 @@ where
         .map_err(AsyncLifecycleError::Submit)?
         .map_err(AsyncLifecycleError::from)
     }
+
+    /// Execute the internal async [`crate::PurgePort`] path and return its remove-if-present count.
+    ///
+    /// API adapters must resolve API-001 targeting and replay semantics before calling this method and
+    /// must not treat this aggregate count as the public per-item response.
+    pub async fn purge(&self, request: AsyncPurgeRequest) -> Result<u64, AsyncLifecycleError> {
+        let queue = request.shard.clone();
+        let planner = Arc::clone(&self.lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let plan = planner
+                    .plan_purge(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let count = validate_purge_plan(&request, &plan.request)
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                if count == 0 {
+                    return Ok::<u64, LifecycleExecutionError>(count);
+                }
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)?;
+                Ok::<u64, LifecycleExecutionError>(count)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+}
+
+fn validate_purge_plan(
+    request: &AsyncPurgeRequest,
+    commit: &RawCommitRequest,
+) -> EngineResult<u64> {
+    if commit.shard() != &request.shard
+        || commit.commands().len() != 1
+        || commit.fault() != RawCommitFault::None
+        || request
+            .expected_epoch
+            .is_some_and(|e| e != commit.expected_epoch())
+    {
+        return Err(EngineError::Invalid("invalid async purge plan"));
+    }
+    let env = &commit.commands()[0];
+    let QueueCommand::PurgeItems(command) = &env.command else {
+        return Err(EngineError::Invalid("invalid async purge plan"));
+    };
+    let unique: HashSet<_> = command.item_ids.iter().copied().collect();
+    if env.command_id.0.is_empty()
+        || env.item_ids != command.item_ids
+        || command.force != request.force
+        || unique.len() != command.item_ids.len()
+        || command
+            .item_ids
+            .iter()
+            .any(|id| !request.item_ids.contains(id))
+        || env.created_at != request.now
+        || env.request_id.is_some()
+        || env.request_fingerprint.is_some()
+        || env.request_outcome.is_some()
+        || env.checksum != CommandChecksum(0)
+    {
+        return Err(EngineError::Invalid("invalid async purge plan"));
+    }
+    Ok(command.item_ids.len() as u64)
 }
 
 fn validate_finalize_plan(
@@ -1120,7 +1425,7 @@ fn validate_finalize_plan(
     Ok(())
 }
 
-impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
+impl<S, D, P, U, V, R, C> AsyncComposedBackend<S, D, P, U, V, R, C>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -1358,7 +1663,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use pqueue_core::{
-        ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, Metadata, OrderingMode,
+        ClientItemKey, CohortId, EligibilityPolicy, ItemId, LeaseToken, Metadata, OrderingMode,
         PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition,
         QueueId, RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
@@ -2115,6 +2420,53 @@ mod tests {
                 Ok(AsyncLifecyclePlan::finalize(planned, expected_outcomes))
             })
         }
+
+        fn plan_purge(
+            &self,
+            request: AsyncPurgeRequest,
+        ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let smuggle = self.smuggle;
+            Box::pin(async move {
+                let mut ids = request.item_ids;
+                if smuggle == LifecycleSmuggle::AppliedState {
+                    ids.push(ItemId::from_u64(999));
+                }
+                let mut env = CommandEnvelope {
+                    command_id: CommandId::new(if smuggle == LifecycleSmuggle::EmptyCommandId {
+                        ""
+                    } else {
+                        "purge-command"
+                    }),
+                    request_id: None,
+                    request_fingerprint: None,
+                    request_outcome: None,
+                    item_ids: ids.clone(),
+                    command: QueueCommand::PurgeItems(crate::PurgeItemsCommand {
+                        item_ids: ids,
+                        force: if smuggle == LifecycleSmuggle::Expiry {
+                            !request.force
+                        } else {
+                            request.force
+                        },
+                    }),
+                    checksum: CommandChecksum(if smuggle == LifecycleSmuggle::Checksum {
+                        1
+                    } else {
+                        0
+                    }),
+                    created_at: request.now,
+                };
+                if smuggle == LifecycleSmuggle::Metadata {
+                    env.request_id = Some(RequestId::new("smuggled").unwrap());
+                }
+                let mut raw = RawCommitRequest::new(request.shard, vec![env], 1);
+                if smuggle == LifecycleSmuggle::Fault {
+                    raw = raw.with_fault(RawCommitFault::BeforeAppend);
+                }
+                Ok(AsyncLifecyclePlan::purge(raw))
+            })
+        }
     }
 
     type PushBackend = AsyncComposedBackend<
@@ -2487,6 +2839,168 @@ mod tests {
             now: UtcTimestamp::new(10, 0).unwrap(),
             expected_epoch: Some(1),
         }
+    }
+
+    fn purge_request(ids: Vec<ItemId>) -> AsyncPurgeRequest {
+        AsyncPurgeRequest {
+            shard: QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new("purge").unwrap(),
+            ),
+            item_ids: ids,
+            force: true,
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            expected_epoch: Some(1),
+        }
+    }
+
+    #[test]
+    fn typed_purge_routes_counts_skips_empty_and_rejects_smuggling() {
+        for (smuggle, commits_expected) in [
+            (LifecycleSmuggle::None, 1),
+            (LifecycleSmuggle::AppliedState, 0),
+            (LifecycleSmuggle::Expiry, 0),
+            (LifecycleSmuggle::Metadata, 0),
+            (LifecycleSmuggle::Checksum, 0),
+            (LifecycleSmuggle::Fault, 0),
+            (LifecycleSmuggle::EmptyCommandId, 0),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let dispatcher = ControlledDispatcher::new(2);
+            let strategy = UnifiedAtomicCommit::for_profile(
+                DurabilityClass::Atomic,
+                ClaimCommitter {
+                    calls: calls.clone(),
+                    completed: Arc::new(AtomicBool::new(false)),
+                    phase: Phase::new(true),
+                },
+            )
+            .unwrap();
+            let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+                .with_lifecycle_planner(ControlledLifecyclePlanner {
+                    smuggle,
+                    calls: Arc::new(AtomicUsize::new(0)),
+                });
+            let mut future = Box::pin(backend.purge(purge_request(vec![ItemId::from_u64(1)])));
+            assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+            assert!(dispatcher.drive_next());
+            if commits_expected == 1 {
+                assert!(matches!(poll_once(future.as_mut()), Poll::Ready(Ok(1))));
+            } else {
+                assert!(matches!(
+                    poll_once(future.as_mut()),
+                    Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(_)))
+                ));
+            }
+            assert_eq!(calls.load(Ordering::Acquire), commits_expected);
+        }
+        let dispatcher = ControlledDispatcher::new(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: calls.clone(),
+                completed: Arc::new(AtomicBool::new(false)),
+                phase: Phase::new(true),
+            },
+        )
+        .unwrap();
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+        let mut empty = Box::pin(backend.purge(purge_request(vec![])));
+        assert!(matches!(poll_once(empty.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(matches!(poll_once(empty.as_mut()), Poll::Ready(Ok(0))));
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn typed_purge_reports_invalid_response_barrier() {
+        let dispatcher = ControlledDispatcher::new(1);
+        let strategy =
+            UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, AppendedOnlyCommitter)
+                .unwrap();
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+        let mut future = Box::pin(backend.purge(purge_request(vec![ItemId::from_u64(1)])));
+        assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(future.as_mut()),
+            Poll::Ready(Err(AsyncLifecycleError::AfterCommit {
+                stage: AsyncLifecyclePostCommitStage::CommitOutcome,
+                source: EngineError::Storage(_)
+            }))
+        ));
+    }
+
+    #[test]
+    fn dropping_typed_purge_response_does_not_cancel_accepted_commit() {
+        let phase = Phase::new(false);
+        let completed = Arc::new(AtomicBool::new(false));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: Arc::new(AtomicUsize::new(0)),
+                completed: completed.clone(),
+                phase: phase.clone(),
+            },
+        )
+        .unwrap();
+        let dispatcher = ControlledDispatcher::new(1);
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+        let mut purge = Box::pin(backend.purge(purge_request(vec![ItemId::from_u64(1)])));
+        assert!(matches!(poll_once(purge.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(phase.started.load(Ordering::Acquire));
+        drop(purge);
+        phase.release();
+        assert!(dispatcher.drive_next());
+        assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn typed_purge_serializes_same_queue_across_planning_and_commit() {
+        let phase = Phase::new(false);
+        let planner_calls = Arc::new(AtomicUsize::new(0));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: Arc::new(AtomicUsize::new(0)),
+                completed: Arc::new(AtomicBool::new(false)),
+                phase: phase.clone(),
+            },
+        )
+        .unwrap();
+        let dispatcher = ControlledDispatcher::new(2);
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: planner_calls.clone(),
+            });
+        let mut first = Box::pin(backend.purge(purge_request(vec![ItemId::from_u64(1)])));
+        let mut second = Box::pin(backend.purge(purge_request(vec![ItemId::from_u64(2)])));
+        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert_eq!(planner_calls.load(Ordering::Acquire), 1);
+        phase.release();
+        assert!(dispatcher.drive_next());
+        assert!(matches!(poll_once(first.as_mut()), Poll::Ready(Ok(1))));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(matches!(poll_once(second.as_mut()), Poll::Ready(Ok(1))));
+        assert_eq!(planner_calls.load(Ordering::Acquire), 2);
     }
 
     fn finalize_request() -> AsyncFinalizeRequest {
@@ -3865,6 +4379,203 @@ mod tests {
         ));
         assert_eq!(plan_calls.load(Ordering::Acquire), 2);
         assert_eq!(commit_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[derive(Clone)]
+    struct FixedCohortPlanner {
+        item_ids: Vec<ItemId>,
+        smuggle: bool,
+    }
+
+    impl AsyncCohortLifecyclePlanner for FixedCohortPlanner {
+        fn plan_cohort_renew(
+            &self,
+            request: AsyncCohortRenewRequest,
+        ) -> OwnedTask<EngineResult<crate::AsyncCohortLifecyclePlan>> {
+            let item_ids = self.item_ids.clone();
+            let smuggle = self.smuggle;
+            Box::pin(async move {
+                let envelope = CommandEnvelope {
+                    command_id: CommandId::new("cohort-renew"),
+                    request_id: None,
+                    request_fingerprint: smuggle.then_some(7),
+                    request_outcome: None,
+                    item_ids: item_ids.clone(),
+                    command: QueueCommand::CohortRenewLease(crate::CohortRenewLeaseCommand {
+                        cohort_id: request.cohort_id,
+                        lease_expires_at: request.new_lease_expires_at,
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: request.now,
+                };
+                Ok(crate::AsyncCohortLifecyclePlan::renew(
+                    RawCommitRequest::new(
+                        request.shard,
+                        vec![envelope],
+                        request.expected_epoch.unwrap_or(1),
+                    ),
+                    item_ids,
+                ))
+            })
+        }
+
+        fn plan_cohort_finalize(
+            &self,
+            request: AsyncCohortFinalizeRequest,
+        ) -> OwnedTask<EngineResult<crate::AsyncCohortLifecyclePlan>> {
+            let item_ids = self.item_ids.clone();
+            Box::pin(async move {
+                let applied_state = match request.kind {
+                    FinalizeKind::Complete => pqueue_core::ItemState::Complete,
+                    FinalizeKind::Fail => pqueue_core::ItemState::Failed,
+                    FinalizeKind::Retry | FinalizeKind::Release => pqueue_core::ItemState::Pending,
+                    FinalizeKind::Rearm => pqueue_core::ItemState::Pending,
+                };
+                let outcomes = item_ids
+                    .iter()
+                    .copied()
+                    .map(|item_id| crate::FinalizeOutcome {
+                        item_id,
+                        kind: request.kind,
+                        applied_state: Some(applied_state),
+                        not_before: request.not_before,
+                    })
+                    .collect::<Vec<_>>();
+                let envelope = CommandEnvelope {
+                    command_id: CommandId::new("cohort-finalize"),
+                    request_id: None,
+                    request_fingerprint: None,
+                    request_outcome: None,
+                    item_ids: item_ids.clone(),
+                    command: QueueCommand::CohortFinalize(crate::CohortFinalizeCommand {
+                        cohort_id: request.cohort_id,
+                        kind: request.kind,
+                        not_before: request.not_before,
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: request.now,
+                };
+                Ok(crate::AsyncCohortLifecyclePlan::finalize(
+                    RawCommitRequest::new(
+                        request.shard,
+                        vec![envelope],
+                        request.expected_epoch.unwrap_or(1),
+                    ),
+                    item_ids,
+                    outcomes,
+                ))
+            })
+        }
+    }
+
+    #[test]
+    fn final_backend_shape_accepts_lifecycle_reclaim_and_cohort_planners_together() {
+        let dispatcher = ControlledDispatcher::new(1);
+        let strategy =
+            UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, AppendedOnlyCommitter)
+                .unwrap();
+        let _backend = AsyncComposedBackend::new(strategy, dispatcher, 1)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: Arc::new(AtomicUsize::new(0)),
+            })
+            .with_reclaim_planner(FixedReclaimPlanner {
+                item_ids: reclaim_items(),
+                calls: Arc::new(AtomicUsize::new(0)),
+                mode: FixedReclaimMode::Valid,
+            })
+            .with_cohort_lifecycle_planner(FixedCohortPlanner {
+                item_ids: reclaim_items(),
+                smuggle: false,
+            });
+    }
+
+    fn cohort_renew_request(name: &str) -> AsyncCohortRenewRequest {
+        AsyncCohortRenewRequest {
+            shard: queue(name),
+            cohort_id: CohortId::new("cohort").unwrap(),
+            cohort_lease_token: LeaseToken::new("cohort-token").unwrap(),
+            new_lease_expires_at: UtcTimestamp::new(40, 0).unwrap(),
+            now: UtcTimestamp::new(30, 0).unwrap(),
+            expected_epoch: Some(1),
+        }
+    }
+
+    #[test]
+    fn typed_cohort_renew_routes_strategy_and_rejects_smuggling() {
+        for (smuggle, expected_commits) in [(false, 1), (true, 0)] {
+            let request = cohort_renew_request("cohort");
+            let commit_calls = Arc::new(AtomicUsize::new(0));
+            let strategy = UnifiedAtomicCommit::for_profile(
+                DurabilityClass::Atomic,
+                FixedOutcomeCommitter {
+                    calls: Arc::clone(&commit_calls),
+                    outcome: Ok(RawCommitOutcome::applied(vec![CommandPosition::new(
+                        request.shard.clone(),
+                        1,
+                        1,
+                    )])),
+                },
+            )
+            .unwrap();
+            let dispatcher = ControlledDispatcher::new(1);
+            let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+                .with_cohort_lifecycle_planner(FixedCohortPlanner {
+                    item_ids: reclaim_items(),
+                    smuggle,
+                });
+            let mut renew = Box::pin(backend.renew_cohort(request));
+            assert!(matches!(poll_once(renew.as_mut()), Poll::Pending));
+            assert!(dispatcher.drive_next());
+            if smuggle {
+                assert!(matches!(
+                    poll_once(renew.as_mut()),
+                    Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(_)))
+                ));
+            } else {
+                assert!(matches!(poll_once(renew.as_mut()), Poll::Ready(Ok(()))));
+            }
+            assert_eq!(commit_calls.load(Ordering::Acquire), expected_commits);
+        }
+    }
+
+    #[test]
+    fn typed_cohort_finalize_survives_dropped_caller() {
+        let phase = Phase::new(false);
+        let completed = Arc::new(AtomicBool::new(false));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: Arc::new(AtomicUsize::new(0)),
+                completed: Arc::clone(&completed),
+                phase: Arc::clone(&phase),
+            },
+        )
+        .unwrap();
+        let dispatcher = ControlledDispatcher::new(1);
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+            .with_cohort_lifecycle_planner(FixedCohortPlanner {
+                item_ids: reclaim_items(),
+                smuggle: false,
+            });
+        let renew = cohort_renew_request("cohort");
+        let request = AsyncCohortFinalizeRequest {
+            shard: renew.shard,
+            cohort_id: renew.cohort_id,
+            cohort_lease_token: renew.cohort_lease_token,
+            kind: FinalizeKind::Complete,
+            not_before: None,
+            now: renew.now,
+            expected_epoch: renew.expected_epoch,
+        };
+        let mut finalize = Box::pin(backend.finalize_cohort(request));
+        assert!(matches!(poll_once(finalize.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(phase.started.load(Ordering::Acquire));
+        drop(finalize);
+        phase.release();
+        assert!(dispatcher.drive_next());
+        assert!(completed.load(Ordering::Acquire));
     }
 
     #[test]

@@ -11,10 +11,10 @@ use pqueue_core::{
     QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
 };
 use pqueue_engine::{
-    AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
-    CommandPosition, EngineError, EngineResult, FinalizeKind, FinalizeTarget, IdempotencyDecision,
-    PayloadUpdate, PushFingerprint, PushItem, QueueCommand, QueueKey, RenewTarget, RequestOutcome,
-    RichClaimSelection,
+    AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CohortLeaseTarget,
+    CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind, FinalizeTarget,
+    IdempotencyDecision, PayloadUpdate, PushFingerprint, PushItem, QueueCommand, QueueKey,
+    RenewTarget, RequestOutcome, RichClaimSelection,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -1719,14 +1719,16 @@ async fn apply_owned(
                 let mut complete = Vec::new();
                 let mut failed = Vec::new();
                 let mut pending = Vec::new();
-                if matches!(finalize.kind, FinalizeKind::Retry) {
+                let effective_kind = if matches!(finalize.kind, FinalizeKind::Retry) {
                     let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
                     append_item_ids(&mut params, &ids);
                     let mut rows = transaction
                         .query(&sql::select_retry_info(ids.len()), params)
                         .await
                         .map_err(storage)?;
+                    let mut seen = 0usize;
                     while let Some(row) = rows.next().await.map_err(storage)? {
+                        seen += 1;
                         let item = ItemId::new(text(&row.get_value(0).map_err(storage)?)?)
                             .map_err(storage)?;
                         let attempts = nonnegative_u32(
@@ -1739,15 +1741,23 @@ async fn apply_owned(
                         )?;
                         if is_retry_exhausted(attempts, max_attempts) {
                             failed.push(item);
-                        } else {
-                            pending.push(item);
                         }
                     }
-                    if failed.len() + pending.len() != ids.len() {
+                    if seen != ids.len() {
                         return Err(storage("cohort finalize could not read every member"));
                     }
+                    if failed.is_empty() {
+                        pending.clone_from(&ids);
+                        FinalizeKind::Retry
+                    } else {
+                        failed.clone_from(&ids);
+                        FinalizeKind::Fail
+                    }
                 } else {
-                    match finalize.kind {
+                    finalize.kind
+                };
+                if !matches!(finalize.kind, FinalizeKind::Retry) {
+                    match effective_kind {
                         FinalizeKind::Complete => complete.clone_from(&ids),
                         FinalizeKind::Fail => failed.clone_from(&ids),
                         FinalizeKind::Release => pending.clone_from(&ids),
@@ -1803,7 +1813,7 @@ async fn apply_owned(
                 }
                 let definition = definition_in_transaction(&transaction, &position.queue).await?;
                 let next_state =
-                    if matches!(finalize.kind, FinalizeKind::Complete | FinalizeKind::Fail) {
+                    if matches!(effective_kind, FinalizeKind::Complete | FinalizeKind::Fail) {
                         "terminal"
                     } else {
                         "complete"
@@ -2244,8 +2254,10 @@ async fn apply_owned(
                         .map_err(storage)?;
                     let mut retention = Vec::new();
                     while let Some(row) = rows.next().await.map_err(storage)? {
-                        let state = parse_state(&text(&row.get_value(2).map_err(storage)?)?)?;
-                        if state.is_terminal() && definition.client_item_key_retention_ms > 0 {
+                        // Validate the persisted state while retaining the key for every successful
+                        // API-001 removal, including pending and force-purged leased items.
+                        let _state = parse_state(&text(&row.get_value(2).map_err(storage)?)?)?;
+                        if definition.client_item_key_retention_ms > 0 {
                             retention.push((
                                 text(&row.get_value(1).map_err(storage)?)?,
                                 text(&row.get_value(0).map_err(storage)?)?,
@@ -2353,6 +2365,30 @@ async fn apply_owned(
         }
     }
     Ok(())
+}
+
+impl TursoRelational {
+    pub(crate) async fn purge_items_validate(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+        force: bool,
+    ) -> EngineResult<Vec<ItemId>> {
+        let connection = self.writer.lock().await;
+        let mut present = Vec::new();
+        for id in ids {
+            if present.contains(id) {
+                continue;
+            }
+            let row=one_row(&connection,"SELECT lifecycle_state FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",vec![Value::Text(shard.tenant_id.as_str().to_string()),Value::Text(shard.queue_id.as_str().to_string()),Value::Text(id.to_string())]).await?;
+            if let Some(row) = row {
+                let state = parse_state(&text(&row[0])?).map_err(storage)?;
+                pqueue_engine::validate_purge_force(state == ItemState::Leased, force)?;
+                present.push(*id);
+            }
+        }
+        Ok(present)
+    }
 }
 
 impl AsyncProjectionStore for TursoRelational {
@@ -2550,7 +2586,9 @@ impl AsyncProjectionStore for TursoRelational {
         shard: QueueKey,
         targets: Vec<FinalizeTarget>,
         now: UtcTimestamp,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<u32>>> + Send {
+        _default_max_attempts: u32,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<pqueue_engine::FinalizeLeaseMember>>> + Send
+    {
         let writer = self.writer.clone();
         async move {
             let mut connection = writer.lock().await;
@@ -2566,7 +2604,7 @@ impl AsyncProjectionStore for TursoRelational {
                 for target in targets {
                     let row = one_row(
                         &transaction,
-                        "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count FROM pqueue_items \
+                        "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts FROM pqueue_items \
                          WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                         vec![
                             tenant.clone().into(),
@@ -2596,7 +2634,14 @@ impl AsyncProjectionStore for TursoRelational {
                     if version < 0 || version as u64 != target.item_version {
                         return Err(EngineError::Conflict);
                     }
-                    attempts.push(nonnegative_u32(integer(&row[7])?, "retry_count")?);
+                    attempts.push(pqueue_engine::FinalizeLeaseMember {
+                        item_id: target.item_id,
+                        attempt_count: nonnegative_u32(integer(&row[7])?, "retry_count")?,
+                        max_attempts: nonnegative_u32(
+                            integer(&row[8])?,
+                            "max_attempts",
+                        )?,
+                    });
                 }
                 Ok(attempts)
             }
@@ -2604,6 +2649,119 @@ impl AsyncProjectionStore for TursoRelational {
             transaction.rollback().await.map_err(storage)?;
             result
         }
+    }
+
+    fn cohort_lease_validate(
+        &self,
+        shard: QueueKey,
+        target: CohortLeaseTarget,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<pqueue_engine::CohortLeaseMember>>> + Send
+    {
+        let writer = self.writer.clone();
+        async move {
+            let mut connection = writer.lock().await;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage)?;
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let result = async {
+                let row = one_row(
+                    &transaction,
+                    "SELECT group_key,state,cohort_size,member_count,cohort_lease_token_hash \
+                     FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+                    vec![
+                        tenant.clone().into(),
+                        queue.clone().into(),
+                        target.cohort_id.as_str().to_string().into(),
+                    ],
+                )
+                .await?
+                .ok_or(EngineError::NotFound)?;
+                let group = text(&row[0])?;
+                let state = text(&row[1])?;
+                let expected = integer(&row[2])?;
+                let recorded = integer(&row[3])?;
+                if state == "terminal" {
+                    return Err(EngineError::Terminal);
+                }
+                if state != "leased" {
+                    return Err(EngineError::Invalid("cohort is not leased"));
+                }
+                if blob(&row[4])? != lease_hash(&target.cohort_lease_token) {
+                    return Err(EngineError::StaleLease);
+                }
+                if expected <= 0 || expected != recorded {
+                    return Err(EngineError::Conflict);
+                }
+                let mut rows = transaction
+                    .query(
+                        "SELECT item_id,lifecycle_state,fenced,superseded,lease_expires_at,retry_count,max_attempts \
+                         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+                         AND cohort_size IS NOT NULL AND superseded=0 \
+                         AND lifecycle_state NOT IN ('Complete','Failed') \
+                         ORDER BY priority_sort,created_seq",
+                        vec![Value::Text(tenant), Value::Text(queue), Value::Text(group)],
+                    )
+                    .await
+                    .map_err(storage)?;
+                let mut item_ids = Vec::new();
+                while let Some(row) = rows.next().await.map_err(storage)? {
+                    let state =
+                        parse_state(&row.get::<String>(1).map_err(storage)?).map_err(storage)?;
+                    if row.get::<i64>(2).map_err(storage)? != 0 {
+                        return Err(EngineError::StaleLease);
+                    }
+                    if state.is_terminal() {
+                        return Err(EngineError::Terminal);
+                    }
+                    if row.get::<i64>(3).map_err(storage)? != 0 {
+                        return Err(EngineError::Superseded);
+                    }
+                    if state != ItemState::Leased {
+                        return Err(EngineError::Invalid("cohort member is not leased"));
+                    }
+                    let expires = row.get_value(4).map_err(storage)?;
+                    if matches!(expires, Value::Null) || integer(&expires)? < ts_nanos(now) {
+                        return Err(EngineError::StaleLease);
+                    }
+                    item_ids.push(pqueue_engine::CohortLeaseMember {
+                        item_id: ItemId::new(row.get::<String>(0).map_err(storage)?)
+                            .map_err(storage)?,
+                        attempt_count: nonnegative_u32(
+                            row.get::<i64>(5).map_err(storage)?,
+                            "retry_count",
+                        )?,
+                        max_attempts: nonnegative_u32(
+                            row.get::<i64>(6).map_err(storage)?,
+                            "max_attempts",
+                        )?,
+                    });
+                }
+                if i64::try_from(item_ids.len()).map_err(storage)? != expected {
+                    return Err(EngineError::Conflict);
+                }
+                Ok(item_ids)
+            }
+            .await;
+            let rollback = transaction.rollback().await.map_err(storage);
+            match (result, rollback) {
+                (_, Err(error)) => Err(error),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(item_ids), Ok(())) => Ok(item_ids),
+            }
+        }
+    }
+
+    fn purge_validate(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+        force: bool,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        async move { self.purge_items_validate(&shard, &ids, force).await }
     }
 
     fn expired_leases(

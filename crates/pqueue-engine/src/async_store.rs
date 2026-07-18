@@ -32,6 +32,18 @@ use crate::{
     IdempotencyDecision, PushFingerprint, PushItem, QueueKey, RenewTarget, RichClaimSelection,
 };
 
+/// Projection-sealed retry inputs for one ordinary leased item.
+///
+/// The projection must return one member for each requested target in the same order. Relational
+/// projections read both counters from the same validation row; the default implementation uses the
+/// queue-level retry bound supplied by the lifecycle planner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeLeaseMember {
+    pub item_id: ItemId,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+}
+
 /// Native-async command-log, epoch-fence, replay, and high-water operations needed by initial composition.
 pub trait AsyncLogStore: Send + Sync {
     /// Immutable after construction; implementations must not acquire an async lock here.
@@ -146,7 +158,8 @@ pub trait AsyncProjectionStore: Send + Sync {
         shard: QueueKey,
         targets: Vec<FinalizeTarget>,
         now: UtcTimestamp,
-    ) -> impl std::future::Future<Output = EngineResult<Vec<u32>>> + Send {
+        default_max_attempts: u32,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<FinalizeLeaseMember>>> + Send {
         async move {
             self.renew_validate(
                 shard.clone(),
@@ -173,11 +186,36 @@ pub trait AsyncProjectionStore: Send + Sync {
                     if item.item_id != target.item_id || item.item_version != target.item_version {
                         Err(EngineError::Conflict)
                     } else {
-                        Ok(item.attempt_count)
+                        Ok(FinalizeLeaseMember {
+                            item_id: item.item_id,
+                            attempt_count: item.attempt_count,
+                            max_attempts: default_max_attempts,
+                        })
                     }
                 })
                 .collect()
         }
+    }
+
+    /// Validate one complete cohort lease and return its deterministic member footprint. Implementations
+    /// must verify the shared token, live lease state, unfenced/unsuperseded members, and cohort
+    /// completeness in one storage operation.
+    fn cohort_lease_validate(
+        &self,
+        _shard: QueueKey,
+        _target: crate::CohortLeaseTarget,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<crate::CohortLeaseMember>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn purge_validate(
+        &self,
+        _shard: QueueKey,
+        _ids: Vec<ItemId>,
+        _force: bool,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
     }
 
     /// Deterministically select leases expired strictly before `now`, ordered by item id and capped before

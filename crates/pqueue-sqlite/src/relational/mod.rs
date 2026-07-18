@@ -18,7 +18,8 @@
 //! two projection families never diverge on the core class.
 //!
 //! RELATIONAL-ONLY (deliberately OUT of the shared core class): the retention tombstone makes
-//! push→complete→purge→re-push(same key) return `Terminal` here, whereas the log-replay/in-memory family
+//! push→purge→re-push(same key) return `Terminal` here for every lifecycle state at removal, whereas the
+//! log-replay/in-memory family
 //! (no retention) would `Insert` a fresh item. No core conformance scenario exercises that sequence, so
 //! the "two families identical on core" invariant holds; BQ-13 must keep retention (and `group_summary`)
 //! a relational-class concern, NOT add it to the shared core suite — else the families would diverge.

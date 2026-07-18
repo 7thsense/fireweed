@@ -34,7 +34,7 @@ use pqueue_core::{
     CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
     OrderingMode, PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest,
-    RangeScanResponse, RequestId, TenantId, UtcTimestamp, is_retry_exhausted,
+    RangeScanResponse, RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::active_scope::{ActiveScope, DiscoveryGranularity};
@@ -3497,32 +3497,21 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
-            let definition = self.control.queue_definition(shard)?;
-            let max_attempts = definition.retry_policy.max_attempts;
             g.projection.finalize_validate(shard, &outcomes)?;
             let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
-            let claimed_items = g.projection.render_claimed(shard, &item_ids)?;
-            let attempt_counts = claimed_items
-                .into_iter()
-                .map(|item| (item.item_id, item.attempt_count))
-                .collect::<HashMap<_, _>>();
             let outcomes = outcomes
                 .into_iter()
                 .map(|mut outcome| {
-                    outcome.applied_state = Some(match outcome.kind {
-                        FinalizeKind::Complete => ItemState::Complete,
-                        FinalizeKind::Fail => ItemState::Failed,
-                        FinalizeKind::Retry => {
-                            let attempts =
-                                attempt_counts.get(&outcome.item_id).copied().unwrap_or(0);
-                            if is_retry_exhausted(attempts, max_attempts) {
-                                ItemState::Failed
-                            } else {
-                                ItemState::Pending
-                            }
-                        }
-                        FinalizeKind::Release | FinalizeKind::Rearm => ItemState::Pending,
-                    });
+                    // The legacy synchronous projection boundary does not return the persisted per-item
+                    // retry bound. Leave Retry unsealed so the authoritative apply transaction resolves it
+                    // from `retry_count` + `max_attempts`; native-async composition seals both values from
+                    // one typed validation row before append.
+                    outcome.applied_state = match outcome.kind {
+                        FinalizeKind::Complete => Some(ItemState::Complete),
+                        FinalizeKind::Fail => Some(ItemState::Failed),
+                        FinalizeKind::Retry => None,
+                        FinalizeKind::Release | FinalizeKind::Rearm => Some(ItemState::Pending),
+                    };
                     outcome
                 })
                 .collect::<Vec<_>>();

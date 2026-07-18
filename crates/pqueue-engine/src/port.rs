@@ -658,11 +658,14 @@ pub trait ReassignLeasePort: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 
-/// Hard-delete specific items (RESP `XDEL`, operator/library purge). Returns the count actually removed
+/// Internal typed hard-delete port for already-resolved item ids (RESP `XDEL`, operator/library purge).
+/// Returns the count actually removed
 /// (ids absent from the projection are no-ops, like Redis `XDEL`). The `PurgeItems` apply is infallible
 /// (remove-if-present), so the only pre-commit check is the API-001 force gate: purging a **leased** item
 /// requires `force` (else `EngineError::Conflict`, nothing appended). `XDEL` passes `force = true`
 /// (Redis deletes unconditionally); a library purge may pass `force = false` to honor the gate.
+/// This is not the complete public API-001 `PurgeItems` surface: key-or-id targeting, request-id replay,
+/// and per-item `purged`/`not_found` results are adapter responsibilities layered above this count port.
 #[doc(hidden)]
 pub trait PurgePort: Send + Sync {
     fn purge(

@@ -315,7 +315,7 @@ async fn group_cap_counts_existing_and_incoming_cohort_members() {
     ));
 }
 use pqueue_relational::OWNED_PROJECTION_TABLES;
-use pqueue_sqlite::{SqliteProjectionStore, SqliteRelational};
+use pqueue_sqlite::{AsyncSqliteProjectionStore, SqliteProjectionStore, SqliteRelational};
 use pqueue_turso::{
     JournalMode, RelationalStatement, TursoConfig, TursoRelational, TursoRelationalError,
 };
@@ -732,6 +732,16 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     .await
     .unwrap();
     assert_eq!(group_summary_count(&turso, &group).await, 1);
+    assert_eq!(
+        AsyncProjectionStore::purge_validate(&turso, shard.clone(), vec![first], false).await,
+        Err(pqueue_engine::EngineError::Conflict)
+    );
+    assert_eq!(
+        AsyncProjectionStore::purge_validate(&turso, shard.clone(), vec![second, second], false)
+            .await
+            .unwrap(),
+        vec![second]
+    );
     AsyncProjectionStore::renew_validate(
         &turso,
         shard.clone(),
@@ -1411,6 +1421,22 @@ async fn apply_both(
         std::slice::from_ref(&command),
     )
     .expect("SQLite apply");
+    AsyncProjectionStore::apply_live(turso, vec![position], vec![command])
+        .await
+        .expect("Turso apply");
+}
+
+async fn apply_async_pair(
+    sqlite: &AsyncSqliteProjectionStore,
+    turso: &TursoRelational,
+    shard: &QueueKey,
+    sequence: u64,
+    command: CommandEnvelope,
+) {
+    let position = CommandPosition::new(shard.clone(), 1, sequence);
+    AsyncProjectionStore::apply_live(sqlite, vec![position.clone()], vec![command.clone()])
+        .await
+        .expect("async SQLite apply");
     AsyncProjectionStore::apply_live(turso, vec![position], vec![command])
         .await
         .expect("Turso apply");
@@ -2390,10 +2416,17 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
         })
         .collect();
     assert_eq!(
-        AsyncProjectionStore::finalize_validate(&turso, shard.clone(), targets, timestamp(30))
+        AsyncProjectionStore::finalize_validate(&turso, shard.clone(), targets, timestamp(30), 3,)
             .await
             .unwrap(),
-        vec![1; ids.len()]
+        ids.iter()
+            .enumerate()
+            .map(|(index, item_id)| pqueue_engine::FinalizeLeaseMember {
+                item_id: *item_id,
+                attempt_count: 1,
+                max_attempts: if index == 2 { 1 } else { 3 },
+            })
+            .collect::<Vec<_>>()
     );
 
     let mut retry = FinalizeOutcome::new(ids[3], FinalizeKind::Retry);
@@ -2783,6 +2816,143 @@ async fn active_lease_reopen_uses_durable_hash_for_renew_validation() {
             .is_empty(),
         "cleartext token recovery is intentionally not claimed by this adapter slice"
     );
+}
+
+#[tokio::test]
+async fn purge_retains_pending_leased_and_terminal_keys_like_async_sqlite() {
+    for (case, lifecycle) in [("pending", 0_u8), ("leased-force", 1), ("terminal", 2)] {
+        let definition = definition();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let sqlite = AsyncSqliteProjectionStore::in_memory()
+            .await
+            .expect("async SQLite");
+        AsyncProjectionStore::ensure_shard(&sqlite, definition.clone())
+            .await
+            .expect("SQLite ensure");
+        let turso = TursoRelational::in_memory().await.expect("Turso");
+        AsyncProjectionStore::ensure_shard(&turso, definition)
+            .await
+            .expect("Turso ensure");
+
+        let item_id = ItemId::mint(11, lifecycle, 1);
+        let key = format!("purge-{case}");
+        let mut sequence = 0;
+        apply_async_pair(
+            &sqlite,
+            &turso,
+            &shard,
+            sequence,
+            envelope(
+                &format!("push-{case}"),
+                QueueCommand::Push(PushCommand {
+                    items: vec![push_item(item_id, &key, 3)],
+                }),
+                vec![item_id],
+                1,
+            ),
+        )
+        .await;
+
+        if lifecycle >= 1 {
+            sequence += 1;
+            apply_async_pair(
+                &sqlite,
+                &turso,
+                &shard,
+                sequence,
+                envelope(
+                    &format!("claim-{case}"),
+                    QueueCommand::Claim(ClaimCommand {
+                        item_ids: vec![item_id],
+                        lease_token: LeaseToken::new(format!("token-{case}")).unwrap(),
+                        lease_expires_at: timestamp(30),
+                        worker_id: None,
+                    }),
+                    vec![item_id],
+                    2,
+                ),
+            )
+            .await;
+        }
+        if lifecycle == 2 {
+            sequence += 1;
+            apply_async_pair(
+                &sqlite,
+                &turso,
+                &shard,
+                sequence,
+                envelope(
+                    &format!("finalize-{case}"),
+                    QueueCommand::Finalize(FinalizeCommand {
+                        outcomes: vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+                    }),
+                    vec![item_id],
+                    3,
+                ),
+            )
+            .await;
+        }
+
+        sequence += 1;
+        let purge_at = 4;
+        apply_async_pair(
+            &sqlite,
+            &turso,
+            &shard,
+            sequence,
+            envelope(
+                &format!("purge-{case}"),
+                QueueCommand::PurgeItems(PurgeItemsCommand {
+                    item_ids: vec![item_id],
+                    force: lifecycle == 1,
+                }),
+                vec![item_id],
+                purge_at,
+            ),
+        )
+        .await;
+
+        let replacement = push_item(ItemId::mint(11, lifecycle, 2), &key, 3);
+        let sqlite_repush = AsyncProjectionStore::validate_push(
+            &sqlite,
+            shard.clone(),
+            vec![replacement.clone()],
+            timestamp(purge_at + 1),
+        )
+        .await;
+        let turso_repush = AsyncProjectionStore::validate_push(
+            &turso,
+            shard.clone(),
+            vec![replacement],
+            timestamp(purge_at + 1),
+        )
+        .await;
+        assert_eq!(
+            sqlite_repush,
+            Err(pqueue_engine::EngineError::Conflict),
+            "SQLite must reject the within-retention {case} re-push"
+        );
+        assert_eq!(
+            turso_repush, sqlite_repush,
+            "Turso must match SQLite for the within-retention {case} re-push"
+        );
+
+        let tombstone = turso
+            .query(
+                "SELECT item_id,expires_at FROM pqueue_item_key_retention \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
+                vec!["tenant".into(), "queue".into(), key.into()],
+            )
+            .await
+            .expect("retention tombstone");
+        assert_eq!(tombstone.len(), 1, "{case} purge tombstone count");
+        assert_eq!(tombstone[0].values[0], Value::Text(item_id.to_string()));
+        assert_eq!(
+            tombstone[0].values[1],
+            Value::Integer((purge_at + 60) * 1_000_000_000),
+            "{case} purge tombstone expiry"
+        );
+    }
 }
 
 #[tokio::test]

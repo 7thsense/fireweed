@@ -1809,7 +1809,7 @@ fn apply_command_sql(
             let mut rearm_schedule: BTreeMap<(Option<i64>, i64), Vec<String>> = BTreeMap::new();
             for o in &c.outcomes {
                 let id = o.item_id.to_string();
-                let new_state = match o.kind {
+                let computed_state = match o.kind {
                     FinalizeKind::Complete => ItemState::Complete,
                     FinalizeKind::Fail => ItemState::Failed,
                     FinalizeKind::Retry => {
@@ -1823,6 +1823,12 @@ fn apply_command_sql(
                     FinalizeKind::Release => ItemState::Pending,
                     FinalizeKind::Rearm => ItemState::Pending,
                 };
+                if o.applied_state
+                    .is_some_and(|sealed| sealed != computed_state)
+                {
+                    return Err(EngineError::Conflict);
+                }
+                let new_state = o.applied_state.unwrap_or(computed_state);
                 match new_state {
                     ItemState::Complete => to_complete.push(id.clone()),
                     ItemState::Failed => to_failed.push(id.clone()),
@@ -1910,13 +1916,33 @@ fn apply_command_sql(
             if ids.is_empty() {
                 return Err(EngineError::NotFound);
             }
-            let outcomes: Vec<FinalizeOutcome> = ids
+            let effective_kind = if matches!(c.kind, FinalizeKind::Retry) {
+                let id_strings = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+                let rows = st(tx.query(
+                    "SELECT retry_count,max_attempts FROM pqueue_items \
+                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                    &[&t, &q, &id_strings],
+                ))?;
+                if rows.into_iter().any(|row| {
+                    is_retry_exhausted(row.get::<_, i64>(0) as u32, row.get::<_, i64>(1) as u32)
+                }) {
+                    FinalizeKind::Fail
+                } else {
+                    FinalizeKind::Retry
+                }
+            } else {
+                c.kind
+            };
+            let effective_not_before = matches!(effective_kind, FinalizeKind::Retry)
+                .then_some(c.not_before)
+                .flatten();
+            let outcomes = ids
                 .iter()
                 .map(|item_id| FinalizeOutcome {
                     item_id: *item_id,
-                    kind: c.kind,
+                    kind: effective_kind,
                     applied_state: None,
-                    not_before: c.not_before,
+                    not_before: effective_not_before,
                 })
                 .collect();
             apply_command_sql(
@@ -1928,7 +1954,7 @@ fn apply_command_sql(
                 now,
                 &QueueCommand::Finalize(FinalizeCommand { outcomes }),
             )?;
-            let next_state = match c.kind {
+            let next_state = match effective_kind {
                 FinalizeKind::Complete | FinalizeKind::Fail => "terminal",
                 FinalizeKind::Retry | FinalizeKind::Release => "complete",
                 FinalizeKind::Rearm => return Err(EngineError::Invalid("cohort rearm is invalid")),
@@ -2077,7 +2103,7 @@ fn apply_command_sql(
                 &[&t, &q, &id_strs],
             ))?;
             let mut groups: Vec<GroupKey> = Vec::new();
-            // (client_item_key, item_id) tombstones for terminal items, deduped LAST-wins on key so the
+            // (client_item_key, item_id) tombstones for every removed item, deduped LAST-wins on key so the
             // batched upsert never touches the same conflict target twice (DO UPDATE cardinality).
             let mut retention: Vec<(String, String)> = Vec::new();
             for row in rows {
@@ -2085,7 +2111,10 @@ fn apply_command_sql(
                 let gk: Option<String> = row.get(1);
                 let ck: String = row.get(2);
                 let state: String = row.get(3);
-                if parse_state(&state)?.is_terminal() && retention_ms > 0 {
+                // API-001/TD-002 requires the retained client-key boundary after every successful
+                // removal, including pending and force-purged leased items.
+                let _ = parse_state(&state)?;
+                if retention_ms > 0 {
                     retention.retain(|(k, _)| k != &ck);
                     retention.push((ck, item_id));
                 }
@@ -4110,7 +4139,7 @@ impl UpsertPort for PostgresRelationalBackend {
             };
             match existing {
                 None => {
-                    // Retention tombstone (a terminal item purged within retention) keeps the re-push a dup.
+                    // A retention tombstone from any successfully purged item keeps the re-push a dup.
                     let retained = st(g.client.query_opt(
                         "SELECT expires_at FROM pqueue_item_key_retention \
                          WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=$3",
@@ -5241,6 +5270,106 @@ impl PostgresRelational {
         Ok(())
     }
 
+    pub(crate) fn async_purge_items_validate(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+        force: bool,
+    ) -> EngineResult<Vec<ItemId>> {
+        let mut g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let mut present = Vec::new();
+        for id in ids {
+            if present.contains(id) {
+                continue;
+            }
+            let row=st(g.client.query_opt("SELECT lifecycle_state FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3", &[&tenant,&queue,&id.to_string()]))?;
+            if let Some(row) = row {
+                let state = parse_state(&row.get::<_, String>(0))?;
+                pqueue_engine::validate_purge_force(state == ItemState::Leased, force)?;
+                present.push(*id);
+            }
+        }
+        Ok(present)
+    }
+
+    pub(crate) fn async_cohort_lease_validate(
+        &self,
+        shard: &QueueKey,
+        target: &CohortLeaseTarget,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<pqueue_engine::CohortLeaseMember>> {
+        let mut g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let mut tx = st(g.client.transaction())?;
+        st(tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))?;
+        let row = st(tx.query_opt(
+            "SELECT group_key,state,cohort_size,member_count,cohort_lease_token_hash \
+             FROM pqueue_cohorts WHERE tenant_id=$1 AND queue_id=$2 AND cohort_id=$3",
+            &[&tenant, &queue, &target.cohort_id.as_str()],
+        ))?
+        .ok_or(EngineError::NotFound)?;
+        let group: String = row.get(0);
+        let state: String = row.get(1);
+        let expected: i64 = row.get(2);
+        let recorded: i64 = row.get(3);
+        let token_hash: Option<Vec<u8>> = row.get(4);
+        if state == "terminal" {
+            return Err(EngineError::Terminal);
+        }
+        if state != "leased" {
+            return Err(EngineError::Invalid("cohort is not leased"));
+        }
+        if token_hash.as_deref() != Some(lease_hash(&target.cohort_lease_token).as_slice()) {
+            return Err(EngineError::StaleLease);
+        }
+        if expected <= 0 || expected != recorded {
+            return Err(EngineError::Conflict);
+        }
+        let rows = st(tx.query(
+            "SELECT item_id,lifecycle_state,fenced,superseded,lease_expires_at,retry_count,max_attempts \
+             FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
+             AND cohort_size IS NOT NULL AND superseded=false \
+             AND lifecycle_state NOT IN ('Complete','Failed') ORDER BY priority_sort,created_seq",
+            &[&tenant, &queue, &group],
+        ))?;
+        let mut item_ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            let state = parse_state(&row.get::<_, String>(1))?;
+            if row.get::<_, bool>(2) {
+                return Err(EngineError::StaleLease);
+            }
+            if state.is_terminal() {
+                return Err(EngineError::Terminal);
+            }
+            if row.get::<_, bool>(3) {
+                return Err(EngineError::Superseded);
+            }
+            if state != ItemState::Leased {
+                return Err(EngineError::Invalid("cohort member is not leased"));
+            }
+            if row
+                .get::<_, Option<i64>>(4)
+                .is_none_or(|expires| expires < ts_nanos(now))
+            {
+                return Err(EngineError::StaleLease);
+            }
+            let raw: String = row.get(0);
+            item_ids.push(pqueue_engine::CohortLeaseMember {
+                item_id: ItemId::new(raw)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                attempt_count: u32::try_from(row.get::<_, i64>(5))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                max_attempts: u32::try_from(row.get::<_, i64>(6))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+            });
+        }
+        if i64::try_from(item_ids.len()).ok() != Some(expected) {
+            return Err(EngineError::Conflict);
+        }
+        Ok(item_ids)
+    }
+
     pub(crate) fn async_expired_leases_bounded(
         &self,
         shard: &QueueKey,
@@ -5270,7 +5399,7 @@ impl PostgresRelational {
         shard: &QueueKey,
         targets: &[pqueue_engine::FinalizeTarget],
         now: UtcTimestamp,
-    ) -> EngineResult<Vec<u32>> {
+    ) -> EngineResult<Vec<pqueue_engine::FinalizeLeaseMember>> {
         let mut g = self.lock();
         let (tenant, queue) = parts(shard);
         let now_nanos = ts_nanos(now);
@@ -5280,7 +5409,7 @@ impl PostgresRelational {
             let mut attempts = Vec::with_capacity(targets.len());
             for target in targets {
                 let row = st(tx.query_opt(
-                    "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count \
+                    "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts \
                      FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 FOR SHARE",
                     &[&tenant, &queue, &target.item_id.to_string()],
                 ))?;
@@ -5315,9 +5444,18 @@ impl PostgresRelational {
                     return Err(EngineError::Conflict);
                 }
                 let retry_count: i64 = row.get(7);
-                attempts.push(u32::try_from(retry_count).map_err(|_| {
-                    EngineError::Storage("postgres retry_count is outside the u32 range".into())
-                })?);
+                let max_attempts: i64 = row.get(8);
+                attempts.push(pqueue_engine::FinalizeLeaseMember {
+                    item_id: target.item_id,
+                    attempt_count: u32::try_from(retry_count).map_err(|_| {
+                        EngineError::Storage("postgres retry_count is outside the u32 range".into())
+                    })?,
+                    max_attempts: u32::try_from(max_attempts).map_err(|_| {
+                        EngineError::Storage(
+                            "postgres max_attempts is outside the u32 range".into(),
+                        )
+                    })?,
+                });
             }
             Ok(attempts)
         })();

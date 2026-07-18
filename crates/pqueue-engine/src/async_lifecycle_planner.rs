@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use crate::{
     AsyncControlPlane, AsyncFinalizeRequest, AsyncLifecyclePlan, AsyncLifecyclePlanner,
-    AsyncLogStore, AsyncProjectionStore, AsyncRenewRequest, CommandChecksum, CommandEnvelope,
-    EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome, IdGen, OwnedTask,
-    QueueCommand, RawCommitRequest, RenewLeaseCommand, validate_rearm,
+    AsyncLogStore, AsyncProjectionStore, AsyncPurgeRequest, AsyncRenewRequest, CommandChecksum,
+    CommandEnvelope, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
+    IdGen, OwnedTask, PurgeItemsCommand, QueueCommand, RawCommitRequest, RenewLeaseCommand,
+    validate_rearm,
 };
 
 fn validate_renew_duration(
@@ -145,21 +146,36 @@ where
             }
             projection.admit_mutation(request.shard.clone()).await?;
             let attempts = projection
-                .finalize_validate(request.shard.clone(), request.targets.clone(), request.now)
+                .finalize_validate(
+                    request.shard.clone(),
+                    request.targets.clone(),
+                    request.now,
+                    definition.retry_policy.max_attempts,
+                )
                 .await?;
+            if attempts.len() != request.targets.len()
+                || attempts
+                    .iter()
+                    .zip(&request.targets)
+                    .any(|(attempt, target)| attempt.item_id != target.item_id)
+            {
+                return Err(EngineError::Storage(
+                    "async finalize validation returned the wrong item footprint".into(),
+                ));
+            }
             let epoch = log.current_epoch(request.shard.clone()).await?;
             if request.expected_epoch.is_some_and(|e| e != epoch) {
                 return Err(EngineError::EpochFenced);
             }
             let mut outcomes = Vec::with_capacity(request.targets.len());
-            for (target, attempts) in request.targets.into_iter().zip(attempts) {
+            for (target, attempt) in request.targets.into_iter().zip(attempts) {
                 let applied_state = match target.kind {
                     FinalizeKind::Complete => pqueue_core::ItemState::Complete,
                     FinalizeKind::Fail => pqueue_core::ItemState::Failed,
                     FinalizeKind::Retry
                         if pqueue_core::is_retry_exhausted(
-                            attempts,
-                            definition.retry_policy.max_attempts,
+                            attempt.attempt_count,
+                            attempt.max_attempts,
                         ) =>
                     {
                         pqueue_core::ItemState::Failed
@@ -194,14 +210,51 @@ where
             ))
         })
     }
+
+    fn plan_purge(
+        &self,
+        request: AsyncPurgeRequest,
+    ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+        let log = Arc::clone(&self.log);
+        let projection = Arc::clone(&self.projection);
+        let ids = Arc::clone(&self.ids);
+        Box::pin(async move {
+            projection.admit_mutation(request.shard.clone()).await?;
+            let present = projection
+                .purge_validate(request.shard.clone(), request.item_ids, request.force)
+                .await?;
+            let epoch = log.current_epoch(request.shard.clone()).await?;
+            if request.expected_epoch.is_some_and(|e| e != epoch) {
+                return Err(EngineError::EpochFenced);
+            }
+            let env = CommandEnvelope {
+                command_id: ids.next_command_id(),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: present.clone(),
+                command: QueueCommand::PurgeItems(PurgeItemsCommand {
+                    item_ids: present,
+                    force: request.force,
+                }),
+                checksum: CommandChecksum(0),
+                created_at: request.now,
+            };
+            Ok(AsyncLifecyclePlan::purge(RawCommitRequest::new(
+                request.shard,
+                vec![env],
+                epoch,
+            )))
+        })
+    }
 }
 
 #[cfg(test)]
 #[allow(refining_impl_trait)]
 mod tests {
     use std::future::{Ready, ready};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use pqueue_core::{
         EligibilityPolicy, ItemId, ItemState, LeaseToken, OrderingMode, PriorityDirection,
@@ -229,6 +282,8 @@ mod tests {
         definition: QueueDefinition,
         epoch: u64,
         attempts: Mutex<Vec<u32>>,
+        attempt_bounds: Mutex<Option<Vec<u32>>>,
+        validation_ids: Mutex<Option<Vec<ItemId>>>,
         ids: AtomicU64,
     }
 
@@ -312,10 +367,47 @@ mod tests {
             _shard: QueueKey,
             targets: Vec<crate::FinalizeTarget>,
             _now: UtcTimestamp,
-        ) -> Ready<EngineResult<Vec<u32>>> {
+            default_max_attempts: u32,
+        ) -> Ready<EngineResult<Vec<crate::FinalizeLeaseMember>>> {
             let attempts = self.attempts.lock().unwrap().clone();
+            let bounds = self
+                .attempt_bounds
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| vec![default_max_attempts; attempts.len()]);
+            let validation_ids = self.validation_ids.lock().unwrap().clone();
             assert_eq!(attempts.len(), targets.len());
-            ready(Ok(attempts))
+            assert_eq!(bounds.len(), targets.len());
+            ready(Ok(attempts
+                .into_iter()
+                .zip(bounds)
+                .zip(targets.into_iter().enumerate())
+                .map(|((attempt_count, max_attempts), (index, target))| {
+                    crate::FinalizeLeaseMember {
+                        item_id: validation_ids
+                            .as_ref()
+                            .map_or(target.item_id, |ids| ids[index]),
+                        attempt_count,
+                        max_attempts,
+                    }
+                })
+                .collect()))
+        }
+        fn purge_validate(
+            &self,
+            _shard: QueueKey,
+            ids: Vec<ItemId>,
+            force: bool,
+        ) -> Ready<EngineResult<Vec<ItemId>>> {
+            assert!(force);
+            let mut present = Vec::new();
+            for id in ids {
+                if id != ItemId::from_u64(2) && !present.contains(&id) {
+                    present.push(id);
+                }
+            }
+            ready(Ok(present))
         }
         fn apply_live(
             &self,
@@ -434,6 +526,8 @@ mod tests {
             definition: definition.clone(),
             epoch: 7,
             attempts: Mutex::new(vec![2, 3]),
+            attempt_bounds: Mutex::new(Some(vec![2, 4])),
+            validation_ids: Mutex::new(None),
             ids: AtomicU64::new(0),
         });
         let planner = ProjectionLifecyclePlanner::from_shared(
@@ -462,8 +556,41 @@ mod tests {
         let QueueCommand::Finalize(command) = &plan.request().commands()[0].command else {
             panic!("expected finalize")
         };
-        assert_eq!(command.outcomes[0].applied_state, Some(ItemState::Pending));
-        assert_eq!(command.outcomes[1].applied_state, Some(ItemState::Failed));
+        assert_eq!(command.outcomes[0].applied_state, Some(ItemState::Failed));
+        assert_eq!(command.outcomes[1].applied_state, Some(ItemState::Pending));
+
+        *axes.attempts.lock().unwrap() = vec![1, 1];
+        *axes.attempt_bounds.lock().unwrap() = None;
+        *axes.validation_ids.lock().unwrap() = Some(vec![ItemId::from_u64(2), ItemId::from_u64(1)]);
+        assert!(matches!(
+            futures::executor::block_on(planner.plan_finalize(request(
+                &definition,
+                vec![
+                    target(1, FinalizeKind::Complete, None),
+                    target(2, FinalizeKind::Complete, None),
+                ],
+                7,
+            ))),
+            Err(EngineError::Storage(message))
+                if message == "async finalize validation returned the wrong item footprint"
+        ));
+        *axes.validation_ids.lock().unwrap() = None;
+
+        *axes.attempts.lock().unwrap() = vec![3];
+        let fallback = futures::executor::block_on(planner.plan_finalize(request(
+            &definition,
+            vec![target(
+                3,
+                FinalizeKind::Retry,
+                Some(UtcTimestamp::new(20, 0).unwrap()),
+            )],
+            7,
+        )))
+        .unwrap();
+        let QueueCommand::Finalize(command) = &fallback.request().commands()[0].command else {
+            panic!("expected finalize")
+        };
+        assert_eq!(command.outcomes[0].applied_state, Some(ItemState::Failed));
 
         for (kind, not_before, expected) in [
             (
@@ -483,6 +610,7 @@ mod tests {
             ),
         ] {
             *axes.attempts.lock().unwrap() = vec![1];
+            *axes.attempt_bounds.lock().unwrap() = None;
             let result = futures::executor::block_on(planner.plan_finalize(request(
                 &definition,
                 vec![target(3, kind, not_before)],
@@ -501,6 +629,57 @@ mod tests {
                 vec![target(4, FinalizeKind::Complete, None)],
                 8,
             ))),
+            Err(EngineError::EpochFenced)
+        ));
+    }
+
+    #[test]
+    fn purge_planner_preserves_present_order_dedups_and_fences_epoch() {
+        let definition = definition();
+        let axes = Arc::new(TestAxes {
+            definition: definition.clone(),
+            epoch: 7,
+            attempts: Mutex::new(Vec::new()),
+            attempt_bounds: Mutex::new(None),
+            validation_ids: Mutex::new(None),
+            ids: AtomicU64::new(0),
+        });
+        let planner = ProjectionLifecyclePlanner::from_shared(
+            axes.clone(),
+            axes.clone(),
+            axes.clone(),
+            axes.clone(),
+        );
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let plan = futures::executor::block_on(planner.plan_purge(AsyncPurgeRequest {
+            shard: shard.clone(),
+            item_ids: vec![
+                ItemId::from_u64(3),
+                ItemId::from_u64(2),
+                ItemId::from_u64(3),
+                ItemId::from_u64(1),
+            ],
+            force: true,
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            expected_epoch: Some(7),
+        }))
+        .unwrap();
+        let QueueCommand::PurgeItems(command) = &plan.request().commands()[0].command else {
+            panic!()
+        };
+        assert_eq!(
+            command.item_ids,
+            vec![ItemId::from_u64(3), ItemId::from_u64(1)]
+        );
+        assert!(command.force);
+        assert!(matches!(
+            futures::executor::block_on(planner.plan_purge(AsyncPurgeRequest {
+                shard,
+                item_ids: vec![ItemId::from_u64(1)],
+                force: true,
+                now: UtcTimestamp::new(10, 0).unwrap(),
+                expected_epoch: Some(6),
+            })),
             Err(EngineError::EpochFenced)
         ));
     }

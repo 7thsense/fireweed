@@ -5,10 +5,10 @@ use bytes::Bytes;
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{
-    AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
-    CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome, IdempotencyDecision, IndexHit,
-    ItemView, LeaseView, LiveItemView, ProjectionRead, PushFingerprint, PushItem, QueueCounters,
-    QueueKey, QueueMetrics,
+    AsOfProjectionStore, ClaimRef, ClaimedItem, CohortLeaseTarget, CommandEnvelope,
+    CommandPosition, CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome,
+    IdempotencyDecision, IndexHit, ItemView, LeaseView, LiveItemView, ProjectionRead,
+    PushFingerprint, PushItem, QueueCounters, QueueKey, QueueMetrics,
 };
 use pqueue_engine::{ProjectionSnapshot, ProjectionStore};
 use pqueue_projection::{InMemoryProjection, ProjectionImage};
@@ -26,7 +26,9 @@ type FinalizeValidationRow = (
     Option<Vec<u8>>,
     i64,
     i64,
+    i64,
 );
+type CohortValidationRow = (String, String, i64, i64, Option<Vec<u8>>);
 
 pub(crate) const EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
      AND lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=0 AND superseded=0 \
@@ -42,6 +44,32 @@ pub struct SqliteProjectionStore {
 }
 
 impl SqliteProjectionStore {
+    pub(crate) fn purge_items_validate(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+        force: bool,
+    ) -> EngineResult<Vec<ItemId>> {
+        let g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let mut present = Vec::new();
+        for id in ids {
+            if present.contains(id) {
+                continue;
+            }
+            let state: Option<String> = st(g.conn.query_row(
+                "SELECT lifecycle_state FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                params![tenant, queue, id.to_string()], |row| row.get(0)).optional())?;
+            if let Some(state) = state {
+                pqueue_engine::validate_purge_force(
+                    parse_state(&state)? == ItemState::Leased,
+                    force,
+                )?;
+                present.push(*id);
+            }
+        }
+        Ok(present)
+    }
     /// Open (or create) a SQLite projection database at `path`.
     pub fn open(path: &str) -> EngineResult<Self> {
         Self::from_conn(st(Connection::open(path))?)
@@ -109,6 +137,97 @@ impl SqliteProjectionStore {
         Ok(())
     }
 
+    pub(crate) fn cohort_lease_validate(
+        &self,
+        shard: &QueueKey,
+        target: &CohortLeaseTarget,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<pqueue_engine::CohortLeaseMember>> {
+        let g = self.lock();
+        let tx = st(g.conn.unchecked_transaction())?;
+        let (tenant, queue) = parts(shard);
+        let cohort: Option<CohortValidationRow> = st(tx
+            .query_row(
+                "SELECT group_key,state,cohort_size,member_count,cohort_lease_token_hash \
+                 FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+                params![tenant, queue, target.cohort_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional())?;
+        let Some((group, state, expected, recorded, token_hash)) = cohort else {
+            return Err(EngineError::NotFound);
+        };
+        if state == "terminal" {
+            return Err(EngineError::Terminal);
+        }
+        if state != "leased" {
+            return Err(EngineError::Invalid("cohort is not leased"));
+        }
+        if token_hash.as_deref() != Some(lease_hash(&target.cohort_lease_token).as_slice()) {
+            return Err(EngineError::StaleLease);
+        }
+        if expected <= 0 || expected != recorded {
+            return Err(EngineError::Conflict);
+        }
+        let mut statement = st(tx.prepare(
+            "SELECT item_id,lifecycle_state,fenced,superseded,lease_expires_at,retry_count,max_attempts \
+             FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+             AND cohort_size IS NOT NULL AND superseded=0 \
+             AND lifecycle_state NOT IN ('Complete','Failed') ORDER BY priority_sort,created_seq",
+        ))?;
+        let rows = st(statement.query_map(params![tenant, queue, group], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        }))?;
+        let mut item_ids = Vec::new();
+        for row in rows {
+            let (item_id, state, fenced, superseded, expires, attempts, max_attempts) = st(row)?;
+            let state = parse_state(&state)?;
+            if fenced != 0 {
+                return Err(EngineError::StaleLease);
+            }
+            if state.is_terminal() {
+                return Err(EngineError::Terminal);
+            }
+            if superseded != 0 {
+                return Err(EngineError::Superseded);
+            }
+            if state != ItemState::Leased {
+                return Err(EngineError::Invalid("cohort member is not leased"));
+            }
+            if expires.is_none_or(|expires| expires < ts_nanos(now)) {
+                return Err(EngineError::StaleLease);
+            }
+            item_ids.push(pqueue_engine::CohortLeaseMember {
+                item_id: ItemId::new(item_id)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                attempt_count: u32::try_from(attempts)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                max_attempts: u32::try_from(max_attempts)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+            });
+        }
+        if i64::try_from(item_ids.len()).ok() != Some(expected) {
+            return Err(EngineError::Conflict);
+        }
+        Ok(item_ids)
+    }
+
     pub(crate) fn expired_leases_bounded(
         &self,
         shard: &QueueKey,
@@ -141,7 +260,7 @@ impl SqliteProjectionStore {
         shard: &QueueKey,
         targets: &[pqueue_engine::FinalizeTarget],
         now: UtcTimestamp,
-    ) -> EngineResult<Vec<u32>> {
+    ) -> EngineResult<Vec<pqueue_engine::FinalizeLeaseMember>> {
         let g = self.lock();
         let tx = st(g.conn.unchecked_transaction())?;
         let (tenant, queue) = parts(shard);
@@ -151,13 +270,13 @@ impl SqliteProjectionStore {
             for target in targets {
                 let row: Option<FinalizeValidationRow> = st(tx
                     .query_row(
-                        "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count \
+                        "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts \
                          FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                         params![tenant, queue, target.item_id.to_string()],
                         |row| {
                             Ok((
                                 row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                                row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+                                row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
                             ))
                         },
                     )
@@ -171,6 +290,7 @@ impl SqliteProjectionStore {
                     hash,
                     version,
                     retry_count,
+                    max_attempts,
                 )) = row
                 else {
                     return Err(EngineError::NotFound);
@@ -199,9 +319,15 @@ impl SqliteProjectionStore {
                 if version < 0 || version as u64 != target.item_version {
                     return Err(EngineError::Conflict);
                 }
-                attempts.push(u32::try_from(retry_count).map_err(|_| {
-                    EngineError::Storage("sqlite retry_count is outside the u32 range".into())
-                })?);
+                attempts.push(pqueue_engine::FinalizeLeaseMember {
+                    item_id: target.item_id,
+                    attempt_count: u32::try_from(retry_count).map_err(|_| {
+                        EngineError::Storage("sqlite retry_count is outside the u32 range".into())
+                    })?,
+                    max_attempts: u32::try_from(max_attempts).map_err(|_| {
+                        EngineError::Storage("sqlite max_attempts is outside the u32 range".into())
+                    })?,
+                });
             }
             Ok(attempts)
         })();

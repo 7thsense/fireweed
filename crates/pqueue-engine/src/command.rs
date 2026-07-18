@@ -1812,6 +1812,26 @@ mod serde_tests {
     }
 
     #[test]
+    fn exhausted_cohort_retry_change_records_use_uniform_fail_disposition() {
+        let shard = shard();
+        let position = CommandPosition::new(shard.clone(), 7, 11);
+        let env = envelope_with_item_ids(
+            QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                cohort_id: CohortId::new("cohort").unwrap(),
+                kind: FinalizeKind::Fail,
+                not_before: None,
+            }),
+            vec![iid("a"), iid("b")],
+        );
+
+        let records = command_envelope_change_records(&shard, &position, &env, ts(99), None);
+        assert_eq!(records[0].new_state, Some(ChangeRecordState::Failed));
+        assert_eq!(records[0].terminal_at, Some(ts(1)));
+        assert_eq!(records[1].new_state, Some(ChangeRecordState::Failed));
+        assert_eq!(records[1].terminal_at, Some(ts(1)));
+    }
+
+    #[test]
     fn cohort_expired_synthesizes_per_member_terminal_records() {
         let shard = shard();
         let position = CommandPosition::new(shard.clone(), 7, 11);

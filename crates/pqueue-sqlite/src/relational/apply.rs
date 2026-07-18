@@ -1126,7 +1126,7 @@ pub(crate) fn apply_command_sql(
             let mut rearm_schedule: BTreeMap<(Option<i64>, i64), Vec<String>> = BTreeMap::new();
             for o in &c.outcomes {
                 let id = o.item_id.to_string();
-                let new_state = match o.kind {
+                let computed_state = match o.kind {
                     FinalizeKind::Complete => ItemState::Complete,
                     FinalizeKind::Fail => ItemState::Failed,
                     FinalizeKind::Retry => {
@@ -1142,6 +1142,12 @@ pub(crate) fn apply_command_sql(
                     FinalizeKind::Release => ItemState::Pending,
                     FinalizeKind::Rearm => ItemState::Pending,
                 };
+                if o.applied_state
+                    .is_some_and(|sealed| sealed != computed_state)
+                {
+                    return Err(EngineError::Conflict);
+                }
+                let new_state = o.applied_state.unwrap_or(computed_state);
                 match new_state {
                     ItemState::Complete => to_complete.push(id.clone()),
                     ItemState::Failed => to_failed.push(id.clone()),
@@ -1294,13 +1300,48 @@ pub(crate) fn apply_command_sql(
             if ids.is_empty() {
                 return Err(EngineError::NotFound);
             }
-            let outcomes: Vec<FinalizeOutcome> = ids
+            let effective_kind = if matches!(c.kind, FinalizeKind::Retry) {
+                let id_strings = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+                let placeholders = std::iter::repeat_n("?", id_strings.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT retry_count,max_attempts FROM pqueue_items \
+                     WHERE tenant_id=? AND queue_id=? AND item_id IN ({placeholders})"
+                );
+                let mut stmt = st(tx.prepare(&sql))?;
+                let params = std::iter::once(Value::Text(t.to_string()))
+                    .chain(std::iter::once(Value::Text(q.to_string())))
+                    .chain(id_strings.into_iter().map(Value::Text))
+                    .collect::<Vec<_>>();
+                let rows = st(stmt.query_map(rusqlite::params_from_iter(params), |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                }))?;
+                let exhausted = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| EngineError::Storage(error.to_string()))?
+                    .into_iter()
+                    .any(|(attempts, max_attempts)| {
+                        is_retry_exhausted(attempts as u32, max_attempts as u32)
+                    });
+                if exhausted {
+                    FinalizeKind::Fail
+                } else {
+                    FinalizeKind::Retry
+                }
+            } else {
+                c.kind
+            };
+            let effective_not_before = matches!(effective_kind, FinalizeKind::Retry)
+                .then_some(c.not_before)
+                .flatten();
+            let outcomes = ids
                 .iter()
                 .map(|item_id| FinalizeOutcome {
                     item_id: *item_id,
-                    kind: c.kind,
+                    kind: effective_kind,
                     applied_state: None,
-                    not_before: c.not_before,
+                    not_before: effective_not_before,
                 })
                 .collect();
             apply_command_sql(
@@ -1316,7 +1357,7 @@ pub(crate) fn apply_command_sql(
                 now,
                 &QueueCommand::Finalize(FinalizeCommand { outcomes }),
             )?;
-            let next_state = match c.kind {
+            let next_state = match effective_kind {
                 FinalizeKind::Complete | FinalizeKind::Fail => "terminal",
                 FinalizeKind::Retry | FinalizeKind::Release => "complete",
                 FinalizeKind::Rearm => return Err(EngineError::Invalid("cohort rearm is invalid")),
@@ -1498,7 +1539,7 @@ pub(crate) fn apply_command_sql(
                 .unwrap_or(0);
             let id_strs: Vec<String> = c.item_ids.iter().map(|i| i.to_string()).collect();
             let mut groups: Vec<GroupKey> = Vec::new();
-            // (client_item_key, item_id) tombstones for terminal items, deduped LAST-wins on key so the
+            // (client_item_key, item_id) tombstones for every removed item, deduped LAST-wins on key so the
             // batched upsert never touches the same conflict target twice (DO UPDATE cardinality).
             let mut retention: Vec<(String, String)> = Vec::new();
             // One set-based read of every purged item (was one SELECT per item).
@@ -1523,10 +1564,11 @@ pub(crate) fn apply_command_sql(
                 }))?;
                 for r in mapped {
                     let (item_id, gk, ck, state) = st(r)?;
-                    // TD-002 retention tombstone: purging a TERMINAL item keeps its client_item_key a
-                    // duplicate (re-push rejected) until `client_item_key_retention_ms` elapses. A pending
-                    // purge records nothing (its key is freely reusable, matching the log-replay family).
-                    if parse_state(&state)?.is_terminal() && retention_ms > 0 {
+                    // API-001/TD-002 retention tombstone: every successful removal keeps its
+                    // client_item_key a duplicate until `client_item_key_retention_ms` elapses,
+                    // regardless of the item's lifecycle state at removal.
+                    let _ = parse_state(&state)?;
+                    if retention_ms > 0 {
                         retention.retain(|(k, _)| k != &ck);
                         retention.push((ck, item_id));
                     }

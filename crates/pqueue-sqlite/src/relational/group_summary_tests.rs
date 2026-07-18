@@ -617,7 +617,7 @@ async fn cohort_expired_drains_the_group_summary() {
 }
 
 #[tokio::test]
-async fn pending_purge_records_no_retention_tombstone() {
+async fn pending_purge_retains_client_key_against_repush() {
     let b = SqliteRelationalBackend::in_memory().unwrap();
     b.create_queue(qdef()).await.unwrap();
     let key = ClientItemKey::new("pk").unwrap();
@@ -641,30 +641,27 @@ async fn pending_purge_records_no_retention_tombstone() {
         UpsertOutcome::Inserted { item_id } => item_id,
         _ => panic!("insert"),
     };
-    // Purge a PENDING item (not terminal) -> no retention tombstone, so the key is freely reusable.
+    // API-001 applies the retention tombstone to every successful removal, including PENDING.
     b.purge(&shard(), vec![id], false, ts(1), None)
         .await
         .unwrap();
-    assert!(
-        matches!(
-            b.replace_if_pending(
-                &shard(),
-                &key,
-                None,
-                None,
-                None,
-                None,
-                BTreeMap::new(),
-                Default::default(),
-                None,
-                ts(2),
-                None
-            )
-            .await
-            .unwrap(),
-            UpsertOutcome::Inserted { .. }
-        ),
-        "a pending purge leaves no tombstone (parity with the log-replay family)"
+    assert_eq!(
+        b.replace_if_pending(
+            &shard(),
+            &key,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+            Default::default(),
+            None,
+            ts(2),
+            None
+        )
+        .await,
+        Err(EngineError::Terminal),
+        "a pending purge must retain its client key until the API-001 window expires"
     );
 }
 

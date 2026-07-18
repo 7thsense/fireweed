@@ -940,8 +940,8 @@ impl ClaimPort for SqliteRelationalBackend {
 
 impl UpsertPort for SqliteRelationalBackend {
     /// Insert / replace-pending / reject-claimed / reject-terminal. BQ-11c adds the `client_item_key`
-    /// retention tombstone: when no active item exists but a non-expired retention record does (a TERMINAL
-    /// item under this key was purged within `client_item_key_retention_ms`), the re-push is still rejected
+    /// retention tombstone: when no active item exists but a non-expired retention record does (an item
+    /// under this key was purged within `client_item_key_retention_ms`), the re-push is still rejected
     /// as a duplicate (`Terminal`) rather than resurrecting the work — duplicate-push convergence across a
     /// purge (TD-002 §Idempotency). Data-plane request-id replay is a separate concern (no port carries a
     /// `request_id` yet — see the module note).
@@ -998,7 +998,7 @@ impl UpsertPort for SqliteRelationalBackend {
             };
             match existing {
                 None => {
-                    // No active item — but a non-expired retention tombstone (a terminal item under this
+                    // No active item — but a non-expired retention tombstone (an item under this
                     // key was purged within retention) keeps the re-push a duplicate (TD-002).
                     let retained: Option<i64> = st(g
                         .conn

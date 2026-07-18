@@ -15,9 +15,9 @@ use std::thread::{self, JoinHandle};
 use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp};
 use pqueue_engine::{
     AsyncControlPlane, AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem,
-    CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome, EngineError,
-    EngineResult, FinalizeTarget, IdempotencyDecision, ProjectionStore, PushFingerprint, PushItem,
-    QueueKey, RenewTarget, RichClaimSelection,
+    CohortLeaseTarget, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
+    EngineError, EngineResult, FinalizeTarget, IdempotencyDecision, ProjectionStore,
+    PushFingerprint, PushItem, QueueKey, RenewTarget, RichClaimSelection,
 };
 
 use crate::{PostgresRelational, PostgresRelationalBackend};
@@ -489,11 +489,40 @@ impl AsyncProjectionStore for AsyncPostgresRelationalProjection {
         shard: QueueKey,
         targets: Vec<FinalizeTarget>,
         now: UtcTimestamp,
-    ) -> impl Future<Output = EngineResult<Vec<u32>>> + Send {
+        _default_max_attempts: u32,
+    ) -> impl Future<Output = EngineResult<Vec<pqueue_engine::FinalizeLeaseMember>>> + Send {
         let actor = self.clone();
         async move {
             actor
                 .execute(move |store| store.async_finalize_targets_validate(&shard, &targets, now))
+                .await
+        }
+    }
+
+    fn cohort_lease_validate(
+        &self,
+        shard: QueueKey,
+        target: CohortLeaseTarget,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<Vec<pqueue_engine::CohortLeaseMember>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.async_cohort_lease_validate(&shard, &target, now))
+                .await
+        }
+    }
+
+    fn purge_validate(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+        force: bool,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.async_purge_items_validate(&shard, &ids, force))
                 .await
         }
     }

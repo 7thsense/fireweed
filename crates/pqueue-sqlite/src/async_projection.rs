@@ -7,9 +7,9 @@ use std::thread::{self, JoinHandle};
 
 use pqueue_core::{ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::{
-    AsyncProjectionStore, ClaimCompatibility, ClaimedItem, CommandEnvelope, CommandPosition,
-    EngineError, EngineResult, FinalizeTarget, IdempotencyDecision, ProjectionStore,
-    PushFingerprint, PushItem, QueueKey, RenewTarget,
+    AsyncProjectionStore, ClaimCompatibility, ClaimedItem, CohortLeaseTarget, CommandEnvelope,
+    CommandPosition, EngineError, EngineResult, FinalizeTarget, IdempotencyDecision,
+    ProjectionStore, PushFingerprint, PushItem, QueueKey, RenewTarget,
 };
 
 use crate::SqliteProjectionStore;
@@ -417,11 +417,40 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
         shard: QueueKey,
         targets: Vec<FinalizeTarget>,
         now: UtcTimestamp,
-    ) -> impl Future<Output = EngineResult<Vec<u32>>> + Send {
+        _default_max_attempts: u32,
+    ) -> impl Future<Output = EngineResult<Vec<pqueue_engine::FinalizeLeaseMember>>> + Send {
         let actor = self.clone();
         async move {
             actor
                 .execute(move |store| store.finalize_targets_validate(&shard, &targets, now))
+                .await
+        }
+    }
+
+    fn cohort_lease_validate(
+        &self,
+        shard: QueueKey,
+        target: CohortLeaseTarget,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<Vec<pqueue_engine::CohortLeaseMember>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.cohort_lease_validate(&shard, &target, now))
+                .await
+        }
+    }
+
+    fn purge_validate(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+        force: bool,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.purge_items_validate(&shard, &ids, force))
                 .await
         }
     }
@@ -750,6 +779,7 @@ mod tests {
                 not_before: None,
             }],
             UtcTimestamp::new(0, 0).unwrap(),
+            3,
         ));
         assert_send(store.apply_live(Vec::new(), Vec::new()));
         assert_send(store.apply_recovery(Vec::new(), Vec::new()));
@@ -804,6 +834,17 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(
+            store.purge_validate(shard(), vec![item], false).await,
+            Err(EngineError::Conflict)
+        );
+        assert_eq!(
+            store
+                .purge_validate(shard(), vec![item, item], true)
+                .await
+                .unwrap(),
+            vec![item]
+        );
         let mut other_definition = definition();
         other_definition.queue_id = QueueId::new("other-queue").unwrap();
         let other_shard = QueueKey::new(
@@ -860,6 +901,50 @@ mod tests {
                 )
                 .await,
             Err(EngineError::StaleLease)
+        );
+    }
+
+    #[tokio::test]
+    async fn purge_validation_and_apply_handle_missing_dedup_and_second_noop() {
+        let store = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        store.ensure_shard(definition()).await.unwrap();
+        let item = ItemId::mint(11, 0, 0);
+        let missing = ItemId::mint(11, 0, 1);
+        store
+            .apply_live(vec![CommandPosition::new(shard(), 1, 0)], vec![push(item)])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .purge_validate(shard(), vec![missing, item, item], false)
+                .await
+                .unwrap(),
+            vec![item]
+        );
+        let env = CommandEnvelope {
+            command_id: CommandId::new("purge"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item],
+            command: QueueCommand::PurgeItems(pqueue_engine::PurgeItemsCommand {
+                item_ids: vec![item],
+                force: false,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(11, 0).unwrap(),
+        };
+        store
+            .apply_live(vec![CommandPosition::new(shard(), 1, 1)], vec![env])
+            .await
+            .unwrap();
+        assert_eq!(store.item_state(shard(), item).await.unwrap(), None);
+        assert!(
+            store
+                .purge_validate(shard(), vec![item, missing], false)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -932,10 +1017,15 @@ mod tests {
                     shard(),
                     vec![target.clone()],
                     UtcTimestamp::new(10, 0).unwrap(),
+                    3,
                 )
                 .await
                 .unwrap(),
-            vec![1]
+            vec![pqueue_engine::FinalizeLeaseMember {
+                item_id: item,
+                attempt_count: 1,
+                max_attempts: 3,
+            }]
         );
         let mut stale_version = target;
         stale_version.item_version += 1;
@@ -945,6 +1035,7 @@ mod tests {
                     shard(),
                     vec![stale_version],
                     UtcTimestamp::new(10, 0).unwrap(),
+                    3,
                 )
                 .await,
             Err(EngineError::Conflict)
