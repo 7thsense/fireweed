@@ -11,6 +11,7 @@
 //! shared TD-001 conformance suite against both).
 
 use std::collections::BTreeMap;
+use std::future::ready;
 
 use rustc_hash::FxHashMap;
 
@@ -22,10 +23,11 @@ use pqueue_core::{
 };
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
-    AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    EngineError, EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView,
-    LogStore, ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey, QueueMetrics,
-    SnapshotRef, TerminalEmissionMetrics,
+    AsOfProjectionStore, AsyncLogStore, AsyncProjectionStore, ClaimRef, ClaimedItem,
+    CommandEnvelope, CommandPage, CommandPosition, DurabilityClass, EngineError, EngineResult,
+    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogStore, ProjectionSnapshot,
+    ProjectionStore, PushItem, QueueCounters, QueueKey, QueueMetrics, SnapshotRef,
+    TerminalEmissionMetrics,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -136,6 +138,66 @@ impl LogStore for MemoryLog {
             .logs
             .get(shard)
             .and_then(|log| log.snapshot_at_or_before(position)))
+    }
+}
+
+impl AsyncLogStore for MemoryLog {
+    fn durability_class(&self) -> DurabilityClass {
+        LogStore::durability_class(self)
+    }
+
+    fn ensure_shard(
+        &mut self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        ready(LogStore::ensure_shard(self, &shard))
+    }
+
+    fn current_epoch(
+        &mut self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        ready(LogStore::current_epoch(self, &shard))
+    }
+
+    fn acquire_epoch(
+        &mut self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        ready(LogStore::acquire_epoch(self, &shard))
+    }
+
+    fn append(
+        &mut self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
+        ready(LogStore::append(self, &shard, &commands, expected_epoch))
+    }
+
+    fn read_from(
+        &mut self,
+        shard: QueueKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
+        ready(LogStore::read_from(self, &shard, from, limit))
+    }
+
+    fn high_water(
+        &mut self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        ready(LogStore::high_water(self, &shard))
+    }
+
+    fn set_high_water(
+        &mut self,
+        shard: QueueKey,
+        position: CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        ready(LogStore::set_high_water(self, &shard, position))
     }
 }
 
@@ -477,6 +539,88 @@ impl ProjectionStore for InMemoryProjection {
     }
 }
 
+impl AsyncProjectionStore for InMemoryProjection {
+    fn supports_gates(&self) -> bool {
+        ProjectionStore::supports_gates(self)
+    }
+
+    fn ensure_shard(
+        &mut self,
+        definition: QueueDefinition,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        ready(ProjectionStore::ensure_shard(self, &definition))
+    }
+
+    fn admit_mutation(
+        &mut self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        ready(ProjectionStore::admit_mutation(self, &shard))
+    }
+
+    fn apply_live(
+        &mut self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        ready(ProjectionStore::apply_live(self, &positions, &commands))
+    }
+
+    fn apply_recovery(
+        &mut self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        ready(ProjectionStore::apply_recovery(self, &positions, &commands))
+    }
+
+    fn eligible_candidates(
+        &mut self,
+        shard: QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        ready(ProjectionStore::eligible_candidates(self, &shard, now, max))
+    }
+
+    fn render_claimed(
+        &mut self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        ready(ProjectionStore::render_claimed(self, &shard, &ids))
+    }
+
+    fn item_state(
+        &mut self,
+        shard: QueueKey,
+        id: ItemId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<ItemState>>> + Send {
+        ready(ProjectionStore::item_state(self, &shard, &id))
+    }
+
+    fn item_version(
+        &mut self,
+        shard: QueueKey,
+        id: ItemId,
+    ) -> impl std::future::Future<Output = EngineResult<Option<u64>>> + Send {
+        ready(ProjectionStore::item_version(self, &shard, &id))
+    }
+
+    fn recovery_high_water(
+        &mut self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        ready(ProjectionStore::recovery_high_water(self, &shard))
+    }
+
+    fn recover_definitions(
+        &mut self,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
+        ready(ProjectionStore::recover_definitions(self))
+    }
+}
+
 impl AsOfProjectionStore for InMemoryProjection {
     type AsOfProjection = InMemoryProjection;
 
@@ -486,11 +630,77 @@ impl AsOfProjectionStore for InMemoryProjection {
         snapshot: Option<ProjectionSnapshot>,
     ) -> EngineResult<Self::AsOfProjection> {
         let mut projection = InMemoryProjection::new();
-        projection.ensure_shard(definition)?;
+        ProjectionStore::ensure_shard(&mut projection, definition)?;
         if let Some(snapshot) = snapshot {
             let image = ProjectionImage::from_bytes(&snapshot.payload)?;
             projection.hydrate_shard(definition, image)?;
         }
         Ok(projection)
+    }
+}
+
+#[cfg(test)]
+mod async_axis_tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use pqueue_core::{QueueId, TenantId};
+
+    use super::*;
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn one_poll<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = pin!(future);
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("in-memory async axis must resolve in one poll"),
+        }
+    }
+
+    fn shard() -> QueueKey {
+        QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        )
+    }
+
+    fn assert_send<T: Send>(_: T) {}
+
+    #[test]
+    fn memory_log_async_axis_is_send_one_poll_and_sync_equivalent() {
+        let mut log = MemoryLog::new();
+        assert_send(AsyncLogStore::ensure_shard(&mut log, shard()));
+        assert!(one_poll(AsyncLogStore::ensure_shard(&mut log, shard())).is_ok());
+        assert_eq!(
+            one_poll(AsyncLogStore::current_epoch(&mut log, shard())).unwrap(),
+            LogStore::current_epoch(&log, &shard()).unwrap()
+        );
+        assert_eq!(
+            one_poll(AsyncLogStore::acquire_epoch(&mut log, shard())).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn in_memory_projection_async_axis_is_send_one_poll_and_sync_equivalent() {
+        let mut projection = InMemoryProjection::new();
+        assert_send(AsyncProjectionStore::recover_definitions(&mut projection));
+        assert_eq!(
+            one_poll(AsyncProjectionStore::recover_definitions(&mut projection)).unwrap(),
+            ProjectionStore::recover_definitions(&projection).unwrap()
+        );
+        assert_eq!(
+            AsyncProjectionStore::supports_gates(&projection),
+            ProjectionStore::supports_gates(&projection)
+        );
     }
 }

@@ -990,6 +990,29 @@ impl ControlPlane for InProcessControlPlane {
     }
 }
 
+impl crate::AsyncControlPlane for InProcessControlPlane {
+    fn create_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
+        std::future::ready(ControlPlane::create_queue(self, definition))
+    }
+
+    fn queue_definition(
+        &self,
+        key: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
+        std::future::ready(ControlPlane::queue_definition(self, &key))
+    }
+
+    fn list_queues(
+        &self,
+        tenant: TenantId,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
+        std::future::ready(ControlPlane::list_queues(self, &tenant))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ComposedBackend
 // ---------------------------------------------------------------------------
@@ -5573,6 +5596,27 @@ mod ordered_tests {
 
     fn ts(seconds: i64) -> UtcTimestamp {
         UtcTimestamp::new(seconds, 0).unwrap()
+    }
+
+    #[test]
+    fn in_process_async_control_plane_delegates_in_one_poll() {
+        let control = InProcessControlPlane::new();
+        let mut create = Box::pin(crate::AsyncControlPlane::create_queue(&control, qdef()));
+        assert!(matches!(poll_once(&mut create), Poll::Ready(Ok(outcome)) if outcome.created));
+
+        let mut get = Box::pin(crate::AsyncControlPlane::queue_definition(
+            &control,
+            queue(),
+        ));
+        assert!(matches!(poll_once(&mut get), Poll::Ready(Ok(definition)) if definition == qdef()));
+
+        let mut list = Box::pin(crate::AsyncControlPlane::list_queues(
+            &control,
+            TenantId::new("tenant").unwrap(),
+        ));
+        assert!(
+            matches!(poll_once(&mut list), Poll::Ready(Ok(queues)) if queues == vec![QueueId::new("queue").unwrap()])
+        );
     }
 
     fn add_millis(timestamp: UtcTimestamp, millis: u64) -> UtcTimestamp {
