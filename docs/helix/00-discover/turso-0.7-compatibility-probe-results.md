@@ -37,7 +37,7 @@ time, so the schema check cannot silently substitute a reduced copy.
 | Supported configuration readback | `journal_mode=wal`, `synchronous=1`, `busy_timeout=5000` | Pass | Every configured value is asserted after the Turso-specific API calls. |
 | Queue/cursor creation plus batched lifecycle transition | Pass | Pass | Three inserts, item A's lease fields, its typed index, and `next_seq=4` committed together. |
 | Priority/FIFO eligible query | `item-b`, `item-c` | `item-b`, `item-c` | Leased item A was excluded and ordered eligibility matched byte-for-byte. |
-| Blocked-gate anti-join, CTE, group-summary UPSERT, typed-index range | Pass | Pass in the matched fixture | The representative difficult SQL classes executed successfully. |
+| Blocked-gate anti-join, CTE, group-summary UPSERT, typed-index range | Pass | Existing production baseline; not independently re-probed here | Turso accepted the representative difficult SQL classes; cross-engine state parity is asserted separately below. |
 | Injected item-plus-cursor rollback | Pass | Pass | The item was absent and `next_seq` remained `4`. |
 | Close and reopen | Full state equal to pre-close state | Full state equal to pre-close state | Item count, lease fields, typed index, cursor, and eligible order survived in both engines. |
 | Cross-engine reopened state | Equal | Equal | Both returned 3 items, cursor 4, eligible `[item-b,item-c]`, index `[item-a]`, and identical item-A lease state. |
