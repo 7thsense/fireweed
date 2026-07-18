@@ -12,7 +12,7 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     AsyncProjectionStore, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    FinalizeKind, QueueCommand, QueueKey,
+    FinalizeKind, PayloadUpdate, QueueCommand, QueueKey,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -162,11 +162,19 @@ fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
         | QueueCommand::Finalize(_)
         | QueueCommand::LeaseExpired(_)
         | QueueCommand::FenceLease(_)
-        | QueueCommand::UnfenceLease(_) => {}
+        | QueueCommand::UnfenceLease(_)
+        | QueueCommand::ReplacePending(_)
+        | QueueCommand::UpdateFields(_)
+        | QueueCommand::PauseQueue(_)
+        | QueueCommand::ResumeQueue
+        | QueueCommand::PurgeItems(_)
+        | QueueCommand::SetGates(_) => {}
         QueueCommand::Push(push) => {
-            if push.items.iter().any(|item| {
-                item.group_key.is_some() || item.cohort_size.is_some() || !item.gate_keys.is_empty()
-            }) {
+            if push
+                .items
+                .iter()
+                .any(|item| item.group_key.is_some() || item.cohort_size.is_some())
+            {
                 return Err(EngineError::Unavailable);
             }
         }
@@ -382,7 +390,7 @@ async fn apply_owned(
                                 entity.map_or(Value::Null, Value::Text),
                                 Value::Integer(incoming),
                                 Value::Integer(now),
-                                Value::Integer(item.max_attempts as i64),
+                                Value::Integer(i64::from(item.max_attempts)),
                                 Value::Integer(
                                     base.checked_add(i64::try_from(offset).map_err(storage)?)
                                         .ok_or_else(|| storage("item sequence overflow"))?,
@@ -391,6 +399,20 @@ async fn apply_owned(
                         )
                         .await
                         .map_err(storage)?;
+                    for gate in &item.gate_keys {
+                        transaction
+                            .execute(
+                                sql::INSERT_ITEM_GATE,
+                                vec![
+                                    Value::Text(tenant.clone()),
+                                    Value::Text(queue.clone()),
+                                    Value::Text(item.item_id.to_string()),
+                                    Value::Text(gate.as_str().to_string()),
+                                ],
+                            )
+                            .await
+                            .map_err(storage)?;
+                    }
                 }
             }
             QueueCommand::Claim(claim) => {
@@ -573,6 +595,190 @@ async fn apply_owned(
                     .await?;
                 }
             }
+            QueueCommand::UpdateFields(update) => {
+                let current = one_row(
+                    &transaction,
+                    sql::SELECT_LIVE_FIELDS,
+                    vec![
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                        Value::Text(update.item_id.to_string()),
+                    ],
+                )
+                .await?;
+                if let Some(row) = current {
+                    let mut fields = fields_from_json(text(&row[0])?)?;
+                    for (key, value) in &update.field_ops {
+                        match value {
+                            Some(value) => {
+                                fields.insert(key.clone(), value.clone());
+                            }
+                            None => {
+                                fields.remove(key);
+                            }
+                        }
+                    }
+                    let encoded = fields_to_json(&fields)?;
+                    let base = vec![
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                        Value::Text(update.item_id.to_string()),
+                        Value::Text(encoded),
+                    ];
+                    match &update.payload {
+                        PayloadUpdate::Keep => {
+                            let mut params = base;
+                            params.extend([
+                                Value::Integer(ts_nanos(envelope.created_at)),
+                                Value::Integer(incoming),
+                            ]);
+                            transaction
+                                .execute(sql::UPDATE_FIELDS_KEEP_PAYLOAD, params)
+                                .await
+                                .map_err(storage)?;
+                        }
+                        PayloadUpdate::Set(payload) => {
+                            let mut params = base;
+                            params.push(
+                                payload
+                                    .as_ref()
+                                    .map_or(Value::Null, |bytes| Value::Blob(bytes.to_vec())),
+                            );
+                            params.extend([
+                                Value::Integer(ts_nanos(envelope.created_at)),
+                                Value::Integer(incoming),
+                            ]);
+                            transaction
+                                .execute(sql::UPDATE_FIELDS_SET_PAYLOAD, params)
+                                .await
+                                .map_err(storage)?;
+                        }
+                    }
+                    if let Some(document) = &update.set_entity_document {
+                        let definition =
+                            definition_in_transaction(&transaction, &position.queue).await?;
+                        if !definition.typed_indexes.is_empty() {
+                            transaction.rollback().await.map_err(storage)?;
+                            return Err(EngineError::Unavailable);
+                        }
+                        transaction
+                            .execute(
+                                sql::UPDATE_ENTITY_DOCUMENT,
+                                vec![
+                                    Value::Text(tenant.clone()),
+                                    Value::Text(queue.clone()),
+                                    Value::Text(update.item_id.to_string()),
+                                    Value::Text(serde_json::to_string(document).map_err(storage)?),
+                                ],
+                            )
+                            .await
+                            .map_err(storage)?;
+                    }
+                }
+            }
+            QueueCommand::ReplacePending(replace) => {
+                let definition = definition_in_transaction(&transaction, &position.queue).await?;
+                if !definition.typed_indexes.is_empty()
+                    || replace.replacement.group_key.is_some()
+                    || replace.replacement.cohort_size.is_some()
+                {
+                    transaction.rollback().await.map_err(storage)?;
+                    return Err(EngineError::Unavailable);
+                }
+                transaction
+                    .execute(
+                        sql::SUPERSEDE_ITEM,
+                        vec![
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                            Value::Text(replace.superseded_item_id.to_string()),
+                            Value::Integer(ts_nanos(envelope.created_at)),
+                            Value::Integer(incoming),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                let row = one_row(
+                    &transaction,
+                    sql::SELECT_NEXT_ITEM_SEQUENCE,
+                    vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                )
+                .await?
+                .ok_or(EngineError::NotFound)?;
+                let created_seq = integer(&row[0])?;
+                transaction
+                    .execute(
+                        sql::UPDATE_NEXT_ITEM_SEQUENCE,
+                        vec![
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                            Value::Integer(
+                                created_seq
+                                    .checked_add(1)
+                                    .ok_or_else(|| storage("item sequence overflow"))?,
+                            ),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                let item = &replace.replacement;
+                let priority = item
+                    .priority
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(storage)?;
+                let not_before = ts_nanos_opt(item.not_before);
+                let now = ts_nanos(envelope.created_at);
+                let entity = item
+                    .entity_document
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(storage)?;
+                transaction
+                    .execute(
+                        sql::INSERT_ITEM,
+                        vec![
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                            Value::Text(item.item_id.to_string()),
+                            Value::Text(item.client_item_key.as_str().to_string()),
+                            priority.map_or(Value::Null, Value::Text),
+                            Value::Blob(elig_sort(&item.priority, &definition.priority_model)),
+                            not_before.map_or(Value::Null, Value::Integer),
+                            Value::Integer(not_before.unwrap_or(now)),
+                            Value::Null,
+                            Value::Null,
+                            item.payload
+                                .as_ref()
+                                .map_or(Value::Null, |value| Value::Blob(value.to_vec())),
+                            Value::Text(fields_to_json(&item.fields)?),
+                            Value::Text(metadata_to_json(&item.metadata)?),
+                            entity.map_or(Value::Null, Value::Text),
+                            Value::Integer(incoming),
+                            Value::Integer(now),
+                            Value::Integer(i64::from(item.max_attempts)),
+                            Value::Integer(created_seq),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                for gate in &item.gate_keys {
+                    transaction
+                        .execute(
+                            sql::INSERT_ITEM_GATE,
+                            vec![
+                                Value::Text(tenant.clone()),
+                                Value::Text(queue.clone()),
+                                Value::Text(item.item_id.to_string()),
+                                Value::Text(gate.as_str().to_string()),
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
+                }
+            }
             QueueCommand::LeaseExpired(expired) => {
                 execute_for_items(
                     &transaction,
@@ -610,6 +816,112 @@ async fn apply_owned(
                     &unfence.item_ids,
                 )
                 .await?;
+            }
+            QueueCommand::PauseQueue(_) => {
+                transaction
+                    .execute(
+                        sql::PAUSE_QUEUE,
+                        vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                    )
+                    .await
+                    .map_err(storage)?;
+            }
+            QueueCommand::ResumeQueue => {
+                transaction
+                    .execute(
+                        sql::RESUME_QUEUE,
+                        vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                    )
+                    .await
+                    .map_err(storage)?;
+            }
+            QueueCommand::SetGates(gates) => {
+                for gate in &gates.gate_keys {
+                    transaction
+                        .execute(
+                            if gates.blocked {
+                                sql::SET_GATE_BLOCKED
+                            } else {
+                                sql::SET_GATE_UNBLOCKED
+                            },
+                            vec![
+                                Value::Text(tenant.clone()),
+                                Value::Text(queue.clone()),
+                                Value::Text(gate.as_str().to_string()),
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
+                }
+            }
+            QueueCommand::PurgeItems(purge) => {
+                if !purge.item_ids.is_empty() {
+                    let definition =
+                        definition_in_transaction(&transaction, &position.queue).await?;
+                    let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+                    append_item_ids(&mut params, &purge.item_ids);
+                    let mut rows = transaction
+                        .query(&sql::select_purge_items(purge.item_ids.len()), params)
+                        .await
+                        .map_err(storage)?;
+                    let mut retention = Vec::new();
+                    while let Some(row) = rows.next().await.map_err(storage)? {
+                        let state = parse_state(&text(&row.get_value(2).map_err(storage)?)?)?;
+                        if state.is_terminal() && definition.client_item_key_retention_ms > 0 {
+                            retention.push((
+                                text(&row.get_value(1).map_err(storage)?)?,
+                                text(&row.get_value(0).map_err(storage)?)?,
+                            ));
+                        }
+                    }
+                    drop(rows);
+                    let retention_nanos = i64::try_from(definition.client_item_key_retention_ms)
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(1_000_000);
+                    let expires = ts_nanos(envelope.created_at).saturating_add(retention_nanos);
+                    for (key, item) in retention {
+                        transaction
+                            .execute(
+                                sql::UPSERT_KEY_RETENTION,
+                                vec![
+                                    Value::Text(tenant.clone()),
+                                    Value::Text(queue.clone()),
+                                    Value::Text(key),
+                                    Value::Text(item),
+                                    Value::Integer(expires),
+                                ],
+                            )
+                            .await
+                            .map_err(storage)?;
+                    }
+                    execute_for_items(
+                        &transaction,
+                        sql::delete_item_gates(purge.item_ids.len()),
+                        vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                        &purge.item_ids,
+                    )
+                    .await?;
+                    execute_for_items(
+                        &transaction,
+                        sql::delete_item_indexes(purge.item_ids.len()),
+                        vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                        &purge.item_ids,
+                    )
+                    .await?;
+                    execute_for_items(
+                        &transaction,
+                        sql::delete_items(purge.item_ids.len()),
+                        vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                        &purge.item_ids,
+                    )
+                    .await?;
+                    token_ops.extend(
+                        purge
+                            .item_ids
+                            .iter()
+                            .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
+                    );
+                }
             }
             _ => unreachable!("validated minimal command set"),
         }
@@ -770,6 +1082,21 @@ impl AsyncProjectionStore for TursoRelational {
                 let Some(expires) = optional_integer(&values[5])? else {
                     continue;
                 };
+                let gate_rows = self
+                    .query(
+                        sql::SELECT_ITEM_GATES,
+                        vec![
+                            shard.tenant_id.as_str().to_string().into(),
+                            shard.queue_id.as_str().to_string().into(),
+                            id.to_string().into(),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                let gate_keys = gate_rows
+                    .iter()
+                    .map(|row| text(&row.values[0]))
+                    .collect::<EngineResult<Vec<_>>>()?;
                 claimed.push(ClaimedItem {
                     item_id: id,
                     client_item_key: ClientItemKey::new(text(&values[0])?).map_err(storage)?,
@@ -786,7 +1113,7 @@ impl AsyncProjectionStore for TursoRelational {
                     payload: optional_blob(&values[7])?.map(Bytes::from),
                     fields: fields_from_json(text(&values[8])?)?,
                     metadata: metadata_from_json(text(&values[9])?)?,
-                    gate_keys: Vec::new(),
+                    gate_keys,
                 });
             }
             Ok(claimed)

@@ -38,7 +38,11 @@ pub mod async_projection {
     pub const SELECT_ELIGIBLE: &str = "SELECT item_id FROM pqueue_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
         AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
-        AND eligible_since IS NOT NULL ORDER BY priority_sort,created_seq LIMIT ?4";
+        AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+        JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+        AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
+        AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
+        ORDER BY priority_sort,created_seq LIMIT ?4";
     pub const SELECT_ITEM_STATE: &str = "SELECT lifecycle_state FROM pqueue_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
     pub const SELECT_ITEM_VERSION: &str = "SELECT item_version FROM pqueue_items \
@@ -46,6 +50,8 @@ pub mod async_projection {
     pub const SELECT_CLAIMED_ITEM: &str = "SELECT client_item_key,item_version,priority,group_key,\
         not_before,lease_expires_at,retry_count,payload,fields,metadata FROM pqueue_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND item_id=?3";
+    pub const SELECT_ITEM_GATES: &str = "SELECT gate_key FROM pqueue_item_gates \
+        WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 ORDER BY gate_key";
     pub const SELECT_DEFINITIONS: &str = "SELECT definition FROM queues ORDER BY tenant,queue";
     pub const SELECT_CLAIM_BY_QUERY_REPLAYS: &str = "SELECT request_id,response_payload \
         FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
@@ -53,6 +59,35 @@ pub mod async_projection {
     pub const EXTEND_CLAIM_BY_QUERY_REPLAY: &str = "UPDATE pqueue_request_idempotency \
         SET expires_at=max(expires_at,?4) WHERE tenant_id=?1 AND queue_id=?2 \
         AND operation='claim_by_query' AND request_id=?3";
+    pub const INSERT_ITEM_GATE: &str = "INSERT INTO pqueue_item_gates \
+        (tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4) \
+        ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING";
+    pub const SELECT_LIVE_FIELDS: &str = "SELECT fields FROM pqueue_items WHERE tenant_id=?1 \
+        AND queue_id=?2 AND item_id=?3 AND lifecycle_state IN ('Pending','Leased') \
+        AND superseded=0 AND fenced=0";
+    pub const UPDATE_FIELDS_KEEP_PAYLOAD: &str = "UPDATE pqueue_items SET fields=?4,\
+        item_version=item_version+1,updated_at=?5,last_command_sequence=?6 WHERE tenant_id=?1 \
+        AND queue_id=?2 AND item_id=?3 AND lifecycle_state IN ('Pending','Leased') \
+        AND superseded=0 AND fenced=0";
+    pub const UPDATE_FIELDS_SET_PAYLOAD: &str = "UPDATE pqueue_items SET fields=?4,payload=?5,\
+        item_version=item_version+1,updated_at=?6,last_command_sequence=?7 WHERE tenant_id=?1 \
+        AND queue_id=?2 AND item_id=?3 AND lifecycle_state IN ('Pending','Leased') \
+        AND superseded=0 AND fenced=0";
+    pub const UPDATE_ENTITY_DOCUMENT: &str = "UPDATE pqueue_items SET entity_document=?4 \
+        WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
+    pub const SUPERSEDE_ITEM: &str = "UPDATE pqueue_items SET superseded=1,updated_at=?4,\
+        last_command_sequence=?5 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
+    pub const PAUSE_QUEUE: &str = "UPDATE queues SET paused=1 WHERE tenant=?1 AND queue=?2";
+    pub const RESUME_QUEUE: &str = "UPDATE queues SET paused=0 WHERE tenant=?1 AND queue=?2";
+    pub const UPSERT_KEY_RETENTION: &str = "INSERT INTO pqueue_item_key_retention \
+        (tenant_id,queue_id,client_item_key,item_id,expires_at) VALUES(?1,?2,?3,?4,?5) \
+        ON CONFLICT(tenant_id,queue_id,client_item_key) DO UPDATE SET \
+        item_id=excluded.item_id,expires_at=excluded.expires_at";
+    pub const SET_GATE_BLOCKED: &str = "INSERT INTO pqueue_gate_state \
+        (tenant_id,queue_id,gate_key) VALUES(?1,?2,?3) \
+        ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING";
+    pub const SET_GATE_UNBLOCKED: &str = "DELETE FROM pqueue_gate_state \
+        WHERE tenant_id=?1 AND queue_id=?2 AND gate_key=?3";
 
     pub fn claim_items(placeholders: usize) -> String {
         let ids = vec!["?"; placeholders].join(",");
@@ -129,6 +164,35 @@ pub mod async_projection {
             } else {
                 "UPDATE pqueue_items SET fenced=0 WHERE tenant_id=? AND queue_id=? AND item_id IN"
             },
+            placeholders,
+        )
+    }
+
+    pub fn select_purge_items(placeholders: usize) -> String {
+        with_item_ids(
+            "SELECT item_id,client_item_key,lifecycle_state FROM pqueue_items \
+             WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn delete_items(placeholders: usize) -> String {
+        with_item_ids(
+            "DELETE FROM pqueue_items WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn delete_item_gates(placeholders: usize) -> String {
+        with_item_ids(
+            "DELETE FROM pqueue_item_gates WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn delete_item_indexes(placeholders: usize) -> String {
+        with_item_ids(
+            "DELETE FROM pqueue_item_index WHERE tenant_id=? AND queue_id=? AND item_id IN",
             placeholders,
         )
     }

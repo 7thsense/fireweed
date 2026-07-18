@@ -9,8 +9,10 @@ use pqueue_core::{
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
     CommandPosition, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, ProjectionStore, PushCommand, PushItem, QueueCommand, QueueKey,
-    ReassignLeaseCommand, RenewLeaseCommand, UnfenceLeaseCommand,
+    LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, ProjectionStore, PurgeItemsCommand,
+    PushCommand, PushItem, QueueCommand, QueueKey, ReassignLeaseCommand, RenewLeaseCommand,
+    ReplacePendingCommand, ScheduleUpdate, SetGatesCommand, UnfenceLeaseCommand,
+    UpdateFieldsCommand, WriteSideRecordsCommand,
 };
 use pqueue_relational::OWNED_PROJECTION_TABLES;
 use pqueue_sqlite::SqliteProjectionStore;
@@ -378,7 +380,7 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
         )],
         vec![envelope(
             "overlap-unsupported",
-            QueueCommand::ResumeQueue,
+            QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
             Vec::new(),
             12,
         )],
@@ -387,7 +389,12 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
     .expect("unsupported overlap is idempotently skipped");
 
     // Unsupported live-frontier arms fail before mutation or cursor advancement.
-    let unsupported = envelope("resume", QueueCommand::ResumeQueue, Vec::new(), 12);
+    let unsupported = envelope(
+        "side-records",
+        QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
+        Vec::new(),
+        12,
+    );
     let unsupported_position = CommandPosition::new(
         QueueKey::new(
             TenantId::new("tenant").unwrap(),
@@ -1162,5 +1169,321 @@ async fn active_lease_reopen_is_explicitly_hash_only_until_response_recovery_exi
             .unwrap()
             .is_empty(),
         "cleartext token recovery is intentionally not claimed by this adapter slice"
+    );
+}
+
+#[tokio::test]
+async fn control_gate_update_replace_and_purge_match_sqlite() {
+    let definition = definition();
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let mut sqlite = SqliteProjectionStore::in_memory().expect("sqlite");
+    ProjectionStore::ensure_shard(&mut sqlite, &definition).expect("sqlite ensure");
+    let turso = TursoRelational::in_memory().await.expect("Turso");
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .expect("Turso ensure");
+    let gated = ItemId::mint(7, 0, 0);
+    let plain = ItemId::mint(7, 0, 1);
+    let old = ItemId::mint(7, 0, 2);
+    let field_item = ItemId::mint(7, 0, 3);
+    let purged = ItemId::mint(7, 0, 4);
+    let replacement = ItemId::mint(7, 0, 5);
+    let paused_push = ItemId::mint(7, 0, 6);
+    let mut gated_item = push_item(gated, "gated", 3);
+    gated_item.gate_keys = vec!["deploy".to_string()];
+    let mut initial_field = push_item(field_item, "fields", 3);
+    initial_field.payload = Some(Bytes::from_static(b"old"));
+    initial_field
+        .fields
+        .insert("remove".into(), Bytes::from_static(b"x"));
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        0,
+        envelope(
+            "shape-push",
+            QueueCommand::Push(PushCommand {
+                items: vec![
+                    gated_item,
+                    push_item(plain, "plain", 3),
+                    push_item(old, "replace-key", 3),
+                    initial_field,
+                    push_item(purged, "purge-key", 3),
+                ],
+            }),
+            vec![gated, plain, old, field_item, purged],
+            10,
+        ),
+    )
+    .await;
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        1,
+        envelope(
+            "block",
+            QueueCommand::SetGates(SetGatesCommand {
+                gate_keys: vec!["deploy".into()],
+                blocked: true,
+            }),
+            Vec::new(),
+            11,
+        ),
+    )
+    .await;
+    assert_eq!(
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(11), 20)
+            .await
+            .unwrap(),
+        ProjectionStore::eligible_candidates(&sqlite, &shard, timestamp(11), 20).unwrap()
+    );
+    assert!(
+        !AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(11), 20)
+            .await
+            .unwrap()
+            .contains(&gated)
+    );
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        2,
+        envelope(
+            "pause",
+            QueueCommand::PauseQueue(PauseQueueCommand { drain_intake: true }),
+            Vec::new(),
+            12,
+        ),
+    )
+    .await;
+    assert!(
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(12), 20)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Projection replay still materializes already-authorized intake while paused; eligibility remains stopped.
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        3,
+        envelope(
+            "paused-push",
+            QueueCommand::Push(PushCommand {
+                items: vec![push_item(paused_push, "paused-push", 3)],
+            }),
+            vec![paused_push],
+            13,
+        ),
+    )
+    .await;
+    assert!(
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(13), 20)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        4,
+        envelope("resume", QueueCommand::ResumeQueue, Vec::new(), 14),
+    )
+    .await;
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        5,
+        envelope(
+            "unblock",
+            QueueCommand::SetGates(SetGatesCommand {
+                gate_keys: vec!["deploy".into()],
+                blocked: false,
+            }),
+            Vec::new(),
+            15,
+        ),
+    )
+    .await;
+    assert_eq!(
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(15), 20)
+            .await
+            .unwrap(),
+        ProjectionStore::eligible_candidates(&sqlite, &shard, timestamp(15), 20).unwrap()
+    );
+
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        6,
+        envelope(
+            "update",
+            QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id: field_item,
+                field_ops: std::collections::BTreeMap::from([
+                    ("remove".into(), None),
+                    ("added".into(), Some(Bytes::from_static(b"yes"))),
+                ]),
+                payload: PayloadUpdate::Set(Some(Bytes::from_static(b"new"))),
+                set_priority: ScheduleUpdate::Keep,
+                set_not_before: ScheduleUpdate::Keep,
+                set_entity_document: None,
+            }),
+            vec![field_item],
+            16,
+        ),
+    )
+    .await;
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        7,
+        envelope(
+            "replace",
+            QueueCommand::ReplacePending(ReplacePendingCommand {
+                client_item_key: ClientItemKey::new("replace-key").unwrap(),
+                superseded_item_id: old,
+                replacement: push_item(replacement, "replace-key", 3),
+            }),
+            vec![old, replacement],
+            17,
+        ),
+    )
+    .await;
+    let eligible =
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(17), 20)
+            .await
+            .unwrap();
+    assert!(!eligible.contains(&old));
+    assert!(eligible.contains(&replacement));
+    assert_eq!(
+        eligible,
+        ProjectionStore::eligible_candidates(&sqlite, &shard, timestamp(17), 20).unwrap()
+    );
+
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        8,
+        envelope(
+            "claim-updated",
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![field_item, purged],
+                lease_token: LeaseToken::new("control-token").unwrap(),
+                lease_expires_at: timestamp(30),
+                worker_id: None,
+            }),
+            vec![field_item, purged],
+            18,
+        ),
+    )
+    .await;
+    let updated = AsyncProjectionStore::render_claimed(&turso, shard.clone(), vec![field_item])
+        .await
+        .unwrap();
+    let sqlite_updated = ProjectionStore::render_claimed(&sqlite, &shard, &[field_item]).unwrap();
+    assert_eq!(updated[0].fields, sqlite_updated[0].fields);
+    assert_eq!(updated[0].payload, sqlite_updated[0].payload);
+    assert_eq!(updated[0].item_version, sqlite_updated[0].item_version);
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        9,
+        envelope(
+            "terminal",
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(purged, FinalizeKind::Complete)],
+            }),
+            vec![purged],
+            19,
+        ),
+    )
+    .await;
+    apply_both(
+        &mut sqlite,
+        &turso,
+        &shard,
+        10,
+        envelope(
+            "purge",
+            QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![purged],
+                force: false,
+            }),
+            vec![purged],
+            20,
+        ),
+    )
+    .await;
+    assert_eq!(
+        AsyncProjectionStore::item_state(&turso, shard.clone(), purged)
+            .await
+            .unwrap(),
+        ProjectionStore::item_state(&sqlite, &shard, &purged).unwrap()
+    );
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        10
+    );
+    let tombstone = turso.query("SELECT item_id,expires_at FROM pqueue_item_key_retention WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3", vec!["tenant".into(), "queue".into(), "purge-key".into()]).await.unwrap();
+    assert_eq!(tombstone[0].values[0], Value::Text(purged.to_string()));
+    assert_eq!(tombstone[0].values[1], Value::Integer(80_000_000_000));
+
+    let rollback_positions = vec![
+        CommandPosition::new(shard.clone(), 1, 11),
+        CommandPosition::new(shard.clone(), 1, 12),
+    ];
+    let rollback_commands = vec![
+        envelope(
+            "rollback-pause",
+            QueueCommand::PauseQueue(PauseQueueCommand {
+                drain_intake: false,
+            }),
+            Vec::new(),
+            21,
+        ),
+        envelope(
+            "duplicate-replacement",
+            QueueCommand::ReplacePending(ReplacePendingCommand {
+                client_item_key: ClientItemKey::new("plain").unwrap(),
+                superseded_item_id: ItemId::mint(7, 0, 99),
+                replacement: push_item(ItemId::mint(7, 0, 100), "plain", 3),
+            }),
+            Vec::new(),
+            21,
+        ),
+    ];
+    assert!(ProjectionStore::apply(&mut sqlite, &rollback_positions, &rollback_commands).is_err());
+    assert!(
+        AsyncProjectionStore::apply_live(&turso, rollback_positions, rollback_commands)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        10
+    );
+    assert_eq!(
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(21), 20)
+            .await
+            .unwrap(),
+        ProjectionStore::eligible_candidates(&sqlite, &shard, timestamp(21), 20).unwrap()
     );
 }
