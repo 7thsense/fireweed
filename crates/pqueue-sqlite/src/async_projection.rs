@@ -8,8 +8,8 @@ use std::thread::{self, JoinHandle};
 use pqueue_core::{ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimedItem, CommandEnvelope, CommandPosition,
-    EngineError, EngineResult, IdempotencyDecision, ProjectionStore, PushFingerprint, PushItem,
-    QueueKey, RenewTarget,
+    EngineError, EngineResult, FinalizeTarget, IdempotencyDecision, ProjectionStore,
+    PushFingerprint, PushItem, QueueKey, RenewTarget,
 };
 
 use crate::SqliteProjectionStore;
@@ -412,6 +412,37 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
         }
     }
 
+    fn finalize_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<FinalizeTarget>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<Vec<u32>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.finalize_targets_validate(&shard, &targets, now))
+                .await
+        }
+    }
+
+    fn expired_leases(
+        &self,
+        shard: QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let actor = self.clone();
+        async move {
+            if max == 0 {
+                return Ok(Vec::new());
+            }
+            actor
+                .execute(move |store| store.expired_leases_bounded(&shard, now, max))
+                .await
+        }
+    }
+
     fn apply_live(
         &self,
         positions: Vec<CommandPosition>,
@@ -543,11 +574,27 @@ mod tests {
         TenantId,
     };
     use pqueue_engine::{
-        ClaimCommand, CommandChecksum, CommandEnvelope, CommandId, PauseQueueCommand, PushCommand,
-        PushItem, QueueCommand, RenewTarget, RequestOutcome,
+        ClaimCommand, CommandChecksum, CommandEnvelope, CommandId, FinalizeKind, FinalizeTarget,
+        PauseQueueCommand, PushCommand, PushItem, QueueCommand, RenewTarget, RequestOutcome,
     };
 
     use super::*;
+
+    #[test]
+    fn expired_lease_selection_is_indexed_bounded_and_ordinary_only() {
+        let sql = crate::relational::EXPIRED_LEASES_BOUNDED_SQL;
+        for predicate in [
+            "cohort_size IS NULL",
+            "fenced=0",
+            "superseded=0",
+            "lease_expires_at<?3",
+            "ORDER BY item_id",
+            "LIMIT ?4",
+        ] {
+            assert!(sql.contains(predicate));
+        }
+        assert!(pqueue_relational::RELATIONAL_SCHEMA.contains("pqueue_items_expired_lease_idx"));
+    }
 
     fn shard() -> QueueKey {
         QueueKey::new(
@@ -690,6 +737,17 @@ mod tests {
             vec![RenewTarget {
                 item_id: item,
                 lease_token: LeaseToken::new("token").unwrap(),
+            }],
+            UtcTimestamp::new(0, 0).unwrap(),
+        ));
+        assert_send(store.finalize_validate(
+            shard(),
+            vec![FinalizeTarget {
+                item_id: item,
+                lease_token: LeaseToken::new("token").unwrap(),
+                item_version: 1,
+                kind: FinalizeKind::Complete,
+                not_before: None,
             }],
             UtcTimestamp::new(0, 0).unwrap(),
         ));
@@ -854,12 +912,43 @@ mod tests {
                 shard(),
                 vec![RenewTarget {
                     item_id: item,
-                    lease_token: token,
+                    lease_token: token.clone(),
                 }],
                 UtcTimestamp::new(10, 0).unwrap(),
             )
             .await
             .unwrap();
+        let item_version = reopened.item_version(shard(), item).await.unwrap().unwrap();
+        let target = FinalizeTarget {
+            item_id: item,
+            lease_token: token.clone(),
+            item_version,
+            kind: FinalizeKind::Complete,
+            not_before: None,
+        };
+        assert_eq!(
+            reopened
+                .finalize_validate(
+                    shard(),
+                    vec![target.clone()],
+                    UtcTimestamp::new(10, 0).unwrap(),
+                )
+                .await
+                .unwrap(),
+            vec![1]
+        );
+        let mut stale_version = target;
+        stale_version.item_version += 1;
+        assert_eq!(
+            reopened
+                .finalize_validate(
+                    shard(),
+                    vec![stale_version],
+                    UtcTimestamp::new(10, 0).unwrap(),
+                )
+                .await,
+            Err(EngineError::Conflict)
+        );
         reopened.close_and_drain().await.unwrap();
         drop(reopened);
         let _ = std::fs::remove_file(path);

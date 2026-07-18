@@ -28,8 +28,8 @@ use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, RequestId, Tenant
 
 use crate::{
     ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, IdempotencyDecision,
-    PushFingerprint, PushItem, QueueKey, RenewTarget, RichClaimSelection,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeTarget,
+    IdempotencyDecision, PushFingerprint, PushItem, QueueKey, RenewTarget, RichClaimSelection,
 };
 
 /// Native-async command-log, epoch-fence, replay, and high-water operations needed by initial composition.
@@ -138,6 +138,56 @@ pub trait AsyncProjectionStore: Send + Sync {
         _targets: Vec<RenewTarget>,
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn finalize_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<FinalizeTarget>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<u32>>> + Send {
+        async move {
+            self.renew_validate(
+                shard.clone(),
+                targets
+                    .iter()
+                    .map(|t| RenewTarget {
+                        item_id: t.item_id,
+                        lease_token: t.lease_token.clone(),
+                    })
+                    .collect(),
+                now,
+            )
+            .await?;
+            let items = self
+                .render_claimed(shard, targets.iter().map(|t| t.item_id).collect())
+                .await?;
+            if items.len() != targets.len() {
+                return Err(EngineError::StaleLease);
+            }
+            items
+                .into_iter()
+                .zip(targets)
+                .map(|(item, target)| {
+                    if item.item_id != target.item_id || item.item_version != target.item_version {
+                        Err(EngineError::Conflict)
+                    } else {
+                        Ok(item.attempt_count)
+                    }
+                })
+                .collect()
+        }
+    }
+
+    /// Deterministically select leases expired strictly before `now`, ordered by item id and capped before
+    /// returning. Selection is read-only; the resulting `LeaseExpired` command owns the transition.
+    fn expired_leases(
+        &self,
+        _shard: QueueKey,
+        _now: UtcTimestamp,
+        _max: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 
@@ -469,6 +519,7 @@ mod tests {
         ));
         assert_send(projection.apply_live(Vec::new(), Vec::new()));
         assert_send(projection.apply_recovery(Vec::new(), Vec::new()));
+        assert_send(projection.expired_leases(shard(), UtcTimestamp::new(0, 0).unwrap(), 16));
         assert_send(projection.eligible_candidates(shard(), UtcTimestamp::new(0, 0).unwrap(), 1));
         assert_send(projection.select_rich_claim(
             shard(),

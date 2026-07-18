@@ -9,12 +9,12 @@ use pqueue_core::{
 };
 
 use crate::{
-    AsyncCommitStrategy, ClaimCommand, ClaimRequest, ClaimUnit, Claimed, ClaimedItem,
-    CohortClaimCommand, CommandChecksum, DispatchError, DurabilityClass, EngineError, EngineResult,
-    KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, PushCommand, PushItem, PushSpec, QueueCommand,
-    QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest, RequestOutcome,
-    TaskOutcomeError, compile_entity_schema, validate_claim_compatibility, validate_entity,
-    validate_gate_push,
+    AsyncCommitStrategy, AsyncReclaimPlanner, AsyncReclaimRequest, ClaimCommand, ClaimRequest,
+    ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CommandChecksum, DispatchError,
+    DurabilityClass, EngineError, EngineResult, KeyedQueueGate, OwnedTask, OwnedTaskDispatcher,
+    PushCommand, PushItem, PushSpec, QueueCommand, QueueGateError, QueueKey, RawCommitFault,
+    RawCommitOutcome, RawCommitRequest, RequestOutcome, TaskOutcomeError, compile_entity_schema,
+    validate_claim_compatibility, validate_entity, validate_gate_push,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +181,23 @@ pub struct RenewTarget {
     pub lease_token: LeaseToken,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizeTarget {
+    pub item_id: ItemId,
+    pub lease_token: LeaseToken,
+    pub item_version: u64,
+    pub kind: crate::FinalizeKind,
+    pub not_before: Option<UtcTimestamp>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AsyncFinalizeRequest {
+    pub shard: QueueKey,
+    pub targets: Vec<FinalizeTarget>,
+    pub now: UtcTimestamp,
+    pub expected_epoch: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AsyncRenewRequest {
     pub shard: QueueKey,
@@ -194,11 +211,30 @@ pub struct AsyncRenewRequest {
 /// the composed backend's exact-envelope validation.
 pub struct AsyncLifecyclePlan {
     request: RawCommitRequest,
+    expected_finalize_outcomes: Option<Vec<crate::FinalizeOutcome>>,
 }
 
 impl AsyncLifecyclePlan {
     pub(crate) fn renew(request: RawCommitRequest) -> Self {
-        Self { request }
+        Self {
+            request,
+            expected_finalize_outcomes: None,
+        }
+    }
+
+    pub(crate) fn finalize(
+        request: RawCommitRequest,
+        expected_outcomes: Vec<crate::FinalizeOutcome>,
+    ) -> Self {
+        Self {
+            request,
+            expected_finalize_outcomes: Some(expected_outcomes),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request(&self) -> &RawCommitRequest {
+        &self.request
     }
 }
 
@@ -207,10 +243,19 @@ impl AsyncLifecyclePlan {
 pub trait AsyncLifecyclePlanner: Send + Sync + 'static {
     fn plan_renew(&self, request: AsyncRenewRequest)
     -> OwnedTask<EngineResult<AsyncLifecyclePlan>>;
+    fn plan_finalize(
+        &self,
+        _request: AsyncFinalizeRequest,
+    ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+        Box::pin(async { Err(EngineError::Unavailable) })
+    }
 }
 
 /// Marker used when typed lifecycle mutations were not injected.
 pub struct NoAsyncLifecyclePlanner;
+
+/// Marker used when typed expired-lease reclaim was not injected.
+pub struct NoAsyncReclaimPlanner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsyncLifecyclePostCommitStage {
@@ -253,12 +298,14 @@ pub struct AsyncComposedBackend<
     P = NoAsyncClaimPlanner,
     U = NoAsyncPushPlanner,
     V = NoAsyncLifecyclePlanner,
+    R = NoAsyncReclaimPlanner,
 > {
     strategy: Arc<S>,
     dispatcher: D,
     claim_planner: Arc<P>,
     push_planner: Arc<U>,
     lifecycle_planner: Arc<V>,
+    reclaim_planner: Arc<R>,
     admission: KeyedQueueGate<crate::QueueKey>,
     durability: DurabilityClass,
 }
@@ -276,6 +323,7 @@ where
             claim_planner: Arc::new(NoAsyncClaimPlanner),
             push_planner: Arc::new(NoAsyncPushPlanner),
             lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
+            reclaim_planner: Arc::new(NoAsyncReclaimPlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
@@ -300,13 +348,14 @@ where
             claim_planner: Arc::new(claim_planner),
             push_planner: Arc::new(NoAsyncPushPlanner),
             lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
+            reclaim_planner: Arc::new(NoAsyncReclaimPlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
     }
 }
 
-impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
+impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest>,
     D: OwnedTaskDispatcher,
@@ -377,7 +426,91 @@ where
     }
 }
 
-impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
+impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
+where
+    S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
+    D: OwnedTaskDispatcher,
+    R: AsyncReclaimPlanner,
+{
+    /// Reclaim one deterministic batch of expired ordinary leases under the same queue permit used by
+    /// every other typed mutation. Once dispatched, caller cancellation discards only the response.
+    pub async fn reclaim_expired(
+        &self,
+        request: AsyncReclaimRequest,
+    ) -> Result<Vec<ItemId>, AsyncLifecycleError> {
+        let queue = request.shard.clone();
+        let planner = Arc::clone(&self.reclaim_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let plan = planner
+                    .plan_reclaim(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let (commit, item_ids) = plan.into_parts();
+                let Some(commit) = commit else {
+                    if !item_ids.is_empty() {
+                        return Err(LifecycleExecutionError::BeforeCommit(EngineError::Invalid(
+                            "invalid empty async reclaim plan",
+                        )));
+                    }
+                    return Ok(item_ids);
+                };
+                validate_reclaim_plan(&request, &commit, &item_ids)
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = commit.expected_epoch();
+                let outcome = strategy
+                    .commit(commit)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)?;
+                Ok(item_ids)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+}
+
+fn validate_reclaim_plan(
+    requested: &AsyncReclaimRequest,
+    commit: &RawCommitRequest,
+    item_ids: &[ItemId],
+) -> EngineResult<()> {
+    let unique: HashSet<_> = item_ids.iter().copied().collect();
+    if item_ids.is_empty()
+        || unique.len() != item_ids.len()
+        || requested.limit.is_some_and(|limit| item_ids.len() > limit)
+        || commit.shard() != &requested.shard
+        || requested
+            .expected_epoch
+            .is_some_and(|epoch| epoch != commit.expected_epoch())
+        || commit.commands().len() != 1
+        || commit.fault() != RawCommitFault::None
+    {
+        return Err(EngineError::Invalid("invalid async reclaim plan"));
+    }
+    let envelope = &commit.commands()[0];
+    let QueueCommand::LeaseExpired(command) = &envelope.command else {
+        return Err(EngineError::Invalid("invalid async reclaim plan"));
+    };
+    if command.item_ids != item_ids
+        || envelope.item_ids != item_ids
+        || envelope.command_id.0.is_empty()
+        || envelope.created_at != requested.now
+        || envelope.request_id.is_some()
+        || envelope.request_fingerprint.is_some()
+        || envelope.request_outcome.is_some()
+        || envelope.checksum != CommandChecksum(0)
+    {
+        return Err(EngineError::Invalid("invalid async reclaim plan"));
+    }
+    Ok(())
+}
+
+impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -797,31 +930,49 @@ where
             claim_planner: Arc::new(claim_planner),
             push_planner: Arc::new(push_planner),
             lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
+            reclaim_planner: Arc::new(NoAsyncReclaimPlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
     }
 }
 
-impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V> {
+impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R> {
     /// Add a separately injected lifecycle capability while preserving the existing claim/push profile.
     pub fn with_lifecycle_planner<W>(
         self,
         lifecycle_planner: W,
-    ) -> AsyncComposedBackend<S, D, P, U, W> {
+    ) -> AsyncComposedBackend<S, D, P, U, W, R> {
         AsyncComposedBackend {
             strategy: self.strategy,
             dispatcher: self.dispatcher,
             claim_planner: self.claim_planner,
             push_planner: self.push_planner,
             lifecycle_planner: Arc::new(lifecycle_planner),
+            reclaim_planner: self.reclaim_planner,
+            admission: self.admission,
+            durability: self.durability,
+        }
+    }
+
+    pub fn with_reclaim_planner<W>(
+        self,
+        reclaim_planner: W,
+    ) -> AsyncComposedBackend<S, D, P, U, V, W> {
+        AsyncComposedBackend {
+            strategy: self.strategy,
+            dispatcher: self.dispatcher,
+            claim_planner: self.claim_planner,
+            push_planner: self.push_planner,
+            lifecycle_planner: self.lifecycle_planner,
+            reclaim_planner: Arc::new(reclaim_planner),
             admission: self.admission,
             durability: self.durability,
         }
     }
 }
 
-impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
+impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -856,9 +1007,120 @@ where
         .map_err(AsyncLifecycleError::Submit)?
         .map_err(AsyncLifecycleError::from)
     }
+
+    pub async fn finalize(&self, request: AsyncFinalizeRequest) -> Result<(), AsyncLifecycleError> {
+        let queue = request.shard.clone();
+        let planner = Arc::clone(&self.lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let plan = planner
+                    .plan_finalize(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                validate_finalize_plan(
+                    &request,
+                    &plan.request,
+                    plan.expected_finalize_outcomes.as_deref(),
+                )
+                .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
 }
 
-impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
+fn validate_finalize_plan(
+    request: &AsyncFinalizeRequest,
+    commit: &RawCommitRequest,
+    expected_outcomes: Option<&[crate::FinalizeOutcome]>,
+) -> EngineResult<()> {
+    if commit.shard() != &request.shard
+        || commit.commands().len() != 1
+        || commit.fault() != RawCommitFault::None
+        || request
+            .expected_epoch
+            .is_some_and(|epoch| epoch != commit.expected_epoch())
+    {
+        return Err(EngineError::Invalid("invalid async finalize plan"));
+    }
+    let envelope = &commit.commands()[0];
+    let QueueCommand::Finalize(command) = &envelope.command else {
+        return Err(EngineError::Invalid("invalid async finalize plan"));
+    };
+    let ids = request
+        .targets
+        .iter()
+        .map(|target| target.item_id)
+        .collect::<Vec<_>>();
+    let unique: HashSet<_> = ids.iter().copied().collect();
+    let Some(expected_outcomes) = expected_outcomes else {
+        return Err(EngineError::Invalid("invalid async finalize plan"));
+    };
+    let exact_expected = command.outcomes.len() == expected_outcomes.len()
+        && command
+            .outcomes
+            .iter()
+            .zip(expected_outcomes)
+            .all(|(actual, expected)| {
+                actual.item_id == expected.item_id
+                    && actual.kind == expected.kind
+                    && actual.applied_state == expected.applied_state
+                    && actual.not_before == expected.not_before
+            });
+    let outcomes_match = exact_expected
+        && expected_outcomes.len() == request.targets.len()
+        && expected_outcomes
+            .iter()
+            .zip(&request.targets)
+            .all(|(outcome, target)| {
+                let state_matches = matches!(
+                    (target.kind, outcome.applied_state),
+                    (
+                        crate::FinalizeKind::Complete,
+                        Some(pqueue_core::ItemState::Complete)
+                    ) | (
+                        crate::FinalizeKind::Fail,
+                        Some(pqueue_core::ItemState::Failed)
+                    ) | (
+                        crate::FinalizeKind::Release | crate::FinalizeKind::Rearm,
+                        Some(pqueue_core::ItemState::Pending),
+                    ) | (
+                        crate::FinalizeKind::Retry,
+                        Some(pqueue_core::ItemState::Pending | pqueue_core::ItemState::Failed),
+                    )
+                );
+                outcome.item_id == target.item_id
+                    && outcome.kind == target.kind
+                    && outcome.not_before == target.not_before
+                    && state_matches
+            });
+    if ids.is_empty()
+        || unique.len() != ids.len()
+        || envelope.command_id.0.is_empty()
+        || envelope.item_ids != ids
+        || envelope.created_at != request.now
+        || envelope.request_id.is_some()
+        || envelope.request_fingerprint.is_some()
+        || envelope.request_outcome.is_some()
+        || envelope.checksum != CommandChecksum(0)
+        || !outcomes_match
+    {
+        return Err(EngineError::Invalid("invalid async finalize plan"));
+    }
+    Ok(())
+}
+
+impl<S, D, P, U, V, R> AsyncComposedBackend<S, D, P, U, V, R>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -1103,10 +1365,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        ClaimCommand, ClaimCompatibility, CommandChecksum, CommandEnvelope, CommandId,
-        CommandPosition, OwnedTask, OwnedTaskFactory, QueueCommand, QueueKey, RawCommitOutcome,
-        RequestOutcome, TaskOutcome, TaskOutcomeSender, UnifiedAtomicCommit,
-        UnifiedAtomicCommitter, build_push_items, task_outcome_channel,
+        AsyncReclaimPlan, ClaimCommand, ClaimCompatibility, CommandChecksum, CommandEnvelope,
+        CommandId, CommandPosition, FinalizeCommand, FinalizeKind, FinalizeOutcome, OwnedTask,
+        OwnedTaskFactory, QueueCommand, QueueKey, RawCommitOutcome, RequestOutcome, TaskOutcome,
+        TaskOutcomeSender, UnifiedAtomicCommit, UnifiedAtomicCommitter, build_push_items,
+        task_outcome_channel,
     };
 
     fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
@@ -1730,6 +1993,11 @@ mod tests {
         Expiry,
         Fault,
         EmptyCommandId,
+        Metadata,
+        Checksum,
+        AppliedState,
+        RetryFailedBelowMax,
+        RetryPendingAtMax,
     }
 
     impl AsyncLifecyclePlanner for ControlledLifecyclePlanner {
@@ -1772,6 +2040,79 @@ mod tests {
                     planned = planned.with_fault(RawCommitFault::BeforeAppend);
                 }
                 Ok(AsyncLifecyclePlan::renew(planned))
+            })
+        }
+
+        fn plan_finalize(
+            &self,
+            request: AsyncFinalizeRequest,
+        ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let smuggle = self.smuggle;
+            Box::pin(async move {
+                let mut expected_outcomes = request
+                    .targets
+                    .iter()
+                    .map(|target| FinalizeOutcome {
+                        item_id: target.item_id,
+                        kind: target.kind,
+                        applied_state: Some(match target.kind {
+                            FinalizeKind::Complete => pqueue_core::ItemState::Complete,
+                            FinalizeKind::Fail => pqueue_core::ItemState::Failed,
+                            FinalizeKind::Retry | FinalizeKind::Release | FinalizeKind::Rearm => {
+                                pqueue_core::ItemState::Pending
+                            }
+                        }),
+                        not_before: target.not_before,
+                    })
+                    .collect::<Vec<_>>();
+                if smuggle == LifecycleSmuggle::RetryPendingAtMax {
+                    expected_outcomes[0].applied_state = Some(pqueue_core::ItemState::Failed);
+                }
+                let mut outcomes = expected_outcomes.clone();
+                match smuggle {
+                    LifecycleSmuggle::AppliedState => {
+                        outcomes[0].applied_state = Some(pqueue_core::ItemState::Leased);
+                    }
+                    LifecycleSmuggle::RetryFailedBelowMax => {
+                        outcomes[0].applied_state = Some(pqueue_core::ItemState::Failed);
+                    }
+                    LifecycleSmuggle::RetryPendingAtMax => {
+                        outcomes[0].applied_state = Some(pqueue_core::ItemState::Pending);
+                    }
+                    _ => {}
+                }
+                let item_ids = request
+                    .targets
+                    .iter()
+                    .map(|target| target.item_id)
+                    .collect();
+                let mut envelope = CommandEnvelope {
+                    command_id: CommandId::new(if smuggle == LifecycleSmuggle::EmptyCommandId {
+                        ""
+                    } else {
+                        "finalize-command"
+                    }),
+                    request_id: None,
+                    request_fingerprint: None,
+                    request_outcome: None,
+                    item_ids,
+                    command: QueueCommand::Finalize(FinalizeCommand { outcomes }),
+                    checksum: CommandChecksum(if smuggle == LifecycleSmuggle::Checksum {
+                        1
+                    } else {
+                        0
+                    }),
+                    created_at: request.now,
+                };
+                if smuggle == LifecycleSmuggle::Metadata {
+                    envelope.request_id = Some(RequestId::new("smuggled").unwrap());
+                }
+                let mut planned = RawCommitRequest::new(request.shard, vec![envelope], 1);
+                if smuggle == LifecycleSmuggle::Fault {
+                    planned = planned.with_fault(RawCommitFault::BeforeAppend);
+                }
+                Ok(AsyncLifecyclePlan::finalize(planned, expected_outcomes))
             })
         }
     }
@@ -2146,6 +2487,190 @@ mod tests {
             now: UtcTimestamp::new(10, 0).unwrap(),
             expected_epoch: Some(1),
         }
+    }
+
+    fn finalize_request() -> AsyncFinalizeRequest {
+        AsyncFinalizeRequest {
+            shard: queue("finalize"),
+            targets: vec![FinalizeTarget {
+                item_id: ItemId::mint(1, 1, 1),
+                lease_token: LeaseToken::new("finalize-token").unwrap(),
+                item_version: 2,
+                kind: FinalizeKind::Complete,
+                not_before: None,
+            }],
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            expected_epoch: Some(1),
+        }
+    }
+
+    struct FinalizeFixture {
+        backend: AsyncComposedBackend<
+            UnifiedAtomicCommit<ClaimCommitter>,
+            ControlledDispatcher,
+            NoAsyncClaimPlanner,
+            NoAsyncPushPlanner,
+            ControlledLifecyclePlanner,
+        >,
+        dispatcher: ControlledDispatcher,
+        phase: Arc<Phase>,
+        commits: Arc<AtomicUsize>,
+        completed: Arc<AtomicBool>,
+        plans: Arc<AtomicUsize>,
+    }
+
+    fn finalize_backend(
+        smuggle: LifecycleSmuggle,
+        released: bool,
+        capacity: usize,
+    ) -> FinalizeFixture {
+        let phase = Phase::new(released);
+        let commits = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(AtomicBool::new(false));
+        let plans = Arc::new(AtomicUsize::new(0));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: commits.clone(),
+                completed: completed.clone(),
+                phase: phase.clone(),
+            },
+        )
+        .unwrap();
+        let dispatcher = ControlledDispatcher::new(capacity);
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), capacity)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle,
+                calls: plans.clone(),
+            });
+        FinalizeFixture {
+            backend,
+            dispatcher,
+            phase,
+            commits,
+            completed,
+            plans,
+        }
+    }
+
+    #[test]
+    fn typed_finalize_routes_strategy_and_rejects_smuggling_before_commit() {
+        for smuggle in [
+            LifecycleSmuggle::None,
+            LifecycleSmuggle::Fault,
+            LifecycleSmuggle::EmptyCommandId,
+            LifecycleSmuggle::Metadata,
+            LifecycleSmuggle::Checksum,
+            LifecycleSmuggle::AppliedState,
+        ] {
+            let fixture = finalize_backend(smuggle, true, 1);
+            let mut finalize = Box::pin(fixture.backend.finalize(finalize_request()));
+            assert!(matches!(poll_once(finalize.as_mut()), Poll::Pending));
+            assert!(fixture.dispatcher.drive_next());
+            if smuggle == LifecycleSmuggle::None {
+                assert!(matches!(poll_once(finalize.as_mut()), Poll::Ready(Ok(()))));
+                assert_eq!(fixture.commits.load(Ordering::Acquire), 1);
+            } else {
+                assert!(matches!(
+                    poll_once(finalize.as_mut()),
+                    Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(
+                        EngineError::Invalid("invalid async finalize plan")
+                    )))
+                ));
+                assert_eq!(fixture.commits.load(Ordering::Acquire), 0);
+            }
+            assert_eq!(fixture.plans.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[test]
+    fn typed_finalize_rejects_empty_duplicate_and_stale_epoch_before_commit() {
+        for mutate in 0..3 {
+            let fixture = finalize_backend(LifecycleSmuggle::None, true, 1);
+            let mut request = finalize_request();
+            match mutate {
+                0 => request.targets.clear(),
+                1 => request.targets.push(request.targets[0].clone()),
+                2 => request.expected_epoch = Some(2),
+                _ => unreachable!(),
+            }
+            let mut finalize = Box::pin(fixture.backend.finalize(request));
+            assert!(matches!(poll_once(finalize.as_mut()), Poll::Pending));
+            assert!(fixture.dispatcher.drive_next());
+            assert!(matches!(
+                poll_once(finalize.as_mut()),
+                Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(_)))
+            ));
+            assert_eq!(fixture.commits.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn typed_finalize_rejects_retry_state_opposite_to_authoritative_attempt_count() {
+        for smuggle in [
+            LifecycleSmuggle::RetryFailedBelowMax,
+            LifecycleSmuggle::RetryPendingAtMax,
+        ] {
+            let fixture = finalize_backend(smuggle, true, 1);
+            let mut request = finalize_request();
+            request.targets[0].kind = FinalizeKind::Retry;
+            request.targets[0].not_before = Some(UtcTimestamp::new(20, 0).unwrap());
+            let mut finalize = Box::pin(fixture.backend.finalize(request));
+            assert!(matches!(poll_once(finalize.as_mut()), Poll::Pending));
+            assert!(fixture.dispatcher.drive_next());
+            assert!(matches!(
+                poll_once(finalize.as_mut()),
+                Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(
+                    EngineError::Invalid("invalid async finalize plan")
+                )))
+            ));
+            assert_eq!(fixture.commits.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn typed_finalize_reports_invalid_response_barrier_after_commit() {
+        let dispatcher = ControlledDispatcher::new(1);
+        let backend = AsyncComposedBackend::new(
+            UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, AppendedOnlyCommitter)
+                .unwrap(),
+            dispatcher.clone(),
+            1,
+        )
+        .with_lifecycle_planner(ControlledLifecyclePlanner {
+            smuggle: LifecycleSmuggle::None,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut finalize = Box::pin(backend.finalize(finalize_request()));
+        assert!(matches!(poll_once(finalize.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(finalize.as_mut()),
+            Poll::Ready(Err(AsyncLifecycleError::AfterCommit {
+                stage: AsyncLifecyclePostCommitStage::CommitOutcome,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn typed_finalize_serializes_same_queue_and_survives_dropped_caller() {
+        let fixture = finalize_backend(LifecycleSmuggle::None, false, 2);
+        let mut first = Box::pin(fixture.backend.finalize(finalize_request()));
+        let mut second = Box::pin(fixture.backend.finalize(finalize_request()));
+        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert_eq!(fixture.plans.load(Ordering::Acquire), 1);
+        drop(first);
+        fixture.phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert!(fixture.completed.load(Ordering::Acquire));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(poll_once(second.as_mut()), Poll::Ready(Ok(()))));
+        assert_eq!(fixture.plans.load(Ordering::Acquire), 2);
+        assert_eq!(fixture.commits.load(Ordering::Acquire), 2);
     }
 
     #[test]
@@ -3051,6 +3576,295 @@ mod tests {
         phase.release();
         assert!(fixture.dispatcher.drive_next());
         assert_eq!(fixture.completed.lock().unwrap().as_slice(), &[queue("q")]);
+    }
+
+    #[derive(Clone, Copy)]
+    enum FixedReclaimMode {
+        Valid,
+        Empty,
+        WrongEpoch,
+        ReplayMetadata,
+        PlannerError,
+    }
+
+    #[derive(Clone)]
+    struct FixedReclaimPlanner {
+        item_ids: Vec<ItemId>,
+        calls: Arc<AtomicUsize>,
+        mode: FixedReclaimMode,
+    }
+
+    impl AsyncReclaimPlanner for FixedReclaimPlanner {
+        fn plan_reclaim(
+            &self,
+            request: AsyncReclaimRequest,
+        ) -> OwnedTask<EngineResult<AsyncReclaimPlan>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let item_ids = self.item_ids.clone();
+            let mode = self.mode;
+            Box::pin(async move {
+                if matches!(mode, FixedReclaimMode::PlannerError) {
+                    return Err(EngineError::Storage("reclaim planning failed".to_string()));
+                }
+                if matches!(mode, FixedReclaimMode::Empty) {
+                    return Ok(AsyncReclaimPlan::empty());
+                }
+                let mut envelope = CommandEnvelope {
+                    command_id: CommandId::new("reclaim-command"),
+                    request_id: None,
+                    request_fingerprint: None,
+                    request_outcome: None,
+                    item_ids: item_ids.clone(),
+                    command: QueueCommand::LeaseExpired(crate::LeaseExpiredCommand {
+                        item_ids: item_ids.clone(),
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: request.now,
+                };
+                if matches!(mode, FixedReclaimMode::ReplayMetadata) {
+                    envelope.request_fingerprint = Some(7);
+                }
+                let epoch = if matches!(mode, FixedReclaimMode::WrongEpoch) {
+                    request.expected_epoch.unwrap_or(1) + 1
+                } else {
+                    request.expected_epoch.unwrap_or(1)
+                };
+                Ok(AsyncReclaimPlan::commit(
+                    RawCommitRequest::new(request.shard, vec![envelope], epoch),
+                    item_ids,
+                ))
+            })
+        }
+    }
+
+    fn reclaim_request(name: &str) -> AsyncReclaimRequest {
+        AsyncReclaimRequest {
+            shard: queue(name),
+            limit: Some(2),
+            now: UtcTimestamp::new(30, 0).unwrap(),
+            expected_epoch: Some(1),
+        }
+    }
+
+    fn reclaim_items() -> Vec<ItemId> {
+        vec![ItemId::mint(1, 1, 1), ItemId::mint(1, 1, 2)]
+    }
+
+    #[test]
+    fn reclaim_happy_path_and_empty_batch_use_one_queue_operation() {
+        for (mode, expected_commits, expected_items) in [
+            (FixedReclaimMode::Valid, 1, reclaim_items()),
+            (FixedReclaimMode::Empty, 0, Vec::new()),
+        ] {
+            let request = reclaim_request("reclaim");
+            let calls = Arc::new(AtomicUsize::new(0));
+            let commit_calls = Arc::new(AtomicUsize::new(0));
+            let committer = FixedOutcomeCommitter {
+                calls: Arc::clone(&commit_calls),
+                outcome: Ok(RawCommitOutcome::applied(vec![CommandPosition::new(
+                    request.shard.clone(),
+                    1,
+                    1,
+                )])),
+            };
+            let strategy =
+                UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, committer).unwrap();
+            let dispatcher = ControlledDispatcher::new(1);
+            let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+                .with_reclaim_planner(FixedReclaimPlanner {
+                    item_ids: reclaim_items(),
+                    calls: Arc::clone(&calls),
+                    mode,
+                });
+
+            let mut reclaim = Box::pin(backend.reclaim_expired(request));
+            assert!(matches!(poll_once(reclaim.as_mut()), Poll::Pending));
+            assert!(dispatcher.drive_next());
+            assert!(
+                matches!(poll_once(reclaim.as_mut()), Poll::Ready(Ok(ids)) if ids == expected_items)
+            );
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            assert_eq!(commit_calls.load(Ordering::Acquire), expected_commits);
+        }
+    }
+
+    #[test]
+    fn reclaim_fence_smuggling_and_planner_failures_stop_before_commit() {
+        for mode in [
+            FixedReclaimMode::WrongEpoch,
+            FixedReclaimMode::ReplayMetadata,
+            FixedReclaimMode::PlannerError,
+        ] {
+            let request = reclaim_request("reclaim");
+            let commit_calls = Arc::new(AtomicUsize::new(0));
+            let committer = FixedOutcomeCommitter {
+                calls: Arc::clone(&commit_calls),
+                outcome: Ok(RawCommitOutcome::applied(vec![CommandPosition::new(
+                    request.shard.clone(),
+                    1,
+                    1,
+                )])),
+            };
+            let strategy =
+                UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, committer).unwrap();
+            let dispatcher = ControlledDispatcher::new(1);
+            let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+                .with_reclaim_planner(FixedReclaimPlanner {
+                    item_ids: reclaim_items(),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    mode,
+                });
+
+            let mut reclaim = Box::pin(backend.reclaim_expired(request));
+            assert!(matches!(poll_once(reclaim.as_mut()), Poll::Pending));
+            assert!(dispatcher.drive_next());
+            assert!(matches!(
+                poll_once(reclaim.as_mut()),
+                Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(_)))
+            ));
+            assert_eq!(commit_calls.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn reclaim_rejects_invalid_plan_footprints() {
+        let request = reclaim_request("reclaim");
+        let ids = reclaim_items();
+        let envelope = |envelope_ids: Vec<ItemId>, command_ids: Vec<ItemId>| CommandEnvelope {
+            command_id: CommandId::new("reclaim-command"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: envelope_ids,
+            command: QueueCommand::LeaseExpired(crate::LeaseExpiredCommand {
+                item_ids: command_ids,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: request.now,
+        };
+
+        let duplicate = vec![ids[0], ids[0]];
+        let commit = RawCommitRequest::new(
+            request.shard.clone(),
+            vec![envelope(duplicate.clone(), duplicate.clone())],
+            1,
+        );
+        assert!(validate_reclaim_plan(&request, &commit, &duplicate).is_err());
+
+        let mut reversed = ids.clone();
+        reversed.reverse();
+        let commit = RawCommitRequest::new(
+            request.shard.clone(),
+            vec![envelope(ids.clone(), reversed)],
+            1,
+        );
+        assert!(validate_reclaim_plan(&request, &commit, &ids).is_err());
+
+        let commit = RawCommitRequest::new(
+            request.shard.clone(),
+            vec![envelope(ids.clone(), ids.clone())],
+            1,
+        )
+        .with_fault(RawCommitFault::AfterAppendBeforeApply);
+        assert!(validate_reclaim_plan(&request, &commit, &ids).is_err());
+    }
+
+    #[test]
+    fn reclaim_commit_and_outcome_failures_are_phase_aware() {
+        let request = reclaim_request("reclaim");
+        for (outcome, expected_commit_error) in [
+            (Err(EngineError::Storage("commit failed".to_string())), true),
+            (
+                Ok(RawCommitOutcome::appended(vec![CommandPosition::new(
+                    request.shard.clone(),
+                    1,
+                    1,
+                )])),
+                false,
+            ),
+        ] {
+            let committer = FixedOutcomeCommitter {
+                calls: Arc::new(AtomicUsize::new(0)),
+                outcome,
+            };
+            let strategy =
+                UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, committer).unwrap();
+            let dispatcher = ControlledDispatcher::new(1);
+            let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+                .with_reclaim_planner(FixedReclaimPlanner {
+                    item_ids: reclaim_items(),
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    mode: FixedReclaimMode::Valid,
+                });
+            let mut reclaim = Box::pin(backend.reclaim_expired(request.clone()));
+            assert!(matches!(poll_once(reclaim.as_mut()), Poll::Pending));
+            assert!(dispatcher.drive_next());
+            let result = poll_once(reclaim.as_mut());
+            if expected_commit_error {
+                assert!(matches!(
+                    result,
+                    Poll::Ready(Err(AsyncLifecycleError::Commit(_)))
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Poll::Ready(Err(AsyncLifecycleError::AfterCommit {
+                        stage: AsyncLifecyclePostCommitStage::CommitOutcome,
+                        ..
+                    }))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn reclaim_cancellation_does_not_cancel_commit_and_same_queue_is_serialized() {
+        let phase = Phase::new(false);
+        let completed = Arc::new(AtomicBool::new(false));
+        let commit_calls = Arc::new(AtomicUsize::new(0));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: Arc::clone(&commit_calls),
+                completed: Arc::clone(&completed),
+                phase: Arc::clone(&phase),
+            },
+        )
+        .unwrap();
+        let dispatcher = ControlledDispatcher::new(2);
+        let plan_calls = Arc::new(AtomicUsize::new(0));
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+            .with_reclaim_planner(FixedReclaimPlanner {
+                item_ids: reclaim_items(),
+                calls: Arc::clone(&plan_calls),
+                mode: FixedReclaimMode::Valid,
+            });
+
+        let mut first = Box::pin(backend.reclaim_expired(reclaim_request("reclaim")));
+        let mut second = Box::pin(backend.reclaim_expired(reclaim_request("reclaim")));
+        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert_eq!(dispatcher.accepted(), 1);
+        assert!(dispatcher.drive_next());
+        assert!(phase.started.load(Ordering::Acquire));
+        assert_eq!(plan_calls.load(Ordering::Acquire), 1);
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+
+        drop(first);
+        phase.release();
+        assert!(dispatcher.drive_next());
+        assert!(completed.load(Ordering::Acquire));
+        assert_eq!(commit_calls.load(Ordering::Acquire), 1);
+
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert_eq!(dispatcher.accepted(), 1);
+        assert!(dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(second.as_mut()),
+            Poll::Ready(Ok(ids)) if ids == reclaim_items()
+        ));
+        assert_eq!(plan_calls.load(Ordering::Acquire), 2);
+        assert_eq!(commit_calls.load(Ordering::Acquire), 2);
     }
 
     #[test]

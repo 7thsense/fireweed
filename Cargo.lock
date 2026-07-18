@@ -2832,6 +2832,7 @@ name = "pqueue-turso"
 version = "0.17.3"
 dependencies = [
  "bytes",
+ "pqueue-conformance",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-projection",

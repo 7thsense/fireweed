@@ -55,6 +55,8 @@ mod helpers;
 mod hybrid;
 mod monitor;
 mod projection;
+#[cfg(test)]
+pub(crate) use projection::EXPIRED_LEASES_BOUNDED_SQL;
 mod query;
 mod recovery;
 mod unified;

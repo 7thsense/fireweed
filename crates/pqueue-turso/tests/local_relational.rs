@@ -12,11 +12,11 @@ use pqueue_engine::{
     AsyncProjectionStore, ClaimCommand, ClaimCompatibility, ClaimUnit, CohortClaimCommand,
     CohortExpiredCommand, CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum,
     CommandEnvelope, CommandId, CommandPosition, FenceLeaseCommand, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, GroupBatching, IdempotencyDecision, LeaseExpiredCommand, PauseQueueCommand,
-    PayloadUpdate, ProjectionStore, PurgeItemsCommand, PushCommand, PushFingerprint, PushItem,
-    QueueCommand, QueueKey, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand,
-    RequestOutcome, ScheduleUpdate, SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsCommand,
-    WriteSideRecordsCommand,
+    FinalizeOutcome, FinalizeTarget, GroupBatching, IdempotencyDecision, LeaseExpiredCommand,
+    PauseQueueCommand, PayloadUpdate, ProjectionStore, PurgeItemsCommand, PushCommand,
+    PushFingerprint, PushItem, QueueCommand, QueueKey, ReassignLeaseCommand, RenewLeaseCommand,
+    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand, UnfenceLeaseCommand,
+    UpdateFieldsCommand, WriteSideRecordsCommand,
 };
 
 fn indexed_item(item_id: ItemId, key: &str, email: &str) -> PushItem {
@@ -2332,6 +2332,7 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
         .expect("Turso ensure");
 
     let ids: Vec<ItemId> = (0..6).map(|counter| ItemId::mint(3, 0, counter)).collect();
+    let finalize_token = LeaseToken::new("lease-finalize").unwrap();
     let items = ids
         .iter()
         .enumerate()
@@ -2365,7 +2366,7 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
             "claim-finalize",
             QueueCommand::Claim(ClaimCommand {
                 item_ids: ids.clone(),
-                lease_token: LeaseToken::new("lease-finalize").unwrap(),
+                lease_token: finalize_token.clone(),
                 lease_expires_at: timestamp(30),
                 worker_id: None,
             }),
@@ -2375,6 +2376,26 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
     )
     .await;
 
+    let claimed = AsyncProjectionStore::render_claimed(&turso, shard.clone(), ids.clone())
+        .await
+        .unwrap();
+    let targets = claimed
+        .iter()
+        .map(|item| FinalizeTarget {
+            item_id: item.item_id,
+            lease_token: finalize_token.clone(),
+            item_version: item.item_version,
+            kind: FinalizeKind::Complete,
+            not_before: None,
+        })
+        .collect();
+    assert_eq!(
+        AsyncProjectionStore::finalize_validate(&turso, shard.clone(), targets, timestamp(30))
+            .await
+            .unwrap(),
+        vec![1; ids.len()]
+    );
+
     let mut retry = FinalizeOutcome::new(ids[3], FinalizeKind::Retry);
     retry.not_before = Some(timestamp(100));
     let outcomes = vec![
@@ -2383,7 +2404,10 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
         FinalizeOutcome::new(ids[2], FinalizeKind::Retry),
         retry,
         FinalizeOutcome::new(ids[4], FinalizeKind::Release),
-        FinalizeOutcome::new(ids[5], FinalizeKind::Rearm),
+        FinalizeOutcome {
+            not_before: Some(timestamp(50)),
+            ..FinalizeOutcome::new(ids[5], FinalizeKind::Rearm)
+        },
     ];
     apply_both(
         &mut sqlite,
@@ -2419,7 +2443,7 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
             .unwrap()
             .is_empty()
     );
-    for now in [12, 99, 100] {
+    for now in [12, 49, 50, 99, 100] {
         assert_eq!(
             AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(now), 10)
                 .await
@@ -2427,6 +2451,16 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
             ProjectionStore::eligible_candidates(&sqlite, &shard, timestamp(now), 10).unwrap()
         );
     }
+    let before_rearm =
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(49), 10)
+            .await
+            .unwrap();
+    assert!(!before_rearm.contains(&ids[5]));
+    let at_rearm =
+        AsyncProjectionStore::eligible_candidates(&turso, shard.clone(), timestamp(50), 10)
+            .await
+            .unwrap();
+    assert!(at_rearm.contains(&ids[5]));
 
     // Release preserves the delivery count while Rearm resets it before the next claim.
     apply_both(
@@ -2439,11 +2473,11 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
             QueueCommand::Claim(ClaimCommand {
                 item_ids: vec![ids[4], ids[5]],
                 lease_token: LeaseToken::new("lease-second-delivery").unwrap(),
-                lease_expires_at: timestamp(40),
+                lease_expires_at: timestamp(140),
                 worker_id: None,
             }),
             vec![ids[4], ids[5]],
-            13,
+            101,
         ),
     )
     .await;

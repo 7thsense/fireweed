@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["sync"], optional = true }
 turso = { version = "=0.7.0", default-features = false, optional = true }
 
 [dev-dependencies]
+pqueue-conformance = { path = "../pqueue-conformance" }
 pqueue-projection = { path = "../pqueue-projection" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 tempfile = "3"
@@ -32,4 +33,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 [[test]]
 name = "local_relational"
 path = "tests/local_relational.rs"
+required-features = ["local"]
+
+[[test]]
+name = "async_reclaim_selection"
+path = "tests/async_reclaim_selection.rs"
 required-features = ["local"]

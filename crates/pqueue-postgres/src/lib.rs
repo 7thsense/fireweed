@@ -76,7 +76,8 @@ mod credential;
 mod relational;
 pub use async_log::{AsyncPostgresLog, DEFAULT_ASYNC_LOG_MAILBOX_CAPACITY};
 pub use async_projection::{
-    AsyncPostgresRelationalProjection, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,
+    AsyncPostgresRelationalControlPlane, AsyncPostgresRelationalProjection,
+    DEFAULT_ASYNC_CONTROL_PLANE_MAILBOX_CAPACITY, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,
 };
 pub use compose_log::PostgresLog;
 pub use connect::{

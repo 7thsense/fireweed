@@ -47,7 +47,7 @@ pub fn validate_rearm(
         return Err(EngineError::Invalid("rearm.not_before is required"));
     };
     if let Some(until) = queue.recurrence.until
-        && nb.seconds > until.seconds
+        && nb > until
     {
         return Err(EngineError::Terminal);
     }

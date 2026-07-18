@@ -132,6 +132,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS pqueue_items_active_key
     ON pqueue_items (tenant_id, queue_id, client_item_key) WHERE superseded = false;
 CREATE INDEX IF NOT EXISTS pqueue_items_claim_idx
     ON pqueue_items (tenant_id, queue_id, priority_sort, created_seq) WHERE lifecycle_state = 'Pending';
+CREATE INDEX IF NOT EXISTS pqueue_items_expired_lease_idx
+    ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)
+    WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = false AND superseded = false;
 CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     next_seq BIGINT NOT NULL,
@@ -280,6 +283,10 @@ pub(crate) const ITEM_GATE_KEYS_BATCH_SQL: &str = "\
 SELECT item_id, gate_key FROM pqueue_item_gates \
 WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3) \
 ORDER BY item_id, gate_key";
+
+const ASYNC_EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+     AND lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=false AND superseded=false \
+     AND lease_expires_at IS NOT NULL AND lease_expires_at<$3 ORDER BY item_id LIMIT $4";
 
 // ---------------------------------------------------------------------------
 // small conversions / error mapping
@@ -1799,6 +1806,7 @@ fn apply_command_sql(
             let mut to_pending: Vec<String> = Vec::new();
             let mut to_pending_rearm: Vec<String> = Vec::new();
             let mut backoff: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+            let mut rearm_schedule: BTreeMap<(Option<i64>, i64), Vec<String>> = BTreeMap::new();
             for o in &c.outcomes {
                 let id = o.item_id.to_string();
                 let new_state = match o.kind {
@@ -1819,7 +1827,12 @@ fn apply_command_sql(
                     ItemState::Complete => to_complete.push(id.clone()),
                     ItemState::Failed => to_failed.push(id.clone()),
                     ItemState::Pending if matches!(o.kind, FinalizeKind::Rearm) => {
-                        to_pending_rearm.push(id.clone())
+                        to_pending_rearm.push(id.clone());
+                        let not_before = o.not_before.map(ts_nanos);
+                        rearm_schedule
+                            .entry((not_before, not_before.unwrap_or(now_n).max(now_n)))
+                            .or_default()
+                            .push(id.clone());
                     }
                     ItemState::Pending => to_pending.push(id.clone()),
                     ItemState::Leased => unreachable!("Finalize never targets Leased"),
@@ -1877,6 +1890,13 @@ fn apply_command_sql(
                     "UPDATE pqueue_items SET not_before=$4, eligible_since=$4 \
                      WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
                     &[&t, &q, ids, nb_n],
+                ))?;
+            }
+            for ((not_before, eligible_since), ids) in &rearm_schedule {
+                st(tx.execute(
+                    "UPDATE pqueue_items SET not_before=$4, eligible_since=$5 \
+                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+                    &[&t, &q, ids, not_before, eligible_since],
                 ))?;
             }
             let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id).collect();
@@ -5221,6 +5241,90 @@ impl PostgresRelational {
         Ok(())
     }
 
+    pub(crate) fn async_expired_leases_bounded(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(max).map_err(|error| EngineError::Storage(error.to_string()))?;
+        let mut g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let rows = st(g.client.query(
+            ASYNC_EXPIRED_LEASES_BOUNDED_SQL,
+            &[&tenant, &queue, &ts_nanos(now), &limit],
+        ))?;
+        rows.into_iter()
+            .map(|row| {
+                ItemId::new(row.get::<_, String>(0))
+                    .map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .collect()
+    }
+
+    pub(crate) fn async_finalize_targets_validate(
+        &self,
+        shard: &QueueKey,
+        targets: &[pqueue_engine::FinalizeTarget],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<u32>> {
+        let mut g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let now_nanos = ts_nanos(now);
+        let mut tx = st(g.client.transaction())?;
+        st(tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))?;
+        let result = (|| {
+            let mut attempts = Vec::with_capacity(targets.len());
+            for target in targets {
+                let row = st(tx.query_opt(
+                    "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count \
+                     FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 FOR SHARE",
+                    &[&tenant, &queue, &target.item_id.to_string()],
+                ))?;
+                let Some(row) = row else {
+                    return Err(EngineError::NotFound);
+                };
+                let state = parse_state(&row.get::<_, String>(0))?;
+                if row.get::<_, bool>(1) {
+                    return Err(EngineError::StaleLease);
+                }
+                if state.is_terminal() {
+                    return Err(EngineError::Terminal);
+                }
+                if row.get::<_, bool>(2) {
+                    return Err(EngineError::Superseded);
+                }
+                if row.get::<_, Option<i64>>(3).is_some() {
+                    return Err(EngineError::Invalid("cohort member requires cohort lease"));
+                }
+                if state != ItemState::Leased {
+                    return Err(EngineError::Invalid("item is not leased"));
+                }
+                let expires: Option<i64> = row.get(4);
+                let hash: Option<Vec<u8>> = row.get(5);
+                if hash.as_deref() != Some(lease_hash(&target.lease_token).as_slice())
+                    || expires.is_none_or(|value| value < now_nanos)
+                {
+                    return Err(EngineError::StaleLease);
+                }
+                let version: i64 = row.get(6);
+                if version < 0 || version as u64 != target.item_version {
+                    return Err(EngineError::Conflict);
+                }
+                let retry_count: i64 = row.get(7);
+                attempts.push(u32::try_from(retry_count).map_err(|_| {
+                    EngineError::Storage("postgres retry_count is outside the u32 range".into())
+                })?);
+            }
+            Ok(attempts)
+        })();
+        st(tx.rollback())?;
+        result
+    }
+
     pub(crate) fn async_push_idempotency(
         &self,
         shard: &QueueKey,
@@ -5997,6 +6101,25 @@ mod sql_shape_tests {
         assert!(
             ITEM_GATE_KEYS_BATCH_SQL.contains("ORDER BY item_id, gate_key"),
             "batched gate lookup must preserve per-item gate-key ordering"
+        );
+    }
+
+    #[test]
+    fn expired_lease_selection_is_indexed_bounded_and_ordinary_only() {
+        for predicate in [
+            "cohort_size IS NULL",
+            "fenced=false",
+            "superseded=false",
+            "lease_expires_at<$3",
+            "ORDER BY item_id",
+            "LIMIT $4",
+        ] {
+            assert!(ASYNC_EXPIRED_LEASES_BOUNDED_SQL.contains(predicate));
+        }
+        assert!(RELATIONAL_SCHEMA.contains("pqueue_items_expired_lease_idx"));
+        assert!(
+            RELATIONAL_SCHEMA
+                .contains("ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)")
         );
     }
 

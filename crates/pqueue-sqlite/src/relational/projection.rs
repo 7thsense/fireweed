@@ -17,6 +17,20 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::*;
 
 type RenewValidationRow = (String, i64, i64, Option<i64>, Option<i64>, Option<Vec<u8>>);
+type FinalizeValidationRow = (
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<Vec<u8>>,
+    i64,
+    i64,
+);
+
+pub(crate) const EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+     AND lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=0 AND superseded=0 \
+     AND lease_expires_at IS NOT NULL AND lease_expires_at<?3 ORDER BY item_id LIMIT ?4";
 
 /// SQLite materialized projection fed by an external command-log authority.
 ///
@@ -93,6 +107,106 @@ impl SqliteProjectionStore {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn expired_leases_bounded(
+        &self,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(max).map_err(|error| EngineError::Storage(error.to_string()))?;
+        let g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let mut statement = st(g.conn.prepare(EXPIRED_LEASES_BOUNDED_SQL))?;
+        let rows = st(
+            statement.query_map(params![tenant, queue, ts_nanos(now), limit], |row| {
+                row.get::<_, String>(0)
+            }),
+        )?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(
+                ItemId::new(st(row)?).map_err(|error| EngineError::Storage(error.to_string()))?,
+            );
+        }
+        Ok(ids)
+    }
+
+    pub(crate) fn finalize_targets_validate(
+        &self,
+        shard: &QueueKey,
+        targets: &[pqueue_engine::FinalizeTarget],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<u32>> {
+        let g = self.lock();
+        let tx = st(g.conn.unchecked_transaction())?;
+        let (tenant, queue) = parts(shard);
+        let now_nanos = ts_nanos(now);
+        let result = (|| {
+            let mut attempts = Vec::with_capacity(targets.len());
+            for target in targets {
+                let row: Option<FinalizeValidationRow> = st(tx
+                    .query_row(
+                        "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count \
+                         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        params![tenant, queue, target.item_id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                                row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+                            ))
+                        },
+                    )
+                    .optional())?;
+                let Some((
+                    state,
+                    fenced,
+                    superseded,
+                    cohort_size,
+                    expires,
+                    hash,
+                    version,
+                    retry_count,
+                )) = row
+                else {
+                    return Err(EngineError::NotFound);
+                };
+                let state = parse_state(&state)?;
+                if fenced != 0 {
+                    return Err(EngineError::StaleLease);
+                }
+                if state.is_terminal() {
+                    return Err(EngineError::Terminal);
+                }
+                if superseded != 0 {
+                    return Err(EngineError::Superseded);
+                }
+                if cohort_size.is_some() {
+                    return Err(EngineError::Invalid("cohort member requires cohort lease"));
+                }
+                if state != ItemState::Leased {
+                    return Err(EngineError::Invalid("item is not leased"));
+                }
+                if hash.as_deref() != Some(lease_hash(&target.lease_token).as_slice())
+                    || expires.is_none_or(|value| value < now_nanos)
+                {
+                    return Err(EngineError::StaleLease);
+                }
+                if version < 0 || version as u64 != target.item_version {
+                    return Err(EngineError::Conflict);
+                }
+                attempts.push(u32::try_from(retry_count).map_err(|_| {
+                    EngineError::Storage("sqlite retry_count is outside the u32 range".into())
+                })?);
+            }
+            Ok(attempts)
+        })();
+        st(tx.rollback())?;
+        result
     }
 
     /// Read-only validation of every SQLite constraint that a fresh push can violate at apply time.

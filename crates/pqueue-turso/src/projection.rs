@@ -12,8 +12,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
-    CommandPosition, EngineError, EngineResult, FinalizeKind, IdempotencyDecision, PayloadUpdate,
-    PushFingerprint, PushItem, QueueCommand, QueueKey, RenewTarget, RequestOutcome,
+    CommandPosition, EngineError, EngineResult, FinalizeKind, FinalizeTarget, IdempotencyDecision,
+    PayloadUpdate, PushFingerprint, PushItem, QueueCommand, QueueKey, RenewTarget, RequestOutcome,
     RichClaimSelection,
 };
 use pqueue_relational::{
@@ -1598,6 +1598,8 @@ async fn apply_owned(
                 let mut pending = Vec::new();
                 let mut rearmed = Vec::new();
                 let mut backoff: HashMap<i64, Vec<ItemId>> = HashMap::new();
+                let mut rearm_schedule: HashMap<(Option<i64>, i64), Vec<ItemId>> = HashMap::new();
+                let now = ts_nanos(envelope.created_at);
                 for outcome in &finalize.outcomes {
                     let state = match outcome.kind {
                         FinalizeKind::Complete => ItemState::Complete,
@@ -1621,7 +1623,14 @@ async fn apply_owned(
                     match (state, outcome.kind) {
                         (ItemState::Complete, _) => complete.push(outcome.item_id),
                         (ItemState::Failed, _) => failed.push(outcome.item_id),
-                        (ItemState::Pending, FinalizeKind::Rearm) => rearmed.push(outcome.item_id),
+                        (ItemState::Pending, FinalizeKind::Rearm) => {
+                            rearmed.push(outcome.item_id);
+                            let not_before = outcome.not_before.map(ts_nanos);
+                            rearm_schedule
+                                .entry((not_before, not_before.unwrap_or(now).max(now)))
+                                .or_default()
+                                .push(outcome.item_id);
+                        }
                         (ItemState::Pending, _) => pending.push(outcome.item_id),
                         (ItemState::Leased, _) => unreachable!("finalize never targets leased"),
                     }
@@ -1636,7 +1645,6 @@ async fn apply_owned(
                     }
                     token_ops.push(TokenOp::Clear(position.queue.clone(), outcome.item_id));
                 }
-                let now = ts_nanos(envelope.created_at);
                 let epoch = i64::try_from(position.backend_epoch)
                     .map_err(|_| storage("backend epoch exceeds relational integer range"))?;
                 for (state, reset, terminal_at, terminal_epoch, ids) in [
@@ -1669,6 +1677,20 @@ async fn apply_owned(
                         vec![
                             Value::Integer(not_before),
                             Value::Integer(not_before),
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                        ],
+                        &ids,
+                    )
+                    .await?;
+                }
+                for ((not_before, eligible_since), ids) in rearm_schedule {
+                    execute_for_items(
+                        &transaction,
+                        sql::finalize_backoff(ids.len()),
+                        vec![
+                            not_before.map_or(Value::Null, Value::Integer),
+                            Value::Integer(eligible_since),
                             Value::Text(tenant.clone()),
                             Value::Text(queue.clone()),
                         ],
@@ -2520,6 +2542,103 @@ impl AsyncProjectionStore for TursoRelational {
                 }
             }
             Ok(())
+        }
+    }
+
+    fn finalize_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<FinalizeTarget>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<u32>>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            let mut connection = writer.lock().await;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage)?;
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let now_nanos = ts_nanos(now);
+            let result = async {
+                let mut attempts = Vec::with_capacity(targets.len());
+                for target in targets {
+                    let row = one_row(
+                        &transaction,
+                        "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count FROM pqueue_items \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        vec![
+                            tenant.clone().into(),
+                            queue.clone().into(),
+                            target.item_id.to_string().into(),
+                        ],
+                    )
+                    .await?
+                    .ok_or(EngineError::NotFound)?;
+                    let state = parse_state(&text(&row[0])?).map_err(storage)?;
+                    if integer(&row[1])? != 0 { return Err(EngineError::StaleLease); }
+                    if state.is_terminal() { return Err(EngineError::Terminal); }
+                    if integer(&row[2])? != 0 { return Err(EngineError::Superseded); }
+                    if !matches!(row[3], Value::Null) {
+                        return Err(EngineError::Invalid("cohort member requires cohort lease"));
+                    }
+                    if state != ItemState::Leased {
+                        return Err(EngineError::Invalid("item is not leased"));
+                    }
+                    if blob(&row[5])? != lease_hash(&target.lease_token)
+                        || matches!(row[4], Value::Null)
+                        || integer(&row[4])? < now_nanos
+                    {
+                        return Err(EngineError::StaleLease);
+                    }
+                    let version = integer(&row[6])?;
+                    if version < 0 || version as u64 != target.item_version {
+                        return Err(EngineError::Conflict);
+                    }
+                    attempts.push(nonnegative_u32(integer(&row[7])?, "retry_count")?);
+                }
+                Ok(attempts)
+            }
+            .await;
+            transaction.rollback().await.map_err(storage)?;
+            result
+        }
+    }
+
+    fn expired_leases(
+        &self,
+        shard: QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            if max == 0 {
+                return Ok(Vec::new());
+            }
+            let limit = i64::try_from(max).map_err(storage)?;
+            let connection = writer.lock().await;
+            let mut rows = connection
+                .query(
+                    "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND lifecycle_state='Leased' AND cohort_size IS NULL AND fenced=0 AND superseded=0 \
+                 AND lease_expires_at IS NOT NULL \
+                 AND lease_expires_at<?3 ORDER BY item_id LIMIT ?4",
+                    vec![
+                        Value::Text(shard.tenant_id.as_str().to_string()),
+                        Value::Text(shard.queue_id.as_str().to_string()),
+                        Value::Integer(ts_nanos(now)),
+                        Value::Integer(limit),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+            let mut ids = Vec::new();
+            while let Some(row) = rows.next().await.map_err(storage)? {
+                ids.push(ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?);
+            }
+            Ok(ids)
         }
     }
 

@@ -1123,6 +1123,7 @@ pub(crate) fn apply_command_sql(
             let mut to_pending: Vec<String> = Vec::new();
             let mut to_pending_rearm: Vec<String> = Vec::new();
             let mut backoff: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+            let mut rearm_schedule: BTreeMap<(Option<i64>, i64), Vec<String>> = BTreeMap::new();
             for o in &c.outcomes {
                 let id = o.item_id.to_string();
                 let new_state = match o.kind {
@@ -1145,7 +1146,12 @@ pub(crate) fn apply_command_sql(
                     ItemState::Complete => to_complete.push(id.clone()),
                     ItemState::Failed => to_failed.push(id.clone()),
                     ItemState::Pending if matches!(o.kind, FinalizeKind::Rearm) => {
-                        to_pending_rearm.push(id.clone())
+                        to_pending_rearm.push(id.clone());
+                        let not_before = o.not_before.map(ts_nanos);
+                        rearm_schedule
+                            .entry((not_before, not_before.unwrap_or(now_n).max(now_n)))
+                            .or_default()
+                            .push(id.clone());
                     }
                     ItemState::Pending => to_pending.push(id.clone()),
                     ItemState::Leased => unreachable!("Finalize never targets Leased"),
@@ -1251,6 +1257,17 @@ pub(crate) fn apply_command_sql(
                     "UPDATE pqueue_items SET not_before=?, eligible_since=? \
                      WHERE tenant_id=? AND queue_id=? AND item_id IN",
                     &[Value::Integer(*nb_n), Value::Integer(*nb_n)],
+                    &t,
+                    &q,
+                    ids,
+                )?;
+            }
+            for ((not_before, eligible_since), ids) in &rearm_schedule {
+                exec_items_in(
+                    tx,
+                    "UPDATE pqueue_items SET not_before=?, eligible_since=? \
+                     WHERE tenant_id=? AND queue_id=? AND item_id IN",
+                    &[opt_int(*not_before), Value::Integer(*eligible_since)],
                     &t,
                     &q,
                     ids,
