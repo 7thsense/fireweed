@@ -9,7 +9,7 @@ use pqueue_core::{ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimedItem, CommandEnvelope, CommandPosition,
     EngineError, EngineResult, IdempotencyDecision, ProjectionStore, PushFingerprint, PushItem,
-    QueueKey,
+    QueueKey, RenewTarget,
 };
 
 use crate::SqliteProjectionStore;
@@ -398,6 +398,20 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
         }
     }
 
+    fn renew_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<RenewTarget>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.renew_targets_validate(&shard, &targets, now))
+                .await
+        }
+    }
+
     fn apply_live(
         &self,
         positions: Vec<CommandPosition>,
@@ -524,12 +538,13 @@ mod tests {
 
     use pqueue_core::{
         BodyHash, ClientItemKey, CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GroupKey,
-        Metadata, MetadataValue, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-        PriorityTieBreaker, QueueId, RecurrencePolicy, RequestId, RetryPolicy, TenantId,
+        LeaseToken, Metadata, MetadataValue, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueId, RecurrencePolicy, RequestId, RetryPolicy,
+        TenantId,
     };
     use pqueue_engine::{
-        CommandChecksum, CommandEnvelope, CommandId, PauseQueueCommand, PushCommand, PushItem,
-        QueueCommand, RequestOutcome,
+        ClaimCommand, CommandChecksum, CommandEnvelope, CommandId, PauseQueueCommand, PushCommand,
+        PushItem, QueueCommand, RenewTarget, RequestOutcome,
     };
 
     use super::*;
@@ -670,6 +685,14 @@ mod tests {
             legacy_fingerprint(1),
             UtcTimestamp::new(0, 0).unwrap(),
         ));
+        assert_send(store.renew_validate(
+            shard(),
+            vec![RenewTarget {
+                item_id: item,
+                lease_token: LeaseToken::new("token").unwrap(),
+            }],
+            UtcTimestamp::new(0, 0).unwrap(),
+        ));
         assert_send(store.apply_live(Vec::new(), Vec::new()));
         assert_send(store.apply_recovery(Vec::new(), Vec::new()));
         assert_send(store.eligible_candidates(shard(), UtcTimestamp::new(0, 0).unwrap(), 1));
@@ -679,6 +702,167 @@ mod tests {
         assert_send(store.recovery_high_water(shard()));
         assert_send(store.recover_definitions());
         assert_send(store.close_and_drain());
+    }
+
+    #[tokio::test]
+    async fn renew_validation_checks_token_and_live_expiry() {
+        let store = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        store.ensure_shard(definition()).await.unwrap();
+        let item = ItemId::mint(9, 0, 0);
+        let token = LeaseToken::new("renew-token").unwrap();
+        let claim = CommandEnvelope {
+            command_id: CommandId::new("claim"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item],
+            command: QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![item],
+                lease_token: token.clone(),
+                lease_expires_at: UtcTimestamp::new(20, 0).unwrap(),
+                worker_id: None,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(2, 0).unwrap(),
+        };
+        store
+            .apply_live(
+                vec![
+                    CommandPosition::new(shard(), 1, 0),
+                    CommandPosition::new(shard(), 1, 1),
+                ],
+                vec![push(item), claim],
+            )
+            .await
+            .unwrap();
+        store
+            .renew_validate(
+                shard(),
+                vec![RenewTarget {
+                    item_id: item,
+                    lease_token: token.clone(),
+                }],
+                UtcTimestamp::new(10, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut other_definition = definition();
+        other_definition.queue_id = QueueId::new("other-queue").unwrap();
+        let other_shard = QueueKey::new(
+            other_definition.tenant_id.clone(),
+            other_definition.queue_id.clone(),
+        );
+        store.ensure_shard(other_definition).await.unwrap();
+        assert_eq!(
+            store
+                .renew_validate(
+                    other_shard,
+                    vec![RenewTarget {
+                        item_id: item,
+                        lease_token: token.clone(),
+                    }],
+                    UtcTimestamp::new(10, 0).unwrap(),
+                )
+                .await,
+            Err(EngineError::NotFound)
+        );
+        assert_eq!(
+            store
+                .renew_validate(
+                    shard(),
+                    vec![RenewTarget {
+                        item_id: item,
+                        lease_token: LeaseToken::new("wrong").unwrap(),
+                    }],
+                    UtcTimestamp::new(10, 0).unwrap(),
+                )
+                .await,
+            Err(EngineError::StaleLease)
+        );
+        store
+            .renew_validate(
+                shard(),
+                vec![RenewTarget {
+                    item_id: item,
+                    lease_token: token.clone(),
+                }],
+                UtcTimestamp::new(20, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .renew_validate(
+                    shard(),
+                    vec![RenewTarget {
+                        item_id: item,
+                        lease_token: token,
+                    }],
+                    UtcTimestamp::new(20, 1).unwrap(),
+                )
+                .await,
+            Err(EngineError::StaleLease)
+        );
+    }
+
+    #[tokio::test]
+    async fn active_lease_reopen_uses_durable_hash_for_renew_validation() {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-renew-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path_str = path.to_str().unwrap().to_string();
+        let store = AsyncSqliteProjectionStore::open(&path_str).await.unwrap();
+        store.ensure_shard(definition()).await.unwrap();
+        let item = ItemId::mint(10, 0, 0);
+        let token = LeaseToken::new("reopen-token").unwrap();
+        let claim = CommandEnvelope {
+            command_id: CommandId::new("reopen-claim"),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: vec![item],
+            command: QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![item],
+                lease_token: token.clone(),
+                lease_expires_at: UtcTimestamp::new(20, 0).unwrap(),
+                worker_id: None,
+            }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(2, 0).unwrap(),
+        };
+        store
+            .apply_live(
+                vec![
+                    CommandPosition::new(shard(), 1, 0),
+                    CommandPosition::new(shard(), 1, 1),
+                ],
+                vec![push(item), claim],
+            )
+            .await
+            .unwrap();
+        store.close_and_drain().await.unwrap();
+        drop(store);
+
+        let reopened = AsyncSqliteProjectionStore::open(&path_str).await.unwrap();
+        reopened
+            .renew_validate(
+                shard(),
+                vec![RenewTarget {
+                    item_id: item,
+                    lease_token: token,
+                }],
+                UtcTimestamp::new(10, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        reopened.close_and_drain().await.unwrap();
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test(flavor = "current_thread")]

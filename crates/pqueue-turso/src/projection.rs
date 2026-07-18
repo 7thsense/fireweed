@@ -13,7 +13,8 @@ use pqueue_core::{
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
     CommandPosition, EngineError, EngineResult, FinalizeKind, IdempotencyDecision, PayloadUpdate,
-    PushFingerprint, PushItem, QueueCommand, QueueKey, RequestOutcome, RichClaimSelection,
+    PushFingerprint, PushItem, QueueCommand, QueueKey, RenewTarget, RequestOutcome,
+    RichClaimSelection,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -2467,6 +2468,58 @@ impl AsyncProjectionStore for TursoRelational {
                 .map(|id| ItemId::new(id).map_err(storage))
                 .collect::<EngineResult<Vec<_>>>()?;
             Ok(IdempotencyDecision::Replay(ids))
+        }
+    }
+
+    fn renew_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<RenewTarget>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            let connection = writer.lock().await;
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let now_nanos = ts_nanos(now);
+            for target in targets {
+                let row = one_row(
+                    &connection,
+                    "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash FROM pqueue_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                    vec![
+                        tenant.clone().into(),
+                        queue.clone().into(),
+                        target.item_id.to_string().into(),
+                    ],
+                )
+                .await?
+                .ok_or(EngineError::NotFound)?;
+                let state = parse_state(&text(&row[0])?).map_err(storage)?;
+                if integer(&row[1])? != 0 {
+                    return Err(EngineError::StaleLease);
+                }
+                if state.is_terminal() {
+                    return Err(EngineError::Terminal);
+                }
+                if integer(&row[2])? != 0 {
+                    return Err(EngineError::Superseded);
+                }
+                if !matches!(row[3], Value::Null) {
+                    return Err(EngineError::Invalid("cohort member requires cohort lease"));
+                }
+                if state != ItemState::Leased {
+                    return Err(EngineError::Invalid("item is not leased"));
+                }
+                if blob(&row[5])? != lease_hash(&target.lease_token)
+                    || matches!(row[4], Value::Null)
+                    || integer(&row[4])? < now_nanos
+                {
+                    return Err(EngineError::StaleLease);
+                }
+            }
+            Ok(())
         }
     }
 

@@ -732,17 +732,95 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     .await
     .unwrap();
     assert_eq!(group_summary_count(&turso, &group).await, 1);
+    AsyncProjectionStore::renew_validate(
+        &turso,
+        shard.clone(),
+        vec![pqueue_engine::RenewTarget {
+            item_id: first,
+            lease_token: token.clone(),
+        }],
+        timestamp(32),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        AsyncProjectionStore::renew_validate(
+            &turso,
+            shard.clone(),
+            vec![pqueue_engine::RenewTarget {
+                item_id: first,
+                lease_token: LeaseToken::new("wrong-token").unwrap(),
+            }],
+            timestamp(32),
+        )
+        .await,
+        Err(pqueue_engine::EngineError::StaleLease)
+    );
+    AsyncProjectionStore::renew_validate(
+        &turso,
+        shard.clone(),
+        vec![pqueue_engine::RenewTarget {
+            item_id: first,
+            lease_token: token.clone(),
+        }],
+        timestamp(60),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        AsyncProjectionStore::renew_validate(
+            &turso,
+            shard.clone(),
+            vec![pqueue_engine::RenewTarget {
+                item_id: second,
+                lease_token: token.clone(),
+            }],
+            timestamp(32),
+        )
+        .await,
+        Err(pqueue_engine::EngineError::Invalid("item is not leased"))
+    ));
+    let version_before = AsyncProjectionStore::item_version(&turso, shard.clone(), first)
+        .await
+        .unwrap()
+        .unwrap();
     apply_turso(
         &turso,
         &shard,
         2,
+        envelope(
+            "ordinary-renew",
+            QueueCommand::RenewLease(RenewLeaseCommand {
+                item_ids: vec![first],
+                lease_expires_at: timestamp(90),
+            }),
+            vec![first],
+            32,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        AsyncProjectionStore::item_version(&turso, shard.clone(), first)
+            .await
+            .unwrap(),
+        Some(version_before + 1)
+    );
+    let renewed = AsyncProjectionStore::render_claimed(&turso, shard.clone(), vec![first])
+        .await
+        .unwrap();
+    assert_eq!(renewed[0].lease_expires_at, timestamp(90));
+    apply_turso(
+        &turso,
+        &shard,
+        3,
         envelope(
             "ordinary-release",
             QueueCommand::Finalize(FinalizeCommand {
                 outcomes: vec![FinalizeOutcome::new(first, FinalizeKind::Release)],
             }),
             vec![first],
-            32,
+            33,
         ),
     )
     .await
@@ -752,7 +830,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     apply_turso(
         &turso,
         &shard,
-        3,
+        4,
         envelope(
             "ordinary-reclaim",
             QueueCommand::Claim(ClaimCommand {
@@ -762,7 +840,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
                 worker_id: None,
             }),
             vec![first],
-            33,
+            34,
         ),
     )
     .await
@@ -771,14 +849,14 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     apply_turso(
         &turso,
         &shard,
-        4,
+        5,
         envelope(
             "ordinary-expiry",
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
                 item_ids: vec![first],
             }),
             vec![first],
-            34,
+            35,
         ),
     )
     .await
@@ -788,7 +866,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     apply_turso(
         &turso,
         &shard,
-        5,
+        6,
         envelope(
             "ordinary-final-claim",
             QueueCommand::Claim(ClaimCommand {
@@ -798,7 +876,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
                 worker_id: None,
             }),
             vec![first],
-            35,
+            36,
         ),
     )
     .await
@@ -806,14 +884,14 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     apply_turso(
         &turso,
         &shard,
-        6,
+        7,
         envelope(
             "ordinary-complete",
             QueueCommand::Finalize(FinalizeCommand {
                 outcomes: vec![FinalizeOutcome::new(first, FinalizeKind::Complete)],
             }),
             vec![first],
-            36,
+            37,
         ),
     )
     .await
@@ -822,7 +900,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     apply_turso(
         &turso,
         &shard,
-        7,
+        8,
         envelope(
             "ordinary-purge",
             QueueCommand::PurgeItems(PurgeItemsCommand {
@@ -830,7 +908,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
                 force: false,
             }),
             vec![first],
-            37,
+            38,
         ),
     )
     .await
@@ -840,7 +918,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
     apply_turso(
         &turso,
         &shard,
-        8,
+        9,
         envelope(
             "ordinary-pending-purge",
             QueueCommand::PurgeItems(PurgeItemsCommand {
@@ -848,7 +926,7 @@ async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
                 force: true,
             }),
             vec![second],
-            38,
+            39,
         ),
     )
     .await
@@ -2603,7 +2681,7 @@ async fn ensure_shard_rejects_missing_or_negative_cursor_state() {
 }
 
 #[tokio::test]
-async fn active_lease_reopen_is_explicitly_hash_only_until_response_recovery_exists() {
+async fn active_lease_reopen_uses_durable_hash_for_renew_validation() {
     let dir = tempdir().expect("tempdir");
     let config = TursoConfig::local(dir.path().join("active-lease.db"));
     let definition = definition();
@@ -2653,6 +2731,17 @@ async fn active_lease_reopen_is_explicitly_hash_only_until_response_recovery_exi
         Some(pqueue_core::ItemState::Leased),
         "durable lease state and token hash survive"
     );
+    AsyncProjectionStore::renew_validate(
+        &reopened,
+        shard.clone(),
+        vec![pqueue_engine::RenewTarget {
+            item_id: item,
+            lease_token: LeaseToken::new("active-reopen-token").unwrap(),
+        }],
+        timestamp(20),
+    )
+    .await
+    .expect("durable token hash validates after reopen");
     assert!(
         AsyncProjectionStore::render_claimed(&reopened, shard, vec![item])
             .await

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use pqueue_core::{
-    BodyHash, CohortId, GateKeyPolicy, ItemId, PriorityModelKind, PriorityValue, QueueDefinition,
-    RequestId, UtcTimestamp,
+    BodyHash, CohortId, GateKeyPolicy, ItemId, LeaseToken, PriorityModelKind, PriorityValue,
+    QueueDefinition, RequestId, UtcTimestamp,
 };
 
 use crate::{
@@ -174,6 +174,60 @@ pub trait AsyncPushPlanner: Send + Sync + 'static {
 /// Marker used when typed async push was not injected.
 pub struct NoAsyncPushPlanner;
 
+/// One ordinary-item lease renewal owned by the async backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenewTarget {
+    pub item_id: ItemId,
+    pub lease_token: LeaseToken,
+}
+
+#[derive(Debug, Clone)]
+pub struct AsyncRenewRequest {
+    pub shard: QueueKey,
+    pub targets: Vec<RenewTarget>,
+    pub new_lease_expires_at: UtcTimestamp,
+    pub now: UtcTimestamp,
+    pub expected_epoch: Option<u64>,
+}
+
+/// Typed lifecycle planner output. Construction is engine-private so injected planners cannot bypass
+/// the composed backend's exact-envelope validation.
+pub struct AsyncLifecyclePlan {
+    request: RawCommitRequest,
+}
+
+impl AsyncLifecyclePlan {
+    pub(crate) fn renew(request: RawCommitRequest) -> Self {
+        Self { request }
+    }
+}
+
+/// Construction-injected preparation for typed lifecycle mutations. It owns validation and envelope
+/// construction, but never durable commit authority.
+pub trait AsyncLifecyclePlanner: Send + Sync + 'static {
+    fn plan_renew(&self, request: AsyncRenewRequest)
+    -> OwnedTask<EngineResult<AsyncLifecyclePlan>>;
+}
+
+/// Marker used when typed lifecycle mutations were not injected.
+pub struct NoAsyncLifecyclePlanner;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncLifecyclePostCommitStage {
+    CommitOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsyncLifecycleError {
+    Submit(AsyncCommitSubmitError),
+    BeforeCommit(EngineError),
+    Commit(EngineError),
+    AfterCommit {
+        stage: AsyncLifecyclePostCommitStage,
+        source: EngineError,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsyncPushPostCommitStage {
     CommitOutcome,
@@ -193,11 +247,18 @@ pub enum AsyncPushError {
 }
 
 /// An ADR-017 mutation-path scaffold, not a full backend implementation.
-pub struct AsyncComposedBackend<S, D, P = NoAsyncClaimPlanner, U = NoAsyncPushPlanner> {
+pub struct AsyncComposedBackend<
+    S,
+    D,
+    P = NoAsyncClaimPlanner,
+    U = NoAsyncPushPlanner,
+    V = NoAsyncLifecyclePlanner,
+> {
     strategy: Arc<S>,
     dispatcher: D,
     claim_planner: Arc<P>,
     push_planner: Arc<U>,
+    lifecycle_planner: Arc<V>,
     admission: KeyedQueueGate<crate::QueueKey>,
     durability: DurabilityClass,
 }
@@ -214,6 +275,7 @@ where
             dispatcher,
             claim_planner: Arc::new(NoAsyncClaimPlanner),
             push_planner: Arc::new(NoAsyncPushPlanner),
+            lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
@@ -237,13 +299,14 @@ where
             dispatcher,
             claim_planner: Arc::new(claim_planner),
             push_planner: Arc::new(NoAsyncPushPlanner),
+            lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
     }
 }
 
-impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
+impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest>,
     D: OwnedTaskDispatcher,
@@ -314,7 +377,7 @@ where
     }
 }
 
-impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
+impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -637,7 +700,85 @@ fn validate_push_commit_outcome(
     Ok(())
 }
 
-impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
+enum LifecycleExecutionError {
+    BeforeCommit(EngineError),
+    Commit(EngineError),
+    AfterCommit(EngineError),
+}
+
+impl From<LifecycleExecutionError> for AsyncLifecycleError {
+    fn from(error: LifecycleExecutionError) -> Self {
+        match error {
+            LifecycleExecutionError::BeforeCommit(error) => Self::BeforeCommit(error),
+            LifecycleExecutionError::Commit(error) => Self::Commit(error),
+            LifecycleExecutionError::AfterCommit(source) => Self::AfterCommit {
+                stage: AsyncLifecyclePostCommitStage::CommitOutcome,
+                source,
+            },
+        }
+    }
+}
+
+fn validate_renew_plan(
+    requested: &AsyncRenewRequest,
+    planned: &RawCommitRequest,
+) -> EngineResult<()> {
+    let requested_ids = requested
+        .targets
+        .iter()
+        .map(|target| target.item_id)
+        .collect::<Vec<_>>();
+    let unique: HashSet<_> = requested_ids.iter().copied().collect();
+    if requested_ids.is_empty() || unique.len() != requested_ids.len() {
+        return Err(EngineError::Invalid("invalid renew item batch"));
+    }
+    if planned.shard() != &requested.shard
+        || requested
+            .expected_epoch
+            .is_some_and(|epoch| epoch != planned.expected_epoch())
+        || planned.commands().len() != 1
+        || planned.fault() != RawCommitFault::None
+    {
+        return Err(EngineError::Invalid("invalid async renew plan"));
+    }
+    let envelope = &planned.commands()[0];
+    let QueueCommand::RenewLease(command) = &envelope.command else {
+        return Err(EngineError::Invalid("invalid async renew plan"));
+    };
+    if command.item_ids != requested_ids
+        || command.lease_expires_at != requested.new_lease_expires_at
+        || envelope.item_ids != requested_ids
+        || envelope.command_id.0.is_empty()
+        || envelope.created_at != requested.now
+        || envelope.request_id.is_some()
+        || envelope.request_fingerprint.is_some()
+        || envelope.request_outcome.is_some()
+        || envelope.checksum != CommandChecksum(0)
+    {
+        return Err(EngineError::Invalid("invalid async renew plan"));
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_commit_outcome(
+    queue: &QueueKey,
+    expected_epoch: u64,
+    outcome: &RawCommitOutcome,
+) -> EngineResult<()> {
+    let positions = outcome.positions();
+    if !outcome.projection_applied()
+        || positions.len() != 1
+        || positions[0].queue != *queue
+        || positions[0].backend_epoch != expected_epoch
+    {
+        return Err(EngineError::Storage(
+            "invalid async lifecycle commit outcome".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+impl<S, D, P, U> AsyncComposedBackend<S, D, P, U, NoAsyncLifecyclePlanner>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest>,
     D: OwnedTaskDispatcher,
@@ -655,13 +796,69 @@ where
             dispatcher,
             claim_planner: Arc::new(claim_planner),
             push_planner: Arc::new(push_planner),
+            lifecycle_planner: Arc::new(NoAsyncLifecyclePlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
     }
 }
 
-impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
+impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V> {
+    /// Add a separately injected lifecycle capability while preserving the existing claim/push profile.
+    pub fn with_lifecycle_planner<W>(
+        self,
+        lifecycle_planner: W,
+    ) -> AsyncComposedBackend<S, D, P, U, W> {
+        AsyncComposedBackend {
+            strategy: self.strategy,
+            dispatcher: self.dispatcher,
+            claim_planner: self.claim_planner,
+            push_planner: self.push_planner,
+            lifecycle_planner: Arc::new(lifecycle_planner),
+            admission: self.admission,
+            durability: self.durability,
+        }
+    }
+}
+
+impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
+where
+    S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
+    D: OwnedTaskDispatcher,
+    V: AsyncLifecyclePlanner,
+{
+    /// Validate and durably renew ordinary item leases under one queue-local permit.
+    ///
+    /// The current API has no request ID, so a commit-boundary error remains an unknown outcome; caller
+    /// cancellation cannot stop an accepted backend-owned operation.
+    pub async fn renew(&self, request: AsyncRenewRequest) -> Result<(), AsyncLifecycleError> {
+        let queue = request.shard.clone();
+        let planner = Arc::clone(&self.lifecycle_planner);
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let plan = planner
+                    .plan_renew(request.clone())
+                    .await
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                validate_renew_plan(&request, &plan.request)
+                    .map_err(LifecycleExecutionError::BeforeCommit)?;
+                let epoch = plan.request.expected_epoch();
+                let outcome = strategy
+                    .commit(plan.request)
+                    .await
+                    .map_err(LifecycleExecutionError::Commit)?;
+                validate_lifecycle_commit_outcome(&queue, epoch, &outcome)
+                    .map_err(LifecycleExecutionError::AfterCommit)
+            })
+        })
+        .await
+        .map_err(AsyncLifecycleError::Submit)?
+        .map_err(AsyncLifecycleError::from)
+    }
+}
+
+impl<S, D, P, U, V> AsyncComposedBackend<S, D, P, U, V>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -1521,6 +1718,64 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ControlledLifecyclePlanner {
+        smuggle: LifecycleSmuggle,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum LifecycleSmuggle {
+        None,
+        Expiry,
+        Fault,
+        EmptyCommandId,
+    }
+
+    impl AsyncLifecyclePlanner for ControlledLifecyclePlanner {
+        fn plan_renew(
+            &self,
+            request: AsyncRenewRequest,
+        ) -> OwnedTask<EngineResult<AsyncLifecyclePlan>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let smuggle = self.smuggle;
+            Box::pin(async move {
+                let expires = if smuggle == LifecycleSmuggle::Expiry {
+                    UtcTimestamp::new(request.new_lease_expires_at.seconds + 1, 0).unwrap()
+                } else {
+                    request.new_lease_expires_at
+                };
+                let item_ids = request
+                    .targets
+                    .iter()
+                    .map(|target| target.item_id)
+                    .collect::<Vec<_>>();
+                let envelope = CommandEnvelope {
+                    command_id: CommandId::new(if smuggle == LifecycleSmuggle::EmptyCommandId {
+                        ""
+                    } else {
+                        "renew-command"
+                    }),
+                    request_id: None,
+                    request_fingerprint: None,
+                    request_outcome: None,
+                    item_ids: item_ids.clone(),
+                    command: QueueCommand::RenewLease(crate::RenewLeaseCommand {
+                        item_ids,
+                        lease_expires_at: expires,
+                    }),
+                    checksum: CommandChecksum(0),
+                    created_at: request.now,
+                };
+                let mut planned = RawCommitRequest::new(request.shard, vec![envelope], 1);
+                if smuggle == LifecycleSmuggle::Fault {
+                    planned = planned.with_fault(RawCommitFault::BeforeAppend);
+                }
+                Ok(AsyncLifecyclePlan::renew(planned))
+            })
+        }
+    }
+
     type PushBackend = AsyncComposedBackend<
         UnifiedAtomicCommit<ClaimCommitter>,
         ControlledDispatcher,
@@ -1817,6 +2072,166 @@ mod tests {
         ));
         assert_eq!(fixture.plan_calls.load(Ordering::Acquire), 0);
         assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn typed_renew_routes_strategy_and_rejects_planner_smuggling() {
+        for smuggle in [
+            LifecycleSmuggle::None,
+            LifecycleSmuggle::Expiry,
+            LifecycleSmuggle::Fault,
+            LifecycleSmuggle::EmptyCommandId,
+        ] {
+            let phase = Phase::new(true);
+            let commit_calls = Arc::new(AtomicUsize::new(0));
+            let strategy = UnifiedAtomicCommit::for_profile(
+                DurabilityClass::Atomic,
+                ClaimCommitter {
+                    calls: commit_calls.clone(),
+                    completed: Arc::new(AtomicBool::new(false)),
+                    phase,
+                },
+            )
+            .unwrap();
+            let dispatcher = ControlledDispatcher::new(4);
+            let planner_calls = Arc::new(AtomicUsize::new(0));
+            let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1)
+                .with_lifecycle_planner(ControlledLifecyclePlanner {
+                    smuggle,
+                    calls: planner_calls.clone(),
+                });
+            let request = AsyncRenewRequest {
+                shard: QueueKey::new(
+                    TenantId::new("tenant").unwrap(),
+                    QueueId::new("renew").unwrap(),
+                ),
+                targets: vec![RenewTarget {
+                    item_id: ItemId::mint(1, 1, 1),
+                    lease_token: LeaseToken::new("renew-token").unwrap(),
+                }],
+                new_lease_expires_at: UtcTimestamp::new(20, 0).unwrap(),
+                now: UtcTimestamp::new(10, 0).unwrap(),
+                expected_epoch: Some(1),
+            };
+            let mut renew = Box::pin(backend.renew(request));
+            assert!(matches!(poll_once(renew.as_mut()), Poll::Pending));
+            assert!(dispatcher.drive_next());
+            if smuggle != LifecycleSmuggle::None {
+                assert!(matches!(
+                    poll_once(renew.as_mut()),
+                    Poll::Ready(Err(AsyncLifecycleError::BeforeCommit(
+                        EngineError::Invalid("invalid async renew plan")
+                    )))
+                ));
+                assert_eq!(commit_calls.load(Ordering::Acquire), 0);
+            } else {
+                assert!(matches!(poll_once(renew.as_mut()), Poll::Ready(Ok(()))));
+                assert_eq!(commit_calls.load(Ordering::Acquire), 1);
+            }
+            assert_eq!(planner_calls.load(Ordering::Acquire), 1);
+        }
+    }
+
+    fn renew_request() -> AsyncRenewRequest {
+        AsyncRenewRequest {
+            shard: QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new("renew").unwrap(),
+            ),
+            targets: vec![RenewTarget {
+                item_id: ItemId::mint(1, 1, 1),
+                lease_token: LeaseToken::new("renew-token").unwrap(),
+            }],
+            new_lease_expires_at: UtcTimestamp::new(20, 0).unwrap(),
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            expected_epoch: Some(1),
+        }
+    }
+
+    #[test]
+    fn typed_renew_reports_invalid_response_barrier_after_commit() {
+        let dispatcher = ControlledDispatcher::new(1);
+        let strategy =
+            UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, AppendedOnlyCommitter)
+                .unwrap();
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+        let mut renew = Box::pin(backend.renew(renew_request()));
+        assert!(matches!(poll_once(renew.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(renew.as_mut()),
+            Poll::Ready(Err(AsyncLifecycleError::AfterCommit {
+                stage: AsyncLifecyclePostCommitStage::CommitOutcome,
+                source: EngineError::Storage(_),
+            }))
+        ));
+    }
+
+    #[test]
+    fn dropping_typed_renew_response_does_not_cancel_accepted_commit() {
+        let phase = Phase::new(false);
+        let completed = Arc::new(AtomicBool::new(false));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: Arc::new(AtomicUsize::new(0)),
+                completed: completed.clone(),
+                phase: phase.clone(),
+            },
+        )
+        .unwrap();
+        let dispatcher = ControlledDispatcher::new(1);
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: Arc::new(AtomicUsize::new(0)),
+            });
+        let mut renew = Box::pin(backend.renew(renew_request()));
+        assert!(matches!(poll_once(renew.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(phase.started.load(Ordering::Acquire));
+        drop(renew);
+        phase.release();
+        assert!(dispatcher.drive_next());
+        assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn typed_renew_serializes_same_queue_across_planning_and_commit() {
+        let phase = Phase::new(false);
+        let planner_calls = Arc::new(AtomicUsize::new(0));
+        let strategy = UnifiedAtomicCommit::for_profile(
+            DurabilityClass::Atomic,
+            ClaimCommitter {
+                calls: Arc::new(AtomicUsize::new(0)),
+                completed: Arc::new(AtomicBool::new(false)),
+                phase: phase.clone(),
+            },
+        )
+        .unwrap();
+        let dispatcher = ControlledDispatcher::new(2);
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 2)
+            .with_lifecycle_planner(ControlledLifecyclePlanner {
+                smuggle: LifecycleSmuggle::None,
+                calls: planner_calls.clone(),
+            });
+        let mut first = Box::pin(backend.renew(renew_request()));
+        let mut second = Box::pin(backend.renew(renew_request()));
+        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert_eq!(planner_calls.load(Ordering::Acquire), 1);
+        phase.release();
+        assert!(dispatcher.drive_next());
+        assert!(matches!(poll_once(first.as_mut()), Poll::Ready(Ok(()))));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(matches!(poll_once(second.as_mut()), Poll::Ready(Ok(()))));
+        assert_eq!(planner_calls.load(Ordering::Acquire), 2);
     }
 
     #[test]

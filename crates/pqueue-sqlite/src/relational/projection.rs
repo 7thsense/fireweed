@@ -16,6 +16,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use super::*;
 
+type RenewValidationRow = (String, i64, i64, Option<i64>, Option<i64>, Option<Vec<u8>>);
+
 /// SQLite materialized projection fed by an external command-log authority.
 ///
 /// This is intentionally not a full backend: it does not mint ids, append log entries, or expose
@@ -34,6 +36,63 @@ impl SqliteProjectionStore {
     /// An ephemeral `:memory:` projection store for tests.
     pub fn in_memory() -> EngineResult<Self> {
         Self::from_conn(st(Connection::open_in_memory())?)
+    }
+
+    pub(crate) fn renew_targets_validate(
+        &self,
+        shard: &QueueKey,
+        targets: &[pqueue_engine::RenewTarget],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let now_nanos = ts_nanos(now);
+        for target in targets {
+            let row: Option<RenewValidationRow> = st(g
+                .conn
+                .query_row(
+                    "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash \
+                     FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                    params![tenant, queue, target.item_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional())?;
+            let Some((state, fenced, superseded, cohort_size, lease_expires_at, stored_hash)) = row
+            else {
+                return Err(EngineError::NotFound);
+            };
+            let state = parse_state(&state)?;
+            if fenced != 0 {
+                return Err(EngineError::StaleLease);
+            }
+            if state.is_terminal() {
+                return Err(EngineError::Terminal);
+            }
+            if superseded != 0 {
+                return Err(EngineError::Superseded);
+            }
+            if cohort_size.is_some() {
+                return Err(EngineError::Invalid("cohort member requires cohort lease"));
+            }
+            if state != ItemState::Leased {
+                return Err(EngineError::Invalid("item is not leased"));
+            }
+            if stored_hash.as_deref() != Some(lease_hash(&target.lease_token).as_slice())
+                || lease_expires_at.is_none_or(|expires| expires < now_nanos)
+            {
+                return Err(EngineError::StaleLease);
+            }
+        }
+        Ok(())
     }
 
     /// Read-only validation of every SQLite constraint that a fresh push can violate at apply time.

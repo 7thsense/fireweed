@@ -29,7 +29,7 @@ use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, RequestId, Tenant
 use crate::{
     ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, IdempotencyDecision,
-    PushFingerprint, PushItem, QueueKey, RichClaimSelection,
+    PushFingerprint, PushItem, QueueKey, RenewTarget, RichClaimSelection,
 };
 
 /// Native-async command-log, epoch-fence, replay, and high-water operations needed by initial composition.
@@ -128,6 +128,16 @@ pub trait AsyncProjectionStore: Send + Sync {
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<IdempotencyDecision<Vec<ItemId>>>> + Send
     {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// Validate that every item remains an active, unfenced lease.
+    fn renew_validate(
+        &self,
+        _shard: QueueKey,
+        _targets: Vec<RenewTarget>,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 

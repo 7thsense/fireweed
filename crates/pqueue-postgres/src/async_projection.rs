@@ -16,7 +16,7 @@ use pqueue_core::{ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
     CommandPosition, EngineError, EngineResult, IdempotencyDecision, ProjectionStore,
-    PushFingerprint, PushItem, QueueKey, RichClaimSelection,
+    PushFingerprint, PushItem, QueueKey, RenewTarget, RichClaimSelection,
 };
 
 use crate::PostgresRelational;
@@ -454,6 +454,20 @@ impl AsyncProjectionStore for AsyncPostgresRelationalProjection {
                 .execute(move |store| {
                     store.async_push_idempotency(&shard, &request_id, fingerprint, now)
                 })
+                .await
+        }
+    }
+
+    fn renew_validate(
+        &self,
+        shard: QueueKey,
+        targets: Vec<RenewTarget>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.async_renew_targets_validate(&shard, &targets, now))
                 .await
         }
     }

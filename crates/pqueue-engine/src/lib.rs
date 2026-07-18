@@ -9,6 +9,7 @@ mod active_scope;
 mod async_claim_planner;
 mod async_commit;
 mod async_composed;
+mod async_lifecycle_planner;
 mod async_push_planner;
 mod async_store;
 mod auth;
@@ -41,10 +42,12 @@ pub use async_commit::{
 };
 pub use async_composed::{
     AsyncClaimError, AsyncClaimPlan, AsyncClaimPlanner, AsyncClaimPostCommitStage,
-    AsyncCommitSubmitError, AsyncComposedBackend, AsyncPushError, AsyncPushPlan, AsyncPushPlanner,
-    AsyncPushPostCommitStage, AsyncPushRequest, NoAsyncClaimPlanner, NoAsyncPushPlanner,
-    PushFingerprint,
+    AsyncCommitSubmitError, AsyncComposedBackend, AsyncLifecycleError, AsyncLifecyclePlan,
+    AsyncLifecyclePlanner, AsyncLifecyclePostCommitStage, AsyncPushError, AsyncPushPlan,
+    AsyncPushPlanner, AsyncPushPostCommitStage, AsyncPushRequest, AsyncRenewRequest,
+    NoAsyncClaimPlanner, NoAsyncLifecyclePlanner, NoAsyncPushPlanner, PushFingerprint, RenewTarget,
 };
+pub use async_lifecycle_planner::ProjectionLifecyclePlanner;
 pub use async_push_planner::ProjectionPushPlanner;
 pub use async_store::{AsyncControlPlane, AsyncLogStore, AsyncProjectionStore};
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};

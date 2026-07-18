@@ -5173,6 +5173,54 @@ impl PostgresRelational {
         Ok(row.get(0))
     }
 
+    pub(crate) fn async_renew_targets_validate(
+        &self,
+        shard: &QueueKey,
+        targets: &[pqueue_engine::RenewTarget],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let mut g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let now_nanos = ts_nanos(now);
+        for target in targets {
+            let row = st(g.client.query_opt(
+                "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash \
+                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                &[&tenant, &queue, &target.item_id.to_string()],
+            ))?;
+            let Some(row) = row else {
+                return Err(EngineError::NotFound);
+            };
+            let state = parse_state(&row.get::<_, String>(0))?;
+            let fenced: bool = row.get(1);
+            let superseded: bool = row.get(2);
+            let cohort_size: Option<i64> = row.get(3);
+            let lease_expires_at: Option<i64> = row.get(4);
+            let stored_hash: Option<Vec<u8>> = row.get(5);
+            if fenced {
+                return Err(EngineError::StaleLease);
+            }
+            if state.is_terminal() {
+                return Err(EngineError::Terminal);
+            }
+            if superseded {
+                return Err(EngineError::Superseded);
+            }
+            if cohort_size.is_some() {
+                return Err(EngineError::Invalid("cohort member requires cohort lease"));
+            }
+            if state != ItemState::Leased {
+                return Err(EngineError::Invalid("item is not leased"));
+            }
+            if stored_hash.as_deref() != Some(lease_hash(&target.lease_token).as_slice())
+                || lease_expires_at.is_none_or(|expires| expires < now_nanos)
+            {
+                return Err(EngineError::StaleLease);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn async_push_idempotency(
         &self,
         shard: &QueueKey,
