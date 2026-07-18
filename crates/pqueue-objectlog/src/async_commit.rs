@@ -1,6 +1,12 @@
 //! Native-async object-log then derived-projection commit capability.
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+
+use futures::channel::oneshot;
 
 use pqueue_engine::{
     AsyncLogStore, AsyncProjectionStore, EngineError, EngineResult, KeyedQueueGate, OwnedTask,
@@ -176,7 +182,103 @@ where
 
 /// Explicit group-commit variant. It never probes mode or calls ordinary append.
 pub struct GroupCommitObjectLogProjectionCommitter<P> {
+    coordinator: Arc<GroupCommitCoordinator<P>>,
+}
+
+struct CoordinatedRequest {
+    id: u64,
+    commands: Vec<pqueue_engine::CommandEnvelope>,
+    expected_epoch: u64,
+    fault: RawCommitFault,
+    response: oneshot::Sender<EngineResult<RawCommitOutcome>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlushPhase {
+    PreRepair,
+    SealPending,
+    ApplyPending,
+}
+
+struct InFlightBatch {
+    requests: Vec<CoordinatedRequest>,
+    phase: FlushPhase,
+    positions: Option<Vec<Vec<pqueue_engine::CommandPosition>>>,
+}
+
+#[derive(Default)]
+struct CoordinatedQueue {
+    pending: VecDeque<CoordinatedRequest>,
+    driver: Option<u64>,
+    in_flight: Option<InFlightBatch>,
+    outstanding: usize,
+    driver_wakers: Vec<Waker>,
+}
+
+struct CoordinatorState {
+    closed: bool,
+    next_request_id: u64,
+    outstanding: usize,
+    queues: HashMap<QueueKey, CoordinatedQueue>,
+    drain_wakers: Vec<Waker>,
+}
+
+struct CoordinatedTaskGuard<P: AsyncProjectionStore + 'static> {
+    coordinator: Arc<GroupCommitCoordinator<P>>,
+    shard: QueueKey,
+    request_id: u64,
+    completed: bool,
+}
+
+impl<P: AsyncProjectionStore + 'static> Drop for CoordinatedTaskGuard<P> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.coordinator.abandon(&self.shard, self.request_id);
+        }
+    }
+}
+
+struct GroupCommitCoordinator<P> {
     inner: ObjectLogProjectionCommitter<P>,
+    max_outstanding: usize,
+    state: Mutex<CoordinatorState>,
+    #[cfg(test)]
+    phase_hook: Mutex<Option<PhaseHook>>,
+}
+
+#[cfg(test)]
+struct PhaseHook {
+    phase: FlushPhase,
+    started: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+struct CoordinatorDrain<P> {
+    coordinator: Arc<GroupCommitCoordinator<P>>,
+}
+
+impl<P> Future for CoordinatorDrain<P> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .expect("group commit coordinator poisoned");
+        if state.outstanding == 0 {
+            Poll::Ready(())
+        } else {
+            if !state
+                .drain_wakers
+                .iter()
+                .any(|registered| registered.will_wake(context.waker()))
+            {
+                state.drain_wakers.push(context.waker().clone());
+            }
+            Poll::Pending
+        }
+    }
 }
 
 impl<P> GroupCommitObjectLogProjectionCommitter<P>
@@ -190,16 +292,469 @@ where
         recovery_page_size: usize,
         max_queued_commits: usize,
     ) -> EngineResult<Self> {
+        let inner = ObjectLogProjectionCommitter::open(
+            log,
+            projection,
+            definitions,
+            recovery_page_size,
+            max_queued_commits,
+        )
+        .await?;
         Ok(Self {
-            inner: ObjectLogProjectionCommitter::open(
-                log,
-                projection,
-                definitions,
-                recovery_page_size,
-                max_queued_commits,
-            )
-            .await?,
+            coordinator: Arc::new(GroupCommitCoordinator {
+                inner,
+                max_outstanding: max_queued_commits,
+                state: Mutex::new(CoordinatorState {
+                    closed: false,
+                    next_request_id: 0,
+                    outstanding: 0,
+                    queues: HashMap::new(),
+                    drain_wakers: Vec::new(),
+                }),
+                #[cfg(test)]
+                phase_hook: Mutex::new(None),
+            }),
         })
+    }
+
+    /// Stop accepting new commit requests. Already accepted requests remain coordinator-owned.
+    pub fn close(&self) {
+        self.coordinator
+            .state
+            .lock()
+            .expect("group commit coordinator poisoned")
+            .closed = true;
+    }
+
+    /// Stop admission and wait until every accepted request has resolved.
+    pub async fn close_and_drain(&self) {
+        self.close();
+        CoordinatorDrain {
+            coordinator: Arc::clone(&self.coordinator),
+        }
+        .await
+    }
+
+    #[cfg(test)]
+    fn gate_phase(&self, phase: FlushPhase) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (started_sender, started) = oneshot::channel();
+        let (release, release_receiver) = oneshot::channel();
+        *self
+            .coordinator
+            .phase_hook
+            .lock()
+            .expect("group commit phase hook poisoned") = Some(PhaseHook {
+            phase,
+            started: started_sender,
+            release: release_receiver,
+        });
+        (started, release)
+    }
+}
+
+impl<P> GroupCommitCoordinator<P>
+where
+    P: AsyncProjectionStore + 'static,
+{
+    #[cfg(test)]
+    async fn await_phase_hook(&self, phase: FlushPhase) {
+        let hook = {
+            let mut hook = self
+                .phase_hook
+                .lock()
+                .expect("group commit phase hook poisoned");
+            if hook.as_ref().is_some_and(|hook| hook.phase == phase) {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some(hook) = hook {
+            let _ = hook.started.send(());
+            let _ = hook.release.await;
+        }
+    }
+
+    fn enqueue(
+        self: &Arc<Self>,
+        request: RawCommitRequest,
+    ) -> EngineResult<(
+        QueueKey,
+        u64,
+        oneshot::Receiver<EngineResult<RawCommitOutcome>>,
+    )> {
+        let shard = request.shard().clone();
+        let commands = request.commands().to_vec();
+        let expected_epoch = request.expected_epoch();
+        let fault = request.fault();
+        let (response, receiver) = oneshot::channel();
+        let mut state = self
+            .state
+            .lock()
+            .expect("group commit coordinator poisoned");
+        if state.closed {
+            return Err(EngineError::Unavailable);
+        }
+        let request_id = state.next_request_id;
+        state.next_request_id = state.next_request_id.wrapping_add(1);
+        if state.outstanding >= self.max_outstanding {
+            return Err(EngineError::Unavailable);
+        }
+        state.outstanding += 1;
+        let queue = state.queues.entry(shard.clone()).or_default();
+        queue.outstanding += 1;
+        queue.pending.push_back(CoordinatedRequest {
+            id: request_id,
+            commands,
+            expected_epoch,
+            fault,
+            response,
+        });
+        Ok((shard, request_id, receiver))
+    }
+
+    fn poll_driver(&self, shard: &QueueKey, request_id: u64, context: &mut Context<'_>) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("group commit coordinator poisoned");
+        let queue = state
+            .queues
+            .get_mut(shard)
+            .expect("accepted coordinated queue disappeared");
+        if queue.driver.is_none() {
+            queue.driver = Some(request_id);
+            true
+        } else {
+            if !queue
+                .driver_wakers
+                .iter()
+                .any(|registered| registered.will_wake(context.waker()))
+            {
+                queue.driver_wakers.push(context.waker().clone());
+            }
+            false
+        }
+    }
+
+    fn abandon(&self, shard: &QueueKey, request_id: u64) {
+        enum Resolution {
+            Error(CoordinatedRequest, EngineError),
+            Appended(CoordinatedRequest, Vec<pqueue_engine::CommandPosition>),
+        }
+        let (driver_wakers, drain_wakers, resolutions) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("group commit coordinator poisoned");
+            let Some(queue) = state.queues.get_mut(shard) else {
+                return;
+            };
+            let mut removed = 0;
+            if let Some(index) = queue
+                .pending
+                .iter()
+                .position(|request| request.id == request_id)
+            {
+                queue.pending.remove(index);
+                queue.outstanding -= 1;
+                removed += 1;
+            }
+            let mut resolutions = Vec::new();
+            let driver_wakers = if queue.driver == Some(request_id) {
+                if let Some(in_flight) = queue.in_flight.take() {
+                    match in_flight.phase {
+                        FlushPhase::PreRepair => {
+                            for request in in_flight.requests.into_iter().rev() {
+                                if request.id == request_id {
+                                    queue.outstanding -= 1;
+                                    removed += 1;
+                                } else {
+                                    queue.pending.push_front(request);
+                                }
+                            }
+                        }
+                        FlushPhase::SealPending => {
+                            for request in in_flight.requests {
+                                queue.outstanding -= 1;
+                                removed += 1;
+                                resolutions.push(Resolution::Error(
+                                    request,
+                                    EngineError::Storage(
+                                        "group commit outcome unknown after seal cancellation; recovery required before retry"
+                                            .to_string(),
+                                    ),
+                                ));
+                            }
+                        }
+                        FlushPhase::ApplyPending => {
+                            let positions = in_flight
+                                .positions
+                                .expect("apply-pending group batch missing positions");
+                            for (request, positions) in
+                                in_flight.requests.into_iter().zip(positions)
+                            {
+                                queue.outstanding -= 1;
+                                removed += 1;
+                                resolutions.push(Resolution::Appended(request, positions));
+                            }
+                        }
+                    }
+                }
+                queue.driver = None;
+                std::mem::take(&mut queue.driver_wakers)
+            } else {
+                Vec::new()
+            };
+            let reclaim = queue.outstanding == 0;
+            state.outstanding -= removed;
+            if reclaim {
+                state.queues.remove(shard);
+            }
+            let drain_wakers = if state.closed && state.outstanding == 0 {
+                std::mem::take(&mut state.drain_wakers)
+            } else {
+                Vec::new()
+            };
+            (driver_wakers, drain_wakers, resolutions)
+        };
+        for resolution in resolutions {
+            match resolution {
+                Resolution::Error(request, error) => {
+                    let _ = request.response.send(Err(error));
+                }
+                Resolution::Appended(request, positions) => {
+                    let _ = request
+                        .response
+                        .send(Ok(RawCommitOutcome::appended(positions)));
+                }
+            }
+        }
+        for waker in driver_wakers.into_iter().chain(drain_wakers) {
+            waker.wake();
+        }
+    }
+
+    async fn drive(self: Arc<Self>, shard: QueueKey) {
+        // Give other already-runnable requests one executor turn to join this queue's first batch. This is
+        // deliberately runtime-neutral: no clock, timer, or executor-specific spawn API is required.
+        let mut yielded = false;
+        futures::future::poll_fn(|context| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+
+        loop {
+            let prepared = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .expect("group commit coordinator poisoned");
+                let Some(queue) = state.queues.get_mut(&shard) else {
+                    return;
+                };
+                let Some(expected_epoch) =
+                    queue.pending.front().map(|request| request.expected_epoch)
+                else {
+                    queue.driver = None;
+                    let wakers = std::mem::take(&mut queue.driver_wakers);
+                    if queue.outstanding == 0 {
+                        state.queues.remove(&shard);
+                    }
+                    drop(state);
+                    for waker in wakers {
+                        waker.wake();
+                    }
+                    return;
+                };
+                let count = queue
+                    .pending
+                    .iter()
+                    .take_while(|request| request.expected_epoch == expected_epoch)
+                    .count();
+                let requests = queue.pending.drain(..count).collect::<Vec<_>>();
+                let commands = requests
+                    .iter()
+                    .flat_map(|request| request.commands.iter().cloned())
+                    .collect::<Vec<_>>();
+                let needs_apply = requests
+                    .iter()
+                    .any(|request| request.fault != RawCommitFault::AfterAppendBeforeApply);
+                queue.in_flight = Some(InFlightBatch {
+                    requests,
+                    phase: FlushPhase::PreRepair,
+                    positions: None,
+                });
+                (expected_epoch, commands, needs_apply)
+            };
+
+            let (expected_epoch, commands, needs_apply) = prepared;
+            #[cfg(test)]
+            self.await_phase_hook(FlushPhase::PreRepair).await;
+            if let Err(error) = repair_tail(
+                &self.inner.log,
+                self.inner.projection.as_ref(),
+                shard.clone(),
+                self.inner.recovery_page_size,
+            )
+            .await
+            {
+                self.finish_in_flight(&shard, Err(error));
+                continue;
+            }
+            self.set_phase(&shard, FlushPhase::SealPending, None);
+            #[cfg(test)]
+            self.await_phase_hook(FlushPhase::SealPending).await;
+            let command_count = commands.len();
+            let sealed = match self
+                .inner
+                .log
+                .group_commit_enqueue_and_seal(shard.clone(), commands, expected_epoch, 0)
+                .await
+            {
+                Ok(sealed) => sealed,
+                Err(error) => {
+                    self.finish_in_flight(&shard, Err(error));
+                    continue;
+                }
+            };
+            if sealed.len() < command_count {
+                self.finish_in_flight(
+                    &shard,
+                    Err(EngineError::Storage(
+                        "group commit seal omitted accepted commands".to_string(),
+                    )),
+                );
+                continue;
+            }
+            if let Err(error) =
+                validate_append_footprint(&shard, &sealed, sealed.len(), Some(expected_epoch))
+            {
+                self.finish_in_flight(&shard, Err(error));
+                continue;
+            }
+            let own = &sealed[sealed.len() - command_count..];
+            let positions = self.partition_positions(&shard, own);
+            if needs_apply {
+                self.set_phase(&shard, FlushPhase::ApplyPending, Some(positions));
+                #[cfg(test)]
+                self.await_phase_hook(FlushPhase::ApplyPending).await;
+                let apply_result = repair_tail(
+                    &self.inner.log,
+                    self.inner.projection.as_ref(),
+                    shard.clone(),
+                    self.inner.recovery_page_size,
+                )
+                .await;
+                self.finish_in_flight(&shard, apply_result);
+            } else {
+                self.set_phase(&shard, FlushPhase::ApplyPending, Some(positions));
+                self.finish_in_flight(&shard, Ok(()));
+            }
+        }
+    }
+
+    fn set_phase(
+        &self,
+        shard: &QueueKey,
+        phase: FlushPhase,
+        positions: Option<Vec<Vec<pqueue_engine::CommandPosition>>>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("group commit coordinator poisoned");
+        let in_flight = state
+            .queues
+            .get_mut(shard)
+            .and_then(|queue| queue.in_flight.as_mut())
+            .expect("group commit in-flight batch disappeared");
+        in_flight.phase = phase;
+        if positions.is_some() {
+            in_flight.positions = positions;
+        }
+    }
+
+    fn partition_positions(
+        &self,
+        shard: &QueueKey,
+        own: &[pqueue_engine::CommandPosition],
+    ) -> Vec<Vec<pqueue_engine::CommandPosition>> {
+        let state = self
+            .state
+            .lock()
+            .expect("group commit coordinator poisoned");
+        let requests = &state
+            .queues
+            .get(shard)
+            .and_then(|queue| queue.in_flight.as_ref())
+            .expect("group commit in-flight batch disappeared")
+            .requests;
+        let mut offset = 0;
+        requests
+            .iter()
+            .map(|request| {
+                let end = offset + request.commands.len();
+                let positions = own[offset..end].to_vec();
+                offset = end;
+                positions
+            })
+            .collect()
+    }
+
+    fn finish_in_flight(&self, shard: &QueueKey, apply_result: EngineResult<()>) {
+        let (requests, positions, drain_wakers) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("group commit coordinator poisoned");
+            let queue = state
+                .queues
+                .get_mut(shard)
+                .expect("group commit queue disappeared");
+            let in_flight = queue
+                .in_flight
+                .take()
+                .expect("group commit in-flight batch disappeared");
+            let count = in_flight.requests.len();
+            queue.outstanding -= count;
+            state.outstanding -= count;
+            let drain_wakers = if state.closed && state.outstanding == 0 {
+                std::mem::take(&mut state.drain_wakers)
+            } else {
+                Vec::new()
+            };
+            (in_flight.requests, in_flight.positions, drain_wakers)
+        };
+        if let Some(positions) = positions {
+            for (request, positions) in requests.into_iter().zip(positions) {
+                let outcome = if request.fault == RawCommitFault::AfterAppendBeforeApply {
+                    Ok(RawCommitOutcome::appended(positions))
+                } else {
+                    apply_result
+                        .clone()
+                        .map(|()| RawCommitOutcome::applied(positions))
+                };
+                let _ = request.response.send(outcome);
+            }
+        } else {
+            debug_assert!(apply_result.is_err());
+            for request in requests {
+                let _ =
+                    request.response.send(apply_result.clone().map(|()| {
+                        unreachable!("pre-append recovery success must carry positions")
+                    }));
+            }
+        }
+        for waker in drain_wakers {
+            waker.wake();
+        }
     }
 }
 
@@ -211,48 +766,50 @@ where
     type Output = EngineResult<RawCommitOutcome>;
 
     fn commit_replayable(&self, request: Self::Request) -> OwnedTask<Self::Output> {
-        let inner = self.inner.clone();
+        let coordinator = Arc::clone(&self.coordinator);
         Box::pin(async move {
-            let shard = request.shard().clone();
-            let commands = request.commands().to_vec();
-            let expected_epoch = request.expected_epoch();
             if request.fault() == RawCommitFault::BeforeAppend {
                 return Err(EngineError::Invalid("fault-injection: kill before append"));
             }
-            let _permit = inner
-                .gate
-                .acquire(shard.clone())
-                .await
-                .map_err(|_| EngineError::Unavailable)?;
-            repair_tail(
-                &inner.log,
-                inner.projection.as_ref(),
-                shard.clone(),
-                inner.recovery_page_size,
-            )
-            .await?;
-            let sealed = inner
-                .log
-                .group_commit_enqueue_and_seal(shard.clone(), commands.clone(), expected_epoch, 0)
-                .await?;
-            if sealed.len() < commands.len() {
-                return Err(EngineError::Storage(
-                    "group commit seal omitted accepted commands".to_string(),
-                ));
+            // Admission happens only when this owned task is first polled. Constructing and dropping an
+            // unpolled task leaves no coordinator entry and consumes no global capacity.
+            let (shard, request_id, mut response) = coordinator.enqueue(request)?;
+            let mut guard = CoordinatedTaskGuard {
+                coordinator: Arc::clone(&coordinator),
+                shard: shard.clone(),
+                request_id,
+                completed: false,
+            };
+            loop {
+                enum Turn<T> {
+                    Response(T),
+                    Drive,
+                }
+                let turn = futures::future::poll_fn(|context| {
+                    if let Poll::Ready(result) = Pin::new(&mut response).poll(context) {
+                        return Poll::Ready(Turn::Response(result));
+                    }
+                    if coordinator.poll_driver(&shard, request_id, context) {
+                        Poll::Ready(Turn::Drive)
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                match turn {
+                    Turn::Response(result) => {
+                        guard.completed = true;
+                        return result.map_err(|_| {
+                            EngineError::Storage(
+                                "group commit coordinator dropped a response".to_string(),
+                            )
+                        })?;
+                    }
+                    Turn::Drive => {
+                        Arc::clone(&coordinator).drive(shard.clone()).await;
+                    }
+                }
             }
-            validate_append_footprint(&shard, &sealed, sealed.len(), Some(expected_epoch))?;
-            let positions = sealed[sealed.len() - commands.len()..].to_vec();
-            if request.fault() == RawCommitFault::AfterAppendBeforeApply {
-                return Ok(RawCommitOutcome::appended(positions));
-            }
-            repair_tail(
-                &inner.log,
-                inner.projection.as_ref(),
-                shard,
-                inner.recovery_page_size,
-            )
-            .await?;
-            Ok(RawCommitOutcome::applied(positions))
         })
     }
 }
@@ -839,5 +1396,279 @@ mod tests {
         assert_eq!(projection.state.lock().unwrap().live.len(), 1);
         log.close_and_drain().await.unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coincident_group_requests_share_one_projection_recovery_batch() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1024 * 1024, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let projection = RecordingProjection::new(log.clone());
+        let committer = GroupCommitObjectLogProjectionCommitter::open(
+            log.clone(),
+            projection.clone(),
+            Vec::new(),
+            16,
+            8,
+        )
+        .await
+        .unwrap();
+
+        let first =
+            committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("1")], 0));
+        let second =
+            committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("2")], 0));
+        let (first, second) = futures::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        assert!(first.projection_applied() && second.projection_applied());
+        assert!(first.positions()[0].precedes(&second.positions()[0]));
+        {
+            let state = projection.state.lock().unwrap();
+            assert_eq!(state.recovery.len(), 1);
+            assert_eq!(state.recovery[0].len(), 2);
+        }
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn group_coordinator_enforces_global_capacity_and_drains_accepted_requests() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1024 * 1024, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let second_shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue-2").unwrap(),
+        );
+        let third_shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue-3").unwrap(),
+        );
+        log.ensure_shard(second_shard.clone()).await.unwrap();
+        log.ensure_shard(third_shard.clone()).await.unwrap();
+        let projection = RecordingProjection::new(log.clone());
+        let committer = GroupCommitObjectLogProjectionCommitter::open(
+            log.clone(),
+            projection,
+            Vec::new(),
+            16,
+            2,
+        )
+        .await
+        .unwrap();
+
+        let mut first =
+            committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("1")], 0));
+        let mut second =
+            committer.commit_replayable(RawCommitRequest::new(second_shard, vec![command("2")], 0));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(first.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(
+            committer
+                .commit_replayable(RawCommitRequest::new(third_shard, vec![command("3")], 0))
+                .await,
+            Err(EngineError::Unavailable)
+        ));
+        committer.close();
+        assert!(matches!(
+            committer
+                .commit_replayable(RawCommitRequest::new(shard(), vec![command("4")], 0))
+                .await,
+            Err(EngineError::Unavailable)
+        ));
+        let (first, second) = futures::join!(first, second);
+        assert!(first.is_ok() && second.is_ok());
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_pre_durable_driver_hands_progress_to_later_task() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1024 * 1024, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let projection = RecordingProjection::new(log.clone());
+        let committer = GroupCommitObjectLogProjectionCommitter::open(
+            log.clone(),
+            projection,
+            Vec::new(),
+            16,
+            8,
+        )
+        .await
+        .unwrap();
+
+        let mut dropped =
+            committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("1")], 0));
+        let survivor =
+            committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("2")], 0));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(dropped.as_mut().poll(&mut context), Poll::Pending));
+        drop(dropped);
+
+        let survivor = survivor.await.unwrap();
+        assert_eq!(survivor.positions().len(), 1);
+        let page = log.read_from(shard(), None, 10).await.unwrap();
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].0, survivor.positions()[0]);
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    async fn assert_driver_drop_at_phase(phase: FlushPhase) {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1024 * 1024, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let projection = RecordingProjection::new(log.clone());
+        let committer = GroupCommitObjectLogProjectionCommitter::open(
+            log.clone(),
+            projection,
+            Vec::new(),
+            16,
+            8,
+        )
+        .await
+        .unwrap();
+        let (started, release) = committer.gate_phase(phase);
+        let first =
+            committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("1")], 0));
+        let second =
+            committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("2")], 0));
+        let first = tokio::spawn(first);
+        let second = tokio::spawn(second);
+        started.await.unwrap();
+        first.abort();
+        let _ = first.await;
+        drop(release);
+
+        let second = second.await.unwrap();
+        match phase {
+            FlushPhase::PreRepair => {
+                let outcome = second.unwrap();
+                assert!(outcome.projection_applied());
+                assert_eq!(outcome.positions().len(), 1);
+            }
+            FlushPhase::SealPending => assert!(matches!(
+                second,
+                Err(EngineError::Storage(message)) if message.contains("outcome unknown")
+            )),
+            FlushPhase::ApplyPending => {
+                let outcome = second.unwrap();
+                assert!(!outcome.projection_applied());
+                assert_eq!(outcome.positions().len(), 1);
+            }
+        }
+        committer.close_and_drain().await;
+        assert_eq!(committer.coordinator.state.lock().unwrap().outstanding, 0);
+        assert!(
+            committer
+                .coordinator
+                .state
+                .lock()
+                .unwrap()
+                .queues
+                .is_empty()
+        );
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn driver_drop_during_pre_repair_requeues_other_requests_and_drains() {
+        assert_driver_drop_at_phase(FlushPhase::PreRepair).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn driver_drop_during_seal_reports_unknown_outcome_and_drains() {
+        assert_driver_drop_at_phase(FlushPhase::SealPending).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn driver_drop_during_apply_reports_durable_append_and_drains() {
+        assert_driver_drop_at_phase(FlushPhase::ApplyPending).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unpolled_drop_has_no_state_and_global_capacity_reclaims_queue_entries() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1024 * 1024, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        let committer = GroupCommitObjectLogProjectionCommitter::open(
+            log.clone(),
+            RecordingProjection::new(log.clone()),
+            Vec::new(),
+            16,
+            2,
+        )
+        .await
+        .unwrap();
+
+        drop(committer.commit_replayable(RawCommitRequest::new(shard(), vec![command("1")], 0)));
+        {
+            let state = committer.coordinator.state.lock().unwrap();
+            assert_eq!(state.outstanding, 0);
+            assert!(state.queues.is_empty());
+        }
+
+        for index in 0..16_u64 {
+            let key = QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new(format!("queue-{index}")).unwrap(),
+            );
+            log.ensure_shard(key.clone()).await.unwrap();
+            committer
+                .commit_replayable(RawCommitRequest::new(
+                    key,
+                    vec![command(&(index + 10).to_string())],
+                    0,
+                ))
+                .await
+                .unwrap();
+        }
+        {
+            let state = committer.coordinator.state.lock().unwrap();
+            assert_eq!(state.outstanding, 0);
+            assert!(state.queues.is_empty());
+        }
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
     }
 }
