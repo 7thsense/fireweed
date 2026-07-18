@@ -133,6 +133,141 @@ impl ObjectLog {
     pub fn discard_branch(&self, source: &QueueKey, branch: &QueueKey) -> EngineResult<()> {
         self.log.discard_branch(source, branch)
     }
+
+    pub(crate) fn shared_ensure_shard(&self, shard: &QueueKey) -> EngineResult<()> {
+        self.log.ensure_shard(shard)
+    }
+
+    pub(crate) fn shared_acquire_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
+        self.log.acquire_epoch(shard, 0)
+    }
+
+    pub(crate) fn shared_append(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let seal_ms = commands
+            .iter()
+            .map(|env| ts_to_ms(env.created_at))
+            .max()
+            .unwrap_or(0);
+        let out = self.log.enqueue(shard, commands, expected_epoch, seal_ms)?;
+        let mut positions = out.committed;
+        positions.extend(self.log.seal(shard, expected_epoch, seal_ms)?);
+        if let Some(last) = positions.last() {
+            self.log.advance_high_water(shard, last.clone())?;
+        }
+        Ok(positions)
+    }
+
+    pub(crate) fn shared_set_high_water(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        self.log.set_high_water(shard, position)
+    }
+
+    pub(crate) fn shared_is_group_commit(&self) -> bool {
+        self.group_commit
+    }
+
+    pub(crate) fn shared_pending(&self, shard: &QueueKey) -> usize {
+        self.log.pending(shard)
+    }
+
+    pub(crate) fn shared_gc_enqueue(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if !self.group_commit {
+            return Err(pqueue_engine::EngineError::Unavailable);
+        }
+        Ok(self
+            .log
+            .enqueue(shard, commands, expected_epoch, now_ms)?
+            .committed)
+    }
+
+    pub(crate) fn shared_gc_seal(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if !self.group_commit {
+            return Err(pqueue_engine::EngineError::Unavailable);
+        }
+        self.log.seal(shard, expected_epoch, now_ms)
+    }
+
+    pub(crate) fn shared_gc_flush_due(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if !self.group_commit {
+            return Err(pqueue_engine::EngineError::Unavailable);
+        }
+        self.log.flush_due(shard, expected_epoch, now_ms)
+    }
+
+    pub(crate) fn shared_gc_advance_high_water(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+    ) -> EngineResult<()> {
+        if !self.group_commit {
+            return Err(pqueue_engine::EngineError::Unavailable);
+        }
+        self.log.advance_high_water(shard, position)
+    }
+
+    pub(crate) fn shared_gc_enqueue_and_advance(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let positions = self.shared_gc_enqueue(shard, commands, expected_epoch, now_ms)?;
+        if let Some(last) = positions.last() {
+            self.log.set_high_water(shard, last.clone())?;
+        }
+        Ok(positions)
+    }
+
+    pub(crate) fn shared_gc_seal_and_advance(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let positions = self.shared_gc_seal(shard, expected_epoch, now_ms)?;
+        if let Some(last) = positions.last() {
+            self.log.set_high_water(shard, last.clone())?;
+        }
+        Ok(positions)
+    }
+
+    pub(crate) fn shared_gc_flush_due_and_advance(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let positions = self.shared_gc_flush_due(shard, expected_epoch, now_ms)?;
+        if let Some(last) = positions.last() {
+            self.log.set_high_water(shard, last.clone())?;
+        }
+        Ok(positions)
+    }
 }
 
 impl LogStore for ObjectLog {
@@ -141,7 +276,7 @@ impl LogStore for ObjectLog {
     }
 
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {
-        self.log.ensure_shard(shard)
+        self.shared_ensure_shard(shard)
     }
 
     fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
@@ -150,7 +285,7 @@ impl LogStore for ObjectLog {
 
     fn acquire_epoch(&mut self, shard: &QueueKey) -> EngineResult<u64> {
         // The fence entry's `committed_at_ms` is audit-only; pass 0 (the composition supplies no wall clock).
-        self.log.acquire_epoch(shard, 0)
+        self.shared_acquire_epoch(shard)
     }
 
     fn append(
@@ -166,23 +301,7 @@ impl LogStore for ObjectLog {
         // ONLY request_ids past retention). A `0` here (the old value) would mark every raw-append segment as
         // infinitely old and let the trim reclaim a within-retention request_id. Empty batches keep `0` (no
         // segment is sealed).
-        let seal_ms = commands
-            .iter()
-            .map(|env| ts_to_ms(env.created_at))
-            .max()
-            .unwrap_or(0);
-        // Buffer the batch, then force-seal it into one segment (the ack boundary). A stale epoch is fenced at
-        // the seal, before any segment object is written, and the buffer is discarded — nothing is acked.
-        let out = self.log.enqueue(shard, commands, expected_epoch, seal_ms)?;
-        let mut positions = out.committed;
-        let sealed = self.log.seal(shard, expected_epoch, seal_ms)?;
-        positions.extend(sealed);
-        // Advance the durable high-water to the last acked position (the per-commit high-water advance the
-        // conformance suite asserts; the explicit `set_high_water` setter is for snapshot truncation).
-        if let Some(last) = positions.last() {
-            self.log.advance_high_water(shard, last.clone())?;
-        }
-        Ok(positions)
+        self.shared_append(shard, commands, expected_epoch)
     }
 
     fn read_from(
@@ -217,7 +336,7 @@ impl LogStore for ObjectLog {
     }
 
     fn set_high_water(&mut self, shard: &QueueKey, position: CommandPosition) -> EngineResult<()> {
-        self.log.set_high_water(shard, position)
+        self.shared_set_high_water(shard, position)
     }
 
     // -- retention floor (bounded-recovery segment-object reclamation, bead pqueue-b5cc2bc7) -------------
@@ -339,10 +458,7 @@ impl LogStore for ObjectLog {
         now_ms: i64,
     ) -> EngineResult<Vec<CommandPosition>> {
         // Buffer; the substrate seals + returns positions only if a SIZE trigger fired during this enqueue.
-        Ok(self
-            .log
-            .enqueue(shard, commands, expected_epoch, now_ms)?
-            .committed)
+        self.shared_gc_enqueue(shard, commands, expected_epoch, now_ms)
     }
 
     fn gc_seal(
@@ -351,7 +467,7 @@ impl LogStore for ObjectLog {
         expected_epoch: u64,
         now_ms: i64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        self.log.seal(shard, expected_epoch, now_ms)
+        self.shared_gc_seal(shard, expected_epoch, now_ms)
     }
 
     fn gc_flush_due(
@@ -360,7 +476,7 @@ impl LogStore for ObjectLog {
         expected_epoch: u64,
         now_ms: i64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        self.log.flush_due(shard, expected_epoch, now_ms)
+        self.shared_gc_flush_due(shard, expected_epoch, now_ms)
     }
 
     fn gc_advance_high_water(
@@ -368,7 +484,7 @@ impl LogStore for ObjectLog {
         shard: &QueueKey,
         position: CommandPosition,
     ) -> EngineResult<()> {
-        self.log.advance_high_water(shard, position)
+        self.shared_gc_advance_high_water(shard, position)
     }
 
     fn gc_max_latency_ms(&self) -> u64 {

@@ -16,9 +16,13 @@
 //! pre-validate — see the INVARIANT). Object names are zero-padded sequence numbers so lexical order is
 //! replay order; the next sequence is `max(existing)+1`, compaction-safe.
 
+mod async_log;
 pub mod compose_log;
 pub mod segmented;
 
+pub use async_log::{
+    AsyncObjectLog, DEFAULT_ASYNC_OBJECT_LOG_CAPACITY, DEFAULT_ASYNC_OBJECT_LOG_WORKERS,
+};
 pub use compose_log::{
     ComposedObjectLogBackend, ObjectLog, composed_objectlog_backend,
     composed_objectlog_backend_group_commit,
