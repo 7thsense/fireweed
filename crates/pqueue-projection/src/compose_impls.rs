@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::future::ready;
+use std::sync::Mutex;
 
 use rustc_hash::FxHashMap;
 
@@ -141,63 +142,116 @@ impl LogStore for MemoryLog {
     }
 }
 
-impl AsyncLogStore for MemoryLog {
+/// Shared-receiver async wrapper for [`MemoryLog`].
+///
+/// Each operation executes immediately under the legacy log's short-lived mutex. The guard is released
+/// before the returned ready future exists, so no standard mutex guard crosses an await.
+#[derive(Default)]
+pub struct AsyncMemoryLog {
+    inner: Mutex<MemoryLog>,
+}
+
+impl AsyncMemoryLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_inner(inner: MemoryLog) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    pub fn into_inner(self) -> MemoryLog {
+        self.inner.into_inner().expect("memory log poisoned")
+    }
+}
+
+impl AsyncLogStore for AsyncMemoryLog {
     fn durability_class(&self) -> DurabilityClass {
-        LogStore::durability_class(self)
+        DurabilityClass::Atomic
     }
 
     fn ensure_shard(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        ready(LogStore::ensure_shard(self, &shard))
+        let result = {
+            let mut inner = self.inner.lock().expect("memory log poisoned");
+            LogStore::ensure_shard(&mut *inner, &shard)
+        };
+        ready(result)
     }
 
     fn current_epoch(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        ready(LogStore::current_epoch(self, &shard))
+        let result = {
+            let inner = self.inner.lock().expect("memory log poisoned");
+            LogStore::current_epoch(&*inner, &shard)
+        };
+        ready(result)
     }
 
     fn acquire_epoch(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        ready(LogStore::acquire_epoch(self, &shard))
+        let result = {
+            let mut inner = self.inner.lock().expect("memory log poisoned");
+            LogStore::acquire_epoch(&mut *inner, &shard)
+        };
+        ready(result)
     }
 
     fn append(
-        &mut self,
+        &self,
         shard: QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl std::future::Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
-        ready(LogStore::append(self, &shard, &commands, expected_epoch))
+        let result = {
+            let mut inner = self.inner.lock().expect("memory log poisoned");
+            LogStore::append(&mut *inner, &shard, &commands, expected_epoch)
+        };
+        ready(result)
     }
 
     fn read_from(
-        &mut self,
+        &self,
         shard: QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
-        ready(LogStore::read_from(self, &shard, from, limit))
+        let result = {
+            let inner = self.inner.lock().expect("memory log poisoned");
+            LogStore::read_from(&*inner, &shard, from, limit)
+        };
+        ready(result)
     }
 
     fn high_water(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
-        ready(LogStore::high_water(self, &shard))
+        let result = {
+            let inner = self.inner.lock().expect("memory log poisoned");
+            LogStore::high_water(&*inner, &shard)
+        };
+        ready(result)
     }
 
     fn set_high_water(
-        &mut self,
+        &self,
         shard: QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        ready(LogStore::set_high_water(self, &shard, position))
+        let result = {
+            let mut inner = self.inner.lock().expect("memory log poisoned");
+            LogStore::set_high_water(&mut *inner, &shard, position)
+        };
+        ready(result)
     }
 }
 
@@ -539,85 +593,152 @@ impl ProjectionStore for InMemoryProjection {
     }
 }
 
-impl AsyncProjectionStore for InMemoryProjection {
+/// Shared-receiver async wrapper for [`InMemoryProjection`].
+///
+/// The legacy projection operation completes under a short-lived mutex before the ready future is returned;
+/// no guard is retained by the future or held across an await.
+#[derive(Default)]
+pub struct AsyncInMemoryProjection {
+    inner: Mutex<InMemoryProjection>,
+}
+
+impl AsyncInMemoryProjection {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_inner(inner: InMemoryProjection) -> Self {
+        Self {
+            inner: Mutex::new(inner),
+        }
+    }
+
+    pub fn into_inner(self) -> InMemoryProjection {
+        self.inner
+            .into_inner()
+            .expect("in-memory projection poisoned")
+    }
+}
+
+impl AsyncProjectionStore for AsyncInMemoryProjection {
     fn supports_gates(&self) -> bool {
-        ProjectionStore::supports_gates(self)
+        false
     }
 
     fn ensure_shard(
-        &mut self,
+        &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        ready(ProjectionStore::ensure_shard(self, &definition))
+        let result = {
+            let mut inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::ensure_shard(&mut *inner, &definition)
+        };
+        ready(result)
     }
 
     fn admit_mutation(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        ready(ProjectionStore::admit_mutation(self, &shard))
+        let result = {
+            let mut inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::admit_mutation(&mut *inner, &shard)
+        };
+        ready(result)
     }
 
     fn apply_live(
-        &mut self,
+        &self,
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        ready(ProjectionStore::apply_live(self, &positions, &commands))
+        let result = {
+            let mut inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::apply_live(&mut *inner, &positions, &commands)
+        };
+        ready(result)
     }
 
     fn apply_recovery(
-        &mut self,
+        &self,
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        ready(ProjectionStore::apply_recovery(self, &positions, &commands))
+        let result = {
+            let mut inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::apply_recovery(&mut *inner, &positions, &commands)
+        };
+        ready(result)
     }
 
     fn eligible_candidates(
-        &mut self,
+        &self,
         shard: QueueKey,
         now: UtcTimestamp,
         max: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        ready(ProjectionStore::eligible_candidates(self, &shard, now, max))
+        let result = {
+            let inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::eligible_candidates(&*inner, &shard, now, max)
+        };
+        ready(result)
     }
 
     fn render_claimed(
-        &mut self,
+        &self,
         shard: QueueKey,
         ids: Vec<ItemId>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
-        ready(ProjectionStore::render_claimed(self, &shard, &ids))
+        let result = {
+            let inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::render_claimed(&*inner, &shard, &ids)
+        };
+        ready(result)
     }
 
     fn item_state(
-        &mut self,
+        &self,
         shard: QueueKey,
         id: ItemId,
     ) -> impl std::future::Future<Output = EngineResult<Option<ItemState>>> + Send {
-        ready(ProjectionStore::item_state(self, &shard, &id))
+        let result = {
+            let inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::item_state(&*inner, &shard, &id)
+        };
+        ready(result)
     }
 
     fn item_version(
-        &mut self,
+        &self,
         shard: QueueKey,
         id: ItemId,
     ) -> impl std::future::Future<Output = EngineResult<Option<u64>>> + Send {
-        ready(ProjectionStore::item_version(self, &shard, &id))
+        let result = {
+            let inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::item_version(&*inner, &shard, &id)
+        };
+        ready(result)
     }
 
     fn recovery_high_water(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
-        ready(ProjectionStore::recovery_high_water(self, &shard))
+        let result = {
+            let inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::recovery_high_water(&*inner, &shard)
+        };
+        ready(result)
     }
 
     fn recover_definitions(
-        &mut self,
+        &self,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
-        ready(ProjectionStore::recover_definitions(self))
+        let result = {
+            let inner = self.inner.lock().expect("in-memory projection poisoned");
+            ProjectionStore::recover_definitions(&*inner)
+        };
+        ready(result)
     }
 }
 
@@ -677,30 +798,32 @@ mod async_axis_tests {
 
     #[test]
     fn memory_log_async_axis_is_send_one_poll_and_sync_equivalent() {
-        let mut log = MemoryLog::new();
-        assert_send(AsyncLogStore::ensure_shard(&mut log, shard()));
-        assert!(one_poll(AsyncLogStore::ensure_shard(&mut log, shard())).is_ok());
+        let log = AsyncMemoryLog::new();
+        assert_send(AsyncLogStore::ensure_shard(&log, shard()));
+        assert!(one_poll(AsyncLogStore::ensure_shard(&log, shard())).is_ok());
         assert_eq!(
-            one_poll(AsyncLogStore::current_epoch(&mut log, shard())).unwrap(),
-            LogStore::current_epoch(&log, &shard()).unwrap()
+            one_poll(AsyncLogStore::current_epoch(&log, shard())).unwrap(),
+            0
         );
         assert_eq!(
-            one_poll(AsyncLogStore::acquire_epoch(&mut log, shard())).unwrap(),
+            one_poll(AsyncLogStore::acquire_epoch(&log, shard())).unwrap(),
             1
         );
+        let legacy = log.into_inner();
+        assert_eq!(LogStore::current_epoch(&legacy, &shard()).unwrap(), 1);
     }
 
     #[test]
     fn in_memory_projection_async_axis_is_send_one_poll_and_sync_equivalent() {
-        let mut projection = InMemoryProjection::new();
-        assert_send(AsyncProjectionStore::recover_definitions(&mut projection));
+        let projection = AsyncInMemoryProjection::new();
+        assert_send(AsyncProjectionStore::recover_definitions(&projection));
         assert_eq!(
-            one_poll(AsyncProjectionStore::recover_definitions(&mut projection)).unwrap(),
-            ProjectionStore::recover_definitions(&projection).unwrap()
+            one_poll(AsyncProjectionStore::recover_definitions(&projection)).unwrap(),
+            Vec::<QueueDefinition>::new()
         );
         assert_eq!(
             AsyncProjectionStore::supports_gates(&projection),
-            ProjectionStore::supports_gates(&projection)
+            ProjectionStore::supports_gates(&projection.into_inner())
         );
     }
 }

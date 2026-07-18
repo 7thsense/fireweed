@@ -5,7 +5,9 @@
 //! and control-plane paths only. Retention, snapshots, group commit, rich relational claims, indexes, and
 //! repair operations remain on the legacy axes until the slice that migrates each behavior and its tests.
 //!
-//! Every request value is owned. An implementation may borrow `self` while its future is alive, but may not
+//! Every request value is owned. Shared receivers allow independent queue/connection work to progress
+//! without requiring a process-global mutable store borrow; implementations provide their own per-queue or
+//! per-connection synchronization. An implementation may borrow `self` while its future is alive, but may not
 //! borrow caller-owned command buffers, identifiers, or database transactions across a suspension point.
 //! The returned futures are `Send` and expose no executor type.
 //!
@@ -29,22 +31,22 @@ use crate::{
 };
 
 /// Native-async command-log, epoch-fence, replay, and high-water operations needed by initial composition.
-pub trait AsyncLogStore: Send {
+pub trait AsyncLogStore: Send + Sync {
     /// Immutable after construction; implementations must not acquire an async lock here.
     fn durability_class(&self) -> DurabilityClass;
 
     fn ensure_shard(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 
     fn current_epoch(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
 
     fn acquire_epoch(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
 
@@ -54,96 +56,96 @@ pub trait AsyncLogStore: Send {
     /// call can suspend at its commit point, its surrounding backend-owned commit task must continue after
     /// caller cancellation and retain a replay-resolvable outcome.
     fn append(
-        &mut self,
+        &self,
         shard: QueueKey,
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl std::future::Future<Output = EngineResult<Vec<CommandPosition>>> + Send;
 
     fn read_from(
-        &mut self,
+        &self,
         shard: QueueKey,
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send;
 
     fn high_water(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send;
 
     fn set_high_water(
-        &mut self,
+        &self,
         shard: QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 }
 
 /// Native-async projection operations needed by initial append/apply, recovery, and item claim paths.
-pub trait AsyncProjectionStore: Send {
+pub trait AsyncProjectionStore: Send + Sync {
     /// Immutable after construction; implementations must not acquire an async lock here.
     fn supports_gates(&self) -> bool {
         false
     }
 
     fn ensure_shard(
-        &mut self,
+        &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 
     /// Fail-closed mutation admission immediately before the append/apply unit begins.
     fn admit_mutation(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 
     /// Apply a committed owned batch to the live serving image.
     fn apply_live(
-        &mut self,
+        &self,
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 
     /// Apply an owned replay batch and durably advance the projection recovery frontier with it.
     fn apply_recovery(
-        &mut self,
+        &self,
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 
     fn eligible_candidates(
-        &mut self,
+        &self,
         shard: QueueKey,
         now: UtcTimestamp,
         max: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
 
     fn render_claimed(
-        &mut self,
+        &self,
         shard: QueueKey,
         ids: Vec<ItemId>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send;
 
     fn item_state(
-        &mut self,
+        &self,
         shard: QueueKey,
         id: ItemId,
     ) -> impl std::future::Future<Output = EngineResult<Option<ItemState>>> + Send;
 
     fn item_version(
-        &mut self,
+        &self,
         shard: QueueKey,
         id: ItemId,
     ) -> impl std::future::Future<Output = EngineResult<Option<u64>>> + Send;
 
     fn recovery_high_water(
-        &mut self,
+        &self,
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send;
 
     /// Enumerate definitions persisted by a durable projection during recovery-on-open.
     fn recover_definitions(
-        &mut self,
+        &self,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueDefinition>>> + Send;
 }
 
@@ -188,20 +190,20 @@ mod tests {
             DurabilityClass::Atomic
         }
 
-        fn ensure_shard(&mut self, _shard: QueueKey) -> Ready<EngineResult<()>> {
+        fn ensure_shard(&self, _shard: QueueKey) -> Ready<EngineResult<()>> {
             ready(Ok(()))
         }
 
-        fn current_epoch(&mut self, _shard: QueueKey) -> Ready<EngineResult<u64>> {
+        fn current_epoch(&self, _shard: QueueKey) -> Ready<EngineResult<u64>> {
             ready(Ok(0))
         }
 
-        fn acquire_epoch(&mut self, _shard: QueueKey) -> Ready<EngineResult<u64>> {
+        fn acquire_epoch(&self, _shard: QueueKey) -> Ready<EngineResult<u64>> {
             ready(Ok(1))
         }
 
         fn append(
-            &mut self,
+            &self,
             _shard: QueueKey,
             _commands: Vec<CommandEnvelope>,
             _expected_epoch: u64,
@@ -210,7 +212,7 @@ mod tests {
         }
 
         fn read_from(
-            &mut self,
+            &self,
             _shard: QueueKey,
             _from: Option<CommandPosition>,
             _limit: usize,
@@ -221,12 +223,12 @@ mod tests {
             }))
         }
 
-        fn high_water(&mut self, _shard: QueueKey) -> Ready<EngineResult<Option<CommandPosition>>> {
+        fn high_water(&self, _shard: QueueKey) -> Ready<EngineResult<Option<CommandPosition>>> {
             ready(Ok(None))
         }
 
         fn set_high_water(
-            &mut self,
+            &self,
             _shard: QueueKey,
             _position: CommandPosition,
         ) -> Ready<EngineResult<()>> {
@@ -237,16 +239,16 @@ mod tests {
     struct ImmediateProjection;
 
     impl AsyncProjectionStore for ImmediateProjection {
-        fn ensure_shard(&mut self, _definition: QueueDefinition) -> Ready<EngineResult<()>> {
+        fn ensure_shard(&self, _definition: QueueDefinition) -> Ready<EngineResult<()>> {
             ready(Ok(()))
         }
 
-        fn admit_mutation(&mut self, _shard: QueueKey) -> Ready<EngineResult<()>> {
+        fn admit_mutation(&self, _shard: QueueKey) -> Ready<EngineResult<()>> {
             ready(Ok(()))
         }
 
         fn apply_live(
-            &mut self,
+            &self,
             _positions: Vec<CommandPosition>,
             _commands: Vec<CommandEnvelope>,
         ) -> Ready<EngineResult<()>> {
@@ -254,7 +256,7 @@ mod tests {
         }
 
         fn apply_recovery(
-            &mut self,
+            &self,
             _positions: Vec<CommandPosition>,
             _commands: Vec<CommandEnvelope>,
         ) -> Ready<EngineResult<()>> {
@@ -262,7 +264,7 @@ mod tests {
         }
 
         fn eligible_candidates(
-            &mut self,
+            &self,
             _shard: QueueKey,
             _now: UtcTimestamp,
             _max: usize,
@@ -271,7 +273,7 @@ mod tests {
         }
 
         fn render_claimed(
-            &mut self,
+            &self,
             _shard: QueueKey,
             _ids: Vec<ItemId>,
         ) -> Ready<EngineResult<Vec<ClaimedItem>>> {
@@ -279,29 +281,25 @@ mod tests {
         }
 
         fn item_state(
-            &mut self,
+            &self,
             _shard: QueueKey,
             _id: ItemId,
         ) -> Ready<EngineResult<Option<ItemState>>> {
             ready(Ok(None))
         }
 
-        fn item_version(
-            &mut self,
-            _shard: QueueKey,
-            _id: ItemId,
-        ) -> Ready<EngineResult<Option<u64>>> {
+        fn item_version(&self, _shard: QueueKey, _id: ItemId) -> Ready<EngineResult<Option<u64>>> {
             ready(Ok(None))
         }
 
         fn recovery_high_water(
-            &mut self,
+            &self,
             _shard: QueueKey,
         ) -> Ready<EngineResult<Option<CommandPosition>>> {
             ready(Ok(None))
         }
 
-        fn recover_definitions(&mut self) -> Ready<EngineResult<Vec<QueueDefinition>>> {
+        fn recover_definitions(&self) -> Ready<EngineResult<Vec<QueueDefinition>>> {
             ready(Ok(Vec::new()))
         }
     }
@@ -366,7 +364,7 @@ mod tests {
 
     #[test]
     fn every_log_future_is_send() {
-        let mut log = ImmediateLog;
+        let log = ImmediateLog;
         assert_send(log.ensure_shard(shard()));
         assert_send(log.current_epoch(shard()));
         assert_send(log.acquire_epoch(shard()));
@@ -378,7 +376,7 @@ mod tests {
 
     #[test]
     fn every_projection_future_is_send() {
-        let mut projection = ImmediateProjection;
+        let projection = ImmediateProjection;
         assert_send(projection.ensure_shard(definition()));
         assert_send(projection.admit_mutation(shard()));
         assert_send(projection.apply_live(Vec::new(), Vec::new()));

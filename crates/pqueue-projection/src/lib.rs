@@ -23,7 +23,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 mod compose_impls;
-pub use compose_impls::{InMemoryProjection, MemoryLog};
+pub use compose_impls::{AsyncInMemoryProjection, AsyncMemoryLog, InMemoryProjection, MemoryLog};
 
 use bytes::Bytes;
 use pqueue_core::{
