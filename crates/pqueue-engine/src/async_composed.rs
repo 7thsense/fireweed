@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::{
-    AsyncCommitStrategy, DispatchError, DurabilityClass, KeyedQueueGate, OwnedTaskDispatcher,
-    QueueGateError, RawCommitRequest, TaskOutcomeError,
+    AsyncCommitStrategy, DispatchError, DurabilityClass, KeyedQueueGate, OwnedTask,
+    OwnedTaskDispatcher, QueueGateError, QueueKey, RawCommitRequest, TaskOutcomeError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,28 +41,46 @@ where
         self.durability
     }
 
-    /// Acquire queue admission, then offer a lazy strategy-task factory to the dispatcher.
-    pub async fn submit_commit(
+    /// Serialize and dispatch one complete queue-local operation.
+    ///
+    /// The factory is invoked only after dispatcher acceptance. Its owned task retains the queue permit
+    /// across every phase it contains, such as validation, idempotency, claim planning, commit, and render.
+    /// This remains a narrow composition primitive and does not imply operation-port parity.
+    pub(crate) async fn submit_operation<F>(
         &self,
-        request: RawCommitRequest,
-    ) -> Result<S::Output, AsyncCommitSubmitError> {
+        queue: QueueKey,
+        operation: F,
+    ) -> Result<S::Output, AsyncCommitSubmitError>
+    where
+        F: FnOnce() -> OwnedTask<S::Output> + Send + 'static,
+    {
         let permit = self
             .admission
-            .acquire(request.shard().clone())
+            .acquire(queue)
             .await
             .map_err(AsyncCommitSubmitError::Admission)?;
-        let strategy = Arc::clone(&self.strategy);
         let outcome = self
             .dispatcher
             .submit(Box::new(move || {
-                let commit = strategy.commit(request);
+                let operation = operation();
                 Box::pin(async move {
                     let _permit = permit;
-                    commit.await
+                    operation.await
                 })
             }))
             .map_err(AsyncCommitSubmitError::Dispatch)?;
         outcome.await.map_err(AsyncCommitSubmitError::Outcome)
+    }
+
+    /// Typed raw-commit wrapper over [`Self::submit_operation`].
+    pub async fn submit_commit(
+        &self,
+        request: RawCommitRequest,
+    ) -> Result<S::Output, AsyncCommitSubmitError> {
+        let queue = request.shard().clone();
+        let strategy = Arc::clone(&self.strategy);
+        self.submit_operation(queue, move || strategy.commit(request))
+            .await
     }
 
     pub fn close(&self) {
@@ -379,6 +397,199 @@ mod tests {
             completed,
             phases,
         }
+    }
+
+    fn planned_operation(
+        key: QueueKey,
+        phase: Arc<Phase>,
+        planned: Arc<Mutex<Vec<QueueKey>>>,
+        active_planners: Arc<AtomicUsize>,
+        max_active_planners: Arc<AtomicUsize>,
+        finished: Arc<AtomicUsize>,
+    ) -> impl FnOnce() -> OwnedTask<QueueKey> + Send + 'static {
+        move || {
+            planned.lock().unwrap().push(key.clone());
+            let active = active_planners.fetch_add(1, Ordering::AcqRel) + 1;
+            max_active_planners.fetch_max(active, Ordering::AcqRel);
+            let mut done = false;
+            Box::pin(poll_fn(move |context| {
+                phase.started.store(true, Ordering::Release);
+                if phase.released.load(Ordering::Acquire) {
+                    if !done {
+                        done = true;
+                        active_planners.fetch_sub(1, Ordering::AcqRel);
+                        finished.fetch_add(1, Ordering::AcqRel);
+                    }
+                    Poll::Ready(key.clone())
+                } else {
+                    *phase.waker.lock().unwrap() = Some(context.waker().clone());
+                    Poll::Pending
+                }
+            }))
+        }
+    }
+
+    #[test]
+    fn same_queue_operation_planning_starts_only_after_predecessor_releases() {
+        let fixture = fixture(2);
+        let first_phase = Phase::new(false);
+        let second_phase = Phase::new(true);
+        let planned = Arc::new(Mutex::new(Vec::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let mut first = Box::pin(fixture.backend.submit_operation(
+            queue("q"),
+            planned_operation(
+                queue("q"),
+                Arc::clone(&first_phase),
+                Arc::clone(&planned),
+                Arc::clone(&active),
+                Arc::clone(&max_active),
+                Arc::clone(&finished),
+            ),
+        ));
+        let mut second = Box::pin(fixture.backend.submit_operation(
+            queue("q"),
+            planned_operation(
+                queue("q"),
+                second_phase,
+                Arc::clone(&planned),
+                Arc::clone(&active),
+                Arc::clone(&max_active),
+                Arc::clone(&finished),
+            ),
+        ));
+
+        assert!(matches!(poll_once(first.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert_eq!(planned.lock().unwrap().as_slice(), &[queue("q")]);
+        assert_eq!(active.load(Ordering::Acquire), 1);
+        assert!(fixture.dispatcher.drive_next());
+        assert!(first_phase.started.load(Ordering::Acquire));
+        assert_eq!(planned.lock().unwrap().len(), 1);
+
+        first_phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert_eq!(finished.load(Ordering::Acquire), 1);
+        assert!(matches!(poll_once(first.as_mut()), Poll::Ready(Ok(_))));
+        assert!(matches!(poll_once(second.as_mut()), Poll::Pending));
+        assert_eq!(planned.lock().unwrap().len(), 2);
+        assert_eq!(active.load(Ordering::Acquire), 1);
+        assert_eq!(max_active.load(Ordering::Acquire), 1);
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(poll_once(second.as_mut()), Poll::Ready(Ok(_))));
+    }
+
+    #[test]
+    fn different_queue_operation_planning_progresses_while_first_is_pending() {
+        let fixture = fixture(2);
+        let stalled_phase = Phase::new(false);
+        let ready_phase = Phase::new(true);
+        let planned = Arc::new(Mutex::new(Vec::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let mut stalled = Box::pin(fixture.backend.submit_operation(
+            queue("a"),
+            planned_operation(
+                queue("a"),
+                Arc::clone(&stalled_phase),
+                Arc::clone(&planned),
+                Arc::clone(&active),
+                Arc::clone(&max_active),
+                Arc::clone(&finished),
+            ),
+        ));
+        let mut unrelated = Box::pin(fixture.backend.submit_operation(
+            queue("b"),
+            planned_operation(
+                queue("b"),
+                ready_phase,
+                Arc::clone(&planned),
+                Arc::clone(&active),
+                Arc::clone(&max_active),
+                Arc::clone(&finished),
+            ),
+        ));
+
+        assert!(matches!(poll_once(stalled.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(unrelated.as_mut()), Poll::Pending));
+        assert_eq!(planned.lock().unwrap().len(), 2);
+        assert_eq!(max_active.load(Ordering::Acquire), 2);
+        assert!(fixture.dispatcher.drive_next());
+        assert!(stalled_phase.started.load(Ordering::Acquire));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(unrelated.as_mut()),
+            Poll::Ready(Ok(key)) if key == queue("b")
+        ));
+        assert_eq!(finished.load(Ordering::Acquire), 1);
+        stalled_phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(poll_once(stalled.as_mut()), Poll::Ready(Ok(_))));
+    }
+
+    #[test]
+    fn rejected_and_closed_operation_submission_never_invokes_planner() {
+        let rejected = fixture(0);
+        let effects = Arc::new(AtomicUsize::new(0));
+        let rejected_effects = Arc::clone(&effects);
+        let mut full = Box::pin(rejected.backend.submit_operation(queue("q"), move || {
+            rejected_effects.fetch_add(1, Ordering::AcqRel);
+            Box::pin(async { queue("q") })
+        }));
+        assert!(matches!(
+            poll_once(full.as_mut()),
+            Poll::Ready(Err(AsyncCommitSubmitError::Dispatch(
+                DispatchError::AtCapacity
+            )))
+        ));
+
+        let closed = fixture(1);
+        closed.dispatcher.close();
+        let closed_effects = Arc::clone(&effects);
+        let mut closed_submission =
+            Box::pin(closed.backend.submit_operation(queue("q"), move || {
+                closed_effects.fetch_add(1, Ordering::AcqRel);
+                Box::pin(async { queue("q") })
+            }));
+        assert!(matches!(
+            poll_once(closed_submission.as_mut()),
+            Poll::Ready(Err(AsyncCommitSubmitError::Dispatch(DispatchError::Closed)))
+        ));
+        assert_eq!(effects.load(Ordering::Acquire), 0);
+        assert_eq!(rejected.backend.admission.entry_count(), 0);
+        assert_eq!(closed.backend.admission.entry_count(), 0);
+    }
+
+    #[test]
+    fn caller_cancellation_after_operation_acceptance_does_not_cancel_work() {
+        let fixture = fixture(1);
+        let phase = Phase::new(false);
+        let planned = Arc::new(Mutex::new(Vec::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let mut caller = Box::pin(fixture.backend.submit_operation(
+            queue("q"),
+            planned_operation(
+                queue("q"),
+                Arc::clone(&phase),
+                planned,
+                active,
+                max_active,
+                Arc::clone(&finished),
+            ),
+        ));
+        assert!(matches!(poll_once(caller.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(phase.started.load(Ordering::Acquire));
+        drop(caller);
+        phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert_eq!(finished.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.backend.admission.entry_count(), 0);
     }
 
     #[test]
