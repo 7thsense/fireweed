@@ -68,12 +68,16 @@ use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 use sha2::{Digest, Sha256};
 
 mod async_log;
+mod async_projection;
 mod compose_log;
 mod connect;
 mod control_plane;
 mod credential;
 mod relational;
 pub use async_log::{AsyncPostgresLog, DEFAULT_ASYNC_LOG_MAILBOX_CAPACITY};
+pub use async_projection::{
+    AsyncPostgresRelationalProjection, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY,
+};
 pub use compose_log::PostgresLog;
 pub use connect::{
     ConnectorChoice, CredentialProvider, PostgresConnectConfig, PostgresSslMode, connect,
