@@ -4,17 +4,17 @@ ddx:
   depends_on:
     - adr-embedded-engine-integration-and-public-surface
   review:
-    self_hash: a5eb402d202ab5dc22f96c06ca42364c4e78a5530648e26e28fe36177bfffbfc
+    self_hash: fb1c9ed0c257673e96716a031b40056110c6ce6f043a858ac41f01718281e280
     deps:
       adr-embedded-engine-integration-and-public-surface: e18689f92ad1070a9d3e96253f41b6d0a3fe67eb9b6eb80f5df07ac24e56c7cc
-    reviewed_at: "2026-07-18T01:26:15Z"
+    reviewed_at: "2026-07-18T01:27:05Z"
 ---
 
 # Rust-Native Embedded Projection Alternatives
 
-**Decision date**: 2026-07-17  
-**Decision owner**: pqueue storage  
-**Governing decision**: ADR-006  
+- **Decision date**: 2026-07-17
+- **Decision owner**: pqueue storage
+- **Governing decision**: ADR-006
 
 ## Scope
 
