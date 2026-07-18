@@ -6,25 +6,27 @@ ddx:
     - adr-queue-as-shard-unit-and-projection-families
     - td-storage-architecture-backend-contracts
   review:
-    self_hash: 46327f801156492ee0a1ad0038b730dea7fcef4ebe00641e8f7d9d5f86f8b3f2
+    self_hash: 72e7c4701c344732c61b2b63043e70024bbff6228b841b8d76dffbb2d5bc4fd5
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-08T18:29:59Z"
+      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
+    reviewed_at: "2026-07-18T02:26:59Z"
 ---
 
 # Architecture Decision Record
 
 **ADR ID**: ADR-012
 **Title**: The backend is the orthogonal product `LogStore × ProjectionStore × ControlPlane`, assembled by one generic `ComposedBackend`
-**Status**: Accepted (status updated 2026-07-05 — the generic `ComposedBackend<L, P, C>` is
+**Status**: Accepted, superseded in part by ADR-015 (the synchronous `Backend::write(f)` and
+`std::sync::Mutex<Inner<L, P>>` mechanism only). The generic `ComposedBackend<L, P, C>` is
 implemented in `crates/pqueue-engine/src/compose.rs` and the `objectlog/hybrid` composition shipped;
 remaining phased work tracks as beads)
 **Related**: ADR-001 (CQRS log/projection), ADR-007 (hexagonal & two interfaces), ADR-008 (queue as
 shard unit & two projection families — **superseded in part**, see below), ADR-009 (engine-enforced
 coordination), TD-001 (backend contracts / conformance capability classes), TD-003 (ownership & epoch
-fencing), TD-007 (durability). Conformance harness: `crates/pqueue-conformance`.
+fencing), TD-007 (durability), ADR-015 (full-async storage boundaries). Conformance harness:
+`crates/pqueue-conformance`.
 
 ## Context
 
@@ -203,6 +205,11 @@ the control plane's transaction (Phase 3+). The split keeps the common (memory/s
 without a phantom epoch store.
 
 ### The atomic write seam (the crux): separate **and** unified transactional stores
+
+> **Supersession note (ADR-015, 2026-07-18):** the atomicity requirements and separate/unified substrate
+> distinction below remain governing history. The synchronous closure and standard-mutex realization are
+> superseded. Typed backend-owned async commit operations and explicit whole-transaction adapters now
+> realize this seam; TD-001 is normative for cancellation and suspension rules.
 
 `Backend::write(f)` runs one unit of work: `f(&mut dyn LogWriter, &mut dyn ProjectionWriter)`, where the
 closure appends commands and applies them, and the two effects commit **together**. There are two physical

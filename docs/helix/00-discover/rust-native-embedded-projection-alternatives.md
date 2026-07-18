@@ -4,10 +4,10 @@ ddx:
   depends_on:
     - adr-embedded-engine-integration-and-public-surface
   review:
-    self_hash: fb1c9ed0c257673e96716a031b40056110c6ce6f043a858ac41f01718281e280
+    self_hash: 09abb88848c53782d2e9b2664714d0a4c7081b698c73da75349492f8fac714ca
     deps:
-      adr-embedded-engine-integration-and-public-surface: e18689f92ad1070a9d3e96253f41b6d0a3fe67eb9b6eb80f5df07ac24e56c7cc
-    reviewed_at: "2026-07-18T01:27:05Z"
+      adr-embedded-engine-integration-and-public-surface: e06dc6a96cdcd7293b5ba67e9c17d387cd2bd51c14daef13287bdf62a9e3951e
+    reviewed_at: "2026-07-18T02:28:33Z"
 ---
 
 # Rust-Native Embedded Projection Alternatives
@@ -237,6 +237,19 @@ prototype limited to `meta/cursor`, `items`, `active_by_client_key`, `eligible_b
   standalone SQLite log authority requires a separate durable-ack evaluation and power-loss evidence.
 - **Scope growth**: do not port all command arms, cohorts, gates, summaries, or production wiring until a
   bounded probe demonstrates a material benefit over bundled SQLite.
+
+## Decision Update: Full-Async Ports Reopen Turso
+
+The completed Turso 0.7 probe passed the SQL, transaction, rollback, reopen, concurrency, and conflict
+boundary but failed this report's synchronous-port stop rule. ADR-015 subsequently adopts full-async
+storage boundaries for independent architectural reasons, so a native-async Turso adapter no longer
+requires a blocking actor or nested runtime. ADR-016 therefore selects Turso as the first Rust-native
+derived projection, paired only with the authoritative object log and gated by TD-010.
+
+This does not retroactively turn the bounded probe into production conformance. SQLite remains the
+reference and rollback implementation. Turso stays feature-gated until every command arm and projection
+read is differentially equal after reopen, cancellation cuts converge through `request_id`, rebuild from
+the object log is exact, and one focused CI lane passes without expanding the broad backend matrix.
 
 ## Source Ledger
 

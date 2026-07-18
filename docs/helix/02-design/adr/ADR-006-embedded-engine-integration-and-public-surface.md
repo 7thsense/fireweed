@@ -7,13 +7,13 @@ ddx:
     - adr-rust-workspace-and-toolchain-policy
     - td-storage-architecture-backend-contracts
   review:
-    self_hash: e18689f92ad1070a9d3e96253f41b6d0a3fe67eb9b6eb80f5df07ac24e56c7cc
+    self_hash: e06dc6a96cdcd7293b5ba67e9c17d387cd2bd51c14daef13287bdf62a9e3951e
     deps:
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-06T14:59:49Z"
+      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
+    reviewed_at: "2026-07-18T02:26:58Z"
 ---
 
 # ADR-006: Embedded Engine Integration and Public Crate Surface
@@ -26,6 +26,10 @@ faces are now RESP (TD-006) and the `pqueue` library. The **embedded mode** half
 ADR-009: the embedding surface is the published `pqueue` facade crate (structurally enforced), not
 direct `pqueue-core`/`pqueue-storage` trait access; ports are `#[doc(hidden)]` behind a documented
 `internal` escape hatch.
+
+ADR-016 adds Turso as a feature-gated, object-log-derived projection. It does not replace the standalone
+SQLite durable backend or make a Turso projection authoritative; the ADR-006 durability requirement still
+binds every embedded production profile.
 
 ## Context
 
@@ -115,9 +119,9 @@ durable boundary. Rejected — embedding without a durability requirement is not
 safe contract.
 
 ### Replace SQLite with libsql or a pure-Rust engine for the embedded backend
-Out of scope here. libsql is also C and offers no benefit over the bundled
-SQLite already in use; a pure-Rust engine (redb/limbo) is a separate evaluation.
-v1 of the `sqlite` backend uses `rusqlite`.
+This was out of scope for ADR-006 and remains so for the standalone `sqlite` authority, which uses
+`rusqlite`. ADR-016 later selects Turso only as an additional rebuildable projection paired with the
+durable object log; it does not revise this backend's authority or durability boundary.
 
 ## Consequences
 

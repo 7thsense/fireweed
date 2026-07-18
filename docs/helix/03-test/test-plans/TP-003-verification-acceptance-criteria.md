@@ -10,6 +10,8 @@ ddx:
     - adr-rust-workspace-and-toolchain-policy
     - adr-granularity-mapping-and-claim-domain
     - adr-queue-as-shard-unit-and-projection-families
+    - adr-full-async-storage-boundaries
+    - adr-turso-derived-projection
     - td-storage-architecture-backend-contracts
     - td-postgres-native-reference-mode
     - td-sharding-and-shard-ownership
@@ -18,13 +20,15 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: ef7d361e7736e99e509f94bbc0b0d435eef558851bc6272527781efa91e5ec08
+    self_hash: 6891ba1e460bc2b4f1076a8999861e02c54e073e06790ce0c5df0315a4d087df
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-full-async-storage-boundaries: e38b3eaaa639ae1ccfc43cb7430924e4e5f7a35ad79f38d687a538a22030e680
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
+      adr-turso-derived-projection: 4e7b857aa6535673272fe4b13f69f3a4949925e574d765de0555c87010bf906a
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
@@ -32,10 +36,10 @@ ddx:
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
       tp-scale-substantiation: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
-    reviewed_at: "2026-07-16T22:35:21Z"
+    reviewed_at: "2026-07-18T02:29:40Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -226,6 +230,8 @@ documented test/dev scope.
 | AC-TXN-5A objectlog/hybrid-async success barrier + unknown-outcome replay | Run `PQUEUE_LOG_BACKEND=objectlog PQUEUE_PROJECTION_BACKEND=hybrid-async` with injected failures before manifest, after manifest before memory apply/render, after memory apply before response delivery, during async SQLite apply, after SQLite lag recovery, while async apply debt exceeds budget, and after backpressure admission trips; cover push, claim, renew, finalize, retry/release, update, purge, and operator-style `request_id` cases; force sealed batches to apply out of scheduler order and restart after a partial SQLite batch transaction; include a poisoned async SQLite worker and an operator repair attempt while the poison is active | TD-004 `objectlog/hybrid-async` success barrier, ordered batching contract, poison/fail-closed contract, bounded async apply debt, unknown-outcome contract, INV-5, INV-10, INV-11, INV-12, INV-14 | Success is returned only after manifest commit plus synchronous memory apply/render; SQLite ordered batching may lag within budget but applies sealed batches in `batch_sequence` order exactly once; `sqlite_high_water` advances only after complete logical batch apply; a crash before memory apply/render resolves as unknown-outcome by `request_id`; same-body retry returns the original committed result or fresh execution when no original commit exists; conflicting body returns `request-id-conflict`; SQLite lag never creates duplicate state transitions or read-after-success gaps from memory; async apply debt records `sqlite_apply_lag_ms`, pending logical batches, oldest unapplied `batch_sequence`, `sqlite_high_water`, memory high-water, and configured debt/backpressure thresholds; when SQLite lag or replay debt exceeds budget, new mutating admission and retention/high-water advancement fail closed or return typed backpressure without acknowledging extra commands until debt is below budget; operator repair cannot bypass poison, stale lease fencing, request-id replay, or high-water lineage gates |
 | AC-TXN-6 implementation-combination parity | Run the same generated operation history and failure schedule across all profile combinations, then compare final visible queue state, idempotency records, terminal outcomes, active leases, and metrics exact fields | backend-independent API semantics | no semantic divergence except documented latency/cost/recovery metadata; pqueue callers need no backend-specific repair path |
 | AC-TXN-7 latency-bound is not a correctness knob | Repeat AC-TXN-1..6 across the TP-002 E3 commit-latency-bound sweep | invariants unchanged by latency/cost setting | 0 invariant deltas across lower-latency vs cost-optimized settings |
+| AC-TXN-8 async cancellation cuts | For every backend class cancel before append, after staging/before commit, during commit, after durable append/before eventual apply, and while waiting for serialization; replay the same and conflicting `request_id` | ADR-015 cancellation and unknown-outcome contract | pre-commit cuts leave no durable effect; commit cancellation converges to exactly one outcome; eventual append repairs exactly once; conflicting replay fails; no stranded waiter or poisoned lock |
+| AC-TXN-9 runtime non-blocking boundary | Run slow memory, SQLite, Postgres, object-log, and Turso storage work on a single-thread Tokio runtime with a heartbeat and bounded timeout | ADR-015 adapter boundary | heartbeat continues within its documented scheduling tolerance; no blocking I/O or standard mutex guard is observed on the runtime worker |
 
 ### 3.11 Product end-to-end workflow validation
 
@@ -331,6 +337,23 @@ profile-specific suites add only substrate obligations such as reconnect
 durability, replay, snapshots, segment/manifest fencing, hybrid
 `ProjectionImage` hydration, poison-on-memory-apply failure, durable request-id
 replay, and latency-bound cost evidence.
+
+The feature-gated `object_log_turso_projection` is not selectable until it also
+passes 100% of the SQLite-versus-Turso differential corpus: every command arm,
+projection read, cursor/counter, lease, index, replay outcome, reopen image,
+cancellation cut, and tenant-isolation case must match. Turso upgrade evidence
+must rerun the exact 0.7 compatibility probe before the version pin changes.
+
+### 4.2 `objectlog/turso` projection gates
+
+| AC | Setup | Assertion | Pass bar |
+|----|-------|-----------|----------|
+| AC-TURSO-1 Schema and initialization | Open a fresh file and exercise the known `execute_batch` PRAGMA trap followed by supported individual configuration | TD-010 initialization contract | trap proves partial WAL side effect; supported path reads back WAL, synchronous `1`, timeout `5000`; exact shared schema succeeds |
+| AC-TURSO-2 Full differential corpus | Apply every supported queue command/history to SQLite and Turso, including rollback injection, then close/reopen | Projection family parity | 0 mismatches in `ProjectionImage`, cursor, counters, replay outcomes, reads, eligibility, leases, indexes, summaries, or errors |
+| AC-TURSO-3 Replay and rebuild | Exercise overlap, gap, manifest-sealed-before-apply crash, snapshot tail, reset, and local-file loss | ADR-013 log authority | overlap is idempotent; gap fails closed; cursor never leads rows; rebuild from object log is exact |
+| AC-TURSO-4 Async cancellation and concurrency | Run AC-TXN-8/9 plus 16 disjoint writers and same-active-key conflict | ADR-015 native-async contract | exactly one conflict winner; all disjoint writes present; zero reactor stalls, waiter loss, duplicate outcomes, or unrecoverable accepted state |
+| AC-TURSO-5 Server profile | Feature-enabled and feature-disabled builds run create/push/claim/finalize/renew/reassign/read/reopen | TD-010 integration contract | enabled profile passes end to end; disabled selection returns explicit configuration error; no default-profile change |
+| AC-TURSO-6 CI scale | Inspect workflow expansion and run focused Turso lane | ADR-016 CI constraint | one focused/path-filtered lane; no new projection-by-kind matrix dimension |
 
 ### 4.1 `objectlog/hybrid-*` projection gates
 

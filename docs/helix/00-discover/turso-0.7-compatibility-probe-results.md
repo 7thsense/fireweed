@@ -1,3 +1,15 @@
+---
+ddx:
+  id: discover-turso-0-7-compatibility-probe-results
+  links:
+    - {kind: informed_by, to: discover-rust-native-embedded-projection-alternatives}
+    - {kind: informed_by, to: adr-embedded-engine-integration-and-public-surface}
+  review:
+    self_hash: dd738a32aca491ef042ea7d845de420564caf6f1252062e04ab525f5acc859df
+    deps: {}
+    reviewed_at: "2026-07-18T02:27:02Z"
+---
+
 # Turso 0.7 Compatibility Probe Results
 
 - **Observed**: 2026-07-17 (America/New_York)
@@ -6,7 +18,7 @@
 - **Candidate**: `turso = 0.7.0`, default features disabled
 - **Baseline**: `rusqlite = 0.32.1`, bundled SQLite
 - **Toolchain**: Rust 1.92.0
-- **Decision**: **No-go for a pqueue adapter under the current storage ports**
+- **Decision**: **No-go under the synchronous storage ports; reopened by ADR-015/ADR-016**
 
 ## Scope and Command
 
@@ -109,3 +121,8 @@ Bundled SQLite through rusqlite remains the production baseline and adapter sele
 
 A future decision may reopen the candidate only if pqueue independently adopts async storage ports or Turso
 ships a supported synchronous Rust API. Any Turso version change must rerun this exact compatibility probe.
+
+ADR-015 subsequently selected full-async storage boundaries and ADR-016 selected Turso as the first
+Rust-native derived projection. Those decisions satisfy the first reopening condition without changing
+this probe's dated evidence. Production status still requires TD-010's full command/read differential,
+cancellation, recovery, and server conformance; the bounded probe alone is not that evidence.

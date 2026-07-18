@@ -7,19 +7,23 @@ ddx:
     - adr-auth-tenancy-and-storage-isolation
     - adr-granularity-mapping-and-claim-domain
     - adr-queue-as-shard-unit-and-projection-families
+    - adr-full-async-storage-boundaries
+    - adr-turso-derived-projection
     - concerns
     - prd
   review:
-    self_hash: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
+    self_hash: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-full-async-storage-boundaries: e38b3eaaa639ae1ccfc43cb7430924e4e5f7a35ad79f38d687a538a22030e680
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-turso-derived-projection: 4e7b857aa6535673272fe4b13f69f3a4949925e574d765de0555c87010bf906a
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
-      concerns: 7e3b81e376f75f71691f55ac1ca4d9599eddcfe6eefe70f614c366c132e07992
+      concerns: 6efb6fecccf86a40650e90b3476fb83ec144b50ee7ac8b6670a4831787e29b75
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-18T02:29:39Z"
 ---
 
 # Technical Design: TD-001 Storage Architecture and Backend Contracts
@@ -44,6 +48,8 @@ In scope:
   (per-queue; the mechanism is TD-003).
 - The two projection families and conformance as the behavior contract.
 - Backend profiles and conformance requirements.
+- Runtime-neutral full-async storage boundaries, typed commit operations,
+  blocking-adapter rules, and cancellation outcomes (ADR-015).
 
 Out of scope:
 
@@ -197,6 +203,7 @@ composition root:
 | `postgres_native` | Postgres | Postgres (relational family) | Optional Postgres/object storage | Postgres |
 | `object_log_inmemory_projection` | S3-compatible object log | In-memory local/rebuildable (log-replay family) | S3-compatible object storage | Postgres |
 | `object_log_sqlite_projection` | S3-compatible object log | SQLite local/rebuildable (relational family) | S3-compatible object storage | Postgres |
+| `object_log_turso_projection` | S3-compatible object log | Turso local/rebuildable, native async (relational family) | S3-compatible object storage | Postgres |
 | `object_log_hybrid_projection` | S3-compatible object log | Hybrid: hot in-memory + durable local SQLite projection image | S3-compatible object storage | Postgres |
 | `kafka_log_sqlite_projection` (retired) | Kafka/Redpanda partition log | SQLite local/rebuildable | Object storage or Postgres checkpoint | Postgres |
 | `dynamodb_authority` (retired) | DynamoDB transaction/log table | DynamoDB query tables or local projection | DynamoDB/object storage | Postgres |
@@ -205,8 +212,10 @@ composition root:
 implemented first; it delivers the single-deployment envelope.
 The object-log profiles are the committed high-scale path for v1. The in-memory
 projection variant is the low-latency serving reference for object-log replay;
-the SQLite projection variant is the durable local-index profile for larger hot
-sets and process restarts. `object_log_hybrid_projection` combines those
+the SQLite projection variant is the durable local-index reference for larger hot
+sets and process restarts. The feature-gated Turso variant is the Rust-native,
+native-async relational projection specified by TD-010; it is not a log authority
+and cannot ship until differential conformance passes. `object_log_hybrid_projection` combines those
 properties: SQLite is applied first as the local durable projection image, then
 the same committed batch is applied to the in-memory hot model used for reads and
 pre-commit validation. TD-004 owns their shared object-log semantics and
@@ -256,6 +265,38 @@ reject, reassignment recovery) are part of **core** and bind every backend; thei
 
 ## API/Interface Design
 
+### Full-async storage amendment (ADR-015)
+
+The storage calls below are asynchronous through the complete engine path. Exact Rust syntax uses native
+return-position `impl Future<Output = Result<...>> + Send` (or an associated future where a transaction
+lifetime requires it); `#[async_trait]` in the historical sketch is illustrative, not a requirement. No
+Tokio type appears in a domain trait.
+
+The generic synchronous `Backend::write(f)`/writer-face closure is superseded. Conformance and fault
+injection use a typed async raw-commit request; ordinary operation ports use backend-owned typed methods.
+This prevents arbitrary suspension inside a borrowed transaction and gives every adapter the same legal
+cancellation points.
+
+Implementation rules:
+
+- native-async drivers await directly below the storage axis;
+- CPU-only memory implementations may return ready futures;
+- blocking drivers offload one complete transaction to a bounded executor or owned actor, preserving
+  connection and transaction affinity;
+- no standard mutex guard or borrowed blocking transaction crosses `.await`;
+- immutable capability accessors remain synchronous and lock-free;
+- async construction, recovery, snapshots, inspection, repair, deferred apply, and shutdown are part of
+  the axis contract when they perform I/O;
+- cancellation before commit rolls back; cancellation during commit yields unknown outcome and an owned
+  commit completes so `request_id` replay can resolve it;
+- atomic stores commit log, projection, cursor, and outcome together; eventual-apply stores repair from
+  the log and still enforce ADR-013's response barrier.
+
+Async traits are introduced additively during migration, with explicit immediate and blocking adapters.
+Blanket sync-to-async implementations are forbidden because they would prevent a substrate from later
+providing a native-async implementation. The legacy sync traits and composition-root blocking wrappers are
+removed after every adapter passes the async conformance suite.
+
 The Rust trait shapes below are normative for design intent, not exact final
 syntax. Implementations may refine lifetimes and associated types, but must keep
 the same capabilities. The owned/routed unit is the whole queue — `QueueKey`;
@@ -296,85 +337,81 @@ pub struct CommandEnvelope {
     pub created_at: Timestamp,
 }
 
-#[async_trait]
 pub trait LogStore {
-    async fn append_batch(
+    fn append_batch(
         &self,
         queue: &QueueKey,
         expected_epoch: Option<u64>,
         commands: Vec<CommandEnvelope>,
-    ) -> Result<AppendBatchResult, LogStoreError>;
+    ) -> impl Future<Output = Result<AppendBatchResult, LogStoreError>> + Send;
 
-    async fn read_from(
+    fn read_from(
         &self,
         queue: &QueueKey,
         position: Option<CommandPosition>,
         limit: usize,
-    ) -> Result<CommandPage, LogStoreError>;
+    ) -> impl Future<Output = Result<CommandPage, LogStoreError>> + Send;
 
     fn durability_profile(&self) -> DurabilityProfile;
 }
 
-#[async_trait]
 pub trait ProjectionStore {
-    async fn apply_committed(
+    fn apply_committed(
         &self,
         position: CommandPosition,
         commands: &[CommandEnvelope],
-    ) -> Result<(), ProjectionError>;
+    ) -> impl Future<Output = Result<(), ProjectionError>> + Send;
 
-    async fn batch_claim(
+    fn batch_claim(
         &self,
         request: ClaimPlan,
-    ) -> Result<ClaimPlanResult, ProjectionError>;
+    ) -> impl Future<Output = Result<ClaimPlanResult, ProjectionError>> + Send;
 
-    async fn metrics(
+    fn metrics(
         &self,
         queue: &QueueKey,
-    ) -> Result<QueueMetricsSnapshot, ProjectionError>;
+    ) -> impl Future<Output = Result<QueueMetricsSnapshot, ProjectionError>> + Send;
 }
 
-#[async_trait]
 pub trait SnapshotStore {
-    async fn write_snapshot(
+    fn write_snapshot(
         &self,
         queue: &QueueKey,
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
-    ) -> Result<SnapshotRef, SnapshotError>;
+    ) -> impl Future<Output = Result<SnapshotRef, SnapshotError>> + Send;
 
-    async fn latest_snapshot(
+    fn latest_snapshot(
         &self,
         queue: &QueueKey,
-    ) -> Result<Option<SnapshotRef>, SnapshotError>;
+    ) -> impl Future<Output = Result<Option<SnapshotRef>, SnapshotError>> + Send;
 
-    async fn read_snapshot(
+    fn read_snapshot(
         &self,
         snapshot: &SnapshotRef,
-    ) -> Result<ProjectionSnapshot, SnapshotError>;
+    ) -> impl Future<Output = Result<ProjectionSnapshot, SnapshotError>> + Send;
 }
 
-#[async_trait]
 pub trait ControlPlaneStore {
-    async fn create_queue(
+    fn create_queue(
         &self,
         definition: QueueDefinition,
-    ) -> Result<CreateQueueResult, ControlPlaneError>;
+    ) -> impl Future<Output = Result<CreateQueueResult, ControlPlaneError>> + Send;
 
-    async fn queue_definition(
+    fn queue_definition(
         &self,
         key: &QueueKey,
-    ) -> Result<QueueDefinition, ControlPlaneError>;
+    ) -> impl Future<Output = Result<QueueDefinition, ControlPlaneError>> + Send;
 
-    async fn queue_assignment(
+    fn queue_assignment(
         &self,
         key: &QueueKey,
-    ) -> Result<QueueAssignment, ControlPlaneError>;
+    ) -> impl Future<Output = Result<QueueAssignment, ControlPlaneError>> + Send;
 
-    async fn backend_profile(
+    fn backend_profile(
         &self,
         key: &QueueKey,
-    ) -> Result<BackendProfileConfig, ControlPlaneError>;
+    ) -> impl Future<Output = Result<BackendProfileConfig, ControlPlaneError>> + Send;
 }
 ```
 
@@ -866,6 +903,12 @@ duplicated here; they come from the single `pqueue_group_summary`.
    the RESP wire adapter (`pqueue-resp`, TD-006), the library facade (`pqueue`,
    ADR-009), and the `pqueue-server` composition root. (The originally planned
    `pqueue-service` HTTP binding was superseded by the ADR-007 clean cutover.)
+8. Migrate storage axes to ADR-015 in dependency order: typed commit/fault seam,
+   reference composition and memory, whole-transaction blocking adapters, then
+   removal of legacy synchronous traits and composition-root wrappers.
+9. Extract the relational substrate and implement the feature-gated
+   `object_log_turso_projection` profile per TD-010. SQLite remains the
+   differential reference and rollback path until all Turso gates pass.
 
 **Prerequisites**: API-001 complete; ADR-001, ADR-002, ADR-003, ADR-004, and
 ADR-008 accepted; TD-002, TD-003, and TD-004 accepted; TP-002 available for test
