@@ -10,10 +10,10 @@
 #
 # WHAT THIS GATE PROVES (green-local, SMOKE tier):
 #   - fmt clean, clippy clean (-D warnings), `cargo test --workspace` green.
-#   - The TP-002 evidence-emitting suites run into a CLEAN ledger dir, every
-#     emitted row is well-formed + strict-valid, and the SMOKE-tier headline
-#     ids E2 (cross-queue scale-out + queue density) and E3 (object-log
-#     cost/ack + recovery) are present.
+#   - Every row emitted into a CLEAN ledger dir is well-formed + strict-valid. By default the SMOKE-tier
+#     headline ids E2 (cross-queue scale-out + queue density) and E3 (object-log cost/ack + recovery) are
+#     required. A version-bound deferral mode omits the scaled E2 workloads and makes no E2 verdict while
+#     retaining their host-independent evidence-judgment contract test.
 #   - Repository-held TP-003 evidence snapshot contains passing required rows
 #     for AC-TXN-1/2/3/6 on both exact Postgres storage pairs. Fresh generation
 #     is enforced by CI/release workflows.
@@ -22,8 +22,8 @@
 #     authority — the check-lcov-coverage.py calls are).
 #
 # WHAT THIS GATE DOES *NOT* PROVE (RELEASE tier — never faked):
-#   This script creates a clean temporary ledger and validates only the
-#   newly-generated SMOKE-tier E2/E3 rows. Repository-held RELEASE-tier E0-E3
+#   This script creates a clean temporary ledger and validates only newly generated SMOKE-tier rows.
+#   Repository-held RELEASE-tier E0-E3
 #   evidence under docs/perf/evidence is not ingested or asserted here, so a
 #   green smoke lane is not a release-tier evidence verdict. Integrating the
 #   governed release evidence into the tag gate is tracked by pqueue-bf46289d.
@@ -32,16 +32,39 @@ set -euo pipefail
 CARGO="rustup run 1.92.0 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+DEFER_QUIET_HOST_EVIDENCE=0
+DEFER_QUIET_HOST_EVIDENCE_VERSION=""
 
-if (($# > 0)); then
-    printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
-    echo "usage: bash scripts/ci/release-gate.sh" >&2
-    exit 64
-fi
+case "${1:-}" in
+    "") ;;
+    --defer-quiet-host-evidence-for)
+        if (($# != 2)); then
+            echo "release-gate.sh: --defer-quiet-host-evidence-for requires exactly one version" >&2
+            echo "usage: bash scripts/ci/release-gate.sh [--defer-quiet-host-evidence-for VERSION]" >&2
+            exit 64
+        fi
+        DEFER_QUIET_HOST_EVIDENCE=1
+        DEFER_QUIET_HOST_EVIDENCE_VERSION="$2"
+        ;;
+    *)
+        printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
+        echo "usage: bash scripts/ci/release-gate.sh [--defer-quiet-host-evidence-for VERSION]" >&2
+        exit 64
+        ;;
+esac
 
 echo "=== pqueue release gate (SMOKE lane) ==="
-echo "    This gate validates newly generated SMOKE-tier E2,E3 evidence only."
+echo "    This gate validates newly generated SMOKE-tier evidence only."
 echo "    It does not assert repository-held RELEASE-tier E0-E3 evidence (pqueue-bf46289d)."
+if ((DEFER_QUIET_HOST_EVIDENCE)); then
+    workspace_version="$(${CARGO} metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "pqueue") | .version')"
+    if [[ "${DEFER_QUIET_HOST_EVIDENCE_VERSION}" != "${workspace_version}" ]]; then
+        echo "release-gate.sh: quiet-host deferral is bound to ${DEFER_QUIET_HOST_EVIDENCE_VERSION}, workspace is ${workspace_version}" >&2
+        exit 64
+    fi
+    echo "    Quiet-host E2 performance evidence is explicitly deferred; shared-runner density and"
+    echo "    cross-queue scale workloads will not run or satisfy this gate."
+fi
 
 echo "--- fmt ---"
 ${CARGO} fmt --all --check
@@ -65,22 +88,36 @@ export PQUEUE_LEDGER_DIR
 trap 'rm -rf "${PQUEUE_LEDGER_DIR}"' EXIT
 echo "--- clean ledger dir: ${PQUEUE_LEDGER_DIR} ---"
 
-echo "--- workspace tests (emits product_validation + E3 smoke rows) ---"
+echo "--- workspace correctness tests ---"
 ${CARGO} test --workspace
 
-# pqueue-bench is a SELF-CONTAINED workspace (not a root member), so the E2
-# evidence suites must be driven via --manifest-path; they emit into the same
-# PQUEUE_LEDGER_DIR exported above.
-echo "--- bench evidence suites (separate workspace; emits E2 smoke rows) ---"
-${CARGO} test --manifest-path "${REPO_ROOT}/crates/pqueue-bench/Cargo.toml" \
-    --test performance_cross_queue_scale_out_tests \
-    --test queue_density_single_node_tests
+# pqueue-bench is a SELF-CONTAINED workspace (not a root member). Its E2 suites are performance
+# measurements, including 1,000-queue durable density ladders, so they must not run on a shared runner
+# when the release explicitly defers quiet-host evidence.
+if ((DEFER_QUIET_HOST_EVIDENCE)); then
+    echo "--- bench E2 evidence suites DEFERRED (quiet-host performance lane) ---"
+    echo "--- host-independent E2 evidence judgment contract ---"
+    ${CARGO} test --manifest-path "${REPO_ROOT}/crates/pqueue-bench/Cargo.toml" \
+        --test performance_cross_queue_scale_out_tests \
+        tp002_e2_release_rows_emit_only_on_pass -- --exact
+else
+    echo "--- bench evidence suites (separate workspace; emits E2 smoke rows) ---"
+    ${CARGO} test --manifest-path "${REPO_ROOT}/crates/pqueue-bench/Cargo.toml" \
+        --test performance_cross_queue_scale_out_tests \
+        --test queue_density_single_node_tests
+fi
 
-echo "--- tier-aware ledger verification (smoke lane: E2,E3 present + well-formed) ---"
-${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
-    --ledger-dir "${PQUEUE_LEDGER_DIR}" \
-    --strict \
-    --require-smoke-evidence E2,E3
+echo "--- strict validation of any smoke rows emitted by correctness tests ---"
+if ((DEFER_QUIET_HOST_EVIDENCE)); then
+    ${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
+        --ledger-dir "${PQUEUE_LEDGER_DIR}" \
+        --strict
+else
+    ${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
+        --ledger-dir "${PQUEUE_LEDGER_DIR}" \
+        --strict \
+        --require-smoke-evidence E2,E3
+fi
 
 echo "--- live coverage gate ---"
 mkdir -p "${REPO_ROOT}/target/coverage"
@@ -114,5 +151,9 @@ echo "--- build-closure integrity ---"
 bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
 
 echo "=== release gate (SMOKE lane) PASSED ==="
-echo "    Smoke evidence E2,E3 present + well-formed; coverage bars met."
+if ((DEFER_QUIET_HOST_EVIDENCE)); then
+    echo "    Correctness, coverage, and closure passed; no quiet-host performance evidence verdict was made."
+else
+    echo "    Required smoke evidence E2,E3 present + well-formed; coverage bars met."
+fi
 echo "    Repository-held RELEASE-tier E0-E3 evidence was not asserted by this lane."

@@ -175,6 +175,16 @@ for row in read_tsv(os.environ["DEPLOYMENT_PROOF_COMMAND_LOG"]):
         "exit_status": int(row[0]),
     })
 
+e2_smoke_status = "run"
+e2_deferral_version = ""
+for command in commands:
+    argv = command["argv"]
+    if "--defer-quiet-host-evidence-for" in argv:
+        option_index = argv.index("--defer-quiet-host-evidence-for")
+        e2_smoke_status = "deferred_quiet_host"
+        if option_index + 1 < len(argv):
+            e2_deferral_version = argv[option_index + 1]
+
 skip_reasons = []
 skip_path = Path(os.environ["DEPLOYMENT_PROOF_SKIP_LOG"])
 if skip_path.is_file():
@@ -291,6 +301,10 @@ proof = {
         "unavailable_reason": "" if image_tag != "unavailable" or image_digest != "unavailable" else "no PQUEUE_IMAGE_* environment values or pqueue-service-image.txt release artifact were available",
     },
     "storage_combinations": storage_combinations,
+    "performance_evidence": {
+        "e2_smoke_status": e2_smoke_status,
+        "deferral_version": e2_deferral_version,
+    },
     "commands": commands,
     "local_environment_skip": {
         "scope": "kind storage matrix only" if skip_reasons else "",
@@ -317,6 +331,8 @@ lines = [
     f"- chart: `pqueue` `{chart_version}`",
     f"- image tag: `{image_tag}`",
     f"- image digest: `{image_digest}`",
+    f"- E2 smoke status: `{e2_smoke_status}`",
+    f"- E2 deferral version: `{e2_deferral_version or 'not_applicable'}`",
     "",
     "## Commands",
     "",
@@ -437,8 +453,12 @@ kind_unavailable_reasons() {
 }
 
 run_non_cluster_gates() {
+    local release_gate_args=()
+    if [[ "${DEFER_QUIET_HOST_EVIDENCE:-0}" == "1" ]]; then
+        release_gate_args+=(--defer-quiet-host-evidence-for "${DEFER_QUIET_HOST_EVIDENCE_VERSION}")
+    fi
     echo "=== deployment release gate: non-cluster checks ==="
-    run_cmd bash scripts/ci/release-gate.sh
+    run_cmd bash scripts/ci/release-gate.sh "${release_gate_args[@]}"
     run_cmd bash scripts/ci/helm-gate.sh
 
     local version
@@ -565,10 +585,21 @@ main() {
         echo "deployment proof finalized: ${PROOF_JSON}"
         return
     fi
-    if (($# > 0)); then
-        err "unexpected argument(s): $*"
-        return 64
-    fi
+    case "${1:-}" in
+        "") ;;
+        --defer-quiet-host-evidence-for)
+            if (($# != 2)); then
+                err "--defer-quiet-host-evidence-for requires exactly one version"
+                return 64
+            fi
+            DEFER_QUIET_HOST_EVIDENCE=1
+            DEFER_QUIET_HOST_EVIDENCE_VERSION="$2"
+            ;;
+        *)
+            err "unexpected argument(s): $*"
+            return 64
+            ;;
+    esac
     init_proof_logs
     trap 'status=$?; write_deployment_proof "${status}" || true; exit "${status}"' EXIT
     run_non_cluster_gates
