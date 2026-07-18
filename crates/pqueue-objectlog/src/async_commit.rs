@@ -9,11 +9,14 @@ use std::task::{Context, Poll, Waker};
 use futures::channel::oneshot;
 
 use pqueue_engine::{
-    AsyncLogStore, AsyncProjectionStore, EngineError, EngineResult, KeyedQueueGate, OwnedTask,
-    QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest, SeparateReplayCommitter,
+    AsyncLogStore, AsyncProjectionStore, BufferedByteBudget, BufferedByteBudgetConfig,
+    BufferedByteBudgetStats, ByteAdmissionError, EngineError, EngineResult, KeyedQueueGate,
+    OwnedBytePermit, OwnedTask, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    SeparateReplayCommitter, retained_records_plus_frame_bytes,
 };
 
 use crate::AsyncObjectLog;
+use crate::segmented::SerializedCommandEnvelope;
 
 /// Owns the two eventual-apply axes used by [`pqueue_engine::SeparateReplayCommit`].
 ///
@@ -142,7 +145,22 @@ where
     P: AsyncProjectionStore + 'static,
 {
     type Request = RawCommitRequest;
+    type PreparedRequest = RawCommitRequest;
     type Output = EngineResult<RawCommitOutcome>;
+
+    fn prepare_replayable(
+        &self,
+        request: Self::Request,
+    ) -> OwnedTask<EngineResult<Self::PreparedRequest>> {
+        Box::pin(std::future::ready(Ok(request)))
+    }
+
+    fn commit_prepared_replayable(
+        &self,
+        request: Self::PreparedRequest,
+    ) -> OwnedTask<Self::Output> {
+        self.commit_replayable(request)
+    }
 
     fn commit_replayable(&self, request: Self::Request) -> OwnedTask<Self::Output> {
         let log = self.log.clone();
@@ -181,13 +199,72 @@ where
 }
 
 /// Explicit group-commit variant. It never probes mode or calls ordinary append.
+#[derive(Clone)]
 pub struct GroupCommitObjectLogProjectionCommitter<P> {
     coordinator: Arc<GroupCommitCoordinator<P>>,
 }
 
+/// Runtime-neutral exhaustion behavior. `Reject` is the finite production default; `Wait` preserves
+/// cancellation-safe async queuing for services that race the future with their own runtime deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteAdmissionWaitPolicy {
+    Reject,
+    Wait,
+}
+
+#[derive(Clone)]
+pub struct ObjectLogByteAdmissionConfig {
+    budget: BufferedByteBudget,
+    max_queue_waiting_bytes: usize,
+    wait_policy: ByteAdmissionWaitPolicy,
+}
+
+/// Low-cardinality operator snapshot. It intentionally contains no tenant, queue, request, or object IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLogByteAdmissionSnapshot {
+    pub configured_global_bytes: usize,
+    pub configured_tenant_bytes: Option<usize>,
+    pub configured_queue_waiting_bytes: usize,
+    pub current_bytes: usize,
+    pub peak_bytes: usize,
+    pub waiters: usize,
+    pub waits: u64,
+    pub rejects: u64,
+    pub total_wait_nanos: u128,
+    pub max_wait_nanos: u128,
+}
+
+/// A raw object-log commit whose canonical bytes and finite-cap permit are already owned. This is the
+/// transfer object used to cross a queue gate or dispatcher boundary without reserialization or recharging.
+pub struct PreparedObjectLogCommit {
+    shard: QueueKey,
+    expected_epoch: u64,
+    fault: RawCommitFault,
+    serialized: Vec<SerializedCommandEnvelope>,
+    charged_bytes: usize,
+    permit: OwnedBytePermit,
+}
+
+impl ObjectLogByteAdmissionConfig {
+    pub fn new(
+        budget: BufferedByteBudget,
+        max_queue_waiting_bytes: usize,
+        wait_policy: ByteAdmissionWaitPolicy,
+    ) -> Self {
+        Self {
+            budget,
+            max_queue_waiting_bytes,
+            wait_policy,
+        }
+    }
+}
+
 struct CoordinatedRequest {
     id: u64,
-    commands: Vec<pqueue_engine::CommandEnvelope>,
+    command_count: usize,
+    serialized: Vec<SerializedCommandEnvelope>,
+    charged_bytes: usize,
+    permit: Option<OwnedBytePermit>,
     expected_epoch: u64,
     fault: RawCommitFault,
     response: oneshot::Sender<EngineResult<RawCommitOutcome>>,
@@ -197,6 +274,7 @@ struct CoordinatedRequest {
 enum FlushPhase {
     PreRepair,
     SealPending,
+    ActorSubmitted,
     ApplyPending,
 }
 
@@ -212,6 +290,7 @@ struct CoordinatedQueue {
     driver: Option<u64>,
     in_flight: Option<InFlightBatch>,
     outstanding: usize,
+    pending_bytes: usize,
     driver_wakers: Vec<Waker>,
 }
 
@@ -241,6 +320,9 @@ impl<P: AsyncProjectionStore + 'static> Drop for CoordinatedTaskGuard<P> {
 struct GroupCommitCoordinator<P> {
     inner: ObjectLogProjectionCommitter<P>,
     max_outstanding: usize,
+    byte_budget: BufferedByteBudget,
+    max_queue_waiting_bytes: usize,
+    wait_policy: ByteAdmissionWaitPolicy,
     state: Mutex<CoordinatorState>,
     #[cfg(test)]
     phase_hook: Mutex<Option<PhaseHook>>,
@@ -292,6 +374,50 @@ where
         recovery_page_size: usize,
         max_queued_commits: usize,
     ) -> EngineResult<Self> {
+        let budget = BufferedByteBudget::new(
+            BufferedByteBudgetConfig::new(64 * 1024 * 1024).expect("constant byte budget is valid"),
+        );
+        Self::open_with_byte_admission(
+            log,
+            projection,
+            definitions,
+            recovery_page_size,
+            max_queued_commits,
+            ObjectLogByteAdmissionConfig::new(
+                budget,
+                16 * 1024 * 1024,
+                ByteAdmissionWaitPolicy::Reject,
+            ),
+        )
+        .await
+    }
+
+    /// Open with a node-shared byte budget and a per-queue cap for admitted requests waiting to drive.
+    pub async fn open_with_byte_admission(
+        log: AsyncObjectLog,
+        projection: P,
+        definitions: Vec<pqueue_core::QueueDefinition>,
+        recovery_page_size: usize,
+        max_queued_commits: usize,
+        admission: ObjectLogByteAdmissionConfig,
+    ) -> EngineResult<Self> {
+        let ObjectLogByteAdmissionConfig {
+            budget: byte_budget,
+            max_queue_waiting_bytes,
+            wait_policy,
+        } = admission;
+        if max_queue_waiting_bytes == 0
+            || max_queue_waiting_bytes > byte_budget.config().global_limit()
+        {
+            return Err(EngineError::Invalid(
+                "queue waiting-byte limit must be positive and no larger than global byte limit",
+            ));
+        }
+        if byte_budget.config().global_limit() < log.segment_target_bytes() {
+            return Err(EngineError::Invalid(
+                "global buffered-byte limit must be at least segment_target_bytes",
+            ));
+        }
         let inner = ObjectLogProjectionCommitter::open(
             log,
             projection,
@@ -304,6 +430,9 @@ where
             coordinator: Arc::new(GroupCommitCoordinator {
                 inner,
                 max_outstanding: max_queued_commits,
+                byte_budget,
+                max_queue_waiting_bytes,
+                wait_policy,
                 state: Mutex::new(CoordinatorState {
                     closed: false,
                     next_request_id: 0,
@@ -319,6 +448,9 @@ where
 
     /// Stop accepting new commit requests. Already accepted requests remain coordinator-owned.
     pub fn close(&self) {
+        // Lifecycle order is deliberate: revoke byte admission first, then close queue admission. Accepted
+        // permits remain charged until their coordinator-owned seal/apply work resolves.
+        self.coordinator.byte_budget.close();
         self.coordinator
             .state
             .lock()
@@ -332,7 +464,76 @@ where
         CoordinatorDrain {
             coordinator: Arc::clone(&self.coordinator),
         }
-        .await
+        .await;
+        debug_assert_eq!(
+            self.coordinator.byte_budget.stats().charged_bytes,
+            0,
+            "object-log byte charge remained after accepted work drained"
+        );
+    }
+
+    pub fn byte_admission_stats(&self) -> BufferedByteBudgetStats {
+        self.coordinator.byte_budget.stats()
+    }
+
+    pub fn byte_admission_snapshot(&self) -> ObjectLogByteAdmissionSnapshot {
+        let stats = self.coordinator.byte_budget.stats();
+        ObjectLogByteAdmissionSnapshot {
+            configured_global_bytes: self.coordinator.byte_budget.config().global_limit(),
+            configured_tenant_bytes: self.coordinator.byte_budget.config().tenant_limit(),
+            configured_queue_waiting_bytes: self.coordinator.max_queue_waiting_bytes,
+            current_bytes: stats.charged_bytes,
+            peak_bytes: stats.peak_charged_bytes,
+            waiters: stats.waiting_requests,
+            waits: stats.wait_count,
+            rejects: stats.rejection_count,
+            total_wait_nanos: stats.total_wait_nanos,
+            max_wait_nanos: stats.max_wait_nanos,
+        }
+    }
+
+    /// Serialize and use non-waiting admission now, before the caller enters a queue gate or dispatcher.
+    /// This is intentionally the only preparation API suitable while an authoritative gate is held.
+    pub fn prepare_reject(
+        &self,
+        request: RawCommitRequest,
+    ) -> EngineResult<PreparedObjectLogCommit> {
+        let (shard, expected_epoch, fault, serialized, charged_bytes) = prepare_serialized_request(
+            request,
+            self.coordinator.byte_budget.config().global_limit(),
+        )?;
+        let permit = self
+            .coordinator
+            .byte_budget
+            .try_acquire(shard.tenant_id.clone(), charged_bytes)
+            .map_err(map_byte_admission_error)?;
+        Ok(PreparedObjectLogCommit {
+            shard,
+            expected_epoch,
+            fault,
+            serialized,
+            charged_bytes,
+            permit,
+        })
+    }
+
+    /// Explicit pre-dispatch preparation using the configured wait policy. A caller selecting `Wait` MUST
+    /// race this future with its service-owned deadline before submitting [`Self::commit_prepared`]; the
+    /// direct [`SeparateReplayCommitter::commit_replayable`] fallback is always finite `Reject` after
+    /// dispatcher acceptance. Generic composed submission invokes this configured preparation boundary.
+    pub async fn prepare_configured(
+        &self,
+        request: RawCommitRequest,
+    ) -> EngineResult<PreparedObjectLogCommit> {
+        prepare_with_configured_policy(Arc::clone(&self.coordinator), request).await
+    }
+
+    /// Submit already-admitted work. Dispatcher ownership can begin with this task without any admission wait.
+    pub fn commit_prepared(
+        &self,
+        prepared: PreparedObjectLogCommit,
+    ) -> OwnedTask<EngineResult<RawCommitOutcome>> {
+        run_prepared_commit(Arc::clone(&self.coordinator), prepared)
     }
 
     #[cfg(test)]
@@ -377,16 +578,18 @@ where
 
     fn enqueue(
         self: &Arc<Self>,
-        request: RawCommitRequest,
+        shard: QueueKey,
+        expected_epoch: u64,
+        fault: RawCommitFault,
+        serialized: Vec<SerializedCommandEnvelope>,
+        charged_bytes: usize,
+        permit: OwnedBytePermit,
     ) -> EngineResult<(
         QueueKey,
         u64,
         oneshot::Receiver<EngineResult<RawCommitOutcome>>,
     )> {
-        let shard = request.shard().clone();
-        let commands = request.commands().to_vec();
-        let expected_epoch = request.expected_epoch();
-        let fault = request.fault();
+        let command_count = serialized.len();
         let (response, receiver) = oneshot::channel();
         let mut state = self
             .state
@@ -400,12 +603,26 @@ where
         if state.outstanding >= self.max_outstanding {
             return Err(EngineError::Unavailable);
         }
+        if state.queues.get(&shard).is_some_and(|queue| {
+            let must_park =
+                queue.driver.is_some() || queue.in_flight.is_some() || !queue.pending.is_empty();
+            must_park
+                && queue.pending_bytes.saturating_add(charged_bytes) > self.max_queue_waiting_bytes
+        }) {
+            return Err(EngineError::Backpressure {
+                resource: "queue buffered bytes",
+            });
+        }
         state.outstanding += 1;
         let queue = state.queues.entry(shard.clone()).or_default();
         queue.outstanding += 1;
+        queue.pending_bytes += charged_bytes;
         queue.pending.push_back(CoordinatedRequest {
             id: request_id,
-            commands,
+            command_count,
+            serialized,
+            charged_bytes,
+            permit: Some(permit),
             expected_epoch,
             fault,
             response,
@@ -456,7 +673,14 @@ where
                 .iter()
                 .position(|request| request.id == request_id)
             {
-                queue.pending.remove(index);
+                let request = queue
+                    .pending
+                    .remove(index)
+                    .expect("pending request disappeared");
+                queue.pending_bytes = queue
+                    .pending_bytes
+                    .checked_sub(request.charged_bytes)
+                    .expect("group commit pending-byte accounting underflow");
                 queue.outstanding -= 1;
                 removed += 1;
             }
@@ -470,11 +694,12 @@ where
                                     queue.outstanding -= 1;
                                     removed += 1;
                                 } else {
+                                    queue.pending_bytes += request.charged_bytes;
                                     queue.pending.push_front(request);
                                 }
                             }
                         }
-                        FlushPhase::SealPending => {
+                        FlushPhase::SealPending | FlushPhase::ActorSubmitted => {
                             for request in in_flight.requests {
                                 queue.outstanding -= 1;
                                 removed += 1;
@@ -579,10 +804,14 @@ where
                     .take_while(|request| request.expected_epoch == expected_epoch)
                     .count();
                 let requests = queue.pending.drain(..count).collect::<Vec<_>>();
-                let commands = requests
+                let drained_bytes = requests
                     .iter()
-                    .flat_map(|request| request.commands.iter().cloned())
-                    .collect::<Vec<_>>();
+                    .map(|request| request.charged_bytes)
+                    .sum::<usize>();
+                queue.pending_bytes = queue
+                    .pending_bytes
+                    .checked_sub(drained_bytes)
+                    .expect("group commit pending-byte accounting underflow");
                 let needs_apply = requests
                     .iter()
                     .any(|request| request.fault != RawCommitFault::AfterAppendBeforeApply);
@@ -591,10 +820,10 @@ where
                     phase: FlushPhase::PreRepair,
                     positions: None,
                 });
-                (expected_epoch, commands, needs_apply)
+                (expected_epoch, needs_apply)
             };
 
-            let (expected_epoch, commands, needs_apply) = prepared;
+            let (expected_epoch, needs_apply) = prepared;
             #[cfg(test)]
             self.await_phase_hook(FlushPhase::PreRepair).await;
             if let Err(error) = repair_tail(
@@ -609,15 +838,27 @@ where
                 continue;
             }
             self.set_phase(&shard, FlushPhase::SealPending, None);
+            let (serialized, permits) = self.take_in_flight_storage(&shard);
             #[cfg(test)]
             self.await_phase_hook(FlushPhase::SealPending).await;
-            let command_count = commands.len();
-            let sealed = match self
-                .inner
-                .log
-                .group_commit_enqueue_and_seal(shard.clone(), commands, expected_epoch, 0)
-                .await
-            {
+            let command_count = serialized.len();
+            let submitted = match self.inner.log.submit_group_commit_serialized_and_seal(
+                shard.clone(),
+                serialized,
+                permits,
+                expected_epoch,
+                0,
+            ) {
+                Ok(submitted) => submitted,
+                Err(error) => {
+                    self.finish_in_flight(&shard, Err(error));
+                    continue;
+                }
+            };
+            self.set_phase(&shard, FlushPhase::ActorSubmitted, None);
+            #[cfg(test)]
+            self.await_phase_hook(FlushPhase::ActorSubmitted).await;
+            let (sealed, permits) = match submitted.await {
                 Ok(sealed) => sealed,
                 Err(error) => {
                     self.finish_in_flight(&shard, Err(error));
@@ -657,6 +898,9 @@ where
                 self.set_phase(&shard, FlushPhase::ApplyPending, Some(positions));
                 self.finish_in_flight(&shard, Ok(()));
             }
+            // Durable segment/frame bytes and their ownership token remain charged through the complete
+            // projection/apply response barrier, including repair failures and caller cancellation.
+            drop(permits);
         }
     }
 
@@ -681,6 +925,36 @@ where
         }
     }
 
+    fn take_in_flight_storage(
+        &self,
+        shard: &QueueKey,
+    ) -> (Vec<SerializedCommandEnvelope>, Vec<OwnedBytePermit>) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("group commit coordinator poisoned");
+        let requests = &mut state
+            .queues
+            .get_mut(shard)
+            .and_then(|queue| queue.in_flight.as_mut())
+            .expect("group commit in-flight batch disappeared")
+            .requests;
+        let serialized = requests
+            .iter_mut()
+            .flat_map(|request| std::mem::take(&mut request.serialized))
+            .collect();
+        let permits = requests
+            .iter_mut()
+            .map(|request| {
+                request
+                    .permit
+                    .take()
+                    .expect("group commit request permit already transferred")
+            })
+            .collect();
+        (serialized, permits)
+    }
+
     fn partition_positions(
         &self,
         shard: &QueueKey,
@@ -700,7 +974,7 @@ where
         requests
             .iter()
             .map(|request| {
-                let end = offset + request.commands.len();
+                let end = offset + request.command_count;
                 let positions = own[offset..end].to_vec();
                 offset = end;
                 positions
@@ -763,55 +1037,196 @@ where
     P: AsyncProjectionStore + 'static,
 {
     type Request = RawCommitRequest;
+    type PreparedRequest = PreparedObjectLogCommit;
     type Output = EngineResult<RawCommitOutcome>;
+
+    fn prepare_replayable(
+        &self,
+        request: Self::Request,
+    ) -> OwnedTask<EngineResult<Self::PreparedRequest>> {
+        let coordinator = Arc::clone(&self.coordinator);
+        Box::pin(prepare_with_configured_policy(coordinator, request))
+    }
+
+    fn commit_prepared_replayable(
+        &self,
+        request: Self::PreparedRequest,
+    ) -> OwnedTask<Self::Output> {
+        run_prepared_commit(Arc::clone(&self.coordinator), request)
+    }
 
     fn commit_replayable(&self, request: Self::Request) -> OwnedTask<Self::Output> {
         let coordinator = Arc::clone(&self.coordinator);
         Box::pin(async move {
-            if request.fault() == RawCommitFault::BeforeAppend {
-                return Err(EngineError::Invalid("fault-injection: kill before append"));
-            }
-            // Admission happens only when this owned task is first polled. Constructing and dropping an
-            // unpolled task leaves no coordinator entry and consumes no global capacity.
-            let (shard, request_id, mut response) = coordinator.enqueue(request)?;
-            let mut guard = CoordinatedTaskGuard {
-                coordinator: Arc::clone(&coordinator),
-                shard: shard.clone(),
-                request_id,
-                completed: false,
-            };
-            loop {
-                enum Turn<T> {
-                    Response(T),
-                    Drive,
-                }
-                let turn = futures::future::poll_fn(|context| {
-                    if let Poll::Ready(result) = Pin::new(&mut response).poll(context) {
-                        return Poll::Ready(Turn::Response(result));
-                    }
-                    if coordinator.poll_driver(&shard, request_id, context) {
-                        Poll::Ready(Turn::Drive)
-                    } else {
-                        Poll::Pending
-                    }
-                })
-                .await;
-                match turn {
-                    Turn::Response(result) => {
-                        guard.completed = true;
-                        return result.map_err(|_| {
-                            EngineError::Storage(
-                                "group commit coordinator dropped a response".to_string(),
-                            )
-                        })?;
-                    }
-                    Turn::Drive => {
-                        Arc::clone(&coordinator).drive(shard.clone()).await;
-                    }
-                }
-            }
+            let (shard, expected_epoch, fault, serialized, charged_bytes) =
+                prepare_serialized_request(
+                    request,
+                    coordinator.byte_budget.config().global_limit(),
+                )?;
+            // Dispatcher acceptance has already happened when this owned future runs. It must therefore be
+            // finite: an ordinary trait caller can never park a dispatcher slot waiting for byte capacity.
+            let permit = coordinator
+                .byte_budget
+                .try_acquire(shard.tenant_id.clone(), charged_bytes)
+                .map_err(map_byte_admission_error)?;
+            run_prepared_commit(
+                coordinator,
+                PreparedObjectLogCommit {
+                    shard,
+                    expected_epoch,
+                    fault,
+                    serialized,
+                    charged_bytes,
+                    permit,
+                },
+            )
+            .await
         })
     }
+}
+
+async fn prepare_with_configured_policy<P>(
+    coordinator: Arc<GroupCommitCoordinator<P>>,
+    request: RawCommitRequest,
+) -> EngineResult<PreparedObjectLogCommit> {
+    let (shard, expected_epoch, fault, serialized, charged_bytes) =
+        prepare_serialized_request(request, coordinator.byte_budget.config().global_limit())?;
+    let tenant = shard.tenant_id.clone();
+    let permit = match coordinator.wait_policy {
+        ByteAdmissionWaitPolicy::Reject => {
+            coordinator.byte_budget.try_acquire(tenant, charged_bytes)
+        }
+        ByteAdmissionWaitPolicy::Wait => {
+            coordinator.byte_budget.acquire(tenant, charged_bytes).await
+        }
+    }
+    .map_err(map_byte_admission_error)?;
+    Ok(PreparedObjectLogCommit {
+        shard,
+        expected_epoch,
+        fault,
+        serialized,
+        charged_bytes,
+        permit,
+    })
+}
+
+fn prepare_serialized_request(
+    request: RawCommitRequest,
+    global_limit: usize,
+) -> EngineResult<(
+    QueueKey,
+    u64,
+    RawCommitFault,
+    Vec<SerializedCommandEnvelope>,
+    usize,
+)> {
+    if request.fault() == RawCommitFault::BeforeAppend {
+        return Err(EngineError::Invalid("fault-injection: kill before append"));
+    }
+    let (shard, commands, expected_epoch, fault) = request.into_parts();
+    let (serialized, charged_bytes) = prepare_serialized_commands(commands, global_limit)?;
+    Ok((shard, expected_epoch, fault, serialized, charged_bytes))
+}
+
+fn run_prepared_commit<P>(
+    coordinator: Arc<GroupCommitCoordinator<P>>,
+    prepared: PreparedObjectLogCommit,
+) -> OwnedTask<EngineResult<RawCommitOutcome>>
+where
+    P: AsyncProjectionStore + 'static,
+{
+    Box::pin(async move {
+        let (shard, request_id, mut response) = coordinator.enqueue(
+            prepared.shard,
+            prepared.expected_epoch,
+            prepared.fault,
+            prepared.serialized,
+            prepared.charged_bytes,
+            prepared.permit,
+        )?;
+        let mut guard = CoordinatedTaskGuard {
+            coordinator: Arc::clone(&coordinator),
+            shard: shard.clone(),
+            request_id,
+            completed: false,
+        };
+        loop {
+            enum Turn<T> {
+                Response(T),
+                Drive,
+            }
+            let turn = futures::future::poll_fn(|context| {
+                if let Poll::Ready(result) = Pin::new(&mut response).poll(context) {
+                    return Poll::Ready(Turn::Response(result));
+                }
+                if coordinator.poll_driver(&shard, request_id, context) {
+                    Poll::Ready(Turn::Drive)
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            match turn {
+                Turn::Response(result) => {
+                    guard.completed = true;
+                    return result.map_err(|_| {
+                        EngineError::Storage(
+                            "group commit coordinator dropped a response".to_string(),
+                        )
+                    })?;
+                }
+                Turn::Drive => {
+                    Arc::clone(&coordinator).drive(shard.clone()).await;
+                }
+            }
+        }
+    })
+}
+
+fn map_byte_admission_error(error: ByteAdmissionError) -> EngineError {
+    match error {
+        ByteAdmissionError::Closed => EngineError::Unavailable,
+        ByteAdmissionError::Backpressure => EngineError::Backpressure {
+            resource: "buffered bytes",
+        },
+        ByteAdmissionError::Oversize {
+            requested, limit, ..
+        } => EngineError::RequestTooLarge { requested, limit },
+    }
+}
+
+/// Canonically encode an owned command batch once and compute its conservative resident peak: retained
+/// records plus a temporary sealed frame. Independently admitted batches each reserve the fixed frame
+/// overhead, so later co-batching safely overcharges rather than attempting a racy merge-time adjustment.
+pub fn prepare_serialized_commands(
+    commands: Vec<pqueue_engine::CommandEnvelope>,
+    limit: usize,
+) -> EngineResult<(Vec<SerializedCommandEnvelope>, usize)> {
+    let serialized = commands
+        .into_iter()
+        .map(SerializedCommandEnvelope::new)
+        .collect::<EngineResult<Vec<_>>>()?;
+    let charged = serialized_peak_charge(&serialized, limit)?;
+    Ok((serialized, charged))
+}
+
+pub fn serialized_peak_charge(
+    records: &[SerializedCommandEnvelope],
+    limit: usize,
+) -> EngineResult<usize> {
+    serialized_peak_charge_for_lengths(records.iter().map(|record| record.record.len()), limit)
+}
+
+fn serialized_peak_charge_for_lengths(
+    lengths: impl IntoIterator<Item = usize>,
+    limit: usize,
+) -> EngineResult<usize> {
+    let overflow = || EngineError::RequestTooLarge {
+        requested: usize::MAX,
+        limit,
+    };
+    retained_records_plus_frame_bytes(lengths, 25, 4).ok_or_else(overflow)
 }
 
 fn validate_page_size(page_size: usize) -> EngineResult<()> {
@@ -877,11 +1292,11 @@ mod tests {
     use pqueue_conformance::{envelope, item};
     use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, TenantId, UtcTimestamp};
     use pqueue_engine::{
-        AsyncCommitStrategy, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
-        CommandPosition, DispatchError, DurabilityClass, IdempotencyDecision, OwnedTaskDispatcher,
-        OwnedTaskFactory, PushCommand, PushFingerprint, PushItem, QueueCommand, RawCommitFault,
-        RichClaimSelection, SeparateReplayCommit, TaskOutcome, TaskOutcomeSender,
-        task_outcome_channel,
+        AsyncCommitStrategy, AsyncComposedBackend, ClaimCompatibility, ClaimUnit, ClaimedItem,
+        CommandEnvelope, CommandPosition, DispatchError, DurabilityClass, IdempotencyDecision,
+        OwnedTaskDispatcher, OwnedTaskFactory, PushCommand, PushFingerprint, PushItem,
+        QueueCommand, RawCommitFault, RichClaimSelection, SeparateReplayCommit, TaskOutcome,
+        TaskOutcomeSender, task_outcome_channel,
     };
 
     use super::*;
@@ -1327,15 +1742,28 @@ mod tests {
         log.close_and_drain().await.unwrap();
     }
 
+    #[derive(Clone)]
     struct TokioTestDispatcher {
-        closed: AtomicBool,
+        closed: Arc<AtomicBool>,
+        accepted: Arc<AtomicUsize>,
+        outstanding: Arc<AtomicUsize>,
     }
 
     impl TokioTestDispatcher {
         fn new() -> Self {
             Self {
-                closed: AtomicBool::new(false),
+                closed: Arc::new(AtomicBool::new(false)),
+                accepted: Arc::new(AtomicUsize::new(0)),
+                outstanding: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn accepted(&self) -> usize {
+            self.accepted.load(Ordering::Acquire)
+        }
+
+        fn outstanding(&self) -> usize {
+            self.outstanding.load(Ordering::Acquire)
         }
     }
 
@@ -1347,8 +1775,14 @@ mod tests {
             if self.closed.load(Ordering::Acquire) {
                 return Err(DispatchError::Closed);
             }
+            self.accepted.fetch_add(1, Ordering::AcqRel);
+            self.outstanding.fetch_add(1, Ordering::AcqRel);
+            let outstanding = Arc::clone(&self.outstanding);
             let (sender, outcome) = task_outcome_channel();
-            tokio::spawn(async move { sender.send(factory().await) });
+            tokio::spawn(async move {
+                sender.send(factory().await);
+                outstanding.fetch_sub(1, Ordering::AcqRel);
+            });
             Ok(outcome)
         }
 
@@ -1538,6 +1972,12 @@ mod tests {
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].0, survivor.positions()[0]);
         committer.close_and_drain().await;
+        let snapshot = committer.byte_admission_snapshot();
+        assert_eq!(snapshot.configured_global_bytes, 64 * 1024 * 1024);
+        assert_eq!(snapshot.configured_tenant_bytes, None);
+        assert_eq!(snapshot.configured_queue_waiting_bytes, 16 * 1024 * 1024);
+        assert_eq!(snapshot.current_bytes, 0);
+        assert!(snapshot.peak_bytes > 0);
         log.close_and_drain().await.unwrap();
     }
 
@@ -1581,7 +2021,7 @@ mod tests {
                 assert!(outcome.projection_applied());
                 assert_eq!(outcome.positions().len(), 1);
             }
-            FlushPhase::SealPending => assert!(matches!(
+            FlushPhase::SealPending | FlushPhase::ActorSubmitted => assert!(matches!(
                 second,
                 Err(EngineError::Storage(message)) if message.contains("outcome unknown")
             )),
@@ -1592,6 +2032,7 @@ mod tests {
             }
         }
         committer.close_and_drain().await;
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
         assert_eq!(committer.coordinator.state.lock().unwrap().outstanding, 0);
         assert!(
             committer
@@ -1613,6 +2054,53 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn driver_drop_during_seal_reports_unknown_outcome_and_drains() {
         assert_driver_drop_at_phase(FlushPhase::SealPending).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn driver_drop_after_actor_submission_keeps_job_owned_until_completion() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1, 100).unwrap(),
+            8,
+            1,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let commands = vec![command("401")];
+        let charge = peak_charge(&commands);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(charge).unwrap());
+        let committer = GroupCommitObjectLogProjectionCommitter::open_with_byte_admission(
+            log.clone(),
+            RecordingProjection::new(log.clone()),
+            Vec::new(),
+            16,
+            8,
+            ObjectLogByteAdmissionConfig::new(budget, charge, ByteAdmissionWaitPolicy::Wait),
+        )
+        .await
+        .unwrap();
+        let (job_started, release_job) = log.gate_serialized_job();
+        let (submitted, release_coordinator) = committer.gate_phase(FlushPhase::ActorSubmitted);
+        let task =
+            tokio::spawn(committer.commit_replayable(RawCommitRequest::new(shard(), commands, 0)));
+        tokio::task::spawn_blocking(move || job_started.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        submitted.await.unwrap();
+        task.abort();
+        let _ = task.await;
+        drop(release_coordinator);
+
+        // The coordinator request is gone, but the accepted blocking actor job still owns the records and
+        // therefore the byte permit.
+        assert_eq!(committer.byte_admission_stats().charged_bytes, charge);
+        release_job.send(()).unwrap();
+        log.close_and_drain().await.unwrap();
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
+        committer.close_and_drain().await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1670,5 +2158,368 @@ mod tests {
         }
         committer.close_and_drain().await;
         log.close_and_drain().await.unwrap();
+    }
+
+    fn peak_charge(commands: &[CommandEnvelope]) -> usize {
+        let records = commands
+            .iter()
+            .map(|command| SerializedCommandEnvelope {
+                envelope: command.clone(),
+                record: serde_json::to_vec(command).unwrap(),
+            })
+            .collect::<Vec<_>>();
+        serialized_peak_charge(&records, usize::MAX).unwrap()
+    }
+
+    #[test]
+    fn serialized_bundle_is_golden_byte_identical_and_charge_matches_frame_peak() {
+        let commands = [command("501"), command("502")];
+        let serialized = commands
+            .iter()
+            .map(|command| SerializedCommandEnvelope {
+                envelope: command.clone(),
+                record: serde_json::to_vec(command).unwrap(),
+            })
+            .collect::<Vec<_>>();
+        for (command, bundled) in commands.iter().zip(&serialized) {
+            assert_eq!(bundled.record, serde_json::to_vec(command).unwrap());
+            assert_eq!(
+                serde_json::to_vec(&bundled.envelope).unwrap(),
+                bundled.record
+            );
+        }
+        let records = serialized
+            .iter()
+            .map(|bundled| bundled.record.clone())
+            .collect::<Vec<_>>();
+        let (frame, _) = crate::segmented::build_segment_object(7, 11, &records);
+        let resident_records = records.iter().map(Vec::len).sum::<usize>();
+        assert_eq!(
+            serialized_peak_charge(&serialized, usize::MAX).unwrap(),
+            resident_records + frame.len()
+        );
+        assert_eq!(
+            frame.len(),
+            crate::segmented::segment_object_len(&records).unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn byte_admission_is_oversize_typed_and_releases_after_seal_apply() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let commands = vec![command("100")];
+        let charge = peak_charge(&commands);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(charge).unwrap());
+        let committer = GroupCommitObjectLogProjectionCommitter::open_with_byte_admission(
+            log.clone(),
+            RecordingProjection::new(log.clone()),
+            Vec::new(),
+            16,
+            8,
+            ObjectLogByteAdmissionConfig::new(budget, charge, ByteAdmissionWaitPolicy::Wait),
+        )
+        .await
+        .unwrap();
+
+        let outcome = committer
+            .commit_replayable(RawCommitRequest::new(shard(), commands, 0))
+            .await
+            .unwrap();
+        assert!(outcome.projection_applied());
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
+        assert_eq!(committer.byte_admission_stats().peak_charged_bytes, charge);
+
+        let too_large = vec![command("1000000000000000000")];
+        assert!(matches!(
+            committer
+                .commit_replayable(RawCommitRequest::new(shard(), too_large, 0))
+                .await,
+            Err(EngineError::RequestTooLarge { limit, .. }) if limit == charge
+        ));
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_commit_bounds_bytes_and_waiter_cancellation_is_conservative() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let commands = vec![command("200")];
+        let charge = peak_charge(&commands);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(charge).unwrap());
+        let committer = GroupCommitObjectLogProjectionCommitter::open_with_byte_admission(
+            log.clone(),
+            RecordingProjection::new(log.clone()),
+            Vec::new(),
+            16,
+            8,
+            ObjectLogByteAdmissionConfig::new(budget, charge, ByteAdmissionWaitPolicy::Wait),
+        )
+        .await
+        .unwrap();
+        let (started, release) = committer.gate_phase(FlushPhase::PreRepair);
+        let first = tokio::spawn(committer.commit_replayable(RawCommitRequest::new(
+            shard(),
+            commands.clone(),
+            0,
+        )));
+        started.await.unwrap();
+
+        let mut waiting = Box::pin(committer.prepare_configured(RawCommitRequest::new(
+            shard(),
+            commands.clone(),
+            0,
+        )));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+        let stats = committer.byte_admission_stats();
+        assert_eq!(stats.charged_bytes, charge);
+        assert_eq!(stats.waiting_requests, 1);
+        assert!(matches!(
+            committer
+                .commit_replayable(RawCommitRequest::new(shard(), commands, 0,))
+                .await,
+            Err(EngineError::Backpressure {
+                resource: "buffered bytes"
+            })
+        ));
+        drop(waiting);
+        assert_eq!(committer.byte_admission_stats().waiting_requests, 0);
+        assert_eq!(committer.byte_admission_stats().charged_bytes, charge);
+
+        drop(release);
+        first.await.unwrap().unwrap();
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn finite_admission_policy_maps_exhaustion_to_typed_backpressure() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1, 100).unwrap(),
+            8,
+            1,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let commands = vec![command("250")];
+        let charge = peak_charge(&commands);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(charge).unwrap());
+        let committer = GroupCommitObjectLogProjectionCommitter::open_with_byte_admission(
+            log.clone(),
+            RecordingProjection::new(log.clone()),
+            Vec::new(),
+            16,
+            8,
+            ObjectLogByteAdmissionConfig::new(budget, charge, ByteAdmissionWaitPolicy::Reject),
+        )
+        .await
+        .unwrap();
+        let (started, release) = committer.gate_phase(FlushPhase::PreRepair);
+        let first = tokio::spawn(committer.commit_replayable(RawCommitRequest::new(
+            shard(),
+            commands.clone(),
+            0,
+        )));
+        started.await.unwrap();
+        assert!(matches!(
+            committer.prepare_reject(RawCommitRequest::new(shard(), commands, 0)),
+            Err(EngineError::Backpressure {
+                resource: "buffered bytes"
+            })
+        ));
+        assert_eq!(
+            committer
+                .coordinator
+                .state
+                .lock()
+                .expect("coordinator state")
+                .outstanding,
+            1,
+            "rejected preparation must not reach queue admission or dispatcher ownership"
+        );
+        drop(release);
+        first.await.unwrap().unwrap();
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn composed_raw_commit_prepares_before_queue_gate_and_dispatch() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1, 100).unwrap(),
+            8,
+            1,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let commands = vec![command("275")];
+        let charge = peak_charge(&commands);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(charge).unwrap());
+        let committer = GroupCommitObjectLogProjectionCommitter::open_with_byte_admission(
+            log.clone(),
+            RecordingProjection::new(log.clone()),
+            Vec::new(),
+            16,
+            8,
+            ObjectLogByteAdmissionConfig::new(budget, charge, ByteAdmissionWaitPolicy::Wait),
+        )
+        .await
+        .unwrap();
+        let (started, release) = committer.gate_phase(FlushPhase::PreRepair);
+        let first = tokio::spawn(committer.commit_replayable(RawCommitRequest::new(
+            shard(),
+            commands.clone(),
+            0,
+        )));
+        started.await.unwrap();
+
+        let strategy =
+            SeparateReplayCommit::for_profile(DurabilityClass::EventualApply, committer.clone())
+                .unwrap();
+        let dispatcher = TokioTestDispatcher::new();
+        let backend = AsyncComposedBackend::new(strategy, dispatcher.clone(), 1);
+        backend.close();
+
+        let mut waiting =
+            Box::pin(backend.submit_commit(RawCommitRequest::new(shard(), commands, 0)));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+        assert_eq!(dispatcher.accepted(), 0);
+        assert_eq!(dispatcher.outstanding(), 0);
+        assert_eq!(committer.byte_admission_stats().waiting_requests, 1);
+        drop(waiting);
+        assert_eq!(committer.byte_admission_stats().waiting_requests, 0);
+
+        drop(release);
+        first.await.unwrap().unwrap();
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn per_queue_waiting_cap_rejects_parked_bytes_without_blocking_driver() {
+        let store: Arc<dyn crate::segmented::BlobStore> = Arc::new(InMemoryBlobStore::default());
+        let log = AsyncObjectLog::open_group_commit_with_blob_store_and_limits(
+            store,
+            SegmentConfig::new(1, 100).unwrap(),
+            8,
+            2,
+        )
+        .await
+        .unwrap();
+        log.ensure_shard(shard()).await.unwrap();
+        let commands = vec![command("300")];
+        let charge = peak_charge(&commands);
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(charge * 3).unwrap());
+        let committer = GroupCommitObjectLogProjectionCommitter::open_with_byte_admission(
+            log.clone(),
+            RecordingProjection::new(log.clone()),
+            Vec::new(),
+            16,
+            8,
+            ObjectLogByteAdmissionConfig::new(budget, charge, ByteAdmissionWaitPolicy::Wait),
+        )
+        .await
+        .unwrap();
+        let (started, release) = committer.gate_phase(FlushPhase::PreRepair);
+        let first = tokio::spawn(committer.commit_replayable(RawCommitRequest::new(
+            shard(),
+            commands.clone(),
+            0,
+        )));
+        started.await.unwrap();
+        let mut parked =
+            committer.commit_replayable(RawCommitRequest::new(shard(), commands.clone(), 0));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(parked.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(
+            committer
+                .commit_replayable(RawCommitRequest::new(shard(), commands, 0))
+                .await,
+            Err(EngineError::Backpressure {
+                resource: "queue buffered bytes"
+            })
+        ));
+        assert_eq!(committer.byte_admission_stats().charged_bytes, charge * 2);
+        drop(parked);
+        assert_eq!(committer.byte_admission_stats().charged_bytes, charge);
+        drop(release);
+        first.await.unwrap().unwrap();
+        assert_eq!(committer.byte_admission_stats().charged_bytes, 0);
+        committer.close_and_drain().await;
+        log.close_and_drain().await.unwrap();
+    }
+
+    #[test]
+    #[ignore = "manual SP-01 serialization/admission microbenchmark"]
+    fn byte_admission_serialization_microbenchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let commands = (1..=100)
+            .map(|id| command(&id.to_string()))
+            .collect::<Vec<_>>();
+        let iterations = 2_000;
+        let started = Instant::now();
+        let mut baseline_bytes = 0usize;
+        for _ in 0..iterations {
+            for command in &commands {
+                baseline_bytes += black_box(serde_json::to_vec(command).unwrap()).len();
+            }
+        }
+        let baseline = started.elapsed();
+
+        let started = Instant::now();
+        let mut admitted_bytes = 0usize;
+        for _ in 0..iterations {
+            let records = commands
+                .iter()
+                .map(|command| serde_json::to_vec(command).unwrap())
+                .collect::<Vec<_>>();
+            admitted_bytes += black_box(
+                serialized_peak_charge_for_lengths(records.iter().map(Vec::len), usize::MAX)
+                    .unwrap(),
+            );
+            black_box(records);
+        }
+        let admitted = started.elapsed();
+        assert!(baseline_bytes > 0 && admitted_bytes > baseline_bytes);
+        eprintln!(
+            "SP-01 serialization microbenchmark: commands={}, iterations={}, baseline={baseline:?}, admitted={admitted:?}, ratio={:.3}",
+            commands.len(),
+            iterations,
+            admitted.as_secs_f64() / baseline.as_secs_f64()
+        );
     }
 }

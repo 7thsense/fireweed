@@ -45,6 +45,10 @@ pub enum EngineError {
     /// happens before log append, idempotency recording, SQL mutation, or projection apply.
     /// Maps to `-ERR pqueue entity_schema_violation`.
     EntitySchemaViolation(String),
+    /// A single request can never fit a configured hard resource limit. This is a permanent invalid request.
+    RequestTooLarge { requested: usize, limit: usize },
+    /// A bounded internal resource is temporarily exhausted. The caller may retry after load subsides.
+    Backpressure { resource: &'static str },
     /// Underlying storage failure (adapter-level).
     Storage(String),
 }
@@ -66,6 +70,8 @@ impl EngineError {
             EngineError::RequestExpired => Some("-ERR pqueue request_expired"),
             EngineError::EpochFenced => Some("-ERR pqueue epoch_stale"),
             EngineError::EntitySchemaViolation(_) => Some("-ERR pqueue entity_schema_violation"),
+            EngineError::RequestTooLarge { .. } => Some("-ERR pqueue invalid"),
+            EngineError::Backpressure { .. } => Some("-ERR pqueue unavailable"),
             // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR pqueue` mappings handled by the adapter.
             EngineError::NotFound
             | EngineError::QueueDefinitionConflict
@@ -96,6 +102,10 @@ impl std::fmt::Display for EngineError {
             EngineError::EntitySchemaViolation(msg) => {
                 write!(f, "entity schema violation: {msg}")
             }
+            EngineError::RequestTooLarge { requested, limit } => {
+                write!(f, "request too large: {requested} bytes exceeds {limit}")
+            }
+            EngineError::Backpressure { resource } => write!(f, "backpressure: {resource}"),
             EngineError::Forbidden(why) => write!(f, "forbidden: {why}"),
             EngineError::Storage(msg) => write!(f, "storage: {msg}"),
         }
@@ -134,6 +144,8 @@ pub enum CommitRejection {
     EpochFenced,
     Forbidden(String),
     EntitySchemaViolation(String),
+    RequestTooLarge { requested: usize, limit: usize },
+    Backpressure(String),
     Storage(String),
 }
 
@@ -159,6 +171,13 @@ impl CommitRejection {
             EngineError::Forbidden(why) => CommitRejection::Forbidden((*why).to_string()),
             EngineError::EntitySchemaViolation(msg) => {
                 CommitRejection::EntitySchemaViolation(msg.clone())
+            }
+            EngineError::RequestTooLarge { requested, limit } => CommitRejection::RequestTooLarge {
+                requested: *requested,
+                limit: *limit,
+            },
+            EngineError::Backpressure { resource } => {
+                CommitRejection::Backpressure((*resource).to_string())
             }
             EngineError::Storage(msg) => CommitRejection::Storage(msg.clone()),
         }
@@ -188,6 +207,17 @@ impl CommitRejection {
             CommitRejection::EpochFenced => EngineError::EpochFenced,
             CommitRejection::Forbidden(_) => EngineError::Forbidden("forbidden"),
             CommitRejection::EntitySchemaViolation(msg) => EngineError::EntitySchemaViolation(msg),
+            CommitRejection::RequestTooLarge { requested, limit } => {
+                EngineError::RequestTooLarge { requested, limit }
+            }
+            CommitRejection::Backpressure(resource) => EngineError::Backpressure {
+                resource: match resource.as_str() {
+                    "buffered bytes" => "buffered bytes",
+                    "buffered bytes closed" => "buffered bytes closed",
+                    "queue buffered bytes" => "queue buffered bytes",
+                    _ => "bounded resource",
+                },
+            },
             CommitRejection::Storage(msg) => EngineError::Storage(msg),
         }
     }
@@ -213,6 +243,13 @@ mod commit_rejection_tests {
             EngineError::Invalid("item is not leased"),
             EngineError::Invalid("instance fence is not monotonic"),
             EngineError::EntitySchemaViolation("bad doc".into()),
+            EngineError::RequestTooLarge {
+                requested: 9,
+                limit: 8,
+            },
+            EngineError::Backpressure {
+                resource: "buffered bytes",
+            },
         ];
         for e in cases {
             let projected = CommitRejection::from_error(&e);

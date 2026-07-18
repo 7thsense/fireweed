@@ -12,6 +12,14 @@ ddx:
     - {kind: informed_by, to: adr-log-single-source-of-truth}
     - {kind: informed_by, to: concerns}
   status: accepted
+  review:
+    self_hash: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
+    deps:
+      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
+      adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
+      adr-orthogonal-log-projection-composition: 72e7c4701c344732c61b2b63043e70024bbff6228b841b8d76dffbb2d5bc4fd5
+      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
+    reviewed_at: "2026-07-18T18:15:59Z"
 ---
 
 # ADR-017: Async composition injects commit strategy and owned-task dispatch
@@ -41,9 +49,11 @@ atomicity or cancellation safety.
      cursor/frontier, and replay outcome together.
    - `SeparateReplayCommit` is legal only for `EventualApply`; it durably appends first, repairs projection
      state from the log, and enforces ADR-013's response barrier.
-2. A runtime-neutral owned-task dispatcher. Mutation admission and the queue gate complete before
-   submission. Submission transfers the owned request and commit capability to the dispatcher; the caller
-   awaits only a result channel. A dropped caller cannot cancel submitted work.
+2. A runtime-neutral owned-task dispatcher. Already-formed raw commits complete strategy preparation before
+   queue gating and submission. State-dependent typed operations acquire their queue gate before submission,
+   but currently perform authoritative planning and finite byte admission inside dispatcher-owned work.
+   Submission transfers the owned request and commit capability to the dispatcher; the caller awaits only a
+   result channel. A dropped caller cannot cancel submitted work.
 
 Async storage axes use `&self`, require `Send + Sync`, and put per-queue or per-connection synchronization
 inside adapters. The composition holds a queue-local gate across validation, idempotency planning,
@@ -54,6 +64,31 @@ Admission is bounded separately from running capacity. Queue-gate waiters do not
 permits, and keyed gate entries are weak/LRU-reclaimed rather than backed by one permanent task,
 connection, or loop per queue. Shutdown closes admission, cancels work that has not been submitted, and
 drains submitted tasks within the configured bound.
+
+For object-log mutations, admission has a second, byte-oriented capability. The generic
+`PreparedAsyncCommitStrategy` turns an already-formed raw request into an owned prepared request before
+`AsyncComposedBackend::submit_commit` enters its queue gate or dispatcher. Object-log preparation serializes
+once, applies the configured finite-reject or async-wait policy, and attaches the resulting permit; unified
+atomic strategies use identity preparation. A service selecting async waiting races the composed submission
+future with its own deadline. Direct `SeparateReplayCommitter::commit_replayable` remains a finite non-waiting
+fallback because callers of that lower-level interface may already hold dispatcher ownership. Typed
+operations are different: their state-dependent `RawCommitRequest` does not exist until authoritative
+planning under the queue gate. They currently plan under that gate inside dispatcher-owned work, serialize
+once, and use finite non-waiting `Reject` admission there; they never wait for byte capacity while holding the
+gate. Mandatory typed pre-dispatch preparation remains full-async activation work. The adapter acquires a node-global and
+optional uniform tenant-scoped byte permit for the
+retained records plus the temporary seal frame, and transfers that non-cloneable permit with the accepted
+request. The permit remains owned through queue wait and seal/CAS resolution; after actor submission the
+accepted actor job owns it independently of the coordinator response future. Caller cancellation cannot
+release resident bytes. A per-queue waiting-byte cap prevents one stalled queue
+from capturing the node budget. Runtime-neutral budget futures contain no timer: the service races them with
+its runtime deadline and maps timeout/exhaustion to typed retryable backpressure; the finite production
+default rejects immediately when the budget is exhausted.
+
+The current live production profiles use the synchronous/group-commit composition and are fully byte-bounded.
+Raw generic `AsyncComposedBackend` submission is structurally prepared before queue gating and dispatch.
+Moving state-dependent typed-operation planning to an equivalent prepared boundary remains full-async
+activation work; it is not claimed as an SP-01 production path.
 
 Immediate memory implementations may use an immediate dispatcher only when the complete typed commit
 resolves in one poll. Blocking stores dispatch one whole transaction to a bounded actor/executor. Native
@@ -95,6 +130,7 @@ async stores await their drivers inside the owned task.
 | Eventual profiles recover every durable append and preserve the response barrier | Any lost accepted command or read-after-success gap. |
 | Submitted commits resolve after caller cancellation | Any started task stops when its response waiter is dropped. |
 | A blocked queue does not stop another queue's read or mutation heartbeat | Any process-global storage lock spans awaited I/O. |
+| Buffered-byte permits conserve global and tenant charges through every cancellation/fence/CAS path | Any retained serialized command has no permit, a permit is released before its bytes, or charged bytes exceed a configured cap. |
 
 ## Supersession
 

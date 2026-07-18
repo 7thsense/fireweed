@@ -21,8 +21,8 @@ use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
-    EmbeddedFjordConfig, LogSpec, ObjectLogSpec, ProjectionSpec, S3CredentialSource, SegmentConfig,
-    resolve_node_id, validated_owner_endpoint,
+    EmbeddedFjordConfig, LogSpec, ObjectLogByteLimits, ObjectLogSpec, ProjectionSpec,
+    S3CredentialSource, SegmentConfig, resolve_node_id, validated_owner_endpoint,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -54,6 +54,56 @@ fn parse_usize(env: &BTreeMap<String, String>, key: &str, default: usize) -> usi
     env.get(key)
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn validated_usize(
+    env: &BTreeMap<String, String>,
+    key: &str,
+    default: usize,
+) -> Result<usize, ConfigError> {
+    let raw = env.get(key).map(String::as_str).unwrap_or("");
+    if raw.is_empty() && !env.contains_key(key) {
+        return Ok(default);
+    }
+    raw.parse::<usize>().map_err(|_| {
+        ConfigError::new(format!(
+            "{key} must be a positive integer number of bytes, got {raw:?}"
+        ))
+    })
+}
+
+fn objectlog_byte_limits(
+    env: &BTreeMap<String, String>,
+    segment_target_bytes: usize,
+) -> Result<ObjectLogByteLimits, ConfigError> {
+    let defaults = ObjectLogByteLimits::default();
+    let global = validated_usize(
+        env,
+        "PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL",
+        defaults.global,
+    )?;
+    let queue_waiting = validated_usize(
+        env,
+        "PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES",
+        defaults.queue_waiting,
+    )?;
+    let tenant = env
+        .get("PQUEUE_OBJECTLOG_BUFFERED_BYTES_TENANT")
+        .map(|_| {
+            validated_usize(
+                env,
+                "PQUEUE_OBJECTLOG_BUFFERED_BYTES_TENANT",
+                defaults.global,
+            )
+        })
+        .transpose()?;
+    ObjectLogByteLimits {
+        global,
+        tenant,
+        queue_waiting,
+    }
+    .validate(segment_target_bytes)
+    .map_err(|reason| ConfigError::new(format!("invalid object-log byte admission: {reason}")))
 }
 
 fn parse_u64(env: &BTreeMap<String, String>, key: &str, default: u64) -> u64 {
@@ -672,6 +722,7 @@ impl Config {
             ),
             // Matches the prior `std::env::var(..).is_ok()` semantics: present (even empty) enables telemetry.
             debug_segments: env.contains_key("PQUEUE_DEBUG_SEGMENTS"),
+            objectlog_byte_limits: objectlog_byte_limits(env, segments.target_bytes)?,
             // `>0` caps the tokio worker pool; absent/0 = one worker per core (the bin builds the runtime).
             worker_threads: env
                 .get("PQUEUE_WORKER_THREADS")
@@ -847,6 +898,46 @@ mod tests {
             config.backend.projection,
             ProjectionSpec::InMemory
         ));
+        assert_eq!(config.objectlog_byte_limits, ObjectLogByteLimits::default());
+    }
+
+    #[test]
+    fn objectlog_byte_limits_are_typed_and_validated_against_segment_target() {
+        let config = Config::from_env(&map(&[
+            ("PQUEUE_SEGMENT_TARGET_BYTES", "1024"),
+            ("PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL", "8192"),
+            ("PQUEUE_OBJECTLOG_BUFFERED_BYTES_TENANT", "4096"),
+            ("PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES", "2048"),
+        ]))
+        .expect("valid byte limits");
+        assert_eq!(
+            config.objectlog_byte_limits,
+            ObjectLogByteLimits {
+                global: 8192,
+                tenant: Some(4096),
+                queue_waiting: 2048,
+            }
+        );
+
+        for pairs in [
+            vec![("PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL", "0")],
+            vec![("PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL", "wat")],
+            vec![("PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES", "0")],
+            vec![
+                ("PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL", "1024"),
+                ("PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES", "2048"),
+            ],
+            vec![
+                ("PQUEUE_SEGMENT_TARGET_BYTES", "4096"),
+                ("PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL", "2048"),
+                ("PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES", "1024"),
+            ],
+        ] {
+            assert!(
+                Config::from_env(&map(&pairs)).is_err(),
+                "accepted {pairs:?}"
+            );
+        }
     }
 
     #[test]

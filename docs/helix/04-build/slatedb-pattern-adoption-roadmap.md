@@ -16,12 +16,12 @@ ddx:
   review:
     self_hash: 5f066b91ba58eec79c056ec7cd1922682dbfb5d8f0607920d34273661350a196
     deps:
-      adr-async-commit-strategy-and-dispatch: 1e09351095c93363b86f817a1d668adff957393f704eb8850d67894870d0919a
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
+      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
+      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      tp-scale-substantiation: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
-      tp-verification-acceptance-criteria: 45d59a6a33b010c37a07f532b3b44a0279238b5b7d3f46876c2f304aad1dea5f
-    reviewed_at: "2026-07-18T16:20:32Z"
+      tp-scale-substantiation: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
+      tp-verification-acceptance-criteria: 3be9892333e1c4809668936e22718d4ed6d88b68837758b3d1a09c204f496882
+    reviewed_at: "2026-07-18T18:16:01Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption

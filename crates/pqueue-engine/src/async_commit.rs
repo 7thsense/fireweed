@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
-use crate::DurabilityClass;
+use crate::{DurabilityClass, EngineResult};
 
 /// The construction-time commit mechanism. Durability metadata never selects this implicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +31,15 @@ pub trait AsyncCommitStrategy: CommitStrategy {
     fn commit(&self, request: Self::Request) -> OwnedTask<Self::Output>;
 }
 
+/// Preparation boundary that runs before queue-gate and dispatcher ownership. Identity strategies return
+/// their request unchanged; byte-oriented strategies can serialize and attach a finite resource permit.
+pub trait PreparedAsyncCommitStrategy: AsyncCommitStrategy {
+    type PreparedRequest: Send + 'static;
+
+    fn prepare(&self, request: Self::Request) -> OwnedTask<EngineResult<Self::PreparedRequest>>;
+    fn commit_prepared(&self, request: Self::PreparedRequest) -> OwnedTask<Self::Output>;
+}
+
 /// Profile-specific capability for a substrate transaction spanning every atomic commit effect.
 pub trait UnifiedAtomicCommitter: Send + Sync + 'static {
     type Request: Send + 'static;
@@ -42,8 +51,15 @@ pub trait UnifiedAtomicCommitter: Send + Sync + 'static {
 /// Profile-specific capability for durable append followed by replayable projection repair.
 pub trait SeparateReplayCommitter: Send + Sync + 'static {
     type Request: Send + 'static;
+    type PreparedRequest: Send + 'static;
     type Output: Send + 'static;
 
+    fn prepare_replayable(
+        &self,
+        request: Self::Request,
+    ) -> OwnedTask<EngineResult<Self::PreparedRequest>>;
+    fn commit_prepared_replayable(&self, request: Self::PreparedRequest)
+    -> OwnedTask<Self::Output>;
     fn commit_replayable(&self, request: Self::Request) -> OwnedTask<Self::Output>;
 }
 
@@ -128,6 +144,21 @@ where
     }
 }
 
+impl<C> PreparedAsyncCommitStrategy for UnifiedAtomicCommit<C>
+where
+    C: UnifiedAtomicCommitter,
+{
+    type PreparedRequest = C::Request;
+
+    fn prepare(&self, request: Self::Request) -> OwnedTask<EngineResult<Self::PreparedRequest>> {
+        Box::pin(std::future::ready(Ok(request)))
+    }
+
+    fn commit_prepared(&self, request: Self::PreparedRequest) -> OwnedTask<Self::Output> {
+        self.committer.commit_atomic(request)
+    }
+}
+
 /// Proof that durable append precedes replayable projection repair and the response barrier.
 #[derive(Debug, Clone)]
 pub struct SeparateReplayCommit<C>
@@ -177,6 +208,21 @@ where
 
     fn commit(&self, request: Self::Request) -> OwnedTask<Self::Output> {
         self.committer.commit_replayable(request)
+    }
+}
+
+impl<C> PreparedAsyncCommitStrategy for SeparateReplayCommit<C>
+where
+    C: SeparateReplayCommitter,
+{
+    type PreparedRequest = C::PreparedRequest;
+
+    fn prepare(&self, request: Self::Request) -> OwnedTask<EngineResult<Self::PreparedRequest>> {
+        self.committer.prepare_replayable(request)
+    }
+
+    fn commit_prepared(&self, request: Self::PreparedRequest) -> OwnedTask<Self::Output> {
+        self.committer.commit_prepared_replayable(request)
     }
 }
 
@@ -705,7 +751,22 @@ mod tests {
 
     impl SeparateReplayCommitter for ControlledReplayCommitter {
         type Request = usize;
+        type PreparedRequest = usize;
         type Output = usize;
+
+        fn prepare_replayable(
+            &self,
+            request: Self::Request,
+        ) -> OwnedTask<EngineResult<Self::PreparedRequest>> {
+            Box::pin(std::future::ready(Ok(request)))
+        }
+
+        fn commit_prepared_replayable(
+            &self,
+            request: Self::PreparedRequest,
+        ) -> OwnedTask<Self::Output> {
+            self.commit_replayable(request)
+        }
 
         fn commit_replayable(&self, request: Self::Request) -> OwnedTask<Self::Output> {
             let calls = Arc::clone(&self.calls);

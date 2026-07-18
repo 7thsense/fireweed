@@ -64,7 +64,8 @@ impl RawCommitRequest {
         self.fault
     }
 
-    pub(crate) fn into_parts(self) -> (QueueKey, Vec<CommandEnvelope>, u64, RawCommitFault) {
+    /// Consume the request at an adapter ownership boundary without cloning its command batch.
+    pub fn into_parts(self) -> (QueueKey, Vec<CommandEnvelope>, u64, RawCommitFault) {
         (self.shard, self.commands, self.expected_epoch, self.fault)
     }
 }

@@ -452,6 +452,10 @@ fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
         EngineError::Forbidden(why) => ("forbidden", Some((*why).to_string())),
         EngineError::Storage(msg) => ("storage", Some(msg.clone())),
         EngineError::EntitySchemaViolation(msg) => ("entity_schema_violation", Some(msg.clone())),
+        EngineError::RequestTooLarge { requested, limit } => {
+            ("request_too_large", Some(format!("{requested}:{limit}")))
+        }
+        EngineError::Backpressure { resource } => ("backpressure", Some((*resource).to_string())),
     }
 }
 
@@ -473,6 +477,17 @@ fn decode_engine_error(code: &str, detail: Option<String>) -> EngineError {
         "request_expired" => EngineError::RequestExpired,
         "epoch_fenced" => EngineError::EpochFenced,
         "forbidden" => EngineError::Forbidden("forbidden"),
+        "request_too_large" => {
+            let (requested, limit) = detail
+                .as_deref()
+                .and_then(|value| value.split_once(':'))
+                .and_then(|(requested, limit)| Some((requested.parse().ok()?, limit.parse().ok()?)))
+                .unwrap_or((usize::MAX, 0));
+            EngineError::RequestTooLarge { requested, limit }
+        }
+        "backpressure" => EngineError::Backpressure {
+            resource: "bounded resource",
+        },
         _ => EngineError::Storage(detail.unwrap_or_else(|| code.to_string())),
     }
 }

@@ -16,20 +16,23 @@ use pqueue_core::{
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPosition, CompiledSchema, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
-    FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView, LeaseView, LiveItemView, LogRead,
-    LogWriter, ProjectionRead, ProjectionWriter, PurgePort, PushCommand, PushPort, PushSpec,
-    QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort, build_push_items,
-    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
-    validate_gate_push,
+    Backend, BufferedByteBudget, BufferedByteBudgetConfig, BufferedByteBudgetStats,
+    ByteAdmissionError, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
+    CommandChecksum, CommandEnvelope, CommandId, CommandPosition, CompiledSchema,
+    ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
+    FinalizeCommand, FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView, LeaseView,
+    LiveItemView, LogRead, LogWriter, OwnedBytePermit, ProjectionRead, ProjectionWriter, PurgePort,
+    PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey,
+    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand,
+    RenewLeasePort, TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
+    build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
+    validate_gate_command, validate_gate_push,
 };
-use pqueue_objectlog::LocalObjectLog;
 use pqueue_objectlog::segmented::{
     BlobStore, FaultHook, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
+};
+use pqueue_objectlog::{
+    LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands,
 };
 use pqueue_projection::ProjectionData;
 use pqueue_sqlite::SqliteProjectionStore;
@@ -59,6 +62,62 @@ pub struct RecoveryStats {
 /// (populated by the bin from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`) via [`Self::with_recovery_max_tail`]. The
 /// backend itself never reads the process environment.
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
+
+fn default_objectlog_byte_budget() -> BufferedByteBudget {
+    BufferedByteBudget::new(
+        BufferedByteBudgetConfig::new(crate::DEFAULT_OBJECTLOG_BUFFERED_BYTES_GLOBAL)
+            .expect("constant object-log byte budget is valid"),
+    )
+}
+
+fn map_byte_admission_error(error: ByteAdmissionError) -> EngineError {
+    match error {
+        ByteAdmissionError::Closed => EngineError::Unavailable,
+        ByteAdmissionError::Backpressure => EngineError::Backpressure {
+            resource: "buffered bytes",
+        },
+        ByteAdmissionError::Oversize {
+            requested, limit, ..
+        } => EngineError::RequestTooLarge { requested, limit },
+    }
+}
+
+fn production_byte_admission_snapshot(
+    budget: &BufferedByteBudget,
+    queue_byte_limit: usize,
+) -> ObjectLogByteAdmissionSnapshot {
+    let stats = budget.stats();
+    ObjectLogByteAdmissionSnapshot {
+        configured_global_bytes: budget.config().global_limit(),
+        configured_tenant_bytes: budget.config().tenant_limit(),
+        configured_queue_waiting_bytes: queue_byte_limit,
+        current_bytes: stats.charged_bytes,
+        peak_bytes: stats.peak_charged_bytes,
+        waiters: stats.waiting_requests,
+        waits: stats.wait_count,
+        rejects: stats.rejection_count,
+        total_wait_nanos: stats.total_wait_nanos,
+        max_wait_nanos: stats.max_wait_nanos,
+    }
+}
+
+fn byte_admission_telemetry(snapshot: ObjectLogByteAdmissionSnapshot) -> String {
+    format!(
+        "admission_current={} admission_peak={} admission_waiters={} admission_waits={} admission_rejects={} admission_total_wait_nanos={} admission_max_wait_nanos={} admission_global_limit={} admission_tenant_limit={} admission_queue_limit={}",
+        snapshot.current_bytes,
+        snapshot.peak_bytes,
+        snapshot.waiters,
+        snapshot.waits,
+        snapshot.rejects,
+        snapshot.total_wait_nanos,
+        snapshot.max_wait_nanos,
+        snapshot.configured_global_bytes,
+        snapshot
+            .configured_tenant_bytes
+            .map_or_else(|| "none".to_string(), |value| value.to_string()),
+        snapshot.configured_queue_waiting_bytes,
+    )
+}
 
 fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -743,6 +802,8 @@ struct ShardCoord {
 struct CoordState {
     /// Envelopes buffered-but-not-yet-acked, mirroring the substrate's internal buffer 1:1 (arrival order).
     pending: Vec<CommandEnvelope>,
+    /// Non-cloneable resident-byte ownership, aligned 1:1 with `pending` until projection apply completes.
+    permits: Vec<OwnedBytePermit>,
     /// One responder per buffered envelope; fired (Ok/Err) when the envelope's segment seals + applies.
     waiters: Vec<oneshot::Sender<EngineResult<()>>>,
 }
@@ -775,6 +836,8 @@ pub struct SegmentedObjectLogSqliteBackend {
     /// Per-queue request-id replay/conflict cache (API-001 / TD-007 §4): a retried `request_id` with the
     /// same body replays the committed ids without a second append; a different body is `RequestIdConflict`.
     idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
+    byte_budget: BufferedByteBudget,
+    queue_byte_limit: usize,
 }
 
 fn ts_to_ms(now: UtcTimestamp) -> i64 {
@@ -836,6 +899,8 @@ impl SegmentedObjectLogSqliteBackend {
             debug_segments: false,
             recovery_stats: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(HashMap::new()),
+            byte_budget: default_objectlog_byte_budget(),
+            queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
         })
     }
 
@@ -865,6 +930,25 @@ impl SegmentedObjectLogSqliteBackend {
         self
     }
 
+    /// Install the node-shared, validated object-log resident-byte budget selected by the composition root.
+    pub fn with_byte_admission(
+        mut self,
+        budget: BufferedByteBudget,
+        queue_byte_limit: usize,
+    ) -> Self {
+        self.byte_budget = budget;
+        self.queue_byte_limit = queue_byte_limit;
+        self
+    }
+
+    pub fn byte_admission_stats(&self) -> BufferedByteBudgetStats {
+        self.byte_budget.stats()
+    }
+
+    pub fn byte_admission_snapshot(&self) -> ObjectLogByteAdmissionSnapshot {
+        production_byte_admission_snapshot(&self.byte_budget, self.queue_byte_limit)
+    }
+
     /// The last snapshot-tail recovery telemetry for `shard` (bead pqueue-8a76daad proof seam).
     pub fn recovery_stats(&self, shard: &QueueKey) -> Option<RecoveryStats> {
         self.recovery_stats
@@ -877,8 +961,10 @@ impl SegmentedObjectLogSqliteBackend {
     /// Spawn the background flusher that seals each queue's latency-due segment (the latency seal trigger).
     /// Without it, a buffer below `target_bytes` would never seal and its pushes would never ack.
     pub fn spawn_flusher(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let me = self.clone();
-        tokio::spawn(async move { me.flush_loop().await })
+        let weak = Arc::downgrade(self);
+        let interval = self.flush_interval;
+        let debug_segments = self.debug_segments;
+        tokio::spawn(async move { Self::flush_loop(weak, interval, debug_segments).await })
     }
 
     fn coord_for(&self, shard: &QueueKey) -> Arc<ShardCoord> {
@@ -888,6 +974,7 @@ impl SegmentedObjectLogSqliteBackend {
                 Arc::new(ShardCoord {
                     state: tokio::sync::Mutex::new(CoordState {
                         pending: Vec::new(),
+                        permits: Vec::new(),
                         waiters: Vec::new(),
                     }),
                 })
@@ -972,10 +1059,12 @@ impl SegmentedObjectLogSqliteBackend {
             "sealed batch cannot exceed buffered/waiting commands"
         );
         let envelopes: Vec<CommandEnvelope> = state.pending.drain(..n).collect();
+        let permits: Vec<OwnedBytePermit> = state.permits.drain(..n).collect();
         let waiters: Vec<_> = state.waiters.drain(..n).collect();
         let result = self
             .projection
             .apply_committed_batch(&positions, &envelopes);
+        drop(permits);
         for w in waiters {
             let _ = w.send(result.clone());
         }
@@ -985,6 +1074,7 @@ impl SegmentedObjectLogSqliteBackend {
     /// waiter and clear `pending` to stay consistent with the now-empty substrate buffer.
     fn fail_all(state: &mut CoordState, err: EngineError) {
         state.pending.clear();
+        state.permits.clear();
         for w in state.waiters.drain(..) {
             let _ = w.send(Err(err.clone()));
         }
@@ -1012,19 +1102,34 @@ impl SegmentedObjectLogSqliteBackend {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = coord.state.lock().await;
-            // Move the envelope into `pending` (it lives there until its segment applies), then enqueue it
-            // into the substrate buffer by reference — no per-command envelope clone on the hot path (Fix A).
-            state.pending.push(envelope);
-            state.waiters.push(tx);
+            // Same-queue callers waiting for this lock own only their request envelope, never a global byte
+            // permit or an extra serialized copy. Canonical encoding, queue reservation, and non-waiting
+            // global admission linearize together under the coordinator lock.
+            let (serialized, charged_bytes) = prepare_serialized_commands(
+                vec![envelope],
+                self.byte_budget.config().global_limit(),
+            )?;
+            let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
+            if !state.pending.is_empty()
+                && queue_bytes.saturating_add(charged_bytes) > self.queue_byte_limit
+            {
+                return Err(EngineError::Backpressure {
+                    resource: "queue buffered bytes",
+                });
+            }
+            let permit = self
+                .byte_budget
+                .try_acquire(shard.tenant_id.clone(), charged_bytes)
+                .map_err(map_byte_admission_error)?;
             let now_ms = ts_to_ms(now);
-            let enqueued = self.log.enqueue(
-                shard,
-                std::slice::from_ref(state.pending.last().expect("just pushed")),
-                epoch,
-                now_ms,
-            );
+            let enqueued = self
+                .log
+                .enqueue_serialized(shard, serialized, epoch, now_ms);
             match enqueued {
-                Ok(outcome) => {
+                Ok((outcome, envelopes)) => {
+                    state.pending.extend(envelopes);
+                    state.permits.push(permit);
+                    state.waiters.push(tx);
                     if !outcome.committed.is_empty() {
                         // A size-triggered seal fired inside `enqueue`; hand the batch to the apply task.
                         self.distribute(&mut state, outcome.committed);
@@ -1036,37 +1141,48 @@ impl SegmentedObjectLogSqliteBackend {
                     }
                     // else: buffered; the flusher (or a later size seal) commits it.
                 }
-                Err(e) => Self::fail_all(&mut state, e),
+                Err(e) => {
+                    Self::fail_all(&mut state, e.clone());
+                    let _ = tx.send(Err(e));
+                }
             }
         }
         rx.await
             .map_err(|_| EngineError::Storage("segment commit responder dropped".into()))?
     }
 
-    async fn flush_loop(self: Arc<Self>) {
-        let mut ticker = tokio::time::interval(self.flush_interval);
+    async fn flush_loop(
+        weak: std::sync::Weak<Self>,
+        flush_interval: Duration,
+        debug_segments: bool,
+    ) {
+        let mut ticker = tokio::time::interval(flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Opt-in group-commit telemetry (the typed `debug_segments` flag, set by the composition root from
         // `Config`). When set, log the segment counters ~1x/s so seal rate + mean batch size are observable
         // during a load run. The hot tick path stays allocation-free.
-        let debug_segments = self.debug_segments;
         let mut dbg_last = std::time::Instant::now();
         loop {
             ticker.tick().await;
+            let Some(this) = weak.upgrade() else {
+                break;
+            };
             if debug_segments && dbg_last.elapsed() >= std::time::Duration::from_millis(1000) {
                 dbg_last = std::time::Instant::now();
-                let c = self.log.counters();
+                let c = this.log.counters();
+                let admission = byte_admission_telemetry(this.byte_admission_snapshot());
                 eprintln!(
-                    "[seg] sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={}",
+                    "[seg] sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
                     c.segments_sealed,
                     c.commands_committed,
                     c.mean_batch_size(),
                     c.max_batch_size(),
-                    c.objects_put
+                    c.objects_put,
+                    admission,
                 );
             }
             let shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
-                self.coords
+                this.coords
                     .lock()
                     .expect("segmented coords poisoned")
                     .iter()
@@ -1075,14 +1191,14 @@ impl SegmentedObjectLogSqliteBackend {
             };
             let now_ms = system_now_ms();
             for (shard, coord) in shards {
-                let epoch = self.cached_epoch(&shard);
+                let epoch = this.cached_epoch(&shard);
                 let mut state = coord.state.lock().await;
                 if state.pending.is_empty() {
                     continue;
                 }
-                match self.log.flush_due(&shard, epoch, now_ms) {
+                match this.log.flush_due(&shard, epoch, now_ms) {
                     Ok(positions) if !positions.is_empty() => {
-                        self.distribute(&mut state, positions)
+                        this.distribute(&mut state, positions)
                     }
                     Ok(_) => {}
                     Err(e) => Self::fail_all(&mut state, e),
@@ -1659,6 +1775,9 @@ pub struct SegmentedObjectLogInMemoryBackend {
     /// Per-queue request-id replay/conflict cache (API-001 / TD-007 §4): a retried `request_id` with the
     /// same body replays the committed ids without a second append; a different body is `RequestIdConflict`.
     idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
+    byte_budget: BufferedByteBudget,
+    queue_byte_limit: usize,
+    debug_segments: bool,
 }
 
 impl SegmentedObjectLogInMemoryBackend {
@@ -1690,6 +1809,9 @@ impl SegmentedObjectLogInMemoryBackend {
             flush_interval: Duration::from_millis(flush_ms),
             recovery_stats: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(HashMap::new()),
+            byte_budget: default_objectlog_byte_budget(),
+            queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
+            debug_segments: false,
         })
     }
 
@@ -1715,10 +1837,35 @@ impl SegmentedObjectLogInMemoryBackend {
         self
     }
 
+    pub fn with_byte_admission(
+        mut self,
+        budget: BufferedByteBudget,
+        queue_byte_limit: usize,
+    ) -> Self {
+        self.byte_budget = budget;
+        self.queue_byte_limit = queue_byte_limit;
+        self
+    }
+
+    pub fn byte_admission_stats(&self) -> BufferedByteBudgetStats {
+        self.byte_budget.stats()
+    }
+
+    pub fn byte_admission_snapshot(&self) -> ObjectLogByteAdmissionSnapshot {
+        production_byte_admission_snapshot(&self.byte_budget, self.queue_byte_limit)
+    }
+
+    pub fn with_debug_segments(mut self, debug_segments: bool) -> Self {
+        self.debug_segments = debug_segments;
+        self
+    }
+
     /// Spawn the background flusher that seals each queue's latency-due segment (the latency seal trigger).
     pub fn spawn_flusher(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let me = self.clone();
-        tokio::spawn(async move { me.flush_loop().await })
+        let weak = Arc::downgrade(self);
+        let interval = self.flush_interval;
+        let debug_segments = self.debug_segments;
+        tokio::spawn(async move { Self::flush_loop(weak, interval, debug_segments).await })
     }
 
     fn projection_for(&self, shard: &QueueKey) -> EngineResult<Arc<Mutex<ProjectionData>>> {
@@ -1737,6 +1884,7 @@ impl SegmentedObjectLogInMemoryBackend {
                 Arc::new(ShardCoord {
                     state: tokio::sync::Mutex::new(CoordState {
                         pending: Vec::new(),
+                        permits: Vec::new(),
                         waiters: Vec::new(),
                     }),
                 })
@@ -1820,11 +1968,13 @@ impl SegmentedObjectLogInMemoryBackend {
             "sealed batch cannot exceed buffered/waiting commands"
         );
         let envelopes: Vec<CommandEnvelope> = state.pending.drain(..n).collect();
+        let permits: Vec<OwnedBytePermit> = state.permits.drain(..n).collect();
         let waiters: Vec<_> = state.waiters.drain(..n).collect();
         let result = match positions.first() {
             Some(pos) => self.apply_batch(&pos.queue, &envelopes),
             None => Ok(()),
         };
+        drop(permits);
         for w in waiters {
             let _ = w.send(result.clone());
         }
@@ -1843,6 +1993,7 @@ impl SegmentedObjectLogInMemoryBackend {
 
     fn fail_all(state: &mut CoordState, err: EngineError) {
         state.pending.clear();
+        state.permits.clear();
         for w in state.waiters.drain(..) {
             let _ = w.send(Err(err.clone()));
         }
@@ -1865,17 +2016,31 @@ impl SegmentedObjectLogInMemoryBackend {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = coord.state.lock().await;
-            state.pending.push(envelope);
-            state.waiters.push(tx);
+            let (serialized, charged_bytes) = prepare_serialized_commands(
+                vec![envelope],
+                self.byte_budget.config().global_limit(),
+            )?;
+            let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
+            if !state.pending.is_empty()
+                && queue_bytes.saturating_add(charged_bytes) > self.queue_byte_limit
+            {
+                return Err(EngineError::Backpressure {
+                    resource: "queue buffered bytes",
+                });
+            }
+            let permit = self
+                .byte_budget
+                .try_acquire(shard.tenant_id.clone(), charged_bytes)
+                .map_err(map_byte_admission_error)?;
             let now_ms = ts_to_ms(now);
-            let enqueued = self.log.enqueue(
-                shard,
-                std::slice::from_ref(state.pending.last().expect("just pushed")),
-                epoch,
-                now_ms,
-            );
+            let enqueued = self
+                .log
+                .enqueue_serialized(shard, serialized, epoch, now_ms);
             match enqueued {
-                Ok(outcome) => {
+                Ok((outcome, envelopes)) => {
+                    state.pending.extend(envelopes);
+                    state.permits.push(permit);
+                    state.waiters.push(tx);
                     if !outcome.committed.is_empty() {
                         self.distribute(&mut state, outcome.committed);
                     } else if force {
@@ -1885,20 +2050,45 @@ impl SegmentedObjectLogInMemoryBackend {
                         }
                     }
                 }
-                Err(e) => Self::fail_all(&mut state, e),
+                Err(e) => {
+                    Self::fail_all(&mut state, e.clone());
+                    let _ = tx.send(Err(e));
+                }
             }
         }
         rx.await
             .map_err(|_| EngineError::Storage("segment commit responder dropped".into()))?
     }
 
-    async fn flush_loop(self: Arc<Self>) {
-        let mut ticker = tokio::time::interval(self.flush_interval);
+    async fn flush_loop(
+        weak: std::sync::Weak<Self>,
+        flush_interval: Duration,
+        debug_segments: bool,
+    ) {
+        let mut ticker = tokio::time::interval(flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut dbg_last = std::time::Instant::now();
         loop {
             ticker.tick().await;
+            let Some(this) = weak.upgrade() else {
+                break;
+            };
+            if debug_segments && dbg_last.elapsed() >= Duration::from_secs(1) {
+                dbg_last = std::time::Instant::now();
+                let counters = this.log.counters();
+                let admission = byte_admission_telemetry(this.byte_admission_snapshot());
+                eprintln!(
+                    "[seg] profile=objectlog/inmemory sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
+                    counters.segments_sealed,
+                    counters.commands_committed,
+                    counters.mean_batch_size(),
+                    counters.max_batch_size(),
+                    counters.objects_put,
+                    admission,
+                );
+            }
             let shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
-                self.coords
+                this.coords
                     .lock()
                     .expect("segmented coords poisoned")
                     .iter()
@@ -1907,14 +2097,14 @@ impl SegmentedObjectLogInMemoryBackend {
             };
             let now_ms = system_now_ms();
             for (shard, coord) in shards {
-                let epoch = self.cached_epoch(&shard);
+                let epoch = this.cached_epoch(&shard);
                 let mut state = coord.state.lock().await;
                 if state.pending.is_empty() {
                     continue;
                 }
-                match self.log.flush_due(&shard, epoch, now_ms) {
+                match this.log.flush_due(&shard, epoch, now_ms) {
                     Ok(positions) if !positions.is_empty() => {
-                        self.distribute(&mut state, positions)
+                        this.distribute(&mut state, positions)
                     }
                     Ok(_) => {}
                     Err(e) => Self::fail_all(&mut state, e),
@@ -2596,6 +2786,142 @@ mod recovery_tests {
     /// size seal inside `enqueue`, so the projection is applied before `push` returns.
     fn seal_each_config() -> SegmentConfig {
         SegmentConfig::new(1, 1_000).unwrap()
+    }
+
+    fn test_budget(bytes: usize) -> BufferedByteBudget {
+        BufferedByteBudget::new(BufferedByteBudgetConfig::new(bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn production_inmemory_constructor_enforces_cap_without_coordinator_residue() {
+        let tmp = TmpDir::new("byte-cap-constructor");
+        let def = queue_def("tenant", "queue");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let backend = SegmentedObjectLogInMemoryBackend::open(
+            tmp.object_root(),
+            SegmentConfig::new(1, 1_000).unwrap(),
+        )
+        .unwrap()
+        .with_byte_admission(test_budget(128), 128);
+        backend.create_queue(def).await.unwrap();
+
+        let error = backend
+            .push(&shard, vec![spec(&"x".repeat(512))], ts(), None)
+            .await
+            .expect_err("oversize production push must be rejected");
+        assert!(matches!(error, EngineError::RequestTooLarge { .. }));
+        assert_eq!(backend.log.pending(&shard), 0);
+        let coord = backend.coord_for(&shard);
+        let state = coord.state.lock().await;
+        assert!(state.pending.is_empty());
+        assert!(state.permits.is_empty());
+        assert!(state.waiters.is_empty());
+        drop(state);
+        let stats = backend.byte_admission_stats();
+        assert_eq!(stats.charged_bytes, 0);
+        assert_eq!(stats.rejection_count, 1);
+        let telemetry = byte_admission_telemetry(backend.byte_admission_snapshot());
+        assert!(telemetry.contains("admission_rejects=1"));
+        assert!(telemetry.contains("admission_global_limit=128"));
+    }
+
+    #[tokio::test]
+    async fn caller_drop_keeps_production_permit_until_seal_and_apply() {
+        let tmp = TmpDir::new("byte-cap-caller-drop");
+        let def = queue_def("tenant", "queue");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let backend = Arc::new(
+            SegmentedObjectLogInMemoryBackend::open(
+                tmp.object_root(),
+                SegmentConfig::new(4_096, 60_000).unwrap(),
+            )
+            .unwrap()
+            .with_byte_admission(test_budget(8_192), 4_096),
+        );
+        backend.create_queue(def).await.unwrap();
+        let task = {
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            tokio::spawn(async move {
+                backend
+                    .push(&shard, vec![spec("resident")], ts(), None)
+                    .await
+            })
+        };
+        for _ in 0..100 {
+            if backend.byte_admission_stats().charged_bytes > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(backend.byte_admission_stats().charged_bytes > 0);
+        task.abort();
+        let _ = task.await;
+        assert!(
+            backend.byte_admission_stats().charged_bytes > 0,
+            "caller cancellation must not release coordinator-owned resident bytes"
+        );
+
+        let coord = backend.coord_for(&shard);
+        let mut state = coord.state.lock().await;
+        let positions = backend.log.seal(&shard, 0, system_now_ms()).unwrap();
+        backend.distribute(&mut state, positions);
+        drop(state);
+        assert_eq!(backend.byte_admission_stats().charged_bytes, 0);
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1);
+    }
+
+    #[tokio::test]
+    async fn same_queue_lock_waiters_do_not_capture_global_permits_before_queue_reservation() {
+        let tmp = TmpDir::new("byte-cap-queue-lock");
+        let def = queue_def("tenant", "queue");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let backend = Arc::new(
+            SegmentedObjectLogInMemoryBackend::open(
+                tmp.object_root(),
+                SegmentConfig::new(4_096, 60_000).unwrap(),
+            )
+            .unwrap()
+            .with_byte_admission(test_budget(8_192), 1_024),
+        );
+        backend.create_queue(def).await.unwrap();
+        let coord = backend.coord_for(&shard);
+        let gate = coord.state.lock().await;
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            tasks.push(tokio::spawn(async move {
+                backend.push(&shard, vec![spec("queued")], ts(), None).await
+            }));
+        }
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            backend.byte_admission_stats().charged_bytes,
+            0,
+            "same-queue lock waiters captured global permits before queue reservation"
+        );
+        drop(gate);
+        for _ in 0..100 {
+            if backend.byte_admission_stats().charged_bytes > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let stats = backend.byte_admission_stats();
+        assert!(stats.charged_bytes > 0);
+        assert!(stats.charged_bytes <= 1_024);
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
+        let mut state = coord.state.lock().await;
+        let positions = backend.log.seal(&shard, 0, system_now_ms()).unwrap();
+        backend.distribute(&mut state, positions);
+        drop(state);
+        assert_eq!(backend.byte_admission_stats().charged_bytes, 0);
     }
 
     /// AC: a clean restart of the production segmented `object_log_sqlite_projection` recovers from the

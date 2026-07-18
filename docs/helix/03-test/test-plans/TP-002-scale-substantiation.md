@@ -8,14 +8,14 @@ ddx:
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
-    self_hash: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
+    self_hash: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-    reviewed_at: "2026-07-18T02:36:05Z"
+      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
+    reviewed_at: "2026-07-18T18:16:00Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -274,6 +274,7 @@ Backend: `object_log_inmemory_projection` and `object_log_sqlite_projection`
 | Pass: recovery | rebuild 10M-item SQLite projection from snapshot + log tail within stated recovery-window budget |
 | Pass: manifest fencing | a stale-epoch writer's manifest CAS commit is rejected; on a no-CAS object store the Postgres-held manifest pointer enforces the same fence (TD-004) |
 | Pass: transaction contract | success-visible, rejection-no-effect, and unknown-outcome replay invariants hold under the same bound sweep; no latency setting may weaken TP-003 transaction invariants |
+| Pass: byte admission | Compare request-count-only evidence with global+tenant byte admission for small, target-sized, and oversize payloads under stalled-store and hot/cold-tenant contention. Global/tenant charges never exceed caps; a cold tenant progresses; median throughput regression is <=5% and p99 regression <=10%, including serialization paid before oversize rejection. |
 
 ### Recurrence under scale (both backend profiles)
 

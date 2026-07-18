@@ -725,21 +725,40 @@ const SEG_HEADER_LEN: usize = 4 + 1 + 8 + 8;
 
 /// Build a sealed-segment object from already-encoded per-command record bytes (no re-serialize). Returns
 /// `(object_bytes, checksum)` where `checksum` is the FNV-1a over the records-blob region only.
-fn build_segment_object(epoch: u64, first_seq: u64, records: &[Vec<u8>]) -> (Vec<u8>, u64) {
-    let records_len: usize = records.iter().map(|r| 4 + r.len()).sum();
-    let mut blob = Vec::with_capacity(4 + records_len);
-    blob.extend_from_slice(&(records.len() as u32).to_le_bytes());
-    for r in records {
-        blob.extend_from_slice(&(r.len() as u32).to_le_bytes());
-        blob.extend_from_slice(r);
-    }
-    let checksum = checksum(&blob);
-    let mut object = Vec::with_capacity(SEG_HEADER_LEN + blob.len());
+pub(crate) fn segment_object_len(records: &[Vec<u8>]) -> Option<usize> {
+    segment_object_len_for_record_lengths(records.iter().map(Vec::len))
+}
+
+pub(crate) fn segment_object_len_for_record_lengths(
+    lengths: impl IntoIterator<Item = usize>,
+) -> Option<usize> {
+    lengths
+        .into_iter()
+        .try_fold(SEG_HEADER_LEN + 4, |size, len| {
+            size.checked_add(4)?.checked_add(len)
+        })
+}
+
+pub(crate) fn build_segment_object(
+    epoch: u64,
+    first_seq: u64,
+    records: &[Vec<u8>],
+) -> (Vec<u8>, u64) {
+    let object_len =
+        segment_object_len(records).expect("validated segment frame length overflowed");
+    let mut object = Vec::with_capacity(object_len);
     object.extend_from_slice(&SEG_MAGIC);
     object.push(SEG_VERSION);
     object.extend_from_slice(&epoch.to_le_bytes());
     object.extend_from_slice(&first_seq.to_le_bytes());
-    object.extend_from_slice(&blob);
+    let records_start = object.len();
+    object.extend_from_slice(&(records.len() as u32).to_le_bytes());
+    for r in records {
+        object.extend_from_slice(&(r.len() as u32).to_le_bytes());
+        object.extend_from_slice(r);
+    }
+    debug_assert_eq!(object.len(), object_len);
+    let checksum = checksum(&object[records_start..]);
     (object, checksum)
 }
 
@@ -1100,6 +1119,32 @@ pub struct EnqueueOutcome {
     pub committed: Vec<CommandPosition>,
     /// Commands still buffered (not yet sealed → not yet acked) for this queue.
     pub pending: usize,
+}
+
+/// One canonical serialized command. Keeping envelope and record together prevents count/order drift across
+/// admission, actor submission, and segment framing.
+pub struct SerializedCommandEnvelope {
+    pub(crate) envelope: CommandEnvelope,
+    pub(crate) record: Vec<u8>,
+}
+
+impl SerializedCommandEnvelope {
+    pub fn new(envelope: CommandEnvelope) -> EngineResult<Self> {
+        let record = serde_json::to_vec(&envelope).map_err(store_err)?;
+        Ok(Self { envelope, record })
+    }
+
+    pub fn record_len(&self) -> usize {
+        self.record.len()
+    }
+
+    pub(crate) fn from_parts(envelope: CommandEnvelope, record: Vec<u8>) -> Self {
+        Self { envelope, record }
+    }
+
+    pub fn into_parts(self) -> (CommandEnvelope, Vec<u8>) {
+        (self.envelope, self.record)
+    }
 }
 
 /// Segmented, group-committing object log over an S3-compatible [`BlobStore`].
@@ -2038,29 +2083,50 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         expected_epoch: u64,
         now_ms: i64,
     ) -> EngineResult<EnqueueOutcome> {
+        let serialized = commands
+            .iter()
+            .cloned()
+            .map(SerializedCommandEnvelope::new)
+            .collect::<EngineResult<Vec<_>>>()?;
+        self.enqueue_serialized(shard, serialized, expected_epoch, now_ms)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Buffer envelopes with their canonical, already-serialized records. The async admission path calls
+    /// this after charging the exact retained bytes, eliminating both measure-only and seal-time encoding.
+    pub fn enqueue_serialized(
+        &self,
+        shard: &QueueKey,
+        commands: Vec<SerializedCommandEnvelope>,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<(EnqueueOutcome, Vec<CommandEnvelope>)> {
         // Class ban + gate validation BEFORE buffering (parity with the file reference write path).
-        for env in commands {
-            validate_gate_command(false, &env.command)?;
-            if matches!(env.command, QueueCommand::ReplacePending(_)) {
+        for command in &commands {
+            validate_gate_command(false, &command.envelope.command)?;
+            if matches!(command.envelope.command, QueueCommand::ReplacePending(_)) {
                 return Err(EngineError::Unavailable);
             }
         }
-        let should_seal = {
+        let (should_seal, envelopes) = {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
-            for env in commands {
-                // Serialize ONCE, here; keep the bytes. `buffered_bytes` is the size of the kept bytes (free)
-                // rather than a throwaway serialize-just-to-measure (Fix A: kills the double serialization).
-                let bytes = serde_json::to_vec(env).map_err(store_err)?;
+            let mut envelopes = Vec::with_capacity(commands.len());
+            for command in commands {
+                let (env, bytes) = command.into_parts();
                 buf.buffered_bytes += bytes.len();
                 // Keep each command's OWN created_at alongside its bytes (bug 1): the seal derives
                 // committed_at_ms from the drained batch, so there is no shared running max to race.
-                buf.buffered.push((bytes, created_at_ms(env)));
+                buf.buffered.push((bytes, created_at_ms(&env)));
                 buf.oldest_buffered_ms.get_or_insert(now_ms);
+                envelopes.push(env);
             }
             let one_command_seal = self.config.dev_unsafe_one_command_segments;
-            buf.buffered_bytes >= self.config.target_bytes
-                || (one_command_seal && !buf.buffered.is_empty())
+            (
+                buf.buffered_bytes >= self.config.target_bytes
+                    || (one_command_seal && !buf.buffered.is_empty()),
+                envelopes,
+            )
         };
         let committed = if should_seal {
             self.seal(shard, expected_epoch, now_ms)?
@@ -2068,7 +2134,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             Vec::new()
         };
         let pending = self.pending(shard);
-        Ok(EnqueueOutcome { committed, pending })
+        Ok((EnqueueOutcome { committed, pending }, envelopes))
     }
 
     /// Seal the buffered commands for `shard` if the oldest has aged past `max_latency_ms` (TD-004 step 2

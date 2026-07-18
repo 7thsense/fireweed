@@ -8,12 +8,12 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 6211670110ed7f75c2ffb82a3ba5bde0aad9573d7a1963266b93a2b42065a8f1
+    self_hash: 5cfbe42a94ec4813e4855e431f0319152c6c8d11c5b081dcc77954a1ecf933b7
     deps:
-      adr-async-commit-strategy-and-dispatch: 1e09351095c93363b86f817a1d668adff957393f704eb8850d67894870d0919a
+      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       build-slatedb-pattern-adoption-roadmap: 5f066b91ba58eec79c056ec7cd1922682dbfb5d8f0607920d34273661350a196
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-    reviewed_at: "2026-07-18T16:20:32Z"
+      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
+    reviewed_at: "2026-07-18T18:16:01Z"
 ---
 
 # Implementation Plan: SP-01 Global Buffer Byte Admission
@@ -27,16 +27,25 @@ network body limits, and generic memory accounting.
 ## Shared Constraints
 
 - Hoist command serialization before admission and pass the serialized representation through the group-commit
-  seam. This preserves the existing single-serialization invariant and makes exact charge bytes available.
+  seam. This preserves the existing single-serialization invariant and makes a conservative resident-peak
+  charge available. Co-batched requests each reserve their own 25-byte fixed frame overhead, so aggregate
+  accounting intentionally overcharges relative to the one merged frame rather than undercounting a peak.
 - Put the runtime-neutral budget/waiter/permit types in `pqueue-engine` and inject them per ADR-017; object-log
   adapters own wiring and byte classification without creating an engine-to-objectlog dependency.
-- Acquire bytes before the queue gate and dispatch. A non-cloneable permit transfers with the accepted request
-  through the coordinator and buffer; caller cancellation after acceptance never releases resident bytes.
+- For an already-formed raw commit, `AsyncComposedBackend` requires `PreparedAsyncCommitStrategy`, acquires
+  bytes before the queue gate and dispatch, and dispatches only the prepared owned request. The direct
+  `SeparateReplayCommitter` fallback uses finite `Reject` inside its owned task; configured waiting occurs in
+  the composed pre-dispatch preparation future and is raced with a service deadline. A typed operation
+  currently performs authoritative state-dependent planning under its queue gate inside dispatcher-owned
+  work, then uses finite non-waiting `Reject` admission there; it never waits for bytes while holding the
+  gate. Mandatory typed pre-dispatch preparation remains full-async activation work. A
+  non-cloneable permit transfers with the accepted request through the coordinator and buffer; caller
+  cancellation after acceptance never releases resident bytes.
 - Prevent byte-holding queue-gate waiters from capturing the global budget: impose a per-queue waiting-byte cap
   and release/reacquire permits when a request parks beyond that cap, without changing accepted-request order.
 - A single command larger than the hard cap is permanently rejected as `invalid-request`; budget exhaustion or
   wait timeout is retryable typed backpressure.
-- No tenant can consume the global reserve once its configured share is exhausted; unused tenant shares do
+- No tenant can consume the global reserve once the optional uniform tenant limit is exhausted; unused capacity does
   not strand global capacity unless strict partitioning is explicitly configured.
 - Admission waiting is async, cancellation-safe, fair enough to prevent a hot tenant from permanent capture,
   and never holds the queue gate while waiting for bytes.
@@ -49,7 +58,7 @@ network body limits, and generic memory accounting.
 | 1 | Amend TD-004/ADR-017 and TP-002/TP-003 with accounting, errors, metrics, and defaults | HELIX validation; config examples |
 | 2 | Hoist serialization and thread pre-serialized commands through coordinator/group-commit seams without behavior change | byte-identical segments; no double serialization |
 | 3 | Add runtime-neutral `BufferedByteBudget`, fair waiter, owned permit, tenant classifier, and invariant tests in `pqueue-engine` | proptest/model tests for conservation and cancellation |
-| 4 | Integrate permits into pre-dispatch admission, queue gating, coordinator, and segment buffer | no double charge; exact release on every exit |
+| 4 | Integrate permits into explicit prepared admission, finite ordinary trait admission, queue gating, coordinator, and segment buffer | no double charge; exact release on every exit |
 | 5 | Add cross-queue/tenant stress, close/drain, oversize, and stalled-store tests | bounded resident bytes; unrelated tenant progress |
 | 6 | Benchmark request-count-only baseline against byte budget at small/target/oversize payloads, including serialization paid before rejection | throughput and p99 bars from roadmap |
 
@@ -67,8 +76,8 @@ registration/de-registration pattern already used by `KeyedQueueGate` rather tha
 | Accepted then queued, requeued for pre-repair, or caller dropped | No early release while bytes remain resident; if abandon removes the final request/bytes, its owned permit releases by RAII |
 | Epoch fence or watermark self-fence | When seal returns and drained/cleared bytes are no longer retained |
 | Same-epoch manifest CAS loss/conflict | When seal returns after orphan handling; not at seal start |
-| Seal success | After segment PUT and manifest CAS complete and drained bytes/temporary frame are freed |
-| Projection apply failure after durable seal | Release at seal completion; apply ownership carries no command bytes |
+| Seal success | After segment PUT, manifest CAS, and projection apply complete and drained bytes/temporary frame are freed |
+| Projection apply failure after durable seal | After the failed apply/repair response barrier resolves; the coordinator retains the permit through the failure path |
 | Worker failure, close, or drain | Owner that drops the final retained serialized bytes releases the permit |
 
 Configuration requires nonzero caps, global cap at least every tenant hard share, global cap at least
@@ -77,14 +86,31 @@ partitioning is deferred.
 
 ## Validation Plan
 
-- [ ] Permit conservation holds for generated acquire/release/cancel traces.
-- [ ] Buffered charged bytes never exceed the global cap and tenant charged bytes never exceed its hard cap.
-- [ ] Stalled object storage cannot grow retained buffers without bound.
-- [ ] Peak accounting includes the temporary segment-frame copy or reserves one maximum in-flight segment.
-- [ ] Queue FIFO ordering and group-commit batching remain unchanged.
-- [ ] Metrics expose current/peak bytes, wait/reject count, wait duration, and configured limits without IDs.
+- [x] Permit conservation holds for generated acquire/release/cancel traces.
+- [x] Buffered charged bytes never exceed the global cap and tenant charged bytes never exceed its hard cap.
+- [x] Stalled object storage cannot grow retained buffers without bound in deterministic non-quiet tests.
+- [x] Peak accounting includes the temporary segment-frame copy.
+- [x] Queue FIFO ordering and group-commit batching remain unchanged.
+- [x] Low-cardinality snapshots expose current/peak bytes, wait/reject count, wait duration, and configured limits without IDs.
 - [ ] Multi-queue contention stays within the roadmap bars; tenant attribution is available only through a
       rate-limited diagnostic event, never a metric label.
+
+## Implementation Record
+
+The production composition root consumes the validated global, uniform-tenant, and queue caps for all five
+live object-log profiles: in-memory, SQLite, hybrid, hybrid-strict, and hybrid-async projections. Raw
+native-async requests pass through generic `AsyncComposedBackend` preparation and serialize/admit before the
+queue gate and dispatcher; the direct lower-level trait fallback uses finite `Reject` inside its owned task.
+Equivalent prepared integration for state-dependent typed operations remains full-async activation work. The live same-queue path serializes, reserves its queue share, and
+uses non-waiting global admission only after acquiring the coordinator lock, so lock waiters cannot capture
+global permits. Both paths transfer canonical bytes into `SegmentedObjectLog` and retain a non-cloneable
+permit through seal/manifest CAS and projection apply. The native-async actor returns permits with its durable result so the
+coordinator, rather than the actor response future, owns them through repair/apply. Caller cancellation does
+not release accepted work; rejection creates no pending coordinator state. All five production-profile
+flusher paths use weak backend ownership and exit on backend drop, releasing pending permits; direct
+programmatic `Config` is revalidated against its selected segment target in `start()`. Opt-in `[seg]` lines
+carry the complete low-cardinality byte snapshot for every profile. Full TP-002 contention and p99
+evidence remains the one unchecked validation item and is intentionally separate from quiet-host tests.
 
 ## Risks and Rollbacks
 
@@ -93,6 +119,7 @@ assert counters at drain. Roll back by reverting the iteration; existing request
 
 ## Exit Criteria
 
-The byte caps are documented, configurable, observable, cancellation-safe, stress-tested, and within the
-roadmap performance bars. Seal-target and durable-byte counters remain; duplicate buffered-byte bookkeeping is
-centralized behind the admission/accounting helper.
+The implementation exit requires documented, configurable, observable, cancellation-safe caps; deterministic
+stress coverage; and the checked-in serialization smoke comparison. The complete TP-002 throughput/p99 matrix
+remains a release-evidence gate and is not claimed by this iteration. Seal-target and durable-byte counters
+remain; duplicate buffered-byte bookkeeping is centralized behind the admission/accounting helper.

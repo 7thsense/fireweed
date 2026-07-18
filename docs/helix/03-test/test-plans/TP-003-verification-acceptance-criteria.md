@@ -22,8 +22,9 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: 8e7afb90dddf5324683ca8fb2781089bda204d71a65e62a0696ef28570e312a6
+    self_hash: 3be9892333e1c4809668936e22718d4ed6d88b68837758b3d1a09c204f496882
     deps:
+      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
@@ -31,18 +32,18 @@ ddx:
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
       adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
-      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
+      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-object-log-turso-projection: ef2026084d244dee4376217af4e3c5d9b9d80628edac3a8aeffc0876660d286f
+      td-object-log-turso-projection: 0626539eb10dced9b304c0fc48cb292d4ed25dd49e5c474b87829caec9384488
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
+      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
+      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
-      tp-scale-substantiation: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
-    reviewed_at: "2026-07-18T02:36:05Z"
+      tp-scale-substantiation: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
+    reviewed_at: "2026-07-18T18:16:00Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -236,6 +237,7 @@ documented test/dev scope.
 | AC-TXN-8 async cancellation cuts | For every backend class cancel before append, after staging/before commit, during commit, after durable append/before eventual apply, and while waiting for serialization; replay the same and conflicting `request_id` | ADR-015 cancellation and unknown-outcome contract | pre-commit cuts leave no durable effect; commit cancellation converges to exactly one outcome; eventual append repairs exactly once; conflicting replay fails; no stranded waiter or poisoned lock |
 | AC-TXN-9 runtime non-blocking boundary | Inject slow blocking-driver and native-async I/O for SQLite, Postgres, object-log, and Turso on a single-thread Tokio runtime with a heartbeat and bounded timeout | ADR-015 adapter boundary | heartbeat continues within its documented scheduling tolerance; no runtime-worker stall |
 | AC-TXN-11 async commit strategy and dispatch | Attempt atomic-profile construction with separate append/apply, cancel a caller after owned-task submission, stall one queue at each mutation phase, and drive another queue concurrently | ADR-017 strategy, submission, and queue-gate contract | invalid atomic composition is unrepresentable or rejected at construction; submitted commit resolves exactly once; stalled queue does not stop unrelated queue progress; no duplicate claim planning or stranded permit |
+| AC-TXN-12 object-log byte admission | Generate acquire/release/cancel traces; run small/target/oversize commands through stalled-store, epoch-fence, watermark self-fence, same-epoch CAS-loss, seal-success, post-seal apply-failure, caller-drop, close, and drain paths; contend hot and cold tenants/queues | ADR-017 byte admission, TD-004 buffered-byte admission, INV-10, INV-12, INV-13 | global and tenant permit conservation returns to zero after drain; charged bytes never exceed caps; oversize is permanent invalid-request; exhaustion/timeout is typed retryable backpressure; retained records never outlive their permit; unrelated tenant progress and queue FIFO remain intact |
 | AC-TXN-10 forbidden lock/bridge structure | Search production storage paths and run the dependency guard | ADR-015 structural boundary | no `std::sync::MutexGuard` crosses an await; no nested runtime/block-on bridge; blocking adapters offload whole transactions rather than statements |
 
 ### 3.11 Product end-to-end workflow validation

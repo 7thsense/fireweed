@@ -64,6 +64,9 @@ use crate::port::{
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
+use crate::{
+    BufferedByteBudget, ByteAdmissionError, OwnedBytePermit, retained_records_plus_frame_bytes,
+};
 
 // ---------------------------------------------------------------------------
 // Axis 1: LogStore — the durable command log + epoch/fence authority
@@ -105,6 +108,19 @@ pub trait LogStore: Send {
         commands: &[CommandEnvelope],
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>>;
+
+    /// Append using canonical bytes prepared by the composition's pre-ownership admission boundary. Logs
+    /// that retain encoded records override this to consume them; other axes preserve existing behavior.
+    fn append_serialized(
+        &mut self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        serialized: Vec<Vec<u8>>,
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        drop(serialized);
+        self.append(shard, commands, expected_epoch)
+    }
 
     fn read_from(
         &self,
@@ -278,6 +294,18 @@ pub trait LogStore: Send {
         Err(EngineError::Unavailable)
     }
 
+    fn gc_enqueue_serialized(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        serialized: Vec<Vec<u8>>,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        drop(serialized);
+        self.gc_enqueue(shard, commands, expected_epoch, now_ms)
+    }
+
     /// Force-seal whatever is buffered for `shard` into one segment and ack (TD-004 step 2 forced). A stale
     /// `expected_epoch` is fenced before any object is written; empty if nothing was buffered. Default:
     /// unsupported.
@@ -433,6 +461,7 @@ struct ShardCoord {
     /// Envelopes buffered-but-not-yet-acked, kept engine-side so `distribute` can apply them to the
     /// projection on seal (the substrate's seal returns only positions).
     pending: Vec<CommandEnvelope>,
+    permits: Vec<Option<OwnedBytePermit>>,
     /// One seal slot per buffered envelope; completed (Ok/Err) when the envelope's segment seals + applies.
     waiters: Vec<Arc<SealSlot>>,
     /// The assignment epoch the buffered batch will seal under (set when the first command buffers).
@@ -450,6 +479,18 @@ fn ts_to_ms(now: UtcTimestamp) -> i64 {
     now.seconds
         .saturating_mul(1000)
         .saturating_add((now.nanoseconds / 1_000_000) as i64)
+}
+
+fn map_composed_byte_admission_error(error: ByteAdmissionError) -> EngineError {
+    match error {
+        ByteAdmissionError::Closed => EngineError::Unavailable,
+        ByteAdmissionError::Backpressure => EngineError::Backpressure {
+            resource: "buffered bytes",
+        },
+        ByteAdmissionError::Oversize {
+            requested, limit, ..
+        } => EngineError::RequestTooLarge { requested, limit },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,6 +1098,8 @@ struct Inner<L, P> {
     /// watermark keeps subsequent idle ticks from re-scanning the manifest once the durable floor is fully
     /// reclaimed. NOT durable: a restart re-verifies against the durable floor.
     trim_completed_through: HashMap<QueueKey, u64>,
+    byte_budget: Option<BufferedByteBudget>,
+    queue_byte_limit: Option<usize>,
 }
 
 /// Default recovery-window budget: the max durable-log tail (commands) a normal reopen replays beyond the
@@ -1140,6 +1183,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 coords: HashMap::new(),
                 known_shards: HashSet::new(),
                 trim_completed_through: HashMap::new(),
+                byte_budget: None,
+                queue_byte_limit: None,
             }),
             control,
             fault_hook: Mutex::new(None),
@@ -1173,6 +1218,35 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     pub fn with_group_commit(mut self, on: bool) -> Self {
         self.group_commit = on;
         self
+    }
+
+    /// Enable finite resident-byte admission at the full append→durable seal/CAS→projection/apply boundary.
+    pub fn with_byte_admission(self, budget: BufferedByteBudget, queue_byte_limit: usize) -> Self {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.byte_budget = Some(budget);
+        inner.queue_byte_limit = Some(queue_byte_limit);
+        drop(inner);
+        self
+    }
+
+    pub fn byte_admission_stats(&self) -> Option<crate::BufferedByteBudgetStats> {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .byte_budget
+            .as_ref()
+            .map(BufferedByteBudget::stats)
+    }
+
+    /// Low-cardinality configured limits for production telemetry: `(global, uniform tenant, queue)`.
+    pub fn byte_admission_limits(&self) -> Option<(usize, Option<usize>, usize)> {
+        let inner = self.inner.lock().expect("poisoned");
+        let budget = inner.byte_budget.as_ref()?;
+        Some((
+            budget.config().global_limit(),
+            budget.config().tenant_limit(),
+            inner.queue_byte_limit?,
+        ))
     }
 
     /// Whether the composition runs the group-commit write path (the builder flag AND a group-commit-capable
@@ -1547,28 +1621,57 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         // The group-commit buffer is itself a durable-write admission boundary. Centralizing the gate here
         // covers every buffered command, even when a caller omitted an operation-specific preflight.
         inner.projection.admit_mutation(shard)?;
+        let (serialized, permit) =
+            Self::prepare_byte_admission(inner, shard, std::slice::from_ref(&env))?;
         let slot = Arc::new(SealSlot::new());
         let now_ms = ts_to_ms(now);
         let resolved_epoch = match expected_epoch {
             Some(e) => e,
             None => inner.log.current_epoch(shard)?,
         };
+        let inner_queue_limit = inner.queue_byte_limit;
         let enqueued = {
             let Inner { log, coords, .. } = &mut *inner;
             let coord = coords.entry(shard.clone()).or_default();
+            if !coord.pending.is_empty()
+                && let (Some(limit), Some(new_permit)) = (inner_queue_limit, permit.as_ref())
+            {
+                let queue_bytes: usize = coord
+                    .permits
+                    .iter()
+                    .flatten()
+                    .map(OwnedBytePermit::bytes)
+                    .sum();
+                if queue_bytes.saturating_add(new_permit.bytes()) > limit {
+                    return Err(EngineError::Backpressure {
+                        resource: "queue buffered bytes",
+                    });
+                }
+            }
             if coord.pending.is_empty() {
                 coord.seal_epoch = resolved_epoch;
             }
             coord.pending.push(env);
+            coord.permits.push(permit);
             coord.waiters.push(slot.clone());
             // Enqueue by reference (no per-command envelope clone on the hot path); the seal epoch is the
             // batch's, so co-buffered commands seal together under one epoch.
-            log.gc_enqueue(
-                shard,
-                std::slice::from_ref(coord.pending.last().expect("just pushed")),
-                coord.seal_epoch,
-                now_ms,
-            )
+            if serialized.is_empty() {
+                log.gc_enqueue(
+                    shard,
+                    std::slice::from_ref(coord.pending.last().expect("just pushed")),
+                    coord.seal_epoch,
+                    now_ms,
+                )
+            } else {
+                log.gc_enqueue_serialized(
+                    shard,
+                    std::slice::from_ref(coord.pending.last().expect("just pushed")),
+                    serialized,
+                    coord.seal_epoch,
+                    now_ms,
+                )
+            }
         };
         match enqueued {
             Ok(positions) if !positions.is_empty() => {
@@ -1605,6 +1708,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             .min(coord.pending.len())
             .min(coord.waiters.len());
         let envelopes: Vec<CommandEnvelope> = coord.pending.drain(..n).collect();
+        let permits: Vec<Option<OwnedBytePermit>> = coord.permits.drain(..n).collect();
         let waiters: Vec<Arc<SealSlot>> = coord.waiters.drain(..n).collect();
         let in_flight_claims: Vec<ItemId> = envelopes
             .iter()
@@ -1622,6 +1726,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             }
             projection.apply_live_owned(positions, envelopes)
         })();
+        drop(permits);
         if let Some(coord) = coords.get_mut(shard) {
             for id in in_flight_claims {
                 coord.in_flight_claims.remove(&id);
@@ -1641,6 +1746,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     fn gc_fail_all(inner: &mut Inner<L, P>, shard: &QueueKey, err: EngineError) {
         if let Some(coord) = inner.coords.get_mut(shard) {
             coord.pending.clear();
+            coord.permits.clear();
             coord.in_flight_claims.clear();
             coord.in_flight_claim_tail = None;
             for w in coord.waiters.drain(..) {
@@ -1688,19 +1794,28 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             return Ok(());
         }
         inner.projection.admit_mutation(shard)?;
+        let (serialized, permit) = Self::prepare_byte_admission(inner, shard, &envs)?;
         let now_ms = ts_to_ms(envs[0].created_at);
         let seal_epoch = match expected_epoch {
             Some(e) => e,
             None => inner.log.current_epoch(shard)?,
         };
-        let mut positions = inner.log.gc_enqueue(shard, &envs, seal_epoch, now_ms)?;
+        let mut positions = if serialized.is_empty() {
+            inner.log.gc_enqueue(shard, &envs, seal_epoch, now_ms)?
+        } else {
+            inner
+                .log
+                .gc_enqueue_serialized(shard, &envs, serialized, seal_epoch, now_ms)?
+        };
         if positions.is_empty() {
             positions = inner.log.gc_seal(shard, seal_epoch, now_ms)?;
         }
         if let Some(last) = positions.last() {
             inner.log.gc_advance_high_water(shard, last.clone())?;
         }
-        inner.projection.apply_live_owned(positions, envs)
+        let result = inner.projection.apply_live_owned(positions, envs);
+        drop(permit);
+        result
     }
 
     fn gc_commit_sync(
@@ -2326,14 +2441,52 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         // lifecycle-offline, async poison, and hard-debt state reject finalize/renew/reassign/purge/upsert
         // and future mutation kinds just as reliably as push/claim.
         inner.projection.admit_mutation(shard)?;
+        let (serialized, permit) = Self::prepare_byte_admission(inner, shard, &envs)?;
         let epoch = inner.log.current_epoch(shard)?;
         // ADR-009 / TD-003: an owner that supplies its cached acquire-time epoch (`Some`) is fenced here if
         // superseded; `None` is the degenerate sole-owner path (stamp current, never fence).
         if expected_epoch.is_some_and(|e| e != epoch) {
             return Err(EngineError::EpochFenced);
         }
-        let positions = inner.log.append(shard, &envs, epoch)?;
-        inner.projection.apply_live(&positions, &envs)
+        let positions = if serialized.is_empty() {
+            inner.log.append(shard, &envs, epoch)?
+        } else {
+            inner
+                .log
+                .append_serialized(shard, &envs, serialized, epoch)?
+        };
+        let result = inner.projection.apply_live(&positions, &envs);
+        drop(permit);
+        result
+    }
+
+    fn prepare_byte_admission(
+        inner: &Inner<L, P>,
+        shard: &QueueKey,
+        envs: &[CommandEnvelope],
+    ) -> EngineResult<(Vec<Vec<u8>>, Option<OwnedBytePermit>)> {
+        let Some(budget) = inner.byte_budget.as_ref() else {
+            return Ok((Vec::new(), None));
+        };
+        let serialized = envs
+            .iter()
+            .map(|env| {
+                serde_json::to_vec(env).map_err(|error| {
+                    EngineError::Storage(format!("command serialization failed: {error}"))
+                })
+            })
+            .collect::<EngineResult<Vec<_>>>()?;
+        // Current segment framing: 21-byte header + record-count, then length+record per command. Charge
+        // retained records and the simultaneously resident sealed frame, with checked arithmetic.
+        let charged = retained_records_plus_frame_bytes(serialized.iter().map(Vec::len), 25, 4)
+            .ok_or(EngineError::RequestTooLarge {
+                requested: usize::MAX,
+                limit: budget.config().global_limit(),
+            })?;
+        let permit = budget
+            .try_acquire(shard.tenant_id.clone(), charged)
+            .map_err(map_composed_byte_admission_error)?;
+        Ok((serialized, Some(permit)))
     }
 
     /// The NON-item claim path (whole-group / same-group-key / whole-cohort, BQ-14b/c). The projection axis

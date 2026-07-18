@@ -14,20 +14,20 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
+    self_hash: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
-      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
+      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
       concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-    reviewed_at: "2026-07-18T02:36:05Z"
+      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
+    reviewed_at: "2026-07-18T18:16:00Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -182,7 +182,7 @@ This realizes the 8-step ADR-001 §"S3/Object-Log Commit Model" sequence. Each s
 
 | Step | Rule |
 |------|------|
-| 1. Buffer | Commands MUST be buffered per `tenant/queue`. A buffer accumulates `CommandEnvelope`s (TD-001) in arrival order. Because the queue is the unit of sharding (ADR-008), every command for the queue — including every member of a `group_key` — lands in the one queue buffer on the queue's owner, so `whole_group` (G1 `compatibility.group_batching`) and `whole_cohort` (G6 `cohort_policy`) claims are owner-local by construction. |
+| 1. Buffer | Commands MUST be buffered per `tenant/queue`. Before dispatch, the adapter serializes each `CommandEnvelope` exactly once, validates a conservative resident-peak charge, and acquires a non-cloneable byte permit covering the retained record and temporary seal-frame copy. Each independently admitted request reserves the fixed 25-byte frame overhead; co-batching MAY therefore overcharge the one merged frame but MUST never undercharge it. The same bytes move through coordinator and segment buffer in arrival order. Because the queue is the unit of sharding (ADR-008), every command for the queue — including every member of a `group_key` — lands in the one queue buffer on the queue's owner, so `whole_group` (G1 `compatibility.group_batching`) and `whole_cohort` (G6 `cohort_policy`) claims are owner-local by construction. |
 | 2. Seal | A segment MUST seal when EITHER the buffered byte size reaches `segment_target_bytes` OR the oldest buffered command's age reaches `segment_max_latency_ms`, whichever comes first. Sealing assigns each command a monotonic per-queue `sequence` (TD-001 `CommandPosition.sequence`) contiguous with the prior segment, and computes a per-segment `checksum` plus per-command `checksum` (TD-001 `CommandEnvelope.checksum`). |
 | 3. Write segment | The sealed, immutable segment MUST be written to object storage under a deterministic key (see "Object Layout") before any manifest commit references it. The write SHOULD use an idempotent PUT keyed by `(queue, first_sequence)` so retried writes do not create divergent objects. |
 | 4. Commit manifest | A manifest entry naming the segment, its `[first_sequence, last_sequence]` range, its checksum, and the writer's `assignment_epoch` MUST be appended via a conditional write that succeeds only if (a) the manifest's tail still equals the writer's expected tail AND (b) the writer's `assignment_epoch` is the **current** epoch for the queue (see "Manifest Commit and Epoch Fencing"). A failed CAS MUST abort the commit, roll back the in-flight reservation, and the writer MUST treat itself as raced or fenced. |
@@ -194,6 +194,32 @@ This realizes the 8-step ADR-001 §"S3/Object-Log Commit Model" sequence. Each s
 `rearm` (recurring items, G5) and in-band `PurgeItems` (G5) are ordinary commands in this pipeline: they
 are buffered, sealed, manifest-committed, acked, and applied like any other mutating command, and gain
 durability and replay parity for free. No special-case path is required (see "SQLite Projection").
+
+### Buffered-byte admission (normative)
+
+`objectlog_buffered_bytes_global` is a positive node-wide hard cap and MUST be at least
+`segment_target_bytes`. An optional positive `objectlog_buffered_bytes_tenant` hard share MUST be no larger
+than the global cap. Unconfigured tenants share otherwise-unused global capacity; strict partitioning is not
+implied. `objectlog_buffered_bytes_queue_waiting` bounds admitted bytes parked behind one queue driver and
+MUST be positive and no larger than the global cap. Request-count capacity and `segment_target_bytes` remain
+independent controls.
+
+One request whose peak charge exceeds its applicable hard cap is permanently rejected as
+`EngineError::RequestTooLarge` / `invalid-request`. Temporary budget or queue-waiting exhaustion is
+`EngineError::Backpressure` / retryable unavailable. The finite production policy rejects immediately on
+exhaustion. `AsyncComposedBackend` raw submission MUST run its generic strategy preparation before queue
+gating/dispatch. A service MAY select async waiting there and race the composed future with its runtime-owned
+deadline; the direct replay-committer fallback uses finite `Reject` inside its owned task. No path holds a
+queue gate while waiting. Cancellation deregisters
+the waiter without charge. After acceptance, the permit follows the serialized records through repair, seal,
+epoch/watermark fencing, manifest CAS success or loss, and projection apply. It releases only when the final
+resident records/frame are gone. Shutdown closes waiters and drains accepted permits to zero.
+
+Low-cardinality telemetry MUST expose configured global/tenant limits, current and peak charged bytes,
+waiting requests, wait/reject counts, and adapter-measured wait duration. Tenant and queue IDs MUST NOT be
+metric labels; tenant attribution is limited to rate-limited diagnostics. Every live object-log profile emits
+these fields, including total/max wait nanoseconds and the queue cap, on its opt-in `[seg]` debug telemetry
+line; the snapshot formatter is shared with focused visibility tests.
 
 ### Object Layout (logical)
 
@@ -609,6 +635,7 @@ themselves.
 | Window sanity | `segment_max_latency_ms` MUST be `> 0`; it is the implementation of the profile's `max_commit_latency_ms` / commit-latency-bound knob. The effective claim/ack latency budget MUST be documented to callers because it bounds API-001 commit latency for this profile. |
 | Snapshot vs recovery window | `log_recovery_window_ms` MUST be `>= snapshot_interval_ms` so an unexpired snapshot always exists before its covered segments can expire. |
 | Hybrid pairing | `PQUEUE_PROJECTION_BACKEND=hybrid-strict` and `PQUEUE_PROJECTION_BACKEND=hybrid-async` are supported only with `PQUEUE_LOG_BACKEND=objectlog` until other pairings are intentionally implemented and tested. `memory/hybrid-*`, `sqlite/hybrid-*`, and `postgres/hybrid-*` MUST fail closed at startup. |
+| Buffered-byte bounds | `PQUEUE_OBJECTLOG_BUFFERED_BYTES_GLOBAL` and `PQUEUE_OBJECTLOG_QUEUE_WAITING_BYTES` MUST be positive; the queue cap and optional `PQUEUE_OBJECTLOG_BUFFERED_BYTES_TENANT` MUST not exceed the global cap; and the segment target MUST not exceed the global cap. The composition root builds one node budget and injects it into every live object-log projection profile. |
 
 ## Runtime Wiring (normative)
 

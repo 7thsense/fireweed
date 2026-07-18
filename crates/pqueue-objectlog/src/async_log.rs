@@ -8,11 +8,11 @@ use std::thread::{self, JoinHandle};
 
 use pqueue_engine::{
     AsyncLogStore, CommandEnvelope, CommandPage, CommandPosition, DurabilityClass, EngineError,
-    EngineResult, LogStore, QueueKey,
+    EngineResult, LogStore, OwnedBytePermit, QueueKey,
 };
 
 use crate::ObjectLog;
-use crate::segmented::{BlobStore, SegmentConfig};
+use crate::segmented::{BlobStore, SegmentConfig, SerializedCommandEnvelope};
 
 /// Maximum accepted operations, including operations currently running, for the default adapter.
 pub const DEFAULT_ASYNC_OBJECT_LOG_CAPACITY: usize = 64;
@@ -26,7 +26,7 @@ struct ReplyState<T> {
     waker: Option<Waker>,
 }
 
-struct Reply<T> {
+pub(crate) struct Reply<T> {
     state: Arc<Mutex<ReplyState<T>>>,
 }
 
@@ -308,7 +308,15 @@ struct Actor {
     shared: Arc<SharedExecutor>,
     group_commit: bool,
     group_shards: Mutex<HashSet<QueueKey>>,
+    #[cfg(test)]
+    serialized_job_hook: Mutex<Option<SerializedJobHook>>,
     _workers: Vec<JoinHandle<()>>,
+}
+
+#[cfg(test)]
+struct SerializedJobHook {
+    started: std::sync::mpsc::SyncSender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 impl Actor {
@@ -363,6 +371,8 @@ impl Actor {
             shared,
             group_commit,
             group_shards: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            serialized_job_hook: Mutex::new(None),
             _workers: workers,
         })
     }
@@ -395,6 +405,30 @@ pub struct AsyncObjectLog {
 }
 
 impl AsyncObjectLog {
+    #[cfg(test)]
+    pub(crate) fn gate_serialized_job(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (started_sender, started) = std::sync::mpsc::sync_channel(1);
+        let (release, release_receiver) = std::sync::mpsc::sync_channel(1);
+        *self
+            .actor
+            .serialized_job_hook
+            .lock()
+            .expect("serialized job hook poisoned") = Some(SerializedJobHook {
+            started: started_sender,
+            release: release_receiver,
+        });
+        (started, release)
+    }
+
+    pub(crate) fn segment_target_bytes(&self) -> usize {
+        self.actor.shared.log.shared_segment_target_bytes()
+    }
+
     pub async fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
         Self::open_with_limits(
             root,
@@ -607,6 +641,50 @@ impl AsyncObjectLog {
             log.shared_gc_enqueue_seal_and_advance(&shard, &commands, expected_epoch, now_ms)
         })
         .await
+    }
+
+    /// Force-seal an already-serialized owned batch. The records are transferred into the segmented buffer
+    /// without encoding or cloning; callers can therefore charge the exact retained representation.
+    pub(crate) fn submit_group_commit_serialized_and_seal(
+        &self,
+        shard: QueueKey,
+        commands: Vec<SerializedCommandEnvelope>,
+        permits: Vec<OwnedBytePermit>,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Reply<(Vec<CommandPosition>, Vec<OwnedBytePermit>)>> {
+        if !self.actor.group_commit {
+            return Err(EngineError::Unavailable);
+        }
+        let key = shard.clone();
+        self.actor
+            .group_shards
+            .lock()
+            .expect("object-log group shard set poisoned")
+            .insert(key.clone());
+        #[cfg(test)]
+        let job_hook = self
+            .actor
+            .serialized_job_hook
+            .lock()
+            .expect("serialized job hook poisoned")
+            .take();
+        self.enqueue(key, move |log| {
+            #[cfg(test)]
+            if let Some(hook) = job_hook {
+                let _ = hook.started.send(());
+                let _ = hook.release.recv();
+            }
+            let outcome = log.shared_gc_enqueue_serialized_seal_and_advance(
+                &shard,
+                commands,
+                expected_epoch,
+                now_ms,
+            );
+            // Return the permits with the durable result. The coordinator keeps them through projection
+            // repair/apply; dropping a caller response can never release accepted resident work early.
+            outcome.map(|positions| (positions, permits))
+        })
     }
 
     /// Seal a latency-due group buffer and monotonically advance high-water as one keyed operation.

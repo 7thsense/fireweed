@@ -23,9 +23,9 @@ use heimq::server::Server as HeimqServer;
 use heimq_broker::storage::{ClusterView, LogBackend, OffsetStore, RecordBatchView};
 use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, AuthContext, Clock, ComposedBackend, ControlPlaneConfig, EngineError,
-    EngineResult, InMemoryControlPlane, InProcessControlPlane, LeaseState, OwnedSession,
-    QueueControlPlane, QueueKey,
+    AcquireOutcome, AuthContext, BufferedByteBudget, BufferedByteBudgetConfig, Clock,
+    ComposedBackend, ControlPlaneConfig, EngineError, EngineResult, InMemoryControlPlane,
+    InProcessControlPlane, LeaseState, OwnedSession, QueueControlPlane, QueueKey,
 };
 use pqueue_memory::composed_memory_backend;
 use pqueue_objectlog::ObjectLog;
@@ -146,6 +146,63 @@ pub enum ObjectLogSpec {
         /// be enabled for production shared-store traffic.
         allow_insecure_http: bool,
     },
+}
+
+pub const DEFAULT_OBJECTLOG_BUFFERED_BYTES_GLOBAL: usize = 64 * 1024 * 1024;
+pub const DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES: usize = 16 * 1024 * 1024;
+
+/// Node-wide buffered-byte limits for object-log commit composition. The optional tenant limit is uniform;
+/// tenant-specific policy belongs outside the storage engine and must not create an unbounded override map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectLogByteLimits {
+    pub global: usize,
+    pub tenant: Option<usize>,
+    pub queue_waiting: usize,
+}
+
+impl ObjectLogByteLimits {
+    pub fn validate(self, segment_target_bytes: usize) -> Result<Self, &'static str> {
+        if self.global == 0 {
+            return Err("object-log global buffered-byte limit must be positive");
+        }
+        if self.queue_waiting == 0 || self.queue_waiting > self.global {
+            return Err(
+                "object-log queue waiting-byte limit must be positive and no larger than global",
+            );
+        }
+        if self
+            .tenant
+            .is_some_and(|limit| limit == 0 || limit > self.global)
+        {
+            return Err(
+                "object-log tenant buffered-byte limit must be positive and no larger than global",
+            );
+        }
+        if segment_target_bytes > self.global {
+            return Err("object-log segment target must not exceed the global buffered-byte limit");
+        }
+        Ok(self)
+    }
+}
+
+impl Default for ObjectLogByteLimits {
+    fn default() -> Self {
+        Self {
+            global: DEFAULT_OBJECTLOG_BUFFERED_BYTES_GLOBAL,
+            tenant: None,
+            queue_waiting: DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
+        }
+    }
+}
+
+fn build_objectlog_byte_budget(limits: ObjectLogByteLimits) -> EngineResult<BufferedByteBudget> {
+    let mut config = BufferedByteBudgetConfig::new(limits.global).map_err(EngineError::Invalid)?;
+    if let Some(tenant) = limits.tenant {
+        config = config
+            .with_uniform_tenant_limit(tenant)
+            .map_err(EngineError::Invalid)?;
+    }
+    Ok(BufferedByteBudget::new(config))
 }
 
 impl ObjectLogSpec {
@@ -876,6 +933,8 @@ pub struct Config {
     /// Opt-in group-commit telemetry for the segmented+SQLite object-log backend (the typed form of
     /// `PQUEUE_DEBUG_SEGMENTS`).
     pub debug_segments: bool,
+    /// Validated finite admission bounds shared by every object-log commit profile on this node.
+    pub objectlog_byte_limits: ObjectLogByteLimits,
     /// Tokio worker-thread cap (the typed form of `PQUEUE_WORKER_THREADS`). `None` = one worker per core.
     /// Consumed by the bin when building the runtime, not by [`start`].
     pub worker_threads: Option<usize>,
@@ -921,6 +980,7 @@ impl Config {
             queues,
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             debug_segments: false,
+            objectlog_byte_limits: ObjectLogByteLimits::default(),
             worker_threads: None,
             hybrid_async: HybridAsyncThresholds::default(),
             deferred_flush_chunk: pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
@@ -1712,6 +1772,12 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 /// Construct the configured backend + a `SystemClock`, provision the config's queues, then run the
 /// server. After this returns the server is ready to serve requests against the provisioned queues.
 pub async fn start(config: Config) -> EngineResult<Server> {
+    if let LogSpec::ObjectLog(spec) = &config.backend.log {
+        config
+            .objectlog_byte_limits
+            .validate(spec.segment_config().target_bytes)
+            .map_err(EngineError::Invalid)?;
+    }
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let node_id = config.node_id;
     let owner_id = config.owner_id.clone();
@@ -1731,6 +1797,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let debug_segments = config.debug_segments;
     let hybrid_async = config.hybrid_async;
     let deferred_flush_chunk = config.deferred_flush_chunk;
+    let config_objectlog_queue_limit = config.objectlog_byte_limits.queue_waiting;
+    let objectlog_byte_budget = build_objectlog_byte_budget(config.objectlog_byte_limits)?;
     let change_record_sink = config.change_record_sink.clone();
     let BackendSpec {
         log,
@@ -1806,6 +1874,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let store = spec.open_blob_store()?;
             let backend = Arc::new(
                 SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, segment_config)?
+                    .with_byte_admission(
+                        objectlog_byte_budget.clone(),
+                        config_objectlog_queue_limit,
+                    )
+                    .with_debug_segments(debug_segments)
                     .with_node_id(node_id),
             );
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
@@ -1833,6 +1906,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let store = spec.open_blob_store()?;
             let backend = Arc::new(
                 SegmentedObjectLogSqliteBackend::open_with_blob_store(store, p, segment_config)?
+                    .with_byte_admission(
+                        objectlog_byte_budget.clone(),
+                        config_objectlog_queue_limit,
+                    )
                     .with_node_id(node_id)
                     .with_recovery_max_tail(recovery_max_tail)
                     .with_debug_segments(debug_segments),
@@ -1862,8 +1939,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
                 false,
                 None,
+                objectlog_byte_budget.clone(),
+                config_objectlog_queue_limit,
             )?;
-            spawn_hybrid_flusher(backend.clone(), debug_segments);
+            spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -1910,8 +1989,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
                 true,
                 None,
+                objectlog_byte_budget.clone(),
+                config_objectlog_queue_limit,
             )?;
-            spawn_hybrid_flusher(backend.clone(), debug_segments);
+            spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -1968,8 +2049,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 deferred_flush_chunk,
                 false,
                 Some(hybrid_async),
+                objectlog_byte_budget.clone(),
+                config_objectlog_queue_limit,
             )?;
-            spawn_hybrid_flusher(backend.clone(), debug_segments);
+            spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2136,6 +2219,8 @@ fn open_objectlog_hybrid_backend(
     deferred_flush_chunk: usize,
     strict: bool,
     async_monitor: Option<HybridAsyncThresholds>,
+    byte_budget: BufferedByteBudget,
+    queue_byte_limit: usize,
 ) -> EngineResult<Arc<ObjectLogHybridBackend>> {
     let p = path
         .to_str()
@@ -2157,6 +2242,7 @@ fn open_objectlog_hybrid_backend(
             InProcessControlPlane::new(),
         )
         .with_group_commit(true)
+        .with_byte_admission(byte_budget, queue_byte_limit)
         .with_recovery_max_tail(recovery_max_tail)
         .recover()?
         .with_node_id(node_id),
@@ -2164,26 +2250,39 @@ fn open_objectlog_hybrid_backend(
 }
 
 fn spawn_hybrid_flusher(
-    backend: Arc<ObjectLogHybridBackend>,
+    backend: &Arc<ObjectLogHybridBackend>,
     debug_segments: bool,
 ) -> JoinHandle<()> {
+    let interval_ms = backend.group_commit_flush_interval_ms();
+    let weak = Arc::downgrade(backend);
     tokio::spawn(async move {
-        let interval_ms = backend.group_commit_flush_interval_ms();
         let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
         let mut deferred_tick = tokio::time::interval(Duration::from_millis(250));
         let mut dbg_last = std::time::Instant::now();
         loop {
-            tokio::select! {
-                _ = tick.tick() => {
-                    let now_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-                        Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
-                        Err(_) => 0,
-                    };
+            enum FlushKind {
+                GroupCommit,
+                DeferredProjection,
+            }
+            let kind = tokio::select! {
+                _ = tick.tick() => FlushKind::GroupCommit,
+                _ = deferred_tick.tick() => FlushKind::DeferredProjection,
+            };
+            let Some(backend) = weak.upgrade() else {
+                break;
+            };
+            match kind {
+                FlushKind::GroupCommit => {
+                    let now_ms =
+                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                            Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
+                            Err(_) => 0,
+                        };
                     if let Err(e) = backend.flush_tick(now_ms) {
                         eprintln!("[objectlog/hybrid] group-commit flush failed: {e}");
                     }
                 }
-                _ = deferred_tick.tick() => {
+                FlushKind::DeferredProjection => {
                     if let Err(e) = backend.try_flush_deferred_projection() {
                         eprintln!("[objectlog/hybrid] deferred projection flush failed: {e}");
                     }
@@ -2192,17 +2291,41 @@ fn spawn_hybrid_flusher(
             if debug_segments && dbg_last.elapsed() >= Duration::from_secs(1) {
                 dbg_last = std::time::Instant::now();
                 let c = backend.with_log(|log| log.counters());
+                let admission = hybrid_byte_admission_telemetry(&backend);
                 eprintln!(
-                    "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={}",
+                    "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
                     c.segments_sealed,
                     c.commands_committed,
                     c.mean_batch_size(),
                     c.max_batch_size(),
-                    c.objects_put
+                    c.objects_put,
+                    admission,
                 );
             }
         }
     })
+}
+
+fn hybrid_byte_admission_telemetry(backend: &ObjectLogHybridBackend) -> String {
+    let stats = backend
+        .byte_admission_stats()
+        .expect("production hybrid byte admission is configured");
+    let (global, tenant, queue) = backend
+        .byte_admission_limits()
+        .expect("production hybrid byte admission limits are configured");
+    format!(
+        "admission_current={} admission_peak={} admission_waiters={} admission_waits={} admission_rejects={} admission_total_wait_nanos={} admission_max_wait_nanos={} admission_global_limit={} admission_tenant_limit={} admission_queue_limit={}",
+        stats.charged_bytes,
+        stats.peak_charged_bytes,
+        stats.waiting_requests,
+        stats.wait_count,
+        stats.rejection_count,
+        stats.total_wait_nanos,
+        stats.max_wait_nanos,
+        global,
+        tenant.map_or_else(|| "none".to_string(), |value| value.to_string()),
+        queue,
+    )
 }
 
 /// Wrap an already-`Arc`-shared backend in the selected ownership runtime and run it. [`start`] constructs
@@ -2465,5 +2588,202 @@ async fn ownership_loop<B, CP>(
         if hooks.renew_sessions(clock.now()).await.is_err() {
             counters.errors.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod byte_admission_wiring_tests {
+    use super::*;
+    use bytes::Bytes;
+    use pqueue_core::{
+        EligibilityPolicy, Metadata, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
+    };
+    use pqueue_engine::{ControlPlaneStore, PushPort, PushSpec};
+    use pqueue_objectlog::segmented::InMemoryBlobStore;
+
+    fn queue_definition() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn push_spec() -> PushSpec {
+        PushSpec {
+            client_item_key: None,
+            priority: None,
+            not_before: None,
+            group_key: None,
+            payload: Some(Bytes::from_static(b"resident")),
+            fields: Default::default(),
+            metadata: Metadata::default(),
+            cohort_size: None,
+            gate_keys: Vec::new(),
+            entity: None,
+        }
+    }
+
+    #[test]
+    fn production_hybrid_constructor_consumes_node_and_queue_caps() {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-byte-admission-hybrid-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let budget = BufferedByteBudget::new(
+            BufferedByteBudgetConfig::new(8_192)
+                .unwrap()
+                .with_uniform_tenant_limit(4_096)
+                .unwrap(),
+        );
+        let backend = open_objectlog_hybrid_backend(
+            Arc::new(InMemoryBlobStore::new()),
+            &path,
+            SegmentConfig::new(1_024, 100).unwrap(),
+            DEFAULT_RECOVERY_MAX_TAIL,
+            0,
+            pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
+            false,
+            None,
+            budget,
+            2_048,
+        )
+        .unwrap();
+        assert_eq!(
+            backend.byte_admission_limits(),
+            Some((8_192, Some(4_096), 2_048))
+        );
+        assert_eq!(backend.byte_admission_stats().unwrap().charged_bytes, 0);
+        let telemetry = hybrid_byte_admission_telemetry(&backend);
+        assert!(telemetry.contains("admission_global_limit=8192"));
+        assert!(telemetry.contains("admission_tenant_limit=4096"));
+        assert!(telemetry.contains("admission_queue_limit=2048"));
+        drop(backend);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn hybrid_flusher_does_not_retain_backend_or_resident_permits_on_shutdown() {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-byte-admission-hybrid-drop-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let budget = BufferedByteBudget::new(BufferedByteBudgetConfig::new(16_384).unwrap());
+        let backend = open_objectlog_hybrid_backend(
+            Arc::new(InMemoryBlobStore::new()),
+            &path,
+            SegmentConfig::new(8_192, 60_000).unwrap(),
+            DEFAULT_RECOVERY_MAX_TAIL,
+            0,
+            pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
+            false,
+            None,
+            budget.clone(),
+            8_192,
+        )
+        .unwrap();
+        let definition = queue_definition();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let flusher = spawn_hybrid_flusher(&backend, false);
+        let push = {
+            let backend = Arc::clone(&backend);
+            let shard = shard.clone();
+            tokio::spawn(async move {
+                backend
+                    .push(
+                        &shard,
+                        vec![push_spec()],
+                        UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+                        None,
+                    )
+                    .await
+            })
+        };
+        for _ in 0..100 {
+            if budget.stats().charged_bytes > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(budget.stats().charged_bytes > 0);
+        push.abort();
+        let _ = push.await;
+        let weak = Arc::downgrade(&backend);
+        drop(backend);
+        tokio::time::timeout(Duration::from_secs(1), flusher)
+            .await
+            .expect("weak hybrid flusher did not exit")
+            .expect("hybrid flusher task failed");
+        assert!(weak.upgrade().is_none());
+        assert_eq!(budget.stats().charged_bytes, 0);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn start_rejects_programmatic_objectlog_limits_below_segment_target() {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-invalid-byte-config-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut config = Config::new(
+            BackendSpec {
+                log: LogSpec::ObjectLog(ObjectLogSpec::local(
+                    path,
+                    SegmentConfig::new(4_096, 100).unwrap(),
+                )),
+                projection: ProjectionSpec::InMemory,
+                control_plane: ControlPlaneSpec::InProcess,
+            },
+            0,
+            "127.0.0.1:0".to_string(),
+            Duration::from_secs(1),
+            Vec::new(),
+        );
+        config.objectlog_byte_limits = ObjectLogByteLimits {
+            global: 2_048,
+            tenant: Some(1_024),
+            queue_waiting: 1_024,
+        };
+        let error = start(config)
+            .await
+            .err()
+            .expect("direct Config must not bypass segment-target validation");
+        assert!(matches!(error, EngineError::Invalid(_)));
     }
 }

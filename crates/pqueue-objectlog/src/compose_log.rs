@@ -25,7 +25,9 @@ use pqueue_projection::InMemoryProjection;
 
 use std::sync::Arc;
 
-use crate::segmented::{BlobStore, LocalFsBlobStore, SegmentConfig, SegmentedObjectLog};
+use crate::segmented::{
+    BlobStore, LocalFsBlobStore, SegmentConfig, SegmentedObjectLog, SerializedCommandEnvelope,
+};
 
 /// Convert a command envelope's `created_at` to epoch-milliseconds (bead pqueue-b5cc2bc7 bug 1): the raw
 /// append path stamps a segment's `committed_at_ms` from the max of these so `created_at <= committed_at_ms`
@@ -174,6 +176,10 @@ impl ObjectLog {
         self.group_commit
     }
 
+    pub(crate) fn shared_segment_target_bytes(&self) -> usize {
+        self.config.target_bytes
+    }
+
     pub(crate) fn shared_pending(&self, shard: &QueueKey) -> usize {
         self.log.pending(shard)
     }
@@ -243,6 +249,27 @@ impl ObjectLog {
         Ok(positions)
     }
 
+    pub(crate) fn shared_gc_enqueue_serialized_and_advance(
+        &self,
+        shard: &QueueKey,
+        commands: Vec<SerializedCommandEnvelope>,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if !self.group_commit {
+            return Err(pqueue_engine::EngineError::Unavailable);
+        }
+        let positions = self
+            .log
+            .enqueue_serialized(shard, commands, expected_epoch, now_ms)?
+            .0
+            .committed;
+        if let Some(last) = positions.last() {
+            self.log.set_high_water(shard, last.clone())?;
+        }
+        Ok(positions)
+    }
+
     pub(crate) fn shared_gc_seal_and_advance(
         &self,
         shard: &QueueKey,
@@ -265,6 +292,19 @@ impl ObjectLog {
     ) -> EngineResult<Vec<CommandPosition>> {
         let mut positions =
             self.shared_gc_enqueue_and_advance(shard, commands, expected_epoch, now_ms)?;
+        positions.extend(self.shared_gc_seal_and_advance(shard, expected_epoch, now_ms)?);
+        Ok(positions)
+    }
+
+    pub(crate) fn shared_gc_enqueue_serialized_seal_and_advance(
+        &self,
+        shard: &QueueKey,
+        commands: Vec<SerializedCommandEnvelope>,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let mut positions =
+            self.shared_gc_enqueue_serialized_and_advance(shard, commands, expected_epoch, now_ms)?;
         positions.extend(self.shared_gc_seal_and_advance(shard, expected_epoch, now_ms)?);
         Ok(positions)
     }
@@ -315,6 +355,35 @@ impl LogStore for ObjectLog {
         // infinitely old and let the trim reclaim a within-retention request_id. Empty batches keep `0` (no
         // segment is sealed).
         self.shared_append(shard, commands, expected_epoch)
+    }
+
+    fn append_serialized(
+        &mut self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        serialized: Vec<Vec<u8>>,
+        expected_epoch: u64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let seal_ms = commands
+            .iter()
+            .map(|env| ts_to_ms(env.created_at))
+            .max()
+            .unwrap_or(0);
+        let prepared = commands
+            .iter()
+            .cloned()
+            .zip(serialized)
+            .map(|(envelope, record)| SerializedCommandEnvelope::from_parts(envelope, record))
+            .collect();
+        let (outcome, _) = self
+            .log
+            .enqueue_serialized(shard, prepared, expected_epoch, seal_ms)?;
+        let mut positions = outcome.committed;
+        positions.extend(self.log.seal(shard, expected_epoch, seal_ms)?);
+        if let Some(last) = positions.last() {
+            self.log.advance_high_water(shard, last.clone())?;
+        }
+        Ok(positions)
     }
 
     fn read_from(
@@ -472,6 +541,30 @@ impl LogStore for ObjectLog {
     ) -> EngineResult<Vec<CommandPosition>> {
         // Buffer; the substrate seals + returns positions only if a SIZE trigger fired during this enqueue.
         self.shared_gc_enqueue(shard, commands, expected_epoch, now_ms)
+    }
+
+    fn gc_enqueue_serialized(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        serialized: Vec<Vec<u8>>,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if !self.group_commit {
+            return Err(pqueue_engine::EngineError::Unavailable);
+        }
+        let prepared = commands
+            .iter()
+            .cloned()
+            .zip(serialized)
+            .map(|(envelope, record)| SerializedCommandEnvelope::from_parts(envelope, record))
+            .collect();
+        Ok(self
+            .log
+            .enqueue_serialized(shard, prepared, expected_epoch, now_ms)?
+            .0
+            .committed)
     }
 
     fn gc_seal(

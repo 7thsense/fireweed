@@ -13,13 +13,15 @@ use crate::{
     AsyncCommitStrategy, AsyncReclaimPlanner, AsyncReclaimRequest, ClaimCommand, ClaimRequest,
     ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CommandChecksum, DispatchError,
     DurabilityClass, EngineError, EngineResult, KeyedQueueGate, NoAsyncCohortLifecyclePlanner,
-    OwnedTask, OwnedTaskDispatcher, PushCommand, PushItem, PushSpec, QueueCommand, QueueGateError,
-    QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest, RequestOutcome, TaskOutcomeError,
-    compile_entity_schema, validate_claim_compatibility, validate_entity, validate_gate_push,
+    OwnedTask, OwnedTaskDispatcher, PreparedAsyncCommitStrategy, PushCommand, PushItem, PushSpec,
+    QueueCommand, QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest,
+    RequestOutcome, TaskOutcomeError, compile_entity_schema, validate_claim_compatibility,
+    validate_entity, validate_gate_push,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AsyncCommitSubmitError {
+    Prepare(EngineError),
     Admission(QueueGateError),
     Dispatch(DispatchError),
     Outcome(TaskOutcomeError),
@@ -433,10 +435,18 @@ where
     pub async fn submit_commit(
         &self,
         request: RawCommitRequest,
-    ) -> Result<S::Output, AsyncCommitSubmitError> {
+    ) -> Result<S::Output, AsyncCommitSubmitError>
+    where
+        S: PreparedAsyncCommitStrategy<Request = RawCommitRequest>,
+    {
         let queue = request.shard().clone();
+        let prepared = self
+            .strategy
+            .prepare(request)
+            .await
+            .map_err(AsyncCommitSubmitError::Prepare)?;
         let strategy = Arc::clone(&self.strategy);
-        self.submit_operation(queue, move || strategy.commit(request))
+        self.submit_operation(queue, move || strategy.commit_prepared(prepared))
             .await
     }
 
