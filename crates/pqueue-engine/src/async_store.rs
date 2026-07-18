@@ -2,8 +2,9 @@
 //!
 //! These traits are the additive migration surface for the first async [`crate::ComposedBackend`]
 //! conversion. They intentionally cover the initial shard, append/replay, projection-apply, basic claim,
-//! and control-plane paths only. Retention, snapshots, group commit, rich relational claims, indexes, and
-//! repair operations remain on the legacy axes until the slice that migrates each behavior and its tests.
+//! rich relational claim selection, and control-plane paths only. Retention, snapshots, group commit,
+//! indexes, and repair operations remain on the legacy axes until the slice that migrates each behavior
+//! and its tests.
 //!
 //! Every request value is owned. Shared receivers allow independent queue/connection work to progress
 //! without requiring a process-global mutable store borrow; implementations provide their own per-queue or
@@ -26,8 +27,8 @@
 use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, TenantId, UtcTimestamp};
 
 use crate::{
-    ClaimedItem, CommandEnvelope, CommandPage, CommandPosition, CreateQueueOutcome,
-    DurabilityClass, EngineResult, QueueKey,
+    ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, QueueKey, RichClaimSelection,
 };
 
 /// Native-async command-log, epoch-fence, replay, and high-water operations needed by initial composition.
@@ -119,6 +120,19 @@ pub trait AsyncProjectionStore: Send + Sync {
         now: UtcTimestamp,
         max: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+
+    /// Select a relational rich-claim unit without durably mutating projection state. Implementations that
+    /// do not materialize group/cohort state fail closed rather than degrading to item-level selection.
+    fn select_rich_claim(
+        &self,
+        _shard: QueueKey,
+        _unit: ClaimUnit,
+        _compatibility: ClaimCompatibility,
+        _now: UtcTimestamp,
+        _max_items: usize,
+    ) -> impl std::future::Future<Output = EngineResult<RichClaimSelection>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
 
     fn render_claimed(
         &self,
@@ -382,12 +396,37 @@ mod tests {
         assert_send(projection.apply_live(Vec::new(), Vec::new()));
         assert_send(projection.apply_recovery(Vec::new(), Vec::new()));
         assert_send(projection.eligible_candidates(shard(), UtcTimestamp::new(0, 0).unwrap(), 1));
+        assert_send(projection.select_rich_claim(
+            shard(),
+            ClaimUnit::SameGroupKey,
+            ClaimCompatibility {
+                same_group_key: true,
+                ..Default::default()
+            },
+            UtcTimestamp::new(0, 0).unwrap(),
+            1,
+        ));
         let id = ItemId::new("1").unwrap();
         assert_send(projection.render_claimed(shard(), vec![id]));
         assert_send(projection.item_state(shard(), ItemId::new("1").unwrap()));
         assert_send(projection.item_version(shard(), ItemId::new("1").unwrap()));
         assert_send(projection.recovery_high_water(shard()));
         assert_send(projection.recover_definitions());
+    }
+
+    #[test]
+    fn default_rich_claim_selection_fails_closed() {
+        let result = futures::executor::block_on(ImmediateProjection.select_rich_claim(
+            shard(),
+            ClaimUnit::WholeCohort,
+            ClaimCompatibility {
+                whole_cohort: true,
+                ..Default::default()
+            },
+            UtcTimestamp::new(0, 0).unwrap(),
+            10,
+        ));
+        assert!(matches!(result, Err(EngineError::Unavailable)));
     }
 
     #[test]

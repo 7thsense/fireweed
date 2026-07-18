@@ -11,8 +11,9 @@ use pqueue_core::{
     QueueDefinition, QueueIndex, UtcTimestamp, is_retry_exhausted,
 };
 use pqueue_engine::{
-    AsyncProjectionStore, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    FinalizeKind, PayloadUpdate, PushItem, QueueCommand, QueueKey,
+    AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
+    CommandPosition, EngineError, EngineResult, FinalizeKind, PayloadUpdate, PushItem,
+    QueueCommand, QueueKey, RichClaimSelection,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -606,6 +607,250 @@ async fn refresh_group_summary(
         .await
         .map_err(storage)?;
     Ok(())
+}
+
+async fn queue_paused(transaction: &Connection, tenant: &str, queue: &str) -> EngineResult<bool> {
+    let row = one_row(
+        transaction,
+        "SELECT paused FROM queues WHERE tenant=?1 AND queue=?2",
+        vec![tenant.to_string().into(), queue.to_string().into()],
+    )
+    .await?
+    .ok_or(EngineError::NotFound)?;
+    Ok(integer(&row[0])? != 0)
+}
+
+async fn refresh_due_group_summaries(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    now: i64,
+) -> EngineResult<()> {
+    let mut rows = transaction
+        .query(
+            "SELECT DISTINCT i.group_key FROM pqueue_items i \
+             LEFT JOIN pqueue_group_summary gs ON gs.tenant_id=i.tenant_id \
+             AND gs.queue_id=i.queue_id AND gs.group_key=i.group_key \
+             WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' \
+             AND i.superseded=0 AND i.group_key IS NOT NULL AND i.eligible_since IS NOT NULL \
+             AND (i.not_before IS NULL OR i.not_before<=?3) \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gstate \
+             ON gstate.tenant_id=ig.tenant_id AND gstate.queue_id=ig.queue_id \
+             AND gstate.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
+             AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+             AND (gs.group_key IS NULL OR gs.oldest_eligible_at IS NULL OR gs.rep_item_id IS NULL) \
+             ORDER BY i.group_key LIMIT 128",
+            vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Integer(now),
+            ],
+        )
+        .await
+        .map_err(storage)?;
+    let mut groups = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        groups.push(GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
+    }
+    drop(rows);
+    for group in groups {
+        refresh_group_summary(transaction, tenant, queue, &group, now).await?;
+    }
+    Ok(())
+}
+
+async fn candidate_groups(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+) -> EngineResult<Vec<GroupKey>> {
+    let mut rows = transaction
+        .query(
+            "SELECT group_key FROM pqueue_group_summary WHERE tenant_id=?1 AND queue_id=?2 \
+             AND oldest_eligible_at IS NOT NULL \
+             ORDER BY rep_priority_sort,rep_created_at,rep_item_id",
+            vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+            ],
+        )
+        .await
+        .map_err(storage)?;
+    let mut groups = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        groups.push(GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
+    }
+    Ok(groups)
+}
+
+async fn group_eligible_items(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    group: &GroupKey,
+    now: i64,
+    limit: usize,
+    cohort: bool,
+) -> EngineResult<Vec<ItemId>> {
+    let cohort_predicate = if cohort {
+        "cohort_size IS NOT NULL"
+    } else {
+        "cohort_size IS NULL"
+    };
+    let mut rows = transaction
+        .query(
+            format!(
+                "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND group_key=?3 AND lifecycle_state='Pending' AND superseded=0 \
+                 AND {cohort_predicate} AND (not_before IS NULL OR not_before<=?4) \
+                 AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+                 JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+                 AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+                 WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+                 AND ig.item_id=pqueue_items.item_id) ORDER BY priority_sort,created_seq LIMIT ?5"
+            ),
+            vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Text(group.as_str().to_string()),
+                Value::Integer(now),
+                Value::Integer(i64::try_from(limit).map_err(storage)?),
+            ],
+        )
+        .await
+        .map_err(storage)?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        ids.push(ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
+    }
+    Ok(ids)
+}
+
+async fn select_group_batching(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    now: i64,
+    max_items: usize,
+    max_groups: u32,
+) -> EngineResult<Vec<ItemId>> {
+    let mut selected = Vec::new();
+    let mut used = 0_u32;
+    for group in candidate_groups(transaction, tenant, queue).await? {
+        if used >= max_groups {
+            break;
+        }
+        let eligible = group_eligible_items(
+            transaction,
+            tenant,
+            queue,
+            &group,
+            now,
+            max_items.saturating_add(1),
+            false,
+        )
+        .await?;
+        if eligible.is_empty() {
+            continue;
+        }
+        if eligible.len() > max_items {
+            return Err(EngineError::BatchTooLarge);
+        }
+        if selected.len().saturating_add(eligible.len()) > max_items {
+            break;
+        }
+        selected.extend(eligible);
+        used += 1;
+    }
+    Ok(selected)
+}
+
+async fn select_same_group(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    now: i64,
+    max_items: usize,
+) -> EngineResult<Vec<ItemId>> {
+    for group in candidate_groups(transaction, tenant, queue).await? {
+        let eligible =
+            group_eligible_items(transaction, tenant, queue, &group, now, max_items, false).await?;
+        if !eligible.is_empty() {
+            return Ok(eligible);
+        }
+    }
+    Ok(Vec::new())
+}
+
+async fn select_whole_cohort(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    now: i64,
+    max_items: usize,
+) -> EngineResult<RichClaimSelection> {
+    let mut rows = transaction
+        .query(
+            "SELECT group_key,cohort_id,cohort_size FROM pqueue_cohorts \
+             WHERE tenant_id=?1 AND queue_id=?2 AND state='complete' \
+             ORDER BY cohort_created_at,group_key",
+            vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+            ],
+        )
+        .await
+        .map_err(storage)?;
+    let mut cohorts = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        cohorts.push((
+            text(&row.get_value(0).map_err(storage)?)?,
+            text(&row.get_value(1).map_err(storage)?)?,
+            integer(&row.get_value(2).map_err(storage)?)?,
+        ));
+    }
+    drop(rows);
+    for (group, cohort_id, size) in cohorts {
+        let size = usize::try_from(size).map_err(|_| storage("invalid cohort size"))?;
+        let member_row = one_row(
+            transaction,
+            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL \
+             AND lifecycle_state NOT IN ('Complete','Failed')",
+            vec![
+                tenant.to_string().into(),
+                queue.to_string().into(),
+                group.clone().into(),
+            ],
+        )
+        .await?
+        .ok_or_else(|| storage("cohort member count returned no row"))?;
+        if usize::try_from(integer(&member_row[0])?).map_err(storage)? != size {
+            continue;
+        }
+        let group_key = GroupKey::new(group).map_err(storage)?;
+        let eligible = group_eligible_items(
+            transaction,
+            tenant,
+            queue,
+            &group_key,
+            now,
+            size.saturating_add(1),
+            true,
+        )
+        .await?;
+        if eligible.len() != size {
+            continue;
+        }
+        if size > max_items {
+            return Err(EngineError::BatchTooLarge);
+        }
+        return Ok(RichClaimSelection {
+            item_ids: eligible,
+            cohort_id: Some(CohortId::new(cohort_id).map_err(storage)?),
+        });
+    }
+    Ok(RichClaimSelection::default())
 }
 
 async fn cohort_state(
@@ -1903,6 +2148,75 @@ impl AsyncProjectionStore for TursoRelational {
             drop(rows);
             transaction.commit().await.map_err(storage)?;
             Ok(eligible)
+        }
+    }
+
+    fn select_rich_claim(
+        &self,
+        shard: QueueKey,
+        unit: ClaimUnit,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> impl std::future::Future<Output = EngineResult<RichClaimSelection>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            if matches!(unit, ClaimUnit::Item) {
+                return Err(EngineError::Unavailable);
+            }
+            let mut connection = writer.lock().await;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage)?;
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let now = ts_nanos(now);
+            let result = async {
+                if matches!(unit, ClaimUnit::WholeGroup | ClaimUnit::SameGroupKey) {
+                    refresh_due_group_summaries(&transaction, &tenant, &queue, now).await?;
+                }
+                if queue_paused(&transaction, &tenant, &queue).await? {
+                    return Ok(RichClaimSelection::default());
+                }
+                match unit {
+                    ClaimUnit::Item => unreachable!("item unit rejected before transaction"),
+                    ClaimUnit::WholeGroup => {
+                        let max_groups = compatibility
+                            .group_batching
+                            .as_ref()
+                            .map(|batching| batching.max_groups)
+                            .unwrap_or(0);
+                        Ok(RichClaimSelection {
+                            item_ids: select_group_batching(
+                                &transaction,
+                                &tenant,
+                                &queue,
+                                now,
+                                max_items,
+                                max_groups,
+                            )
+                            .await?,
+                            cohort_id: None,
+                        })
+                    }
+                    ClaimUnit::SameGroupKey => Ok(RichClaimSelection {
+                        item_ids: select_same_group(&transaction, &tenant, &queue, now, max_items)
+                            .await?,
+                        cohort_id: None,
+                    }),
+                    ClaimUnit::WholeCohort => {
+                        select_whole_cohort(&transaction, &tenant, &queue, now, max_items).await
+                    }
+                }
+            }
+            .await;
+            let rollback = transaction.rollback().await.map_err(storage);
+            match (result, rollback) {
+                (_, Err(error)) => Err(error),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(selection), Ok(())) => Ok(selection),
+            }
         }
     }
 

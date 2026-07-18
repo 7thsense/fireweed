@@ -2,22 +2,22 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, EligibilityPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType,
-    ItemId, LeaseToken, Metadata, OrderingMode, PriorityDirection, PriorityModel,
+    ClientItemKey, CohortId, CohortPolicy, EligibilityPolicy, GroupKey, IndexDeclaration, IndexDef,
+    IndexType, ItemId, LeaseToken, Metadata, OrderingMode, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueIndex,
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    AsyncProjectionStore, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
-    CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
-    CommandPosition, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, ProjectionStore, PurgeItemsCommand,
-    PushCommand, PushItem, QueueCommand, QueueKey, ReassignLeaseCommand, RenewLeaseCommand,
-    ReplacePendingCommand, ScheduleUpdate, SetGatesCommand, UnfenceLeaseCommand,
-    UpdateFieldsCommand, WriteSideRecordsCommand,
+    AsyncProjectionStore, ClaimCommand, ClaimCompatibility, ClaimUnit, CohortClaimCommand,
+    CohortExpiredCommand, CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum,
+    CommandEnvelope, CommandId, CommandPosition, FenceLeaseCommand, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, GroupBatching, LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate,
+    ProjectionStore, PurgeItemsCommand, PushCommand, PushItem, QueueCommand, QueueKey,
+    ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, ScheduleUpdate,
+    SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
 };
 use pqueue_relational::OWNED_PROJECTION_TABLES;
-use pqueue_sqlite::SqliteProjectionStore;
+use pqueue_sqlite::{SqliteProjectionStore, SqliteRelational};
 use pqueue_turso::{
     JournalMode, RelationalStatement, TursoConfig, TursoRelational, TursoRelationalError,
 };
@@ -1038,6 +1038,52 @@ async fn apply_both(
     AsyncProjectionStore::apply_live(turso, vec![position], vec![command])
         .await
         .expect("Turso apply");
+}
+
+async fn assert_rich_selection_matches(
+    sqlite: &SqliteRelational,
+    turso: &TursoRelational,
+    shard: &QueueKey,
+    unit: ClaimUnit,
+    compatibility: ClaimCompatibility,
+    now: UtcTimestamp,
+    max_items: usize,
+) -> pqueue_engine::RichClaimSelection {
+    let expected =
+        ProjectionStore::select_rich_claim(sqlite, shard, unit, &compatibility, now, max_items)
+            .unwrap();
+    let actual = AsyncProjectionStore::select_rich_claim(
+        turso,
+        shard.clone(),
+        unit,
+        compatibility,
+        now,
+        max_items,
+    )
+    .await
+    .unwrap();
+    assert_eq!(actual.item_ids, expected.item_ids);
+    assert_eq!(actual.cohort_id, expected.cohort_id);
+    actual
+}
+
+async fn apply_both_rich(
+    sqlite: &mut SqliteRelational,
+    turso: &TursoRelational,
+    shard: &QueueKey,
+    sequence: u64,
+    command: CommandEnvelope,
+) {
+    let position = CommandPosition::new(shard.clone(), 1, sequence);
+    ProjectionStore::apply(
+        sqlite,
+        std::slice::from_ref(&position),
+        std::slice::from_ref(&command),
+    )
+    .expect("SQLite rich apply");
+    AsyncProjectionStore::apply_live(turso, vec![position], vec![command])
+        .await
+        .expect("Turso rich apply");
 }
 
 fn push_item(item_id: ItemId, key: &str, max_attempts: u32) -> PushItem {
@@ -2437,5 +2483,309 @@ async fn control_gate_update_replace_and_purge_match_sqlite() {
             .await
             .unwrap(),
         ProjectionStore::eligible_candidates(&sqlite, &shard, timestamp(21), 20).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn async_rich_claim_selection_matches_sqlite_without_durable_mutation() {
+    let mut rich_definition = definition();
+    rich_definition.max_eligible_group_size = Some(3);
+    rich_definition.cohort_policy = Some(CohortPolicy {
+        enabled: true,
+        completion_bound_ms: Some(30_000),
+        on_incomplete: None,
+        max_cohort_size: Some(4),
+    });
+    let shard = QueueKey::new(
+        rich_definition.tenant_id.clone(),
+        rich_definition.queue_id.clone(),
+    );
+    let mut sqlite = SqliteRelational::in_memory().unwrap();
+    ProjectionStore::ensure_shard(&mut sqlite, &rich_definition).unwrap();
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, rich_definition.clone())
+        .await
+        .unwrap();
+    let oldest = GroupKey::new("oldest").unwrap();
+    let later = GroupKey::new("later").unwrap();
+    let first = ItemId::mint(30, 0, 0);
+    let second = ItemId::mint(30, 0, 1);
+    let third = ItemId::mint(30, 0, 2);
+    let grouped = |id, key: &str, group: &GroupKey, not_before, gates| PushItem {
+        group_key: Some(group.clone()),
+        not_before,
+        gate_keys: gates,
+        ..push_item(id, key, 3)
+    };
+    apply_both_rich(
+        &mut sqlite,
+        &turso,
+        &shard,
+        0,
+        envelope(
+            "rich-groups",
+            QueueCommand::Push(PushCommand {
+                items: vec![
+                    grouped(
+                        first,
+                        "first",
+                        &oldest,
+                        Some(timestamp(100)),
+                        vec!["blocked".to_string()],
+                    ),
+                    grouped(
+                        second,
+                        "second",
+                        &oldest,
+                        Some(timestamp(100)),
+                        vec!["blocked".to_string()],
+                    ),
+                    grouped(third, "third", &later, None, Vec::new()),
+                ],
+            }),
+            vec![first, second, third],
+            10,
+        ),
+    )
+    .await;
+    let frontier = AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
+        .await
+        .unwrap();
+    assert_eq!(group_summary_count(&turso, &oldest).await, 0);
+    let batching = ClaimCompatibility {
+        group_batching: Some(GroupBatching { max_groups: 2 }),
+        ..Default::default()
+    };
+    let selected = assert_rich_selection_matches(
+        &sqlite,
+        &turso,
+        &shard,
+        ClaimUnit::WholeGroup,
+        batching.clone(),
+        timestamp(100),
+        3,
+    )
+    .await;
+    assert_eq!(selected.item_ids, vec![first, second, third]);
+    assert_eq!(group_summary_count(&turso, &oldest).await, 0);
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
+            .await
+            .unwrap(),
+        frontier
+    );
+    let same = assert_rich_selection_matches(
+        &sqlite,
+        &turso,
+        &shard,
+        ClaimUnit::SameGroupKey,
+        ClaimCompatibility {
+            same_group_key: true,
+            ..Default::default()
+        },
+        timestamp(100),
+        1,
+    )
+    .await;
+    assert_eq!(same.item_ids, vec![first]);
+    assert!(matches!(
+        ProjectionStore::select_rich_claim(
+            &sqlite,
+            &shard,
+            ClaimUnit::WholeGroup,
+            &batching,
+            timestamp(100),
+            1,
+        ),
+        Err(pqueue_engine::EngineError::BatchTooLarge)
+    ));
+    assert!(matches!(
+        AsyncProjectionStore::select_rich_claim(
+            &turso,
+            shard.clone(),
+            ClaimUnit::WholeGroup,
+            batching.clone(),
+            timestamp(100),
+            1,
+        )
+        .await,
+        Err(pqueue_engine::EngineError::BatchTooLarge)
+    ));
+    apply_both_rich(
+        &mut sqlite,
+        &turso,
+        &shard,
+        1,
+        envelope(
+            "block-rich-group",
+            QueueCommand::SetGates(SetGatesCommand {
+                gate_keys: vec!["blocked".to_string()],
+                blocked: true,
+            }),
+            Vec::new(),
+            101,
+        ),
+    )
+    .await;
+    let selected = assert_rich_selection_matches(
+        &sqlite,
+        &turso,
+        &shard,
+        ClaimUnit::WholeGroup,
+        batching.clone(),
+        timestamp(101),
+        3,
+    )
+    .await;
+    assert_eq!(selected.item_ids, vec![third]);
+    apply_both_rich(
+        &mut sqlite,
+        &turso,
+        &shard,
+        2,
+        envelope(
+            "pause-rich",
+            QueueCommand::PauseQueue(PauseQueueCommand {
+                drain_intake: false,
+            }),
+            Vec::new(),
+            102,
+        ),
+    )
+    .await;
+    assert!(
+        assert_rich_selection_matches(
+            &sqlite,
+            &turso,
+            &shard,
+            ClaimUnit::SameGroupKey,
+            ClaimCompatibility {
+                same_group_key: true,
+                ..Default::default()
+            },
+            timestamp(102),
+            3,
+        )
+        .await
+        .item_ids
+        .is_empty()
+    );
+
+    let cohort_shard = QueueKey::new(
+        TenantId::new("cohort-tenant").unwrap(),
+        QueueId::new("cohort-queue").unwrap(),
+    );
+    let mut cohort_definition = rich_definition;
+    cohort_definition.tenant_id = cohort_shard.tenant_id.clone();
+    cohort_definition.queue_id = cohort_shard.queue_id.clone();
+    let mut cohort_sqlite = SqliteRelational::in_memory().unwrap();
+    ProjectionStore::ensure_shard(&mut cohort_sqlite, &cohort_definition).unwrap();
+    let cohort_turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&cohort_turso, cohort_definition)
+        .await
+        .unwrap();
+    let incomplete_group = GroupKey::new("incomplete").unwrap();
+    let complete_group = GroupKey::new("complete").unwrap();
+    let incomplete = ItemId::mint(31, 0, 0);
+    let cohort_first = ItemId::mint(31, 0, 1);
+    let cohort_second = ItemId::mint(31, 0, 2);
+    let cohort_member = |id, key: &str, group: &GroupKey, gates| PushItem {
+        group_key: Some(group.clone()),
+        cohort_size: Some(2),
+        gate_keys: gates,
+        ..push_item(id, key, 3)
+    };
+    apply_both_rich(
+        &mut cohort_sqlite,
+        &cohort_turso,
+        &cohort_shard,
+        0,
+        envelope(
+            "rich-cohorts",
+            QueueCommand::Push(PushCommand {
+                items: vec![
+                    cohort_member(incomplete, "incomplete", &incomplete_group, Vec::new()),
+                    cohort_member(
+                        cohort_first,
+                        "cohort-first",
+                        &complete_group,
+                        vec!["cohort-blocked".to_string()],
+                    ),
+                    cohort_member(cohort_second, "cohort-second", &complete_group, Vec::new()),
+                ],
+            }),
+            vec![incomplete, cohort_first, cohort_second],
+            200,
+        ),
+    )
+    .await;
+    let cohort_compatibility = ClaimCompatibility {
+        whole_cohort: true,
+        ..Default::default()
+    };
+    let cohort = assert_rich_selection_matches(
+        &cohort_sqlite,
+        &cohort_turso,
+        &cohort_shard,
+        ClaimUnit::WholeCohort,
+        cohort_compatibility.clone(),
+        timestamp(200),
+        2,
+    )
+    .await;
+    assert_eq!(cohort.item_ids, vec![cohort_first, cohort_second]);
+    assert!(cohort.cohort_id.is_some());
+    assert!(matches!(
+        ProjectionStore::select_rich_claim(
+            &cohort_sqlite,
+            &cohort_shard,
+            ClaimUnit::WholeCohort,
+            &cohort_compatibility,
+            timestamp(200),
+            1,
+        ),
+        Err(pqueue_engine::EngineError::BatchTooLarge)
+    ));
+    assert!(matches!(
+        AsyncProjectionStore::select_rich_claim(
+            &cohort_turso,
+            cohort_shard.clone(),
+            ClaimUnit::WholeCohort,
+            cohort_compatibility.clone(),
+            timestamp(200),
+            1,
+        )
+        .await,
+        Err(pqueue_engine::EngineError::BatchTooLarge)
+    ));
+    apply_both_rich(
+        &mut cohort_sqlite,
+        &cohort_turso,
+        &cohort_shard,
+        1,
+        envelope(
+            "block-rich-cohort",
+            QueueCommand::SetGates(SetGatesCommand {
+                gate_keys: vec!["cohort-blocked".to_string()],
+                blocked: true,
+            }),
+            Vec::new(),
+            201,
+        ),
+    )
+    .await;
+    assert!(
+        assert_rich_selection_matches(
+            &cohort_sqlite,
+            &cohort_turso,
+            &cohort_shard,
+            ClaimUnit::WholeCohort,
+            cohort_compatibility,
+            timestamp(201),
+            2,
+        )
+        .await
+        .item_ids
+        .is_empty()
     );
 }
