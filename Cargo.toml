@@ -10,6 +10,7 @@ members = [
     "crates/pqueue-engine",
     "crates/pqueue-projection",
     "crates/pqueue-relational",
+    "crates/pqueue-turso",
     "crates/pqueue-conformance",
     "crates/pqueue-memory",
     "crates/pqueue-sqlite",

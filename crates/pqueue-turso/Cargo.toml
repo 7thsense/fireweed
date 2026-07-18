@@ -1,0 +1,29 @@
+[package]
+name = "pqueue-turso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# Opt-in local embedded Turso Database engine. Remote/cloud sync is intentionally not part of this slice.
+local = ["dep:tokio", "dep:turso"]
+
+[dependencies]
+pqueue-relational = { path = "../pqueue-relational" }
+tokio = { version = "1", features = ["sync"], optional = true }
+# Turso's official Rust-native embedded client. Defaults pull in FTS and mimalloc; neither is needed here.
+turso = { version = "=0.7.0", default-features = false, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+[[test]]
+name = "local_relational"
+path = "tests/local_relational.rs"
+required-features = ["local"]
