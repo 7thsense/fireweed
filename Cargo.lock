@@ -2830,7 +2830,13 @@ dependencies = [
 name = "pqueue-turso"
 version = "0.17.3"
 dependencies = [
+ "bytes",
+ "pqueue-core",
+ "pqueue-engine",
+ "pqueue-projection",
  "pqueue-relational",
+ "pqueue-sqlite",
+ "serde_json",
  "tempfile",
  "tokio",
  "turso",

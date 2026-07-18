@@ -14,12 +14,18 @@ default = []
 local = ["dep:tokio", "dep:turso"]
 
 [dependencies]
+pqueue-core = { path = "../pqueue-core" }
+pqueue-engine = { path = "../pqueue-engine" }
 pqueue-relational = { path = "../pqueue-relational" }
+bytes = "1"
+serde_json = "1"
 tokio = { version = "1", features = ["sync"], optional = true }
 # Turso's official Rust-native embedded client. Defaults pull in FTS and mimalloc; neither is needed here.
 turso = { version = "=0.7.0", default-features = false, optional = true }
 
 [dev-dependencies]
+pqueue-projection = { path = "../pqueue-projection" }
+pqueue-sqlite = { path = "../pqueue-sqlite" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 

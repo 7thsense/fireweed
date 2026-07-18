@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use pqueue_core::{ItemId, LeaseToken};
 use pqueue_relational::{OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA};
 use tokio::sync::Mutex;
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
@@ -165,7 +168,8 @@ pub struct SchemaReport {
 /// blocking a Tokio worker or manufacturing a private runtime/thread boundary.
 pub struct TursoRelational {
     database: Database,
-    writer: Mutex<Connection>,
+    pub(crate) writer: Arc<Mutex<Connection>>,
+    pub(crate) live_tokens: Arc<Mutex<HashMap<ItemId, LeaseToken>>>,
     config: TursoConfig,
 }
 
@@ -189,7 +193,8 @@ impl TursoRelational {
         verify_schema(&writer).await?;
         Ok(Self {
             database,
-            writer: Mutex::new(writer),
+            writer: Arc::new(Mutex::new(writer)),
+            live_tokens: Arc::new(Mutex::new(HashMap::new())),
             config,
         })
     }
