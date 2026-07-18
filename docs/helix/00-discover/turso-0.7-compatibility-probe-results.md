@@ -32,22 +32,31 @@ time, so the schema check cannot silently substitute a reduced copy.
 | Behavior | Turso 0.7.0 | rusqlite 0.32.1 | Implication |
 |---|---|---|---|
 | Exact current `RELATIONAL_SCHEMA`, including partial indexes | Pass | Pass | The current DDL is accepted unchanged. |
-| Exact `open_inner` PRAGMA `execute_batch` | `Misuse("unexpected row during execution")` | Pass | Turso's `execute_batch` rejects the row produced by `journal_mode`; it still applies the side effect. |
+| Exact `open_inner` PRAGMA `execute_batch` | `Misuse("unexpected row during execution")`; immediate readback `journal_mode=wal` | Pass | Turso's `execute_batch` rejects the row produced by `journal_mode` after applying that partial side effect. |
 | `pragma_update("journal_mode", "WAL")` | Pass, one result row | N/A | This is a mechanical Turso API adaptation, not a SQL rewrite. |
-| `synchronous=NORMAL`, five-second busy timeout | Pass | Pass | Readback was synchronous `1` and busy timeout `5000`. |
-| Queue and cursor creation plus two-item immediate transaction | Pass | Pass | Projection rows and `next_seq=2` committed together. |
-| Priority/FIFO eligible query | `item-b`, `item-a` | `item-b`, `item-a` | Ordered eligibility matched byte-for-byte for the fixture. |
-| Blocked-gate anti-join, CTE, group-summary UPSERT, typed-index range | Pass | Existing baseline | The representative difficult SQL classes executed successfully. |
-| Injected item-plus-cursor rollback | Pass | Pass | The item was absent and `next_seq` remained `2`. |
-| Close and reopen | Pass | Pass | Two items, cursor `2`, eligible order, and index state survived. |
+| Supported configuration readback | `journal_mode=wal`, `synchronous=1`, `busy_timeout=5000` | Pass | Every configured value is asserted after the Turso-specific API calls. |
+| Queue/cursor creation plus batched lifecycle transition | Pass | Pass | Three inserts, item A's lease fields, its typed index, and `next_seq=4` committed together. |
+| Priority/FIFO eligible query | `item-b`, `item-c` | `item-b`, `item-c` | Leased item A was excluded and ordered eligibility matched byte-for-byte. |
+| Blocked-gate anti-join, CTE, group-summary UPSERT, typed-index range | Pass | Pass in the matched fixture | The representative difficult SQL classes executed successfully. |
+| Injected item-plus-cursor rollback | Pass | Pass | The item was absent and `next_seq` remained `4`. |
+| Close and reopen | Full state equal to pre-close state | Full state equal to pre-close state | Item count, lease fields, typed index, cursor, and eligible order survived in both engines. |
+| Cross-engine reopened state | Equal | Equal | Both returned 3 items, cursor 4, eligible `[item-b,item-c]`, index `[item-a]`, and identical item-A lease state. |
 | `wal_checkpoint(PASSIVE)` result shape | Pass: three integers, observed `(0,82,82)` | Existing baseline | The current checkpoint reader shape is available. Frame counts are run-specific. |
 | Sixteen disjoint writers | Pass: 16 tasks, 16 distinct committed IDs | Not used as a performance baseline | Every spawned task and every distinct row is asserted. All completed on their first application retry in this run. |
 | Active client-key conflict | `same-key-a` persisted; `same-key-b` received typed constraint | Same winner and constraint class | The partial active-key index behaved deterministically. |
 
-The exact Turso PRAGMA failure is load-bearing evidence. Calling `execute_batch` returns an error after
-`journal_mode=WAL` has already changed the connection, so retrying the whole initialization batch can report
-failure after a partial side effect. A Turso-specific implementation would have to call `pragma_update` and
-consume its row before applying the remaining settings.
+The exact Turso PRAGMA failure is load-bearing evidence. Immediately after `execute_batch` returns the
+`Misuse`, the probe queries `PRAGMA journal_mode` and requires `wal`. Calling `execute_batch` therefore
+reports failure after a proven partial side effect; retrying the whole initialization batch is unsafe. A
+Turso-specific implementation would have to call `pragma_update`, consume its row, apply the remaining
+settings, and assert the resulting `wal`, synchronous `1`, and busy timeout `5000` values.
+
+The representative projection transaction creates the queue and cursor, inserts three pending items, adds
+item A's typed-index row, updates item A to `Leased` with token hash `A1B2`, expiry `1000`, worker
+`worker-a`, retry count `1`, item version `2`, and last command sequence `4`, then advances the cursor to
+`4`. All operations share one immediate transaction. After reopen, both engines reconstruct a
+`ProjectionState` containing item count, cursor, ordered eligible IDs, typed-index IDs, and every listed
+lease field. Each engine must equal its own pre-close state, then Turso and rusqlite must equal each other.
 
 ## Concurrency Assertions
 
@@ -84,11 +93,12 @@ They reinforce keeping the probe opt-in and outside the default root workspace a
 
 ## Decision
 
-The SQL result is promising but the adapter decision is **no-go under the current pqueue ports**. Turso's
-Rust API builds the database asynchronously and makes SQL preparation, queries, transactions, commits, and
+The SQL result is promising but the governing probe stop rule makes the adapter decision **no-go under the
+current pqueue ports**. This is not a claim that a Turso adapter is intrinsically impossible. Turso's Rust
+API builds the database asynchronously and makes SQL preparation, queries, transactions, commits, and
 rollbacks async. pqueue's `LogStore` and `ProjectionStore` operations and the closure passed to
-`Backend::write` are synchronous inside the atomic unit-of-work lock. A Turso implementation therefore
-cannot preserve the current boundary without either:
+`Backend::write` are synchronous inside the atomic unit-of-work lock. Under that current boundary, an
+adapter would require either:
 
 - changing the storage axes and atomic closure to async across the workspace; or
 - introducing a blocking database actor and serial request/response handoff.
