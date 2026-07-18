@@ -9,6 +9,7 @@ mod active_scope;
 mod auth;
 mod claim_validation;
 mod command;
+mod commit;
 mod compose;
 mod control_plane;
 mod density;
@@ -60,6 +61,7 @@ pub use command::{
     command_envelope_change_records, validate_gate_command, validate_gate_push,
     validate_request_replay_metadata,
 };
+pub use commit::{RawCommitFault, RawCommitOutcome, RawCommitRequest};
 pub use error::{CommitRejection, EngineError, EngineResult};
 pub use finalize_validation::{
     FinalizeTargeting, validate_finalize_targeting, validate_purge_force, validate_purge_targeting,

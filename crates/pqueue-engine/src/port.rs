@@ -17,7 +17,6 @@ use pqueue_core::{
     RangeScanResponse, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 
-use crate::ProjectionStore;
 use crate::claim_validation::ClaimCompatibility;
 use crate::command::{
     ChangeRecord, CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand,
@@ -25,6 +24,7 @@ use crate::command::{
 };
 use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
+use crate::{ProjectionStore, RawCommitFault, RawCommitOutcome, RawCommitRequest};
 
 /// API-001 write-reserved item field names. These names are emitted by the claimed-item / lease wire
 /// shapes, so user-authored field writes must reject them before commit or RESP rendering.
@@ -123,6 +123,37 @@ pub trait Backend: Send + Sync {
     where
         F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
         R: Send;
+
+    /// Drive the append/apply boundary with an owned, typed request.
+    ///
+    /// This additive seam supersedes raw closure construction in conformance and fault-injection callers.
+    /// Its owned inputs are suitable for transfer into a backend-owned task once an adapter gains a native
+    /// async transaction. The legacy implementation below is correct only for implementations whose
+    /// [`Self::write`] work completes synchronously without yielding: cancellation cannot then interrupt a
+    /// started commit. Any implementation whose commit can return `Pending` MUST override this method,
+    /// transfer the request and transaction capability into backend-owned execution before its first
+    /// suspension, and await only that task's result channel. Dropping the caller after transfer may discard
+    /// the response, but MUST NOT cancel the started commit; its outcome remains resolvable by replay.
+    fn commit_raw(
+        &self,
+        request: RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<RawCommitOutcome>> + Send {
+        async move {
+            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            self.write(move |log, projection| {
+                if fault == RawCommitFault::BeforeAppend {
+                    return Err(EngineError::Invalid("fault-injection: kill before append"));
+                }
+                let positions = log.append(&shard, &commands, expected_epoch)?;
+                if fault == RawCommitFault::AfterAppendBeforeApply {
+                    return Ok(RawCommitOutcome::appended(positions));
+                }
+                projection.apply(&positions, &commands)?;
+                Ok(RawCommitOutcome::applied(positions))
+            })
+            .await
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

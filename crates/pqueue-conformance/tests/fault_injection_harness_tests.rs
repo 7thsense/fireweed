@@ -1,27 +1,105 @@
 //! `fault_injection_harness_tests` (TP-001 line 148) — the reusable fault-injection CAPABILITY and its
 //! own tests. This suite proves the harness itself: that [`pqueue_conformance::fault::inject_commit`]
-//! genuinely drives a backend's commit pipeline through the [`Backend::write`] unit-of-work seam and
+//! genuinely drives a backend's commit pipeline through the typed [`Backend::commit_raw`] seam and
 //! injects a crash at the AC-TXN-3 cut points, producing the durable footprint each cut point claims.
 //!
-//! Because the only commit seam the engine exposes is the `write` closure, the harness expresses each cut
-//! point as a decision inside that closure and simulates a process kill by dropping the handle and
+//! The harness expresses each cut point as owned request data and simulates a process kill by dropping the handle and
 //! reopening the SAME durable state. These tests exercise the capability against a non-durable profile
 //! (memory — in-process invariants only) and two durable profiles (composed sqlite-log, composed
 //! object-log) so the cut-point mechanics are validated on the recovery path they exist to model.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use pqueue_conformance::fault::{CutPoint, durable_command_count, inject_commit, spec};
 use pqueue_conformance::{envelope, item, qdef, qkey, shard, ts};
 use pqueue_engine::{
-    ComposedBackend, ControlPlaneStore, EngineError, EngineResult, InProcessControlPlane, LogStore,
-    ProjectionRead, ProjectionSnapshot, PushCommand, QueueCommand,
+    Backend, CommandPosition, ComposedBackend, ControlPlaneStore, DurabilityClass, EngineError,
+    EngineResult, InProcessControlPlane, LogStore, LogWriter, ProjectionRead, ProjectionSnapshot,
+    ProjectionWriter, PushCommand, QueueCommand, RawCommitFault, RawCommitOutcome,
+    RawCommitRequest,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::HybridProjectionStore;
-use std::sync::Arc;
+use tokio::sync::{Notify, oneshot};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Default)]
+struct ControlledCommitState {
+    started: Notify,
+    release: Notify,
+    resolved: AtomicBool,
+    replay_outcome: Mutex<Option<RawCommitOutcome>>,
+}
+
+struct ControlledOwnedCommitBackend {
+    state: Arc<ControlledCommitState>,
+}
+
+impl Backend for ControlledOwnedCommitBackend {
+    fn durability_class(&self) -> DurabilityClass {
+        DurabilityClass::Atomic
+    }
+
+    fn write<R, F>(&self, _f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
+    where
+        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
+        R: Send,
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn commit_raw(
+        &self,
+        request: RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<RawCommitOutcome>> + Send {
+        let state = Arc::clone(&self.state);
+        async move {
+            let (result_tx, result_rx) = oneshot::channel();
+            tokio::spawn(async move {
+                // Transfer is complete before this signal. The worker owns the request and remains alive if
+                // the caller awaiting `result_rx` is cancelled.
+                state.started.notify_waiters();
+                state.release.notified().await;
+
+                let result = if request.fault() == RawCommitFault::BeforeAppend {
+                    Err(EngineError::Invalid("fault-injection: kill before append"))
+                } else {
+                    let positions = request
+                        .commands()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| {
+                            CommandPosition::new(
+                                request.shard().clone(),
+                                request.expected_epoch(),
+                                index as u64 + 1,
+                            )
+                        })
+                        .collect();
+                    let outcome = if request.fault() == RawCommitFault::AfterAppendBeforeApply {
+                        RawCommitOutcome::appended(positions)
+                    } else {
+                        RawCommitOutcome::applied(positions)
+                    };
+                    *state
+                        .replay_outcome
+                        .lock()
+                        .expect("replay outcome poisoned") = Some(outcome.clone());
+                    Ok(outcome)
+                };
+                state.resolved.store(true, Ordering::Release);
+                let _ = result_tx.send(result);
+            });
+
+            result_rx.await.map_err(|_| {
+                EngineError::Storage("owned commit worker dropped its result".to_string())
+            })?
+        }
+    }
+}
 
 fn unique_dir(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -69,6 +147,80 @@ fn objectlog_sqlite_factory() -> impl Fn() -> HybridBackend {
 // ---------------------------------------------------------------------------
 // Capability tests: BeforeAppend produces zero durable effect on every backend.
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn dropping_unpolled_owned_commit_leaves_no_effect() {
+    let backend = pqueue_memory::composed_memory_backend();
+    backend.create_queue(qdef()).await.unwrap();
+    let epoch = backend.current_epoch(&shard()).await.unwrap();
+    let request = RawCommitRequest::new(
+        shard(),
+        vec![envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item("700001", "unpolled", 1)],
+            }),
+            vec![],
+        )],
+        epoch,
+    );
+
+    // Constructing the future transfers owned request data to the backend seam. Cancellation before its
+    // first poll is still the queued phase: no append or apply may have started.
+    let commit = backend.commit_raw(request);
+    drop(commit);
+
+    assert_eq!(durable_command_count(&backend).await.unwrap(), 0);
+    assert_eq!(backend.metrics(&qkey()).await.unwrap().pending, 0);
+}
+
+#[tokio::test]
+async fn dropping_started_caller_does_not_cancel_owned_commit() {
+    let state = Arc::new(ControlledCommitState::default());
+    let backend = Arc::new(ControlledOwnedCommitBackend {
+        state: Arc::clone(&state),
+    });
+    let started = state.started.notified();
+    let caller_backend = Arc::clone(&backend);
+    let caller = tokio::spawn(async move {
+        caller_backend
+            .commit_raw(RawCommitRequest::new(
+                shard(),
+                vec![envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item("700003", "started", 1)],
+                    }),
+                    vec![],
+                )],
+                7,
+            ))
+            .await
+    });
+
+    // The backend-owned worker has the request and is deliberately suspended during commit. Cancelling the
+    // caller now drops only its response awaiter.
+    started.await;
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    state.release.notify_one();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !state.resolved.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owned commit must resolve after caller cancellation");
+
+    let replay = state
+        .replay_outcome
+        .lock()
+        .expect("replay outcome poisoned")
+        .clone()
+        .expect("resolved outcome remains replayable after lost response");
+    assert!(replay.projection_applied());
+    assert_eq!(replay.positions().len(), 1);
+    assert_eq!(replay.positions()[0].backend_epoch, 7);
+}
 
 async fn assert_before_append_is_inert<B>(make: &impl Fn() -> B)
 where
@@ -204,6 +356,30 @@ async fn full_commit_is_visible_in_process_memory() {
     assert_eq!(durable_command_count(&a).await.unwrap(), 1);
 }
 
+#[tokio::test]
+async fn typed_commit_reports_resolved_apply_boundary() {
+    let backend = pqueue_memory::composed_memory_backend();
+    backend.create_queue(qdef()).await.unwrap();
+    let epoch = backend.current_epoch(&shard()).await.unwrap();
+    let outcome = backend
+        .commit_raw(RawCommitRequest::new(
+            shard(),
+            vec![envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![item("700002", "resolved", 1)],
+                }),
+                vec![],
+            )],
+            epoch,
+        ))
+        .await
+        .unwrap();
+
+    assert!(outcome.projection_applied());
+    assert_eq!(outcome.positions().len(), 1);
+    assert_eq!(backend.metrics(&qkey()).await.unwrap().pending, 1);
+}
+
 // ---------------------------------------------------------------------------
 // The harness drives the real request_id idempotency path too (AfterApplyBeforeResponse
 // / AfterResponse): a committed-then-lost response replays exactly once on reopen.
@@ -259,7 +435,7 @@ async fn lost_response_replays_once_sqlite_log() {
 // ---------------------------------------------------------------------------
 // Object-log INTERNAL cut points (TP-003 §3.10 AC-TXN-4): segment write, manifest CAS/ack, owner
 // reassignment (epoch-fence CAS), and snapshot write. These are instants strictly INSIDE
-// `SegmentedObjectLog`'s own commit pipeline that the public `Backend::write` seam above cannot reach —
+// `SegmentedObjectLog`'s own commit pipeline that the public `Backend::commit_raw` seam above cannot reach —
 // that seam can only crash before or after a whole `append`/`acquire_epoch`/`write_snapshot` call, not at
 // the durable sub-steps inside one. Driven directly against `ObjectLog`'s `LogStore` impl (bypassing
 // `ComposedBackend`) so the fault strikes the pipeline itself.

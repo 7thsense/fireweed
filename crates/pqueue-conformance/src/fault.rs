@@ -4,9 +4,8 @@
 //!
 //! # What this exercises for real
 //!
-//! The only commit-pipeline seam the engine exposes to a driver is [`Backend::write`]: a synchronous
-//! unit-of-work closure handed a [`pqueue_engine::LogWriter`] and a
-//! [`pqueue_engine::ProjectionWriter`]. [`inject_commit`] drives that seam and injects
+//! The direct commit-pipeline seam the engine exposes to a driver is [`Backend::commit_raw`]: an async
+//! operation accepting an owned [`pqueue_engine::RawCommitRequest`]. [`inject_commit`] drives that seam and injects
 //! a crash at the AC-TXN-3 cut points that ARE reachable through it:
 //!
 //! * `BeforeAppend` — return before `append`: zero durable effect on every backend.
@@ -61,8 +60,8 @@ use pqueue_engine::{
     CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, DurabilityClass, EngineError, EntryRecovery,
     FenceLeaseCommand, FinalizeKind, FinalizeOutcome, GroupBatching, LogRead, PayloadUpdate,
-    PushCommand, PushSpec, QueueCommand, RecoveryReadPort, RequestIdReplayProbe, SetGatesCommand,
-    SetGatesPort, UnfenceLeaseCommand,
+    PushCommand, PushSpec, QueueCommand, RawCommitFault, RawCommitRequest, RecoveryReadPort,
+    RequestIdReplayProbe, SetGatesCommand, SetGatesPort, UnfenceLeaseCommand,
 };
 
 use crate::{ConformanceCore, claim_req, commit, envelope, item, qdef, qkey, shard, ts};
@@ -120,32 +119,26 @@ pub fn spec(key: &str, priority: i64) -> PushSpec {
     }
 }
 
-/// Drive one raw commit through the backend's [`Backend::write`] unit-of-work seam, injecting a crash at
+/// Drive one raw commit through the backend's typed [`Backend::commit_raw`] seam, injecting a crash at
 /// `cut`. Returns the appended positions when the append reached the durable log, or the injected error.
 ///
-/// This is the reusable fault-injection primitive: the whole capability is expressing each AC-TXN-3 cut
-/// point as a decision INSIDE the one commit closure the engine exposes.
+/// This is the reusable fault-injection primitive: every AC-TXN-3 cut is an owned request value rather than
+/// arbitrary caller code running inside the backend transaction.
 pub async fn inject_commit<B: Backend + ControlPlaneStore>(
     backend: &B,
     env: CommandEnvelope,
     cut: CutPoint,
 ) -> Result<Vec<CommandPosition>, EngineError> {
     let epoch = backend.current_epoch(&shard()).await?;
+    let fault = match cut {
+        CutPoint::BeforeAppend => RawCommitFault::BeforeAppend,
+        CutPoint::AfterAppendBeforeApply => RawCommitFault::AfterAppendBeforeApply,
+        CutPoint::AfterApplyBeforeResponse | CutPoint::AfterResponse => RawCommitFault::None,
+    };
     backend
-        .write(move |lw, pw| {
-            if cut == CutPoint::BeforeAppend {
-                return Err(EngineError::Invalid("fault-injection: kill before append"));
-            }
-            let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
-            if cut == CutPoint::AfterAppendBeforeApply {
-                // Durable append committed; skip apply to model a kill in the commit→apply window. The
-                // caller drops+reopens the durable backend so recovery replays this tail entry.
-                return Ok(pos);
-            }
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(pos)
-        })
+        .commit_raw(RawCommitRequest::new(shard(), vec![env], epoch).with_fault(fault))
         .await
+        .map(|outcome| outcome.into_positions())
 }
 
 /// The number of durably-appended commands for the fixture shard (recovery/no-divergence probe).
@@ -1745,7 +1738,7 @@ pub async fn ac_txn_3_commit_transition_request_id<
     // request_id-bearing op. `commit_transition`'s public call is atomic (append+apply under one lock), so —
     // exactly like the PUSH mid-pipeline probe — we use `build_request_id_commit_envelope` to construct the
     // EXACT durable request_id-bearing FINALIZE envelope a single-entry commit would append (same request_id +
-    // whole-body fingerprint), drive it through `Backend::write` with a kill BEFORE apply, then reopen: recovery
+    // whole-body fingerprint), drive it through `Backend::commit_raw` with a kill BEFORE apply, then reopen: recovery
     // replays the durable-but-unapplied commit AND rebuilds commit_idempotency from it, so a retry by
     // request_id replays the ONE committed outcome (0 duplicate transitions).
     let rid_mid = RequestId::new("ac-txn-3-commit-transition-mid").unwrap();
@@ -2000,7 +1993,7 @@ pub async fn ac_txn_3_commit_transition_request_id<
     // production `commit_transition` appends the WHOLE commit — the committed entry's Finalize AND the
     // CommitTransition outcome marker — as ONE atomic log batch (no crash window between committed-entry
     // durability and outcome durability). This probe builds that exact batch via
-    // `build_request_id_commit_envelopes` and drives it through `Backend::write` appending the whole batch
+    // `build_request_id_commit_envelopes` and drives it through `Backend::commit_raw`, appending the whole batch
     // durably then SKIPPING apply — striking the append→apply crash window on the atomic commit unit. On
     // drop+reopen, recovery replays the durable tail (finalizing the valid input) AND rebuilds the full
     // [Committed, Rejected(StaleLease)] vec from the durable marker, so the retry replays it byte-identically. ====
@@ -2030,14 +2023,13 @@ pub async fn ac_txn_3_commit_transition_request_id<
         .current_epoch(&shard())
         .await
         .map_err(|e| format!("current_epoch: {e:?}"))?;
-    let envs_for_write = envs.clone();
     let pos = a
-        .write(move |lw, _pw| {
-            let pos = lw.append(&shard(), &envs_for_write, epoch)?;
-            // AfterAppendBeforeApply: durable append committed; skip apply to model the mid-pipeline kill.
-            Ok(pos)
-        })
+        .commit_raw(
+            RawCommitRequest::new(shard(), envs.clone(), epoch)
+                .with_fault(RawCommitFault::AfterAppendBeforeApply),
+        )
         .await
+        .map(|outcome| outcome.into_positions())
         .map_err(|e| format!("mixed AfterAppendBeforeApply append (skip apply): {e:?}"))?;
     ensure!(!pos.is_empty(), "the mixed commit envelopes are durable");
     let after = durable_command_count(&a).await?;

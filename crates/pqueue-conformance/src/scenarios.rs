@@ -14,7 +14,8 @@ use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRef, ClaimRequest, CommandPosition, EngineError,
     EngineResult, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome, GroupBatching,
     InstanceFence, PauseQueueCommand, PayloadUpdate, ProjectionSnapshot, PushCommand, PushSpec,
-    QueueCommand, ReplacePendingCommand, SideRecord, UnfenceLeaseCommand, UpsertOutcome,
+    QueueCommand, RawCommitRequest, ReplacePendingCommand, SideRecord, UnfenceLeaseCommand,
+    UpsertOutcome,
 };
 
 // Re-exported so callers that address every scenario through the `scenarios::` path uniformly (e.g. the
@@ -1210,13 +1211,9 @@ pub async fn adr011_typed_log_replay_reconstructs_index_rows<
     let b_epoch = b.current_epoch(&shard()).await.unwrap();
     for (_pos, env) in &page.entries {
         let env = env.clone();
-        b.write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env), b_epoch)?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+        b.commit_raw(RawCommitRequest::new(shard(), vec![env], b_epoch))
+            .await
+            .unwrap();
     }
 
     assert_eq!(
@@ -3188,13 +3185,9 @@ pub async fn pause_and_fence_reconstruct_from_log<B: ConformanceBackend>(make: i
     let b_epoch = b.current_epoch(&shard()).await.unwrap();
     for (_pos, env) in &page.entries {
         let env = env.clone();
-        b.write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env), b_epoch)?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+        b.commit_raw(RawCommitRequest::new(shard(), vec![env], b_epoch))
+            .await
+            .unwrap();
     }
 
     // B reconstructed the durable state: pause withholds the pending item, and the fence holds.
@@ -3952,12 +3945,9 @@ async fn append_at_epoch<B: ConformanceCore>(
     command: QueueCommand,
 ) -> EngineResult<()> {
     let env = envelope(command, vec![]);
-    b.write(move |lw, pw| {
-        let pos = lw.append(&shard(), std::slice::from_ref(&env), expected_epoch)?;
-        pw.apply(&pos, std::slice::from_ref(&env))?;
-        Ok(())
-    })
-    .await
+    b.commit_raw(RawCommitRequest::new(shard(), vec![env], expected_epoch))
+        .await
+        .map(|_| ())
 }
 
 /// A stale (non-current) epoch is fenced at append; the current epoch is admitted; `acquire_epoch`

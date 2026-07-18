@@ -64,9 +64,9 @@ use pqueue_core::{
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
     CommandId, CommitTransitionPort, ControlPlaneStore, FinalizePort, IndexQueryPort, LogRead,
-    ProjectionRead, PurgePort, PushItem, PushPort, QueueCommand, QueueKey, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, SnapshotStore, UpdateFieldsPort,
-    UpsertPort,
+    ProjectionRead, PurgePort, PushItem, PushPort, QueueCommand, QueueKey, RawCommitRequest,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, SnapshotStore,
+    UpdateFieldsPort, UpsertPort,
 };
 
 pub mod fault;
@@ -264,11 +264,7 @@ pub async fn commit<B: Backend + ControlPlaneStore>(backend: &B, env: CommandEnv
         .await
         .expect("current epoch");
     backend
-        .write(move |lw, pw| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
+        .commit_raw(RawCommitRequest::new(shard(), vec![env], epoch))
         .await
         .expect("commit");
 }

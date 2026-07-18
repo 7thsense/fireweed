@@ -2,7 +2,7 @@
 //! API-001 external-transaction contract (TP-003 §3.10, AC-TXN-1..7) run across backend PROFILES under
 //! fault injection, using the reusable [`pqueue_conformance::fault`] harness.
 //!
-//! Each row is a REAL run: the scenario functions drive live backends through the [`Backend::write`]
+//! Each row is a REAL run: the scenario functions drive live backends through [`Backend::commit_raw`]
 //! commit seam and the [`PushPort::push_with_request_id`] idempotency path, simulate process kills by
 //! drop+reopen of durable state, and assert the invariant. Every row (pass / n-a / documented-gap) is
 //! written to `docs/perf/evidence/tp003-ac-txn-matrix.jsonl` so the evidence reflects exactly this run.
@@ -94,7 +94,7 @@
 //! `*` AC-TXN-4 (`pass`) covers TP-003 §3.10 row 209 at BOTH architectural layers. The 5 substrate-internal
 //! instants drive [`pqueue_objectlog::ObjectLog`]'s `LogStore` impl DIRECTLY (bypassing `ComposedBackend`)
 //! with the [`pqueue_objectlog::FaultHook`] seam, striking cut points strictly INSIDE the segmented
-//! substrate's own commit pipeline that the public `Backend::write` seam cannot reach: `BeforeSegmentWrite`,
+//! substrate's own commit pipeline that the public `Backend::commit_raw` seam cannot reach: `BeforeSegmentWrite`,
 //! `AfterSegmentWriteBeforeManifest`, `AfterManifestBeforeAck` (whose "0 duplicate active leases" clause
 //! replays the recovered log through a fresh projection and asserts exactly one ACTIVE lease in the projected
 //! serving image, not just one durable Claim log command), `DuringOwnerReassignment`, `DuringSnapshotWrite`.
@@ -102,7 +102,7 @@
 //! projection apply before response" — live one layer up in `pqueue-engine`'s `ComposedBackend` (which applies
 //! a batch only after `LogStore::append` returned `Ok`), so they need the engine's [`pqueue_engine::ComposeFaultPoint`]
 //! seam (`DuringProjectionApply` / `AfterApplyBeforeResponse`): `ac_txn_4_composed_projection_apply_crash`
-//! strikes each against the composed OBJECTLOG backend through the `Backend::write` unit-of-work seam and, on
+//! strikes each against the composed OBJECTLOG backend through the `Backend::commit_raw` seam and, on
 //! drop+reopen recovery, asserts the row-209 outcomes on the RECONSTRUCTED PROJECTED STATE (3 accepted items
 //! preserved, the faulted Claim+Push replay EXACTLY ONCE → projected `leased`/`pending` counts not log-row
 //! counts, 0 duplicate active leases, stale-epoch commits EpochFenced). ("During manifest CAS" collapses into
@@ -180,7 +180,7 @@ use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, CommandPosition, ComposeFaultHook, ComposeFaultPoint,
     ComposedBackend, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
     InProcessControlPlane, LogRead, LogStore, ProjectionRead, ProjectionSnapshot, ProjectionStore,
-    PushCommand, PushPort, QueueCommand,
+    PushCommand, PushPort, QueueCommand, RawCommitRequest,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{
@@ -415,7 +415,7 @@ fn record_na(records: &mut Vec<AcEvidence>, ac: &'static str, backend: &str, det
 // alongside the AC-TXN-1..3/6 scenarios; it lives here, in the objectlog-specific test binary, which
 // already carries `pqueue_objectlog` as a dev-dependency. It drives `ObjectLog`'s `LogStore` impl DIRECTLY
 // (bypassing `ComposedBackend` entirely) so the [`FaultHook`] strikes instants strictly INSIDE the
-// segmented substrate's own commit pipeline that the public `Backend::write` seam cannot reach.
+// segmented substrate's own commit pipeline that the public `Backend::commit_raw` seam cannot reach.
 
 /// Crashes (`Err`) every time the pipeline reaches `target`; a no-op at every other cut point.
 struct CrashAt(FaultCutPoint);
@@ -714,7 +714,7 @@ async fn ac_txn_4_crash_point_matrix() -> AcOutcome {
     // apply" and "after projection apply before response". These are NOT internal to the segmented object-log
     // substrate the 5 cuts above drive directly; they live one layer up, in the `pqueue-engine`
     // ComposedBackend projection-apply step. They now have a REAL cut point via the engine's `ComposeFaultPoint`
-    // fault seam, struck against the composed OBJECTLOG backend through the `Backend::write` unit-of-work seam
+    // fault seam, struck against the composed OBJECTLOG backend through the `Backend::commit_raw` seam
     // and asserted on the RECONSTRUCTED PROJECTED STATE after drop+reopen recovery (see
     // `ac_txn_4_composed_projection_apply_crash`).
     asserts.extend(
@@ -749,7 +749,7 @@ async fn ac_txn_4_objectlog_crash_point_matrix() {
 /// AC-TXN-4 composed-layer projection-apply cut points (TP-003 §3.10 row 209). The two projection-apply
 /// instants row 209 names live in the `pqueue-engine` [`ComposedBackend`] apply step, ABOVE the segmented
 /// object-log substrate (whose 5 internal cut points `ac_txn_4_crash_point_matrix` covers). This drives the
-/// composed OBJECTLOG backend through the real [`Backend::write`] unit-of-work seam and injects a crash at
+/// composed OBJECTLOG backend through the real [`Backend::commit_raw`] seam and injects a crash at
 /// `cut` via the engine's [`ComposeFaultPoint`] fault hook:
 ///
 /// * [`ComposeFaultPoint::DuringProjectionApply`] — the durable log append has returned Ok, then the fault
@@ -842,11 +842,11 @@ async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcO
             ac_txn_4_push_env("900000004", "txn4c-a4"),
         ];
         let res = b
-            .write(move |lw, pw| {
-                let pos = lw.append(&pqueue_conformance::shard(), &batch, epoch)?;
-                pw.apply(&pos, &batch)?;
-                Ok(pos)
-            })
+            .commit_raw(RawCommitRequest::new(
+                pqueue_conformance::shard(),
+                batch,
+                epoch,
+            ))
             .await;
         ensure!(
             res.is_err(),
@@ -913,30 +913,22 @@ async fn ac_txn_4_composed_projection_apply_crash(cut: ComposeFaultPoint) -> AcO
         );
         let stale = ac_txn_4_push_env("900000005", "txn4c-stale");
         let stale_res = d
-            .write(move |lw, pw| {
-                let pos = lw.append(
-                    &pqueue_conformance::shard(),
-                    std::slice::from_ref(&stale),
-                    0,
-                )?;
-                pw.apply(&pos, std::slice::from_ref(&stale))?;
-                Ok(pos)
-            })
+            .commit_raw(RawCommitRequest::new(
+                pqueue_conformance::shard(),
+                vec![stale],
+                0,
+            ))
             .await;
         ensure!(
             matches!(stale_res, Err(EngineError::EpochFenced)),
             "a commit at the superseded epoch (0) must be EpochFenced; got {stale_res:?}"
         );
         let cur = ac_txn_4_push_env("900000006", "txn4c-cur");
-        d.write(move |lw, pw| {
-            let pos = lw.append(
-                &pqueue_conformance::shard(),
-                std::slice::from_ref(&cur),
-                cur_epoch,
-            )?;
-            pw.apply(&pos, std::slice::from_ref(&cur))?;
-            Ok(pos)
-        })
+        d.commit_raw(RawCommitRequest::new(
+            pqueue_conformance::shard(),
+            vec![cur],
+            cur_epoch,
+        ))
         .await
         .map_err(|e| format!("current-epoch commit after fence: {e:?}"))?;
     }
@@ -1465,7 +1457,7 @@ async fn ac_txn_3_request_id_replay_all_ops_all_cut_points() {
 // (`pqueue_objectlog::segmented`, AC-TXN-4); this section adds the analogous seam on the PROJECTION side —
 // `pqueue_sqlite::HybridFaultHook` — striking instants strictly INSIDE `HybridProjectionStore`'s own apply
 // pipeline (between the durable SQLite commit and the in-memory apply, and inside the deferred async SQLite
-// checkpoint apply) that neither `Backend::write` nor `PushPort::push_with_request_id` can isolate. Where a
+// checkpoint apply) that neither `Backend::commit_raw` nor `PushPort::push_with_request_id` can isolate. Where a
 // cut point genuinely IS reachable through the public seam (a memory-apply failure struck from inside
 // `apply_live`, or a crash in the commit→apply window), these scenarios drive it through the real
 // `ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>` instead, same as the rest of
@@ -4324,7 +4316,7 @@ async fn ac_txn_contract_matrix() {
     // NB: AC-TXN-3 is intentionally NOT run on `sqlite_relational`. Its `AfterAppendBeforeApply` cut injects a
     // durable-but-unapplied window via the raw `inject_commit` seam (append, skip apply, reopen, replay). The
     // UNIFIED relational store has no such window: its log axis IS its projection axis (`SqliteRelational` on
-    // both), so `Backend::write`'s append+apply commit together in one relational transaction and there is no
+    // both), so `Backend::commit_raw`'s append+apply commit together in one relational transaction and there is no
     // durable log entry that reopens as unapplied. The mid-pipeline cut is architecturally inapplicable here,
     // not a coverage gap — the composed log+projection profiles (sqlite_log/objectlog/postgres) cover AC-TXN-3.
     record_na(
