@@ -8,8 +8,10 @@
 //! re-implementation) via [`pqueue_projection`]; this crate owns only the durable sqlite persistence axes:
 //! the [`SqliteLog`] command-log and the derived relational [`SqliteProjectionStore`].
 
+mod async_projection;
 mod compose_log;
 mod relational;
+pub use async_projection::{AsyncSqliteProjectionStore, DEFAULT_ASYNC_PROJECTION_MAILBOX_CAPACITY};
 pub use compose_log::SqliteLog;
 pub use relational::{
     BackpressureLevel, CheckpointLineage, CheckpointProgress, ComposedSqliteRelationalBackend,
