@@ -120,70 +120,6 @@ async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
         vec![Value::Integer(2)]
     );
 
-    let typed_update = envelope(
-        "unsupported-typed-update",
-        QueueCommand::UpdateFields(UpdateFieldsCommand {
-            item_id: first,
-            field_ops: std::collections::BTreeMap::from([(
-                "must_rollback".to_string(),
-                Some(Bytes::from_static(b"yes")),
-            )]),
-            payload: PayloadUpdate::Keep,
-            set_priority: ScheduleUpdate::Keep,
-            set_not_before: ScheduleUpdate::Keep,
-            set_entity_document: Some(serde_json::json!({ "email": "changed@example.com" })),
-        }),
-        vec![first],
-        11,
-    );
-    assert!(matches!(
-        AsyncProjectionStore::apply_live(
-            &turso,
-            vec![CommandPosition::new(shard.clone(), 2, 1)],
-            vec![typed_update],
-        )
-        .await,
-        Err(pqueue_engine::EngineError::Unavailable)
-    ));
-    assert_eq!(
-        turso
-            .query(
-                "SELECT fields FROM pqueue_items WHERE item_id=?1",
-                vec![Value::Text(first.to_string())],
-            )
-            .await
-            .unwrap()[0]
-            .values,
-        vec![Value::Text("{}".to_string())]
-    );
-    let typed_replace = envelope(
-        "unsupported-typed-replace",
-        QueueCommand::ReplacePending(ReplacePendingCommand {
-            client_item_key: ClientItemKey::new("first").unwrap(),
-            superseded_item_id: first,
-            replacement: push_item(ItemId::mint(20, 0, 2), "first", 3),
-        }),
-        vec![first],
-        11,
-    );
-    assert!(matches!(
-        AsyncProjectionStore::apply_live(
-            &turso,
-            vec![CommandPosition::new(shard.clone(), 2, 1)],
-            vec![typed_replace],
-        )
-        .await,
-        Err(pqueue_engine::EngineError::Unavailable)
-    ));
-    assert_eq!(
-        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
-            .await
-            .unwrap()
-            .unwrap()
-            .sequence,
-        0
-    );
-
     let invalid_claim = envelope(
         "bad-cohort-claim",
         QueueCommand::CohortClaim(CohortClaimCommand {
@@ -687,6 +623,358 @@ async fn grouped_replace_is_rejected_before_projection_mutation() {
             .unwrap()
             .sequence,
         0
+    );
+
+    let ungrouped = ItemId::mint(23, 0, 2);
+    let grouped_replacement = ItemId::mint(23, 0, 3);
+    let shard = QueueKey::new(
+        TenantId::new("tenant").unwrap(),
+        QueueId::new("queue").unwrap(),
+    );
+    apply_turso(
+        &turso,
+        &shard,
+        1,
+        envelope(
+            "ungrouped-replace-source",
+            QueueCommand::Push(PushCommand {
+                items: vec![push_item(ungrouped, "ungrouped-key", 3)],
+            }),
+            vec![ungrouped],
+            42,
+        ),
+    )
+    .await
+    .unwrap();
+    let result = apply_turso(
+        &turso,
+        &shard,
+        2,
+        envelope(
+            "grouped-replacement-target",
+            QueueCommand::ReplacePending(ReplacePendingCommand {
+                client_item_key: ClientItemKey::new("ungrouped-key").unwrap(),
+                superseded_item_id: ungrouped,
+                replacement: PushItem {
+                    group_key: Some(group),
+                    ..push_item(grouped_replacement, "ungrouped-key", 3)
+                },
+            }),
+            vec![ungrouped, grouped_replacement],
+            43,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(pqueue_engine::EngineError::Unavailable)
+    ));
+    assert_eq!(
+        turso
+            .query(
+                "SELECT superseded FROM pqueue_items WHERE item_id=?1",
+                vec![Value::Text(ungrouped.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(0)]
+    );
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard)
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        1
+    );
+}
+
+#[tokio::test]
+async fn typed_update_and_replace_preserve_unique_index_atomicity_and_replay() {
+    let mut definition = definition();
+    definition.typed_indexes = vec![QueueIndex {
+        name: "by_email".to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: "email".to_string(),
+            index_type: IndexType::String,
+            unique: true,
+        }),
+    }];
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    let first = ItemId::mint(24, 0, 0);
+    let second = ItemId::mint(24, 0, 1);
+    let replacement = ItemId::mint(24, 0, 2);
+    let conflict_replacement = ItemId::mint(24, 0, 3);
+    let typed_item = |item_id, key: &str, email: &str| PushItem {
+        entity_document: Some(serde_json::json!({ "email": email })),
+        ..push_item(item_id, key, 3)
+    };
+    apply_turso(
+        &turso,
+        &shard,
+        0,
+        envelope(
+            "typed-mutation-push",
+            QueueCommand::Push(PushCommand {
+                items: vec![
+                    typed_item(first, "first", "a@example.com"),
+                    typed_item(second, "second", "b@example.com"),
+                ],
+            }),
+            vec![first, second],
+            50,
+        ),
+    )
+    .await
+    .unwrap();
+    let before_item = turso
+        .query(
+            "SELECT fields,payload,entity_document FROM pqueue_items WHERE item_id=?1",
+            vec![Value::Text(first.to_string())],
+        )
+        .await
+        .unwrap()[0]
+        .values
+        .clone();
+    let before_index = turso
+        .query(
+            "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+            vec![Value::Text(first.to_string())],
+        )
+        .await
+        .unwrap()[0]
+        .values
+        .clone();
+
+    let conflicting_update = envelope(
+        "typed-update-conflict",
+        QueueCommand::UpdateFields(UpdateFieldsCommand {
+            item_id: first,
+            field_ops: std::collections::BTreeMap::from([(
+                "must_rollback".to_string(),
+                Some(Bytes::from_static(b"yes")),
+            )]),
+            payload: PayloadUpdate::Set(Some(Bytes::from_static(b"must-rollback"))),
+            set_priority: ScheduleUpdate::Keep,
+            set_not_before: ScheduleUpdate::Keep,
+            set_entity_document: Some(serde_json::json!({ "email": "b@example.com" })),
+        }),
+        vec![first],
+        51,
+    );
+    assert!(matches!(
+        apply_turso(&turso, &shard, 1, conflicting_update).await,
+        Err(pqueue_engine::EngineError::Conflict)
+    ));
+    assert_eq!(
+        turso
+            .query(
+                "SELECT fields,payload,entity_document FROM pqueue_items WHERE item_id=?1",
+                vec![Value::Text(first.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        before_item
+    );
+    assert_eq!(
+        turso
+            .query(
+                "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+                vec![Value::Text(first.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        before_index
+    );
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        0
+    );
+
+    let successful_update = envelope(
+        "typed-update-success",
+        QueueCommand::UpdateFields(UpdateFieldsCommand {
+            item_id: first,
+            field_ops: std::collections::BTreeMap::from([(
+                "changed".to_string(),
+                Some(Bytes::from_static(b"yes")),
+            )]),
+            payload: PayloadUpdate::Set(Some(Bytes::from_static(b"changed"))),
+            set_priority: ScheduleUpdate::Keep,
+            set_not_before: ScheduleUpdate::Keep,
+            set_entity_document: Some(serde_json::json!({ "email": "c@example.com" })),
+        }),
+        vec![first],
+        52,
+    );
+    apply_turso(&turso, &shard, 1, successful_update.clone())
+        .await
+        .unwrap();
+    let changed = turso
+        .query(
+            "SELECT fields,payload,entity_document FROM pqueue_items WHERE item_id=?1",
+            vec![Value::Text(first.to_string())],
+        )
+        .await
+        .unwrap()[0]
+        .values
+        .clone();
+    assert_ne!(changed, before_item);
+    assert_eq!(
+        changed[2],
+        Value::Text("{\"email\":\"c@example.com\"}".to_string())
+    );
+    let changed_index = turso
+        .query(
+            "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+            vec![Value::Text(first.to_string())],
+        )
+        .await
+        .unwrap()[0]
+        .values
+        .clone();
+    assert_ne!(changed_index, before_index);
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 4, 1)],
+        vec![successful_update],
+    )
+    .await
+    .unwrap();
+
+    let successful_replace = envelope(
+        "typed-replace-success",
+        QueueCommand::ReplacePending(ReplacePendingCommand {
+            client_item_key: ClientItemKey::new("first").unwrap(),
+            superseded_item_id: first,
+            replacement: PushItem {
+                gate_keys: vec!["replacement-gate".to_string()],
+                ..typed_item(replacement, "first", "c@example.com")
+            },
+        }),
+        vec![first, replacement],
+        53,
+    );
+    apply_turso(&turso, &shard, 2, successful_replace.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        turso
+            .query(
+                "SELECT item_id FROM pqueue_item_index WHERE index_name='by_email' ORDER BY item_id",
+                vec![],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values[0].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::Text(second.to_string()),
+            Value::Text(replacement.to_string())
+        ]
+    );
+    assert_eq!(
+        turso
+            .query(
+                "SELECT COUNT(*) FROM pqueue_item_gates WHERE item_id=?1 AND gate_key='replacement-gate'",
+                vec![Value::Text(replacement.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(1)]
+    );
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 4, 2)],
+        vec![successful_replace],
+    )
+    .await
+    .unwrap();
+
+    let second_before = turso
+        .query(
+            "SELECT superseded,entity_document FROM pqueue_items WHERE item_id=?1",
+            vec![Value::Text(second.to_string())],
+        )
+        .await
+        .unwrap()[0]
+        .values
+        .clone();
+    let second_index_before = turso
+        .query(
+            "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+            vec![Value::Text(second.to_string())],
+        )
+        .await
+        .unwrap()[0]
+        .values
+        .clone();
+    let conflicting_replace = envelope(
+        "typed-replace-conflict",
+        QueueCommand::ReplacePending(ReplacePendingCommand {
+            client_item_key: ClientItemKey::new("second").unwrap(),
+            superseded_item_id: second,
+            replacement: typed_item(conflict_replacement, "second", "c@example.com"),
+        }),
+        vec![second, conflict_replacement],
+        54,
+    );
+    assert!(matches!(
+        apply_turso(&turso, &shard, 3, conflicting_replace).await,
+        Err(pqueue_engine::EngineError::Conflict)
+    ));
+    assert_eq!(
+        turso
+            .query(
+                "SELECT superseded,entity_document FROM pqueue_items WHERE item_id=?1",
+                vec![Value::Text(second.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        second_before
+    );
+    assert_eq!(
+        turso
+            .query(
+                "SELECT index_key FROM pqueue_item_index WHERE item_id=?1",
+                vec![Value::Text(second.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        second_index_before
+    );
+    assert!(
+        turso
+            .query(
+                "SELECT item_id FROM pqueue_items WHERE item_id=?1",
+                vec![Value::Text(conflict_replacement.to_string())],
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard)
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        2
     );
 }
 

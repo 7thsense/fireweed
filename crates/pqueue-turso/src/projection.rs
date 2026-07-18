@@ -221,27 +221,20 @@ fn typed_index_keys(
         .collect()
 }
 
-async fn maintain_typed_indexes_on_insert(
+async fn check_typed_unique_conflicts(
     transaction: &Connection,
     tenant: &str,
     queue: &str,
     indexes: &[QueueIndex],
-    items: &[PushItem],
+    keys: &[(String, Vec<u8>)],
 ) -> EngineResult<()> {
-    let mut batch_unique: HashMap<(String, Vec<u8>), String> = HashMap::new();
-    let mut rows = Vec::with_capacity(items.len());
-    for item in items {
-        let item_id = item.item_id.to_string();
-        let keys = typed_index_keys(indexes, item.entity_document.as_ref())?;
-        for (name, key) in &keys {
-            let unique = indexes
-                .iter()
-                .find(|index| index.name == *name)
-                .is_some_and(index_is_unique);
-            if !unique {
-                continue;
-            }
-            if one_row(
+    for (name, key) in keys {
+        let unique = indexes
+            .iter()
+            .find(|index| index.name == *name)
+            .is_some_and(index_is_unique);
+        if unique
+            && one_row(
                 transaction,
                 "SELECT item_id FROM pqueue_item_index WHERE tenant_id=?1 AND queue_id=?2 \
                  AND index_name=?3 AND index_key=?4 LIMIT 1",
@@ -254,8 +247,90 @@ async fn maintain_typed_indexes_on_insert(
             )
             .await?
             .is_some()
-            {
-                return Err(EngineError::Conflict);
+        {
+            return Err(EngineError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+async fn insert_typed_index_rows(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    item_id: &str,
+    keys: &[(String, Vec<u8>)],
+) -> EngineResult<()> {
+    for (name, key) in keys {
+        transaction
+            .execute(
+                "INSERT INTO pqueue_item_index \
+                 (tenant_id,queue_id,index_name,index_key,item_id) VALUES(?1,?2,?3,?4,?5) \
+                 ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
+                 index_key=excluded.index_key",
+                vec![
+                    tenant.to_string().into(),
+                    queue.to_string().into(),
+                    name.clone().into(),
+                    Value::Blob(key.clone()),
+                    item_id.to_string().into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
+async fn delete_typed_index_rows(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    ids: &[ItemId],
+) -> EngineResult<()> {
+    execute_for_items(
+        transaction,
+        sql::delete_item_indexes(ids.len()),
+        vec![tenant.to_string().into(), queue.to_string().into()],
+        ids,
+    )
+    .await
+}
+
+async fn replace_typed_indexes_for_entity(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    indexes: &[QueueIndex],
+    item_id: ItemId,
+    entity: &serde_json::Value,
+) -> EngineResult<()> {
+    let keys = typed_index_keys(indexes, Some(entity))?;
+    delete_typed_index_rows(transaction, tenant, queue, std::slice::from_ref(&item_id)).await?;
+    check_typed_unique_conflicts(transaction, tenant, queue, indexes, &keys).await?;
+    insert_typed_index_rows(transaction, tenant, queue, &item_id.to_string(), &keys).await
+}
+
+async fn maintain_typed_indexes_on_insert(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    indexes: &[QueueIndex],
+    items: &[PushItem],
+) -> EngineResult<()> {
+    let mut batch_unique: HashMap<(String, Vec<u8>), String> = HashMap::new();
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        let item_id = item.item_id.to_string();
+        let keys = typed_index_keys(indexes, item.entity_document.as_ref())?;
+        check_typed_unique_conflicts(transaction, tenant, queue, indexes, &keys).await?;
+        for (name, key) in &keys {
+            let unique = indexes
+                .iter()
+                .find(|index| index.name == *name)
+                .is_some_and(index_is_unique);
+            if !unique {
+                continue;
             }
             let batch_key = (name.clone(), key.clone());
             if batch_unique
@@ -268,24 +343,7 @@ async fn maintain_typed_indexes_on_insert(
         rows.push((item_id, keys));
     }
     for (item_id, keys) in rows {
-        for (name, key) in keys {
-            transaction
-                .execute(
-                    "INSERT INTO pqueue_item_index \
-                     (tenant_id,queue_id,index_name,index_key,item_id) VALUES(?1,?2,?3,?4,?5) \
-                     ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
-                     index_key=excluded.index_key",
-                    vec![
-                        tenant.to_string().into(),
-                        queue.to_string().into(),
-                        name.into(),
-                        Value::Blob(key),
-                        item_id.clone().into(),
-                    ],
-                )
-                .await
-                .map_err(storage)?;
-        }
+        insert_typed_index_rows(transaction, tenant, queue, &item_id, &keys).await?;
     }
     Ok(())
 }
@@ -1308,10 +1366,15 @@ async fn apply_owned(
                     if let Some(document) = &update.set_entity_document {
                         let definition =
                             definition_in_transaction(&transaction, &position.queue).await?;
-                        if !definition.typed_indexes.is_empty() {
-                            transaction.rollback().await.map_err(storage)?;
-                            return Err(EngineError::Unavailable);
-                        }
+                        replace_typed_indexes_for_entity(
+                            &transaction,
+                            &tenant,
+                            &queue,
+                            &definition.typed_indexes,
+                            update.item_id,
+                            document,
+                        )
+                        .await?;
                         transaction
                             .execute(
                                 sql::UPDATE_ENTITY_DOCUMENT,
@@ -1336,14 +1399,20 @@ async fn apply_owned(
                     std::slice::from_ref(&replace.superseded_item_id),
                 )
                 .await?;
-                if !definition.typed_indexes.is_empty()
-                    || !old_groups.is_empty()
+                if !old_groups.is_empty()
                     || replace.replacement.group_key.is_some()
                     || replace.replacement.cohort_size.is_some()
                 {
                     transaction.rollback().await.map_err(storage)?;
                     return Err(EngineError::Unavailable);
                 }
+                delete_typed_index_rows(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    std::slice::from_ref(&replace.superseded_item_id),
+                )
+                .await?;
                 transaction
                     .execute(
                         sql::SUPERSEDE_ITEM,
@@ -1437,6 +1506,14 @@ async fn apply_owned(
                         .await
                         .map_err(storage)?;
                 }
+                maintain_typed_indexes_on_insert(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    &definition.typed_indexes,
+                    std::slice::from_ref(item),
+                )
+                .await?;
             }
             QueueCommand::LeaseExpired(expired) => {
                 let groups =
