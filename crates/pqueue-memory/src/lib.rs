@@ -14,6 +14,12 @@ use pqueue_core::{ItemId, UtcTimestamp};
 use pqueue_engine::{Clock, CommandId, ComposedBackend, IdGen, InProcessControlPlane};
 use pqueue_projection::{InMemoryProjection, MemoryLog};
 
+mod experimental_async;
+
+pub use experimental_async::{
+    MemoryAtomicCommitter, MemoryOnePollDispatcher, experimental_async_memory_backend,
+};
+
 // ---------------------------------------------------------------------------
 // Composed memory backend (ADR-012)
 //
