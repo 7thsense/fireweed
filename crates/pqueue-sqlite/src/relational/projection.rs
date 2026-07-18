@@ -50,27 +50,9 @@ impl SqliteProjectionStore {
     /// commands before treating the durable projection as current again.
     pub fn reset_projection(&self) -> EngineResult<()> {
         let mut g = self.inner.lock().expect("projection store poisoned");
-        const OWNED_TABLES: &[&str] = &[
-            "pqueue_checkpoint_lineage",
-            "pqueue_item_index",
-            "pqueue_instance_fences",
-            "pqueue_side_records",
-            "pqueue_gate_state",
-            "pqueue_item_gates",
-            "pqueue_cohorts",
-            "pqueue_request_idempotency",
-            "pqueue_item_key_retention",
-            "pqueue_group_summary",
-            "relational_emission_cursor",
-            "pqueue_id_high_water",
-            "pqueue_items",
-            "relational_cursor",
-            "queues",
-        ];
-
         st(g.conn.execute_batch("BEGIN IMMEDIATE"))?;
         let reset = (|| -> EngineResult<()> {
-            for table in OWNED_TABLES {
+            for table in pqueue_relational::OWNED_PROJECTION_TABLES {
                 st(g.conn
                     .execute_batch(&format!("DROP TABLE IF EXISTS {table}")))?;
             }
@@ -159,7 +141,7 @@ impl SqliteProjectionStore {
         let row: Option<(i64, i64)> = st(g
             .conn
             .query_row(
-                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                pqueue_relational::SELECT_RELATIONAL_CURSOR,
                 params![t, q],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -200,7 +182,7 @@ impl SqliteProjectionStore {
         let (t, q) = parts(shard);
         let mut stmt = st(g
             .conn
-            .prepare("SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2"))?;
+            .prepare(pqueue_relational::SELECT_MATERIALIZED_ITEM_IDS))?;
         let rows = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
         for r in rows {
             let id = ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?;

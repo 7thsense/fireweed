@@ -15,6 +15,7 @@ path = "src/lib.rs"
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 pqueue-projection = { path = "../pqueue-projection" }
+pqueue-relational = { path = "../pqueue-relational" }
 axon-esf.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = "1"
