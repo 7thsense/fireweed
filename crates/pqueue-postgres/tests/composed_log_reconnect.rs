@@ -7,8 +7,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey};
-use pqueue_engine::{ClaimPort, ControlPlaneStore, ProjectionRead, PushCommand, QueueCommand};
-use pqueue_postgres::composed_postgres_backend_in_schema;
+use pqueue_engine::{
+    ClaimPort, ControlPlaneStore, LogStore, ProjectionRead, PushCommand, QueueCommand,
+};
+use pqueue_postgres::{PostgresLog, composed_postgres_backend_in_schema};
 
 fn pg_url() -> Option<String> {
     std::env::var("PQUEUE_PG_TEST_URL").ok()
@@ -33,6 +35,53 @@ fn composed_postgres_projection_rebuilds_from_durable_log_on_reconnect() {
         return;
     };
     futures::executor::block_on(reopen_inner(url));
+}
+
+#[test]
+fn postgres_log_pagination_resumes_after_last_returned_position() {
+    let Some(url) = pg_url() else {
+        eprintln!(
+            "COMPOSED POSTGRES RECOVERY SKIPPED (pagination) — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+    let mut log = PostgresLog::connect_in_schema(&url, &fresh_schema("pagination"))
+        .expect("connect postgres log");
+    let shard = qkey();
+    log.ensure_shard(&shard).unwrap();
+    let epoch = log.acquire_epoch(&shard).unwrap();
+    let commands = [
+        ("1", "page-a", 10),
+        ("2", "page-b", 20),
+        ("3", "page-c", 30),
+    ]
+    .into_iter()
+    .map(|(id, key, priority)| {
+        envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item(id, key, priority)],
+            }),
+            vec![],
+        )
+    })
+    .collect::<Vec<_>>();
+    log.append(&shard, &commands, epoch).unwrap();
+
+    let first = log.read_from(&shard, None, 1).unwrap();
+    assert_eq!(first.entries[0].0.sequence, 0);
+    assert_eq!(
+        first.next.as_ref().map(|position| position.sequence),
+        Some(0)
+    );
+    let second = log.read_from(&shard, first.next, 1).unwrap();
+    assert_eq!(second.entries[0].0.sequence, 1);
+    assert_eq!(
+        second.next.as_ref().map(|position| position.sequence),
+        Some(1)
+    );
+    let third = log.read_from(&shard, second.next, 1).unwrap();
+    assert_eq!(third.entries[0].0.sequence, 2);
+    assert!(third.next.is_none());
 }
 
 async fn reopen_inner(url: String) {

@@ -74,6 +74,11 @@ CREATE TABLE IF NOT EXISTS queue_defs (
 );
 "#;
 
+// The row lock is part of append's fencing protocol, not an optimization. It prevents a concurrent
+// connection from advancing the authoritative epoch after append validates it but before append commits.
+const LOCK_CURRENT_EPOCH_SQL: &str =
+    "SELECT assignment_epoch FROM log_epochs WHERE tenant=$1 AND queue=$2 FOR UPDATE";
+
 fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
     r.map_err(|e| EngineError::Storage(e.to_string()))
 }
@@ -87,6 +92,13 @@ fn parts(shard: &QueueKey) -> (String, String) {
         shard.tenant_id.as_str().to_string(),
         shard.queue_id.as_str().to_string(),
     )
+}
+
+fn next_page_cursor(
+    has_more: bool,
+    last_returned: Option<&CommandPosition>,
+) -> Option<CommandPosition> {
+    has_more.then(|| last_returned.cloned()).flatten()
 }
 
 /// The durable postgres command-log axis (ADR-012). The composition serializes access behind its
@@ -182,12 +194,9 @@ impl LogStore for PostgresLog {
         let client = self.client.get_mut();
         let mut tx = st(client.transaction())?;
         // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
-        let epoch: i64 = st(tx.query_opt(
-            "SELECT assignment_epoch FROM log_epochs WHERE tenant=$1 AND queue=$2",
-            &[&t, &q],
-        ))?
-        .ok_or(EngineError::NotFound)?
-        .get(0);
+        let epoch: i64 = st(tx.query_opt(LOCK_CURRENT_EPOCH_SQL, &[&t, &q]))?
+            .ok_or(EngineError::NotFound)?
+            .get(0);
         if expected_epoch != epoch as u64 {
             return Err(EngineError::EpochFenced);
         }
@@ -257,9 +266,12 @@ impl LogStore for PostgresLog {
             ));
         }
         let consumed = start + entries.len() as u64;
-        let cursor_epoch = entries.last().map(|(p, _)| p.backend_epoch).unwrap_or(0);
-        let next = (consumed < total as u64)
-            .then(|| CommandPosition::new(shard.clone(), cursor_epoch, consumed));
+        // `from` is the last consumed position and the next read adds one. Carry the last position this
+        // page actually returned; carrying `consumed` here would skip one command at every page boundary.
+        let next = next_page_cursor(
+            consumed < total as u64,
+            entries.last().map(|(position, _)| position),
+        );
         Ok(CommandPage { entries, next })
     }
 
@@ -414,5 +426,33 @@ impl LogStore for PostgresLog {
             out.push(serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod safety_shape_tests {
+    use pqueue_core::{QueueId, TenantId};
+    use pqueue_engine::{CommandPosition, QueueKey};
+
+    use super::{LOCK_CURRENT_EPOCH_SQL, next_page_cursor};
+
+    #[test]
+    fn append_locks_epoch_authority_until_its_transaction_finishes() {
+        let normalized = LOCK_CURRENT_EPOCH_SQL.to_ascii_uppercase();
+        assert!(normalized.contains("FROM LOG_EPOCHS"));
+        assert!(normalized.ends_with("FOR UPDATE"));
+    }
+
+    #[test]
+    fn pagination_cursor_is_last_returned_not_next_sequence() {
+        let shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        );
+        let last_returned = CommandPosition::new(shard, 4, 7);
+        let cursor = next_page_cursor(true, Some(&last_returned)).unwrap();
+        assert_eq!(cursor, last_returned);
+        assert_eq!(cursor.sequence, 7, "the reader adds one when resuming");
+        assert!(next_page_cursor(false, Some(&cursor)).is_none());
     }
 }
