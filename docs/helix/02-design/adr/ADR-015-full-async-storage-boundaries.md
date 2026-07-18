@@ -1,6 +1,10 @@
 ---
 ddx:
   id: adr-full-async-storage-boundaries
+  depends_on:
+    - prd
+    - concerns
+    - adr-cqrs-log-projection-storage-model
   links:
     - {kind: informed_by, to: prd}
     - {kind: informed_by, to: concerns}
@@ -11,9 +15,12 @@ ddx:
     - {kind: informed_by, to: adr-log-single-source-of-truth}
   status: accepted
   review:
-    self_hash: e38b3eaaa639ae1ccfc43cb7430924e4e5f7a35ad79f38d687a538a22030e680
-    deps: {}
-    reviewed_at: "2026-07-18T02:29:39Z"
+    self_hash: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
+    deps:
+      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
+      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # ADR-015: Full-async storage boundaries
@@ -65,6 +72,28 @@ The following rules are normative:
    when they can perform I/O.
 7. Capability accessors that are immutable after construction stay synchronous and never acquire an
    async lock.
+
+### Commit ownership and cancellation
+
+Mutation dispatch has three explicit phases:
+
+1. **Queued**: validation is complete, but no transaction or durable append has started. Cancellation
+   removes the request from the bounded queue and leaves no effect.
+2. **Started**: the backend transfers owned request data and an owned connection/transaction capability
+   into a backend-owned commit task. The task, not the caller future, begins and owns the transaction.
+   The caller awaits a result channel; dropping that awaiter does not cancel the task.
+3. **Resolved**: the task atomically persists the command/projection outcome for atomic stores, or the
+   command and replay outcome at the durable-log boundary for eventual-apply stores, then publishes the
+   result. A missing receiver discards only the response, never the outcome.
+
+Starting a task is bounded by per-queue admission and global backend capacity. Each started task registers
+its `request_id` and lifecycle in an owned commit registry. Graceful shutdown stops new admission, cancels
+queued work, and drains started tasks for the configured shutdown bound. If the process ends first,
+database rollback handles uncommitted atomic transactions and restart/replay resolves any durable outcome.
+No detached task may hold only a borrowed connection, transaction, mutex guard, or caller-owned buffer.
+
+Native drivers are awaited directly *inside* the owned commit task. Reads and pre-commit planning do not
+need this task boundary because their cancellation has no durable effect.
 
 Migration is additive at first: explicit async axis traits and compatibility wrappers land beside the
 legacy synchronous axes, the reference composition and memory backend move first, blocking adapters move

@@ -7,7 +7,7 @@ ddx:
     self_hash: b49b122239af43127faabd91747efc79cc3853555ffa9bfe4febb9d04f8bde32
     deps:
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # ADR-005: Kafka Producer Wire Adapter as P2 Compatibility Layer

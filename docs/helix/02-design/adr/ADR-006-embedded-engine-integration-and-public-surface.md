@@ -13,7 +13,7 @@ ddx:
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-    reviewed_at: "2026-07-18T02:26:58Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # ADR-006: Embedded Engine Integration and Public Crate Surface

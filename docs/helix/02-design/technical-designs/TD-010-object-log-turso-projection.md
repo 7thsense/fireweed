@@ -1,6 +1,14 @@
 ---
 ddx:
   id: td-object-log-turso-projection
+  depends_on:
+    - adr-full-async-storage-boundaries
+    - adr-turso-derived-projection
+    - adr-log-single-source-of-truth
+    - td-storage-architecture-backend-contracts
+    - td-s3-object-log-sqlite-projection-mode
+    - api-native-client-interface
+    - concerns
   links:
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
     - {kind: informed_by, to: adr-turso-derived-projection}
@@ -11,9 +19,16 @@ ddx:
     - {kind: informed_by, to: concerns}
   status: accepted
   review:
-    self_hash: 96edd46e3f05051f7fae1ecd9e35ad106ef2a414029db0d0ca62c777e47d2fa3
-    deps: {}
-    reviewed_at: "2026-07-18T02:29:40Z"
+    self_hash: ef2026084d244dee4376217af4e3c5d9b9d80628edac3a8aeffc0876660d286f
+    deps:
+      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
+      adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
+      adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
+      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
+      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
+      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
+      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Technical Design: TD-010 Object-log + Turso Projection
@@ -56,6 +71,9 @@ whose manifest remains the acknowledged-command authority.
 - `TursoProjectionStore` owns `turso::Database` plus a connection/transaction coordinator using
   `tokio::sync` primitives. The first implementation serializes writes to match the reference projection,
   while reads use independently configured connections when safe.
+- Mutations transfer owned request data and an owned connection capability to ADR-015's bounded commit
+  task before the driver transaction begins. Dropping the caller awaiter cannot cancel a started commit;
+  shutdown drains started tasks and replay resolves any process-loss outcome.
 - Every applied batch uses one immediate transaction. Projection rows, indexes, replay outcome, counters,
   and applied cursor commit together; an overlapping prefix is idempotent and a gap is rejected.
 - Public server selection is feature-gated. Default builds and profiles remain unchanged.
@@ -205,4 +223,3 @@ rebuild rules unchanged.
 | Full command corpus exposes unsupported Turso behavior | M | H | Differential test blocks profile enablement; keep SQLite rollback. |
 | Cancellation leaves waiter or transaction stranded | M | H | Owned commit and lock-wait cancellation tests. |
 | New CI work is over-scaled | M | M | One focused job; no broad matrix expansion. |
-

@@ -5,11 +5,11 @@ ddx:
     - product-vision
     - prd
   review:
-    self_hash: 6efb6fecccf86a40650e90b3476fb83ec144b50ee7ac8b6670a4831787e29b75
+    self_hash: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
     deps:
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       product-vision: 0e59c80e42299b3426b95bc91d71ad509059dcadf3a47aa74b688acb6c626e5e
-    reviewed_at: "2026-07-18T02:26:56Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Project Concerns
@@ -24,8 +24,8 @@ implementation tasks.
 |---------|--------|-------|------------|---------------|
 | `durable-priority-queue-semantics` | project-local | `area:core`, `area:api`, `area:data`, `area:infra`, `area:testing` | pqueue's core value depends on preserving priority, eligibility, lease, idempotency, progress-bound, and batch/group semantics across every downstream artifact. | Keep priority separate from eligibility; enforce single active lease; state at-least-once delivery; preserve idempotency horizons; make progress bounds observable and non-starving; test batch and group-aware claims under skew. |
 | `enterprise-integration-patterns` | library | `area:core`, `area:api`, `area:infra`, `area:testing` | pqueue is itself an asynchronous work channel and may expose compatibility adapters shaped by known messaging patterns. | Treat delivery as at-least-once; design idempotent receivers; define dead-letter/invalid-message paths; carry correlation identifiers; keep broker/client mechanics behind explicit gateways. |
-| `concurrency-model` | library | `area:core`, `area:data`, `area:infra`, `area:testing` | Claims, leases, batch operations, relaxed priority ordering, and storage suspension are concurrency-sensitive and must remain bounded under worker contention. | Use runtime-neutral async storage ports; never hold a standard mutex or blocking transaction across `.await`; serialize at the narrowest queue/connection scope; bound in-flight work; test cancellation, duplicate execution, and contention paths. |
-| `resilience` | library | `area:core`, `area:api`, `area:infra`, `area:testing` | Queue users and pqueue internals depend on bounded calls, retry safety, cancellation-safe commits, lease recovery, overload handling, and steady-state resource limits. | Bound calls with timeouts; model commit cancellation as unknown outcome; retry only idempotent operations with backoff and jitter; use bulkheads; define load-shedding/backpressure; cap accumulating resources. |
+| `concurrency-model` | library | `area:core`, `area:data`, `area:infra`, `area:testing` | Claims, leases, batch operations, relaxed priority ordering, and storage suspension are concurrency-sensitive and must remain bounded under worker contention. | Name the concurrency model; prevent reactor stalls; preserve transaction affinity; bound in-flight work; avoid unbounded buffers; test cancellation, duplicate execution, and contention paths. |
+| `resilience` | library | `area:core`, `area:api`, `area:infra`, `area:testing` | Queue users and pqueue internals depend on bounded calls, retry safety, determinate cancellation outcomes, lease recovery, overload handling, and steady-state resource limits. | Bound calls with timeouts; make interrupted commits resolvable; retry only idempotent operations with backoff and jitter; use bulkheads; define load-shedding/backpressure; cap accumulating resources. |
 | `o11y-otel` | library | `area:core`, `area:api`, `area:infra` | Progress bounds, leases, retries, queue depth, and latency targets are only governable if observable. | Emit traces, metrics, and structured logs; propagate correlation IDs; expose RED metrics and queue-specific gauges; verify observability overhead under load. |
 | `api-style` | library | `area:api` | pqueue will need a native API and likely compatibility adapters, so contract shape, versioning, errors, and input validation must stay consistent. | Publish typed/versioned contracts; validate inputs at the boundary; use standard error shapes; keep wire contracts separate from the internal queue model; record non-default API style choices in ADRs. |
 | `security-owasp` | library | `area:api`, `area:data`, `area:infra` | pqueue accepts untrusted payloads, metadata, API requests, and dependency inputs; a future service form must not leak secrets, internal errors, or cross-queue data. | Validate all external inputs; parameterize queries; audit dependencies; keep secrets out of source; enforce TLS for network surfaces; avoid implementation-detail leakage. |

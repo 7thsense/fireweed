@@ -14,8 +14,8 @@ ddx:
       adr-fjord-embedded-change-log-consumer-surface: 278c336d35ab55c302a1cc321c74a11afca0001545201875fe322a9dd31ebdae
       adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-      td-storage-architecture-backend-contracts: 430d0dc1f83fa62aeb19948efd2a84f5c31df7d15195e51c8296c93c711919f5
-    reviewed_at: "2026-07-11T00:58:14Z"
+      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # TD-008: Queue history via change-record emission, plus longer terminal retention

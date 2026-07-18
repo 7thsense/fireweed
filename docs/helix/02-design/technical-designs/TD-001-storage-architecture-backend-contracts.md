@@ -16,14 +16,14 @@ ddx:
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-full-async-storage-boundaries: e38b3eaaa639ae1ccfc43cb7430924e4e5f7a35ad79f38d687a538a22030e680
+      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-      adr-turso-derived-projection: 4e7b857aa6535673272fe4b13f69f3a4949925e574d765de0555c87010bf906a
+      adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
-      concerns: 6efb6fecccf86a40650e90b3476fb83ec144b50ee7ac8b6670a4831787e29b75
+      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-18T02:29:39Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Technical Design: TD-001 Storage Architecture and Backend Contracts

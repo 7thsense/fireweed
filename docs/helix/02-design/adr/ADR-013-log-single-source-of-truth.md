@@ -9,9 +9,9 @@ ddx:
     self_hash: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-orthogonal-log-projection-composition: 46327f801156492ee0a1ad0038b730dea7fcef4ebe00641e8f7d9d5f86f8b3f2
+      adr-orthogonal-log-projection-composition: 72e7c4701c344732c61b2b63043e70024bbff6228b841b8d76dffbb2d5bc4fd5
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-    reviewed_at: "2026-07-11T00:57:07Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Architecture Decision Record

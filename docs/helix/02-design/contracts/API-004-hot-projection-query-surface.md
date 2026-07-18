@@ -7,13 +7,13 @@ ddx:
     - adr-queue-as-shard-unit-and-projection-families
     - adr-typed-payload-schemas-and-indexes-via-axon-esf
   review:
-    self_hash: 07b216b2b09d6828109027ea44f891f59224cb8ff844155f8b60242c96fe2f39
+    self_hash: 2b943bd1b915099f9b16bc28b2e0640beb2b85df9c54b936ebbf6380ca0578f1
     deps:
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       adr-typed-payload-schemas-and-indexes-via-axon-esf: bc29e64f6e6f89932496a4803282d3e388bea665db6c526a92ba17fe49422347
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Contract

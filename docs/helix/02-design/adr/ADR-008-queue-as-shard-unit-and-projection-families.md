@@ -8,7 +8,7 @@ ddx:
     self_hash: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
     deps:
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-06T14:59:49Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Architecture Decision Record

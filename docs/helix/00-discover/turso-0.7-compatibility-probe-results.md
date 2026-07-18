@@ -1,13 +1,18 @@
 ---
 ddx:
   id: discover-turso-0-7-compatibility-probe-results
+  depends_on:
+    - discover-rust-native-embedded-projection-alternatives
+    - adr-embedded-engine-integration-and-public-surface
   links:
     - {kind: informed_by, to: discover-rust-native-embedded-projection-alternatives}
     - {kind: informed_by, to: adr-embedded-engine-integration-and-public-surface}
   review:
-    self_hash: dd738a32aca491ef042ea7d845de420564caf6f1252062e04ab525f5acc859df
-    deps: {}
-    reviewed_at: "2026-07-18T02:27:02Z"
+    self_hash: d1060000d2e85a38d997e55afc7daa69a63567cc99a515140084552a30eca08a
+    deps:
+      adr-embedded-engine-integration-and-public-surface: e06dc6a96cdcd7293b5ba67e9c17d387cd2bd51c14daef13287bdf62a9e3951e
+      discover-rust-native-embedded-projection-alternatives: 09abb88848c53782d2e9b2664714d0a4c7081b698c73da75349492f8fac714ca
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Turso 0.7 Compatibility Probe Results

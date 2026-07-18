@@ -1,6 +1,12 @@
 ---
 ddx:
   id: build-full-async-turso-projection
+  depends_on:
+    - adr-full-async-storage-boundaries
+    - adr-turso-derived-projection
+    - td-storage-architecture-backend-contracts
+    - td-object-log-turso-projection
+    - tp-verification-acceptance-criteria
   links:
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
     - {kind: informed_by, to: adr-turso-derived-projection}
@@ -8,9 +14,14 @@ ddx:
     - {kind: informed_by, to: td-object-log-turso-projection}
     - {kind: informed_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 843f7c3c379521279ef58c4b9ad54b8f6f77d25b94f851c08763246f80a03af9
-    deps: {}
-    reviewed_at: "2026-07-18T02:29:41Z"
+    self_hash: 2563a637d70eba065d6825ecbeeb25864c64e539f5709299de409f3781998627
+    deps:
+      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
+      adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
+      td-object-log-turso-projection: ef2026084d244dee4376217af4e3c5d9b9d80628edac3a8aeffc0876660d286f
+      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
+      tp-verification-acceptance-criteria: 8e7afb90dddf5324683ca8fb2781089bda204d71a65e62a0696ef28570e312a6
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Build Plan: Full-Async Storage and Turso Projection
@@ -34,17 +45,20 @@ new broad Actions matrix dimensions; release/push activity.
 
 | Slice | Area | Depends On | Validation Gate |
 |-------|------|------------|-----------------|
-| AT-01 | Typed async raw commit and cancellation fault contract | None | engine + conformance fault tests |
-| AT-02 | Async axis traits and memory/reference composition | AT-01 | engine/projection/memory conformance; Send-future checks |
-| AT-03 | Whole-transaction blocking adapters | AT-02 | SQLite/object-log/Postgres tests; runtime heartbeat |
-| AT-04 | Driver-neutral relational substrate extraction | AT-03 | SQLite relational/conformance unchanged |
-| AT-05 | Native-async `pqueue-turso` adapter | AT-04 | probe regressions + full differential/reopen/cancellation suite |
-| AT-06 | Object-log + Turso server profile | AT-05 | server end-to-end, recovery, feature-disabled error |
-| AT-07 | Legacy sync seam removal and focused CI/config validation | AT-06 | repository search gate, clippy, workspace tests, HELIX validation |
+| AT-01 | Typed raw commit request, owned-task lifecycle, and cancellation faults (`pqueue-engine`, conformance fault modules) | None | engine fault tests; cancellation before/start/during commit |
+| AT-02 | `AsyncLogStore`, `AsyncProjectionStore`, `AsyncControlPlane` plus explicit immediate/blocking adapters (`pqueue-engine`) | AT-01 | compile-time `Send` future tests; no blanket impl |
+| AT-03 | Async `ComposedBackend` and memory/reference projection (`pqueue-engine`, `pqueue-projection`, `pqueue-memory`) | AT-02 | engine/projection/memory conformance |
+| AT-04 | SQLite whole-transaction adapter (`pqueue-sqlite`) | AT-03 | SQLite tests plus single-thread heartbeat |
+| AT-05 | Object-log/Postgres whole-transaction adapters and composition-root consumer migration | AT-03 | object-log, Postgres, server focused tests; heartbeat |
+| AT-06 | Driver-neutral relational schema/codecs/rows (`pqueue-relational`, SQLite imports) | AT-04 | SQLite relational/conformance byte-for-byte parity |
+| AT-07 | Native-async Turso schema/apply/query/recovery (`pqueue-turso`) | AT-06 | exact probe regressions and adapter unit tests |
+| AT-08 | Full SQLite/Turso differential, reopen, cancellation, and concurrency conformance | AT-07 | AC-TURSO-1..4 |
+| AT-09 | Feature-gated object-log + Turso server configuration/profile | AT-05, AT-08 | AC-TURSO-5; end-to-end recovery/reopen |
+| AT-10 | Legacy sync seam removal and focused CI/config validation | AT-04, AT-05, AT-09 | structural search, AC-TURSO-6, clippy, workspace tests, HELIX validation |
 
-AT-03 and early AT-04 preparation may run independently after AT-02 only if their file scopes do not
-overlap. AT-05 must not copy SQLite schema or SQL; AT-06 must not enable Turso before AT-05 differential
-conformance is green.
+AT-04 and AT-05 may run independently after AT-03. AT-07 must not copy SQLite schema or SQL; AT-09 must
+not enable Turso before AT-08 differential conformance is green. Each filed bead expands its row into an
+exact file list and named test commands before it can be claimed.
 
 ## Issue Decomposition
 
@@ -60,6 +74,9 @@ Dependencies mirror AT-01 through AT-07. Terra is an execution routing constrain
 - [ ] No Niflheim or quiet-host test file changes.
 - [ ] No new broad CI matrix dimension.
 - [ ] Final `cargo fmt`, workspace clippy/tests, `ddx doc validate`, and traceability checks pass.
+- [ ] `ddx doc stale` has no unclassified actionable item introduced by this change. Compatible direct
+      dependents are explicitly reviewed/stamped; unrelated historical dependents remain in a recorded
+      deferral list rather than being silently stamped.
 
 ## Risks and Rollbacks
 
@@ -72,8 +89,7 @@ Dependencies mirror AT-01 through AT-07. Terra is an execution routing constrain
 
 ## Exit Criteria
 
-- [ ] All seven labeled beads are closed with reviewed commits.
+- [ ] All ten labeled beads are closed with reviewed commits.
 - [ ] Turso is usable only as the feature-gated object-log-derived projection.
 - [ ] The legacy synchronous storage seam and redundant composition-root blocking wrappers are absent.
 - [ ] Full backend and document validation is green, with any environment-only live test gap recorded.
-

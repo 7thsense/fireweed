@@ -17,21 +17,23 @@ ddx:
     - td-sharding-and-shard-ownership
     - td-resp-wire-adapter
     - td-s3-object-log-sqlite-projection-mode
+    - td-object-log-turso-projection
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: 6891ba1e460bc2b4f1076a8999861e02c54e073e06790ce0c5df0315a4d087df
+    self_hash: 8e7afb90dddf5324683ca8fb2781089bda204d71a65e62a0696ef28570e312a6
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-full-async-storage-boundaries: e38b3eaaa639ae1ccfc43cb7430924e4e5f7a35ad79f38d687a538a22030e680
+      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
-      adr-turso-derived-projection: 4e7b857aa6535673272fe4b13f69f3a4949925e574d765de0555c87010bf906a
+      adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
       api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      td-object-log-turso-projection: ef2026084d244dee4376217af4e3c5d9b9d80628edac3a8aeffc0876660d286f
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
       td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
@@ -39,7 +41,7 @@ ddx:
       td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
       tp-scale-substantiation: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
-    reviewed_at: "2026-07-18T02:29:40Z"
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -231,7 +233,8 @@ documented test/dev scope.
 | AC-TXN-6 implementation-combination parity | Run the same generated operation history and failure schedule across all profile combinations, then compare final visible queue state, idempotency records, terminal outcomes, active leases, and metrics exact fields | backend-independent API semantics | no semantic divergence except documented latency/cost/recovery metadata; pqueue callers need no backend-specific repair path |
 | AC-TXN-7 latency-bound is not a correctness knob | Repeat AC-TXN-1..6 across the TP-002 E3 commit-latency-bound sweep | invariants unchanged by latency/cost setting | 0 invariant deltas across lower-latency vs cost-optimized settings |
 | AC-TXN-8 async cancellation cuts | For every backend class cancel before append, after staging/before commit, during commit, after durable append/before eventual apply, and while waiting for serialization; replay the same and conflicting `request_id` | ADR-015 cancellation and unknown-outcome contract | pre-commit cuts leave no durable effect; commit cancellation converges to exactly one outcome; eventual append repairs exactly once; conflicting replay fails; no stranded waiter or poisoned lock |
-| AC-TXN-9 runtime non-blocking boundary | Run slow memory, SQLite, Postgres, object-log, and Turso storage work on a single-thread Tokio runtime with a heartbeat and bounded timeout | ADR-015 adapter boundary | heartbeat continues within its documented scheduling tolerance; no blocking I/O or standard mutex guard is observed on the runtime worker |
+| AC-TXN-9 runtime non-blocking boundary | Inject slow blocking-driver and native-async I/O for SQLite, Postgres, object-log, and Turso on a single-thread Tokio runtime with a heartbeat and bounded timeout | ADR-015 adapter boundary | heartbeat continues within its documented scheduling tolerance; no runtime-worker stall |
+| AC-TXN-10 forbidden lock/bridge structure | Search production storage paths and run the dependency guard | ADR-015 structural boundary | no `std::sync::MutexGuard` crosses an await; no nested runtime/block-on bridge; blocking adapters offload whole transactions rather than statements |
 
 ### 3.11 Product end-to-end workflow validation
 
@@ -344,7 +347,7 @@ projection read, cursor/counter, lease, index, replay outcome, reopen image,
 cancellation cut, and tenant-isolation case must match. Turso upgrade evidence
 must rerun the exact 0.7 compatibility probe before the version pin changes.
 
-### 4.2 `objectlog/turso` projection gates
+### 4.1 `objectlog/turso` projection gates
 
 | AC | Setup | Assertion | Pass bar |
 |----|-------|-----------|----------|
@@ -355,7 +358,7 @@ must rerun the exact 0.7 compatibility probe before the version pin changes.
 | AC-TURSO-5 Server profile | Feature-enabled and feature-disabled builds run create/push/claim/finalize/renew/reassign/read/reopen | TD-010 integration contract | enabled profile passes end to end; disabled selection returns explicit configuration error; no default-profile change |
 | AC-TURSO-6 CI scale | Inspect workflow expansion and run focused Turso lane | ADR-016 CI constraint | one focused/path-filtered lane; no new projection-by-kind matrix dimension |
 
-### 4.1 `objectlog/hybrid-*` projection gates
+### 4.2 `objectlog/hybrid-*` projection gates
 
 These gates are mandatory before `PQUEUE_PROJECTION_BACKEND=hybrid-strict` or
 `PQUEUE_PROJECTION_BACKEND=hybrid-async` can be advertised outside experimental

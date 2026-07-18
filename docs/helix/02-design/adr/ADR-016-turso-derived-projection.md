@@ -1,6 +1,8 @@
 ---
 ddx:
   id: adr-turso-derived-projection
+  depends_on:
+    - adr-full-async-storage-boundaries
   links:
     - {kind: informed_by, to: adr-full-async-storage-boundaries}
     - {kind: informed_by, to: adr-embedded-engine-integration-and-public-surface}
@@ -10,9 +12,10 @@ ddx:
     - {kind: informed_by, to: discover-turso-0-7-compatibility-probe-results}
   status: accepted
   review:
-    self_hash: 4e7b857aa6535673272fe4b13f69f3a4949925e574d765de0555c87010bf906a
-    deps: {}
-    reviewed_at: "2026-07-18T02:27:00Z"
+    self_hash: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
+    deps:
+      adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
+    reviewed_at: "2026-07-18T02:36:05Z"
 ---
 
 # ADR-016: Turso is the Rust-native derived SQL projection
@@ -103,4 +106,3 @@ existing broad GitHub Actions kind matrix will not gain a Turso dimension.
 - `docs/helix/00-discover/rust-native-embedded-projection-alternatives.md`
 - `docs/helix/00-discover/turso-0.7-compatibility-probe-results.md`
 - `docs/helix/02-design/technical-designs/TD-010-object-log-turso-projection.md`
-
