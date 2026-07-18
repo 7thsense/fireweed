@@ -1,13 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
+use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{
     AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
-    CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView,
-    LiveItemView, ProjectionRead, PushItem, QueueCounters, QueueKey, QueueMetrics,
+    CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome, IdempotencyDecision, IndexHit,
+    ItemView, LeaseView, LiveItemView, ProjectionRead, PushFingerprint, PushItem, QueueCounters,
+    QueueKey, QueueMetrics,
 };
 use pqueue_engine::{ProjectionSnapshot, ProjectionStore};
 use pqueue_projection::{InMemoryProjection, ProjectionImage};
@@ -33,6 +34,205 @@ impl SqliteProjectionStore {
     /// An ephemeral `:memory:` projection store for tests.
     pub fn in_memory() -> EngineResult<Self> {
         Self::from_conn(st(Connection::open_in_memory())?)
+    }
+
+    /// Read-only validation of every SQLite constraint that a fresh push can violate at apply time.
+    ///
+    /// This deliberately runs before the authoritative append. It covers active client-key and item-id
+    /// uniqueness, cohort generation consistency/capacity, and typed UNIQUE indexes, including conflicts
+    /// wholly within the candidate batch.
+    pub(crate) fn validate_push_constraints(
+        &self,
+        shard: &QueueKey,
+        items: &[PushItem],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let g = self.lock();
+        let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?;
+        validate_typed_unique_push(&g.conn, shard, &definition.typed_indexes, items)?;
+
+        let (tenant, queue) = parts(shard);
+        let mut item_ids = BTreeSet::new();
+        let mut client_keys = BTreeSet::new();
+        let mut cohorts: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        let mut group_additions: BTreeMap<String, u64> = BTreeMap::new();
+        let now_nanos = ts_nanos(now);
+        for item in items {
+            let item_id = item.item_id.to_string();
+            if !item_ids.insert(item_id.clone()) {
+                return Err(EngineError::Conflict);
+            }
+            let client_key = item.client_item_key.as_str().to_string();
+            if !client_keys.insert(client_key.clone()) {
+                return Err(EngineError::Conflict);
+            }
+            let occupied: Option<i64> = st(g
+                .conn
+                .query_row(
+                    "SELECT 1 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                     AND (item_id=?3 OR (client_item_key=?4 AND superseded=0)) LIMIT 1",
+                    params![tenant, queue, item_id, client_key],
+                    |row| row.get(0),
+                )
+                .optional())?;
+            if occupied.is_some() {
+                return Err(EngineError::Conflict);
+            }
+            let retained_until: Option<i64> = st(g
+                .conn
+                .query_row(
+                    "SELECT expires_at FROM pqueue_item_key_retention \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3",
+                    params![tenant, queue, client_key],
+                    |row| row.get(0),
+                )
+                .optional())?;
+            if retained_until.is_some_and(|until| until > now_nanos) {
+                return Err(EngineError::Conflict);
+            }
+
+            if let Some(group) = &item.group_key {
+                *group_additions
+                    .entry(group.as_str().to_string())
+                    .or_default() += 1;
+            }
+
+            match (&item.group_key, item.cohort_size) {
+                (None, Some(_)) => {
+                    return Err(EngineError::Invalid("cohort_size requires group_key"));
+                }
+                (Some(group), Some(size)) => {
+                    let cohort_policy = definition.cohort_policy.as_ref();
+                    if !cohort_policy.is_some_and(|policy| policy.enabled) {
+                        return Err(EngineError::Invalid(
+                            "cohort_size requires an enabled cohort policy",
+                        ));
+                    }
+                    if cohort_policy
+                        .and_then(|policy| policy.max_cohort_size)
+                        .is_some_and(|max| size > max)
+                    {
+                        return Err(EngineError::Conflict);
+                    }
+                    let entry = cohorts
+                        .entry(group.as_str().to_string())
+                        .or_insert((size, 0));
+                    if entry.0 != size {
+                        return Err(EngineError::Conflict);
+                    }
+                    entry.1 += 1;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(max_group_size) = definition.max_eligible_group_size {
+            for (group, added) in group_additions {
+                // API-001 caps every non-terminal member carrying the group key. Cohort members therefore
+                // count too: they are still Pending/Leased members of that group, while terminal and
+                // superseded generations do not consume the cap.
+                let existing: i64 = st(g.conn.query_row(
+                    "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                     AND group_key=?3 AND superseded=0 AND lifecycle_state IN ('Pending','Leased')",
+                    params![tenant, queue, group],
+                    |row| row.get(0),
+                ))?;
+                if existing.saturating_add(added as i64) > max_group_size as i64 {
+                    return Err(EngineError::Conflict);
+                }
+            }
+        }
+
+        for (group, (size, added)) in cohorts {
+            let existing: Option<(i64, i64, String, Option<i64>)> = st(g
+                .conn
+                .query_row(
+                    "SELECT cohort_size,member_count,state,retention_until FROM pqueue_cohorts \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                    params![tenant, queue, group],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional())?;
+            match existing {
+                None if added > size => return Err(EngineError::Conflict),
+                Some((_, _, state, retention_until))
+                    if state == "terminal"
+                        && retention_until.is_some_and(|until| until > now_nanos) =>
+                {
+                    return Err(EngineError::Conflict);
+                }
+                // An expired terminal generation is replaced rather than extended. Its old declared size
+                // and member count therefore do not participate in validation of the new generation.
+                Some((_, _, state, _)) if state == "terminal" && added > size => {
+                    return Err(EngineError::Conflict);
+                }
+                Some((_, _, state, _)) if state == "terminal" => {}
+                Some((existing_size, member_count, _, _))
+                    if existing_size != size as i64
+                        || member_count.saturating_add(added as i64) > existing_size =>
+                {
+                    return Err(EngineError::Conflict);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn pause_blocks_push_intake(&self, shard: &QueueKey) -> EngineResult<bool> {
+        let g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let drain: i64 = st(g
+            .conn
+            .query_row(
+                "SELECT pause_drain_intake FROM queues WHERE tenant=?1 AND queue=?2",
+                params![tenant, queue],
+                |row| row.get(0),
+            )
+            .optional())?
+        .ok_or(EngineError::NotFound)?;
+        Ok(drain != 0)
+    }
+
+    /// Consult the durable projection replay row without deleting an expired record or otherwise mutating
+    /// projection state. Expiry cleanup remains a later committed maintenance concern.
+    pub(crate) fn push_idempotency_decision(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: PushFingerprint,
+        now: UtcTimestamp,
+    ) -> EngineResult<IdempotencyDecision<Vec<ItemId>>> {
+        let g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let prior: Option<(Vec<u8>, String, i64)> = st(g
+            .conn
+            .query_row(
+                "SELECT request_fingerprint,response_payload,expires_at \
+                 FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_PUSH,
+                    request_id.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional())?;
+        let Some((stored_fingerprint, response, expires_at)) = prior else {
+            return Ok(IdempotencyDecision::Proceed);
+        };
+        if expires_at <= ts_nanos(now) {
+            return Ok(IdempotencyDecision::Expired);
+        }
+        if stored_fingerprint == fingerprint.canonical_sha256
+            || stored_fingerprint == fingerprint.legacy_body_hash.0.to_be_bytes()
+        {
+            Ok(IdempotencyDecision::Replay(item_ids_from_json(response)?))
+        } else {
+            Ok(IdempotencyDecision::Conflict)
+        }
     }
 
     fn from_conn(conn: Connection) -> EngineResult<Self> {
@@ -116,6 +316,46 @@ impl SqliteProjectionStore {
             return Ok(());
         }
         let mut g = self.inner.lock().expect("projection store poisoned");
+        apply_committed_batch_sql(&mut g, positions, envelopes)
+    }
+
+    fn apply_live_batch(
+        &self,
+        positions: &[CommandPosition],
+        envelopes: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        if positions.len() != envelopes.len() {
+            return Err(EngineError::Storage(
+                "apply_live_batch: positions/envelopes length mismatch".into(),
+            ));
+        }
+        let mut g = self.lock();
+        let mut epoch_floor = BTreeMap::<QueueKey, u64>::new();
+        for position in positions {
+            let floor = match epoch_floor.get(&position.queue) {
+                Some(floor) => *floor,
+                None => {
+                    let (tenant, queue) = parts(&position.queue);
+                    let stored: i64 = st(g
+                        .conn
+                        .query_row(
+                            "SELECT assignment_epoch FROM relational_cursor \
+                             WHERE tenant=?1 AND queue=?2",
+                            params![tenant, queue],
+                            |row| row.get(0),
+                        )
+                        .optional())?
+                    .ok_or(EngineError::NotFound)?;
+                    u64::try_from(stored).map_err(|_| {
+                        EngineError::Storage("negative SQLite assignment epoch".into())
+                    })?
+                }
+            };
+            if position.backend_epoch < floor {
+                return Err(EngineError::EpochFenced);
+            }
+            epoch_floor.insert(position.queue.clone(), position.backend_epoch.max(floor));
+        }
         apply_committed_batch_sql(&mut g, positions, envelopes)
     }
 
@@ -342,6 +582,22 @@ impl ProjectionStore for SqliteProjectionStore {
         self.apply_committed_batch(positions, commands)
     }
 
+    fn apply_live(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.apply_live_batch(positions, commands)
+    }
+
+    fn apply_recovery(
+        &mut self,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.apply_committed_batch(positions, commands)
+    }
+
     // -- recovery-on-open (ADR-012 P2): this derived sqlite projection persists its high-water + definitions,
     //    so a reopened composition replays only the object-/sqlite-log tail beyond the snapshot.
 
@@ -378,6 +634,16 @@ impl ProjectionStore for SqliteProjectionStore {
             now,
             max,
         )
+    }
+
+    fn select_item_claim(
+        &self,
+        shard: &QueueKey,
+        compatibility: &pqueue_engine::ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        filter_item_claim_candidates(&self.lock().conn, shard, compatibility, now, max)
     }
 
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {

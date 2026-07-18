@@ -43,6 +43,14 @@ pub mod async_projection {
         AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
         AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
         ORDER BY priority_sort,created_seq LIMIT ?4";
+    pub const SELECT_ELIGIBLE_FILTERABLE: &str = "SELECT item_id,group_key,metadata FROM pqueue_items \
+        WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+        AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
+        AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+        JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+        AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
+        AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
+        ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5";
     pub const SELECT_ITEM_STATE: &str = "SELECT lifecycle_state FROM pqueue_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
     pub const SELECT_ITEM_VERSION: &str = "SELECT item_version FROM pqueue_items \
@@ -77,8 +85,10 @@ pub mod async_projection {
         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
     pub const SUPERSEDE_ITEM: &str = "UPDATE pqueue_items SET superseded=1,updated_at=?4,\
         last_command_sequence=?5 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3";
-    pub const PAUSE_QUEUE: &str = "UPDATE queues SET paused=1 WHERE tenant=?1 AND queue=?2";
-    pub const RESUME_QUEUE: &str = "UPDATE queues SET paused=0 WHERE tenant=?1 AND queue=?2";
+    pub const PAUSE_QUEUE: &str =
+        "UPDATE queues SET paused=1,pause_drain_intake=?3 WHERE tenant=?1 AND queue=?2";
+    pub const RESUME_QUEUE: &str =
+        "UPDATE queues SET paused=0,pause_drain_intake=0 WHERE tenant=?1 AND queue=?2";
     pub const UPSERT_KEY_RETENTION: &str = "INSERT INTO pqueue_item_key_retention \
         (tenant_id,queue_id,client_item_key,item_id,expires_at) VALUES(?1,?2,?3,?4,?5) \
         ON CONFLICT(tenant_id,queue_id,client_item_key) DO UPDATE SET \

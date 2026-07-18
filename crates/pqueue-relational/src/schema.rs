@@ -9,6 +9,7 @@ pub const RELATIONAL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS queues (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, definition TEXT NOT NULL,
     paused INTEGER NOT NULL DEFAULT 0,
+    pause_drain_intake INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS pqueue_items (

@@ -6,8 +6,10 @@
 //! hexagonal-migration-plan.md` (v4) and TD-007.
 
 mod active_scope;
+mod async_claim_planner;
 mod async_commit;
 mod async_composed;
+mod async_push_planner;
 mod async_store;
 mod auth;
 mod claim_validation;
@@ -29,6 +31,7 @@ pub use active_scope::{
     ActiveScope, DiscoveryGranularity, project_scopes, resolve_granularity, roll_up_queue_scopes,
     validate_discovery_request,
 };
+pub use async_claim_planner::ProjectionClaimPlanner;
 pub use async_commit::{
     AsyncCommitStrategy, CommitStrategy, CommitStrategyKind, DispatchError, InvalidCommitStrategy,
     KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, OwnedTaskFactory, QueueGateAcquire,
@@ -38,8 +41,11 @@ pub use async_commit::{
 };
 pub use async_composed::{
     AsyncClaimError, AsyncClaimPlan, AsyncClaimPlanner, AsyncClaimPostCommitStage,
-    AsyncCommitSubmitError, AsyncComposedBackend, NoAsyncClaimPlanner,
+    AsyncCommitSubmitError, AsyncComposedBackend, AsyncPushError, AsyncPushPlan, AsyncPushPlanner,
+    AsyncPushPostCommitStage, AsyncPushRequest, NoAsyncClaimPlanner, NoAsyncPushPlanner,
+    PushFingerprint,
 };
+pub use async_push_planner::ProjectionPushPlanner;
 pub use async_store::{AsyncControlPlane, AsyncLogStore, AsyncProjectionStore};
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use claim_validation::{
@@ -49,7 +55,7 @@ pub use claim_validation::{
 pub use compose::{
     ComposeFaultHook, ComposeFaultPoint, ComposedBackend, ControlPlane, InProcessControlPlane,
     LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart, RichClaimSelection, max_position,
-    resolve_recovery_start,
+    push_items_fingerprint_sha256, push_specs_fingerprint_sha256, resolve_recovery_start,
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState,

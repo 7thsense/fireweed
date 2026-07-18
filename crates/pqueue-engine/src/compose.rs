@@ -635,6 +635,18 @@ pub trait ProjectionStore: Send {
         now: UtcTimestamp,
         max: usize,
     ) -> EngineResult<Vec<ItemId>>;
+    fn select_item_claim(
+        &self,
+        shard: &QueueKey,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        if compatibility.group_key.is_some() || !compatibility.metadata_equals.is_empty() {
+            return Err(EngineError::Unavailable);
+        }
+        self.eligible_candidates(shard, now, max)
+    }
     fn eligible_candidates_after(
         &self,
         shard: &QueueKey,
@@ -2399,7 +2411,7 @@ fn request_expires_at(now: UtcTimestamp, retention_ms: u64) -> UtcTimestamp {
 
 /// Stable body fingerprint for request-id conflict detection (non-cryptographic hash over the serialized
 /// push specs — determinism + collision-safety, not cryptographic strength).
-fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
+pub(crate) fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
     #[derive(serde::Serialize)]
     struct CanonicalPushSpec<'a> {
         client_item_key: Option<&'a ClientItemKey>,
@@ -2429,6 +2441,38 @@ fn push_body_hash(items: &[PushSpec]) -> EngineResult<BodyHash> {
         })
         .collect();
     push_body_hash_canonical(&canonical)
+}
+
+pub fn push_specs_fingerprint_sha256(items: &[PushSpec]) -> EngineResult<[u8; 32]> {
+    #[derive(serde::Serialize)]
+    struct Canonical<'a> {
+        client_item_key: Option<&'a ClientItemKey>,
+        priority: &'a Option<PriorityValue>,
+        not_before: &'a Option<UtcTimestamp>,
+        group_key: &'a Option<GroupKey>,
+        payload: &'a Option<Bytes>,
+        fields: &'a BTreeMap<String, Bytes>,
+        metadata: &'a Metadata,
+        cohort_size: &'a Option<u64>,
+        gate_keys: &'a Vec<String>,
+        entity: &'a Option<serde_json::Value>,
+    }
+    let canonical: Vec<_> = items
+        .iter()
+        .map(|item| Canonical {
+            client_item_key: item.client_item_key.as_ref(),
+            priority: &item.priority,
+            not_before: &item.not_before,
+            group_key: &item.group_key,
+            payload: &item.payload,
+            fields: &item.fields,
+            metadata: &item.metadata,
+            cohort_size: &item.cohort_size,
+            gate_keys: &item.gate_keys,
+            entity: &item.entity,
+        })
+        .collect();
+    push_body_sha256_canonical(&canonical)
 }
 
 /// The recovery twin of [`push_body_hash`]. Committed log entries contain [`PushItem`]s, not the caller's
@@ -2466,6 +2510,45 @@ fn push_item_body_hash(items: &[PushItem]) -> EngineResult<BodyHash> {
         })
         .collect();
     push_body_hash_canonical(&canonical)
+}
+
+pub fn push_items_fingerprint_sha256(items: &[PushItem]) -> EngineResult<[u8; 32]> {
+    #[derive(serde::Serialize)]
+    struct Canonical<'a> {
+        client_item_key: Option<&'a ClientItemKey>,
+        priority: &'a Option<PriorityValue>,
+        not_before: &'a Option<UtcTimestamp>,
+        group_key: &'a Option<GroupKey>,
+        payload: &'a Option<Bytes>,
+        fields: &'a BTreeMap<String, Bytes>,
+        metadata: &'a Metadata,
+        cohort_size: &'a Option<u64>,
+        gate_keys: &'a Vec<String>,
+        entity: &'a Option<serde_json::Value>,
+    }
+    let canonical: Vec<_> = items
+        .iter()
+        .map(|item| Canonical {
+            client_item_key: (item.client_item_key.as_str() != item.item_id.to_string())
+                .then_some(&item.client_item_key),
+            priority: &item.priority,
+            not_before: &item.not_before,
+            group_key: &item.group_key,
+            payload: &item.payload,
+            fields: &item.fields,
+            metadata: &item.metadata,
+            cohort_size: &item.cohort_size,
+            gate_keys: &item.gate_keys,
+            entity: &item.entity_document,
+        })
+        .collect();
+    push_body_sha256_canonical(&canonical)
+}
+
+fn push_body_sha256_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
+    Ok(Sha256::digest(bytes).into())
 }
 
 fn push_body_hash_canonical<T: serde::Serialize>(items: &[T]) -> EngineResult<BodyHash> {

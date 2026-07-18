@@ -283,6 +283,19 @@ async fn configure_connection(connection: &Connection, config: &TursoConfig) -> 
 
 async fn migrate_connection(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(RELATIONAL_SCHEMA).await?;
+    if let Err(error) = connection
+        .execute(
+            "ALTER TABLE queues ADD COLUMN pause_drain_intake INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await
+        && !error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("duplicate column")
+    {
+        return Err(error.into());
+    }
     Ok(())
 }
 

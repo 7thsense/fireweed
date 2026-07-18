@@ -3,14 +3,18 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use pqueue_core::{CohortId, ItemId, QueueDefinition};
+use pqueue_core::{
+    BodyHash, CohortId, GateKeyPolicy, ItemId, PriorityModelKind, PriorityValue, QueueDefinition,
+    RequestId, UtcTimestamp,
+};
 
 use crate::{
     AsyncCommitStrategy, ClaimCommand, ClaimRequest, ClaimUnit, Claimed, ClaimedItem,
     CohortClaimCommand, CommandChecksum, DispatchError, DurabilityClass, EngineError, EngineResult,
-    KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, QueueCommand, QueueGateError, QueueKey,
-    RawCommitFault, RawCommitOutcome, RawCommitRequest, TaskOutcomeError,
-    validate_claim_compatibility,
+    KeyedQueueGate, OwnedTask, OwnedTaskDispatcher, PushCommand, PushItem, PushSpec, QueueCommand,
+    QueueGateError, QueueKey, RawCommitFault, RawCommitOutcome, RawCommitRequest, RequestOutcome,
+    TaskOutcomeError, compile_entity_schema, validate_claim_compatibility, validate_entity,
+    validate_gate_push,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,11 +112,92 @@ pub trait AsyncClaimPlanner: Send + Sync + 'static {
 /// Marker used by a raw-commit-only composed backend.
 pub struct NoAsyncClaimPlanner;
 
+/// One owned invocation of the async push path.
+#[derive(Debug, Clone)]
+pub struct AsyncPushRequest {
+    pub shard: QueueKey,
+    pub request_id: Option<RequestId>,
+    pub items: Vec<PushSpec>,
+    pub now: UtcTimestamp,
+    pub expected_epoch: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PushFingerprint {
+    pub canonical_sha256: [u8; 32],
+    pub legacy_body_hash: BodyHash,
+}
+
+/// Planner result for a push. Constructors keep the representation typed and engine-validated.
+pub struct AsyncPushPlan {
+    kind: AsyncPushPlanKind,
+}
+
+enum AsyncPushPlanKind {
+    Replay(Vec<ItemId>),
+    Commit {
+        request: RawCommitRequest,
+        item_ids: Vec<ItemId>,
+    },
+}
+
+impl AsyncPushPlan {
+    pub(crate) fn replay(item_ids: Vec<ItemId>) -> Self {
+        Self {
+            kind: AsyncPushPlanKind::Replay(item_ids),
+        }
+    }
+
+    pub(crate) fn commit(request: RawCommitRequest, item_ids: Vec<ItemId>) -> Self {
+        Self {
+            kind: AsyncPushPlanKind::Commit { request, item_ids },
+        }
+    }
+}
+
+/// Construction-injected push preparation capability. It may resolve retained replay or allocate IDs
+/// and build an envelope, but it has no durable commit authority.
+pub trait AsyncPushPlanner: Send + Sync + 'static {
+    fn supports_gates(&self) -> bool;
+
+    fn queue_definition(&self, shard: QueueKey) -> OwnedTask<EngineResult<QueueDefinition>>;
+
+    /// Resolve idempotency and, only for fresh work, reserve IDs and construct the push envelope.
+    fn plan_push(
+        &self,
+        request: AsyncPushRequest,
+        definition: QueueDefinition,
+        fingerprint: Option<PushFingerprint>,
+    ) -> OwnedTask<EngineResult<AsyncPushPlan>>;
+}
+
+/// Marker used when typed async push was not injected.
+pub struct NoAsyncPushPlanner;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncPushPostCommitStage {
+    CommitOutcome,
+}
+
+/// Phase-aware failure for typed async push. A `Commit` error can be an unknown durable outcome;
+/// callers with a request ID resolve it by retrying the same request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsyncPushError {
+    Submit(AsyncCommitSubmitError),
+    BeforeCommit(EngineError),
+    Commit(EngineError),
+    AfterCommit {
+        stage: AsyncPushPostCommitStage,
+        source: EngineError,
+    },
+}
+
 /// An ADR-017 mutation-path scaffold, not a full backend implementation.
-pub struct AsyncComposedBackend<S, D, P = NoAsyncClaimPlanner> {
+pub struct AsyncComposedBackend<S, D, P = NoAsyncClaimPlanner, U = NoAsyncPushPlanner> {
     strategy: Arc<S>,
     dispatcher: D,
     claim_planner: Arc<P>,
+    push_planner: Arc<U>,
     admission: KeyedQueueGate<crate::QueueKey>,
     durability: DurabilityClass,
 }
@@ -128,6 +213,7 @@ where
             strategy: Arc::new(strategy),
             dispatcher,
             claim_planner: Arc::new(NoAsyncClaimPlanner),
+            push_planner: Arc::new(NoAsyncPushPlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
@@ -150,11 +236,18 @@ where
             strategy: Arc::new(strategy),
             dispatcher,
             claim_planner: Arc::new(claim_planner),
+            push_planner: Arc::new(NoAsyncPushPlanner),
             admission: KeyedQueueGate::new(max_queued_commits),
             durability,
         }
     }
+}
 
+impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
+where
+    S: AsyncCommitStrategy<Request = RawCommitRequest>,
+    D: OwnedTaskDispatcher,
+{
     pub fn durability_class(&self) -> DurabilityClass {
         self.durability
     }
@@ -221,7 +314,354 @@ where
     }
 }
 
-impl<S, D, P> AsyncComposedBackend<S, D, P>
+impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
+where
+    S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
+    D: OwnedTaskDispatcher,
+    U: AsyncPushPlanner,
+{
+    /// Validate, prepare, and durably commit a typed push under one queue-local permit.
+    ///
+    /// Once accepted by the dispatcher this operation is backend-owned: dropping the caller only loses
+    /// the response. A commit-phase error may therefore represent an unknown outcome. Supplying a
+    /// `request_id` lets the injected planner resolve that outcome on retry from retained replay state.
+    pub async fn push(&self, request: AsyncPushRequest) -> Result<Vec<ItemId>, AsyncPushError> {
+        let queue = request.shard.clone();
+        let strategy = Arc::clone(&self.strategy);
+        let planner = Arc::clone(&self.push_planner);
+        self.submit_operation(queue.clone(), move || {
+            Box::pin(async move {
+                let mut request = request;
+                let original_items = request.items.clone();
+                canonicalize_push_gate_keys(&mut request.items);
+                let definition = planner
+                    .queue_definition(queue.clone())
+                    .await
+                    .map_err(PushExecutionError::BeforeCommit)?;
+                validate_push_definition(&queue, &request, &definition, planner.supports_gates())
+                    .map_err(PushExecutionError::BeforeCommit)?;
+                let fingerprint = request
+                    .request_id
+                    .as_ref()
+                    .map(|_| {
+                        Ok(PushFingerprint {
+                            canonical_sha256: crate::push_specs_fingerprint_sha256(&request.items)?,
+                            legacy_body_hash: crate::compose::push_body_hash(&original_items)?,
+                        })
+                    })
+                    .transpose()
+                    .map_err(PushExecutionError::BeforeCommit)?;
+                let plan = planner
+                    .plan_push(request.clone(), definition.clone(), fingerprint)
+                    .await
+                    .map_err(PushExecutionError::BeforeCommit)?;
+                let (commit, item_ids) = match plan.kind {
+                    AsyncPushPlanKind::Replay(item_ids) => {
+                        validate_push_replay(&request, &item_ids)
+                            .map_err(PushExecutionError::BeforeCommit)?;
+                        return Ok::<Vec<ItemId>, PushExecutionError>(item_ids);
+                    }
+                    AsyncPushPlanKind::Commit { request, item_ids } => (request, item_ids),
+                };
+                validate_push_plan(&request, &definition, fingerprint, &commit, &item_ids)
+                    .map_err(PushExecutionError::BeforeCommit)?;
+                let expected_epoch = commit.expected_epoch();
+                let outcome = strategy
+                    .commit(commit)
+                    .await
+                    .map_err(PushExecutionError::Commit)?;
+                validate_push_commit_outcome(&queue, expected_epoch, &outcome).map_err(
+                    |source| PushExecutionError::AfterCommit {
+                        stage: AsyncPushPostCommitStage::CommitOutcome,
+                        source,
+                    },
+                )?;
+                Ok(item_ids)
+            })
+        })
+        .await
+        .map_err(AsyncPushError::Submit)?
+        .map_err(AsyncPushError::from)
+    }
+}
+
+enum PushExecutionError {
+    BeforeCommit(EngineError),
+    Commit(EngineError),
+    AfterCommit {
+        stage: AsyncPushPostCommitStage,
+        source: EngineError,
+    },
+}
+
+impl From<PushExecutionError> for AsyncPushError {
+    fn from(error: PushExecutionError) -> Self {
+        match error {
+            PushExecutionError::BeforeCommit(error) => Self::BeforeCommit(error),
+            PushExecutionError::Commit(error) => Self::Commit(error),
+            PushExecutionError::AfterCommit { stage, source } => {
+                Self::AfterCommit { stage, source }
+            }
+        }
+    }
+}
+
+fn validate_push_definition(
+    queue: &QueueKey,
+    request: &AsyncPushRequest,
+    definition: &QueueDefinition,
+    supports_gates: bool,
+) -> EngineResult<()> {
+    if definition.tenant_id != queue.tenant_id || definition.queue_id != queue.queue_id {
+        return Err(EngineError::Storage(
+            "async push planner returned the wrong queue definition".to_string(),
+        ));
+    }
+    if request.items.is_empty() {
+        return Err(EngineError::Invalid("push batch must not be empty"));
+    }
+    if request.items.len() > definition.max_push_batch_size as usize {
+        return Err(EngineError::Invalid("push batch exceeds queue limit"));
+    }
+    validate_gate_push(supports_gates, &request.items)?;
+    validate_push_shape(definition, &request.items)?;
+    let schema = definition
+        .entity_schema
+        .as_ref()
+        .and_then(|descriptor| descriptor.entity_schema.as_ref())
+        .map(compile_entity_schema)
+        .transpose()?;
+    for item in &request.items {
+        validate_entity(schema.as_ref(), item.entity.as_ref())?;
+    }
+    Ok(())
+}
+
+fn validate_push_shape(definition: &QueueDefinition, items: &[PushSpec]) -> EngineResult<()> {
+    let mut request_gates = HashSet::new();
+    let mut grouped_counts = std::collections::HashMap::new();
+    for item in items {
+        let priority_matches = matches!(
+            (&definition.priority_model.kind, &item.priority),
+            (_, None)
+                | (
+                    PriorityModelKind::Timestamp,
+                    Some(PriorityValue::Timestamp(_))
+                )
+                | (PriorityModelKind::Int64, Some(PriorityValue::Int64(_)))
+                | (PriorityModelKind::Decimal, Some(PriorityValue::Decimal(_)))
+                | (PriorityModelKind::Text, Some(PriorityValue::Text(_)))
+        );
+        if !priority_matches {
+            return Err(EngineError::Invalid("priority does not match queue model"));
+        }
+        if item.gate_keys.iter().any(|key| {
+            key.is_empty()
+                || key.len() > 256
+                || !key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        }) {
+            return Err(EngineError::Invalid("invalid gate key"));
+        }
+        if !item.gate_keys.is_empty()
+            && definition.eligibility_policy.gate_keys != GateKeyPolicy::Dynamic
+        {
+            return Err(EngineError::Invalid("queue does not allow gate keys"));
+        }
+        if definition
+            .eligibility_policy
+            .max_gate_keys_per_item
+            .is_some_and(|max| item.gate_keys.len() as u64 > max)
+        {
+            return Err(EngineError::Invalid("item gate-key cap exceeded"));
+        }
+        request_gates.extend(item.gate_keys.iter());
+        let cohort_policy = definition.cohort_policy.filter(|policy| policy.enabled);
+        match (&item.group_key, item.cohort_size, cohort_policy) {
+            (None, _, Some(_)) | (_, None, Some(_)) => {
+                return Err(EngineError::Invalid(
+                    "cohort items require group_key and cohort_size",
+                ));
+            }
+            (Some(_), Some(size), Some(policy)) => {
+                if size == 0 || policy.max_cohort_size.is_some_and(|max| size > max) {
+                    return Err(EngineError::Invalid("cohort size exceeds queue limit"));
+                }
+            }
+            (_, Some(_), None) => {
+                return Err(EngineError::Invalid("cohort_size is invalid on this queue"));
+            }
+            (Some(group), None, None) => {
+                *grouped_counts.entry(group.as_str()).or_insert(0_u64) += 1;
+            }
+            (None, None, None) if definition.max_eligible_group_size.is_some() => {
+                return Err(EngineError::Invalid(
+                    "group batching items require group_key",
+                ));
+            }
+            (None, None, None) => {}
+        }
+    }
+    if definition
+        .eligibility_policy
+        .max_gates_per_request
+        .is_some_and(|max| request_gates.len() as u64 > max)
+    {
+        return Err(EngineError::Invalid("request gate-key cap exceeded"));
+    }
+    if definition
+        .max_eligible_group_size
+        .is_some_and(|max| grouped_counts.values().any(|count| *count > max))
+    {
+        return Err(EngineError::Invalid("group batch exceeds queue limit"));
+    }
+    Ok(())
+}
+
+fn canonicalize_push_gate_keys(items: &mut [PushSpec]) {
+    for item in items {
+        item.gate_keys.sort();
+        item.gate_keys.dedup();
+    }
+}
+
+fn validate_push_replay(request: &AsyncPushRequest, item_ids: &[ItemId]) -> EngineResult<()> {
+    let unique: HashSet<_> = item_ids.iter().copied().collect();
+    if request.request_id.is_none()
+        || item_ids.len() != request.items.len()
+        || unique.len() != item_ids.len()
+    {
+        return Err(EngineError::Invalid("invalid async push replay"));
+    }
+    Ok(())
+}
+
+fn validate_push_plan(
+    requested: &AsyncPushRequest,
+    definition: &QueueDefinition,
+    fingerprint: Option<PushFingerprint>,
+    commit: &RawCommitRequest,
+    item_ids: &[ItemId],
+) -> EngineResult<()> {
+    let unique: HashSet<_> = item_ids.iter().copied().collect();
+    if commit.shard() != &requested.shard
+        || commit.fault() != RawCommitFault::None
+        || requested
+            .expected_epoch
+            .is_some_and(|epoch| epoch != commit.expected_epoch())
+        || item_ids.len() != requested.items.len()
+        || unique.len() != item_ids.len()
+        || item_ids
+            .iter()
+            .any(|item_id| item_id.epoch() != commit.expected_epoch())
+        || commit.commands().len() != 1
+    {
+        return Err(EngineError::Invalid("invalid async push plan"));
+    }
+    let envelope = &commit.commands()[0];
+    if envelope.item_ids != item_ids
+        || envelope.command_id.0.is_empty()
+        || envelope.checksum != CommandChecksum(0)
+        || envelope.created_at != requested.now
+        || envelope.request_id != requested.request_id
+        || envelope.request_fingerprint != fingerprint.map(|hash| hash.legacy_body_hash.0)
+        || envelope.request_outcome
+            != requested.request_id.as_ref().map(|_| RequestOutcome::Push {
+                item_ids: item_ids.to_vec(),
+            })
+    {
+        return Err(EngineError::Invalid("invalid async push plan"));
+    }
+    let QueueCommand::Push(PushCommand { items }) = &envelope.command else {
+        return Err(EngineError::Invalid("invalid async push plan"));
+    };
+    if items.len() != requested.items.len()
+        || items
+            .iter()
+            .zip(&requested.items)
+            .zip(item_ids)
+            .any(|((planned, spec), item_id)| {
+                !push_item_matches(
+                    planned,
+                    spec,
+                    *item_id,
+                    definition.retry_policy.max_attempts,
+                )
+            })
+    {
+        return Err(EngineError::Invalid("invalid async push plan"));
+    }
+    Ok(())
+}
+
+fn push_item_matches(
+    planned: &PushItem,
+    spec: &PushSpec,
+    item_id: ItemId,
+    max_attempts: u32,
+) -> bool {
+    let key_matches = spec.client_item_key.as_ref().map_or_else(
+        || planned.client_item_key.as_str() == item_id.to_string(),
+        |key| &planned.client_item_key == key,
+    );
+    planned.item_id == item_id
+        && key_matches
+        && planned.priority == spec.priority
+        && planned.not_before == spec.not_before
+        && planned.group_key == spec.group_key
+        && planned.max_attempts == max_attempts
+        && planned.payload == spec.payload
+        && planned.fields == spec.fields
+        && planned.metadata == spec.metadata
+        && planned.cohort_size == spec.cohort_size
+        && planned.gate_keys == spec.gate_keys
+        && planned.entity_document == spec.entity
+}
+
+fn validate_push_commit_outcome(
+    queue: &QueueKey,
+    expected_epoch: u64,
+    outcome: &RawCommitOutcome,
+) -> EngineResult<()> {
+    let positions = outcome.positions();
+    if !outcome.projection_applied()
+        || positions.len() != 1
+        || positions[0].queue != *queue
+        || positions[0].backend_epoch != expected_epoch
+    {
+        return Err(EngineError::Storage(
+            "invalid async push commit outcome".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
+where
+    S: AsyncCommitStrategy<Request = RawCommitRequest>,
+    D: OwnedTaskDispatcher,
+{
+    pub fn new_with_planners(
+        strategy: S,
+        dispatcher: D,
+        claim_planner: P,
+        push_planner: U,
+        max_queued_commits: usize,
+    ) -> Self {
+        let durability = strategy.durability_class();
+        Self {
+            strategy: Arc::new(strategy),
+            dispatcher,
+            claim_planner: Arc::new(claim_planner),
+            push_planner: Arc::new(push_planner),
+            admission: KeyedQueueGate::new(max_queued_commits),
+            durability,
+        }
+    }
+}
+
+impl<S, D, P, U> AsyncComposedBackend<S, D, P, U>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest, Output = EngineResult<RawCommitOutcome>>,
     D: OwnedTaskDispatcher,
@@ -242,6 +682,13 @@ where
                 {
                     return Err(ClaimExecutionError::BeforeCommit(EngineError::Storage(
                         "async claim planner returned the wrong queue definition".to_string(),
+                    )));
+                }
+                if request.max_items == 0
+                    || request.max_items > definition.max_claim_batch_size as usize
+                {
+                    return Err(ClaimExecutionError::BeforeCommit(EngineError::Invalid(
+                        "claim batch is outside queue limits",
                     )));
                 }
                 let unit = validate_claim_compatibility(
@@ -454,7 +901,7 @@ mod tests {
     use pqueue_core::{
         ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, Metadata, OrderingMode,
         PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition,
-        QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+        QueueId, RecurrencePolicy, RequestId, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
     };
 
     use super::*;
@@ -462,7 +909,7 @@ mod tests {
         ClaimCommand, ClaimCompatibility, CommandChecksum, CommandEnvelope, CommandId,
         CommandPosition, OwnedTask, OwnedTaskFactory, QueueCommand, QueueKey, RawCommitOutcome,
         RequestOutcome, TaskOutcome, TaskOutcomeSender, UnifiedAtomicCommit,
-        UnifiedAtomicCommitter, task_outcome_channel,
+        UnifiedAtomicCommitter, build_push_items, task_outcome_channel,
     };
 
     fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
@@ -746,6 +1193,19 @@ mod tests {
         }
     }
 
+    fn push_request(name: &str, with_request_id: bool) -> AsyncPushRequest {
+        AsyncPushRequest {
+            shard: queue(name),
+            request_id: with_request_id.then(|| RequestId::new(format!("request-{name}")).unwrap()),
+            items: vec![PushSpec {
+                payload: Some(bytes::Bytes::from_static(b"payload")),
+                ..PushSpec::default()
+            }],
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            expected_epoch: Some(1),
+        }
+    }
+
     fn definition(name: &str) -> QueueDefinition {
         QueueDefinition {
             tenant_id: TenantId::new("tenant").unwrap(),
@@ -768,7 +1228,7 @@ mod tests {
             retry_policy: RetryPolicy { max_attempts: 3 },
             max_push_batch_size: 100,
             max_claim_batch_size: 100,
-            max_eligible_group_size: Some(10),
+            max_eligible_group_size: None,
             secondary_indexes: Vec::new(),
             entity_schema: None,
             typed_indexes: Vec::new(),
@@ -991,6 +1451,130 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum PushPlanMode {
+        Valid,
+        Replay,
+        SmugglePayload,
+        WrongFingerprint,
+    }
+
+    #[derive(Clone)]
+    struct ControlledPushPlanner {
+        mode: PushPlanMode,
+        item_id: ItemId,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl AsyncPushPlanner for ControlledPushPlanner {
+        fn supports_gates(&self) -> bool {
+            false
+        }
+
+        fn queue_definition(&self, shard: QueueKey) -> OwnedTask<EngineResult<QueueDefinition>> {
+            Box::pin(async move { Ok(definition(shard.queue_id.as_str())) })
+        }
+
+        fn plan_push(
+            &self,
+            request: AsyncPushRequest,
+            _definition: QueueDefinition,
+            fingerprint: Option<PushFingerprint>,
+        ) -> OwnedTask<EngineResult<AsyncPushPlan>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            let mode = self.mode;
+            let item_id = self.item_id;
+            Box::pin(async move {
+                if matches!(mode, PushPlanMode::Replay) {
+                    return Ok(AsyncPushPlan::replay(vec![item_id]));
+                }
+                let (mut items, ids) = build_push_items(request.items.clone(), 1, 1, 1, 3);
+                assert_eq!(ids, vec![item_id]);
+                if matches!(mode, PushPlanMode::SmugglePayload) {
+                    items[0].payload = Some(bytes::Bytes::from_static(b"smuggled"));
+                }
+                let envelope = CommandEnvelope {
+                    command_id: CommandId::new("push-command"),
+                    request_id: request.request_id.clone(),
+                    request_fingerprint: fingerprint.map(|hash| hash.legacy_body_hash.0).map(
+                        |hash| {
+                            if matches!(mode, PushPlanMode::WrongFingerprint) {
+                                hash ^ 1
+                            } else {
+                                hash
+                            }
+                        },
+                    ),
+                    request_outcome: request.request_id.as_ref().map(|_| RequestOutcome::Push {
+                        item_ids: ids.clone(),
+                    }),
+                    item_ids: ids.clone(),
+                    command: QueueCommand::Push(PushCommand { items }),
+                    checksum: CommandChecksum(0),
+                    created_at: request.now,
+                };
+                Ok(AsyncPushPlan::commit(
+                    RawCommitRequest::new(request.shard, vec![envelope], 1),
+                    ids,
+                ))
+            })
+        }
+    }
+
+    type PushBackend = AsyncComposedBackend<
+        UnifiedAtomicCommit<ClaimCommitter>,
+        ControlledDispatcher,
+        NoAsyncClaimPlanner,
+        ControlledPushPlanner,
+    >;
+
+    struct PushFixture {
+        backend: PushBackend,
+        dispatcher: ControlledDispatcher,
+        phase: Arc<Phase>,
+        commit_calls: Arc<AtomicUsize>,
+        commit_completed: Arc<AtomicBool>,
+        plan_calls: Arc<AtomicUsize>,
+        item_id: ItemId,
+    }
+
+    fn push_fixture(mode: PushPlanMode, released: bool) -> PushFixture {
+        let phase = Phase::new(released);
+        let commit_calls = Arc::new(AtomicUsize::new(0));
+        let commit_completed = Arc::new(AtomicBool::new(false));
+        let plan_calls = Arc::new(AtomicUsize::new(0));
+        let item_id = ItemId::mint(1, 1, 1);
+        let committer = ClaimCommitter {
+            calls: Arc::clone(&commit_calls),
+            completed: Arc::clone(&commit_completed),
+            phase: Arc::clone(&phase),
+        };
+        let planner = ControlledPushPlanner {
+            mode,
+            item_id,
+            calls: Arc::clone(&plan_calls),
+        };
+        let strategy =
+            UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, committer).unwrap();
+        let dispatcher = ControlledDispatcher::new(4);
+        let backend = AsyncComposedBackend::new_with_planners(
+            strategy,
+            dispatcher.clone(),
+            NoAsyncClaimPlanner,
+            planner,
+            4,
+        );
+        PushFixture {
+            backend,
+            dispatcher,
+            phase,
+            commit_calls,
+            commit_completed,
+            plan_calls,
+            item_id,
+        }
+    }
+
     fn planned_operation(
         key: QueueKey,
         phase: Arc<Phase>,
@@ -1173,6 +1757,201 @@ mod tests {
         assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 1);
         assert!(fixture.commit_completed.load(Ordering::Acquire));
         assert_eq!(fixture.render_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn typed_push_routes_validated_plan_through_injected_strategy() {
+        let fixture = push_fixture(PushPlanMode::Valid, true);
+        let mut push = Box::pin(fixture.backend.push(push_request("push", true)));
+
+        assert!(matches!(poll_once(push.as_mut()), Poll::Pending));
+        assert_eq!(fixture.plan_calls.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(push.as_mut()),
+            Poll::Ready(Ok(ids)) if ids == vec![fixture.item_id]
+        ));
+        assert_eq!(fixture.plan_calls.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 1);
+        assert!(fixture.commit_completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn typed_push_replay_requires_request_id_and_bypasses_commit() {
+        let fixture = push_fixture(PushPlanMode::Replay, true);
+        let mut replay = Box::pin(fixture.backend.push(push_request("push", true)));
+        assert!(matches!(poll_once(replay.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(replay.as_mut()),
+            Poll::Ready(Ok(ids)) if ids == vec![fixture.item_id]
+        ));
+        assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+
+        let mut illicit = Box::pin(fixture.backend.push(push_request("push", false)));
+        assert!(matches!(poll_once(illicit.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(illicit.as_mut()),
+            Poll::Ready(Err(AsyncPushError::BeforeCommit(EngineError::Invalid(
+                "invalid async push replay"
+            ))))
+        ));
+        assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn typed_push_rejects_empty_batch_before_planning() {
+        let fixture = push_fixture(PushPlanMode::Valid, true);
+        let mut request = push_request("push", true);
+        request.items.clear();
+        let mut push = Box::pin(fixture.backend.push(request));
+        assert!(matches!(poll_once(push.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(push.as_mut()),
+            Poll::Ready(Err(AsyncPushError::BeforeCommit(EngineError::Invalid(
+                "push batch must not be empty"
+            ))))
+        ));
+        assert_eq!(fixture.plan_calls.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn static_push_shape_enforces_priority_gates_cohorts_and_groups() {
+        let mut def = definition("push");
+        def.max_eligible_group_size = Some(10);
+        let mut spec = PushSpec {
+            priority: Some(PriorityValue::Text("wrong".into())),
+            ..Default::default()
+        };
+        assert!(validate_push_shape(&def, &[spec.clone()]).is_err());
+
+        spec.priority = None;
+        spec.gate_keys = vec!["same".into(), "same".into()];
+        assert!(validate_push_shape(&def, &[spec.clone()]).is_err());
+
+        spec.gate_keys.clear();
+        spec.group_key = Some(pqueue_core::GroupKey::new("cohort").unwrap());
+        spec.cohort_size = Some(2);
+        assert!(validate_push_shape(&def, &[spec.clone()]).is_err());
+
+        def.cohort_policy = Some(pqueue_core::CohortPolicy {
+            enabled: true,
+            completion_bound_ms: Some(60_000),
+            on_incomplete: None,
+            max_cohort_size: Some(1),
+        });
+        assert!(validate_push_shape(&def, &[spec.clone()]).is_err());
+
+        spec.cohort_size = None;
+        def.max_eligible_group_size = None;
+        assert!(validate_push_shape(&def, &[spec]).is_err());
+
+        let mut ordinary = definition("ordinary");
+        ordinary.max_eligible_group_size = None;
+        let grouped = PushSpec {
+            group_key: Some(pqueue_core::GroupKey::new("ordinary-group").unwrap()),
+            ..Default::default()
+        };
+        assert!(validate_push_shape(&ordinary, &[grouped]).is_ok());
+    }
+
+    #[test]
+    fn duplicate_gate_keys_canonicalize_before_fingerprinting() {
+        let mut duplicated = vec![PushSpec {
+            gate_keys: vec!["z".into(), "a".into(), "z".into()],
+            ..Default::default()
+        }];
+        let mut canonical = vec![PushSpec {
+            gate_keys: vec!["a".into(), "z".into()],
+            ..Default::default()
+        }];
+        canonicalize_push_gate_keys(&mut duplicated);
+        canonicalize_push_gate_keys(&mut canonical);
+        assert_eq!(duplicated[0].gate_keys, canonical[0].gate_keys);
+        assert_eq!(
+            crate::push_specs_fingerprint_sha256(&duplicated).unwrap(),
+            crate::push_specs_fingerprint_sha256(&canonical).unwrap()
+        );
+    }
+
+    #[test]
+    fn typed_push_rejects_planner_smuggling_before_commit() {
+        for mode in [PushPlanMode::SmugglePayload, PushPlanMode::WrongFingerprint] {
+            let fixture = push_fixture(mode, true);
+            let mut push = Box::pin(fixture.backend.push(push_request("push", true)));
+            assert!(matches!(poll_once(push.as_mut()), Poll::Pending));
+            assert!(fixture.dispatcher.drive_next());
+            assert!(matches!(
+                poll_once(push.as_mut()),
+                Poll::Ready(Err(AsyncPushError::BeforeCommit(EngineError::Invalid(
+                    "invalid async push plan"
+                ))))
+            ));
+            assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[test]
+    fn dropping_typed_push_response_does_not_cancel_accepted_commit() {
+        let fixture = push_fixture(PushPlanMode::Valid, false);
+        let mut push = Box::pin(fixture.backend.push(push_request("push", true)));
+
+        assert!(matches!(poll_once(push.as_mut()), Poll::Pending));
+        assert!(fixture.dispatcher.drive_next());
+        assert!(fixture.phase.started.load(Ordering::Acquire));
+        assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 1);
+        drop(push);
+
+        fixture.phase.release();
+        assert!(fixture.dispatcher.drive_next());
+        assert!(fixture.commit_completed.load(Ordering::Acquire));
+    }
+
+    struct AppendedOnlyCommitter;
+
+    impl UnifiedAtomicCommitter for AppendedOnlyCommitter {
+        type Request = RawCommitRequest;
+        type Output = EngineResult<RawCommitOutcome>;
+
+        fn commit_atomic(&self, request: Self::Request) -> OwnedTask<Self::Output> {
+            let position =
+                CommandPosition::new(request.shard().clone(), request.expected_epoch(), 1);
+            Box::pin(async move { Ok(RawCommitOutcome::appended(vec![position])) })
+        }
+    }
+
+    #[test]
+    fn typed_push_reports_invalid_response_barrier_after_commit() {
+        let dispatcher = ControlledDispatcher::new(1);
+        let strategy =
+            UnifiedAtomicCommit::for_profile(DurabilityClass::Atomic, AppendedOnlyCommitter)
+                .unwrap();
+        let backend = AsyncComposedBackend::new_with_planners(
+            strategy,
+            dispatcher.clone(),
+            NoAsyncClaimPlanner,
+            ControlledPushPlanner {
+                mode: PushPlanMode::Valid,
+                item_id: ItemId::mint(1, 1, 1),
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+            1,
+        );
+        let mut push = Box::pin(backend.push(push_request("push", true)));
+
+        assert!(matches!(poll_once(push.as_mut()), Poll::Pending));
+        assert!(dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(push.as_mut()),
+            Poll::Ready(Err(AsyncPushError::AfterCommit {
+                stage: AsyncPushPostCommitStage::CommitOutcome,
+                source: EngineError::Storage(_),
+            }))
+        ));
     }
 
     #[test]
@@ -1737,6 +2516,26 @@ mod tests {
             },
             false,
         );
+    }
+
+    #[test]
+    fn claim_batch_limits_are_enforced_before_planning() {
+        for max_items in [0, 101] {
+            let fixture = claim_fixture(1, true, true);
+            let mut request = claim_request("claim");
+            request.max_items = max_items;
+            let mut claim = Box::pin(fixture.backend.claim(request));
+            assert!(matches!(poll_once(claim.as_mut()), Poll::Pending));
+            assert!(fixture.dispatcher.drive_next());
+            assert!(matches!(
+                poll_once(claim.as_mut()),
+                Poll::Ready(Err(AsyncClaimError::BeforeCommit(EngineError::Invalid(
+                    "claim batch is outside queue limits"
+                ))))
+            ));
+            assert_eq!(fixture.plan_calls.load(Ordering::Acquire), 0);
+            assert_eq!(fixture.commit_calls.load(Ordering::Acquire), 0);
+        }
     }
 
     #[test]

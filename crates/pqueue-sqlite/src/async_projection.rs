@@ -5,10 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 
-use pqueue_core::{ItemId, ItemState, QueueDefinition, UtcTimestamp};
+use pqueue_core::{ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::{
-    AsyncProjectionStore, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    ProjectionStore, QueueKey,
+    AsyncProjectionStore, ClaimCompatibility, ClaimedItem, CommandEnvelope, CommandPosition,
+    EngineError, EngineResult, IdempotencyDecision, ProjectionStore, PushFingerprint, PushItem,
+    QueueKey,
 };
 
 use crate::SqliteProjectionStore;
@@ -329,6 +330,10 @@ impl AsyncSqliteProjectionStore {
 }
 
 impl AsyncProjectionStore for AsyncSqliteProjectionStore {
+    fn supports_gates(&self) -> bool {
+        true
+    }
+
     fn ensure_shard(
         &self,
         definition: QueueDefinition,
@@ -346,6 +351,49 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
         async move {
             actor
                 .execute(move |store| ProjectionStore::admit_mutation(store, &shard))
+                .await
+        }
+    }
+
+    fn validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.validate_push_constraints(&shard, &items, now))
+                .await
+        }
+    }
+
+    fn pause_blocks_intake(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<bool>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.pause_blocks_push_intake(&shard))
+                .await
+        }
+    }
+
+    fn push_idempotency(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: PushFingerprint,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<IdempotencyDecision<Vec<ItemId>>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    store.push_idempotency_decision(&shard, &request_id, fingerprint, now)
+                })
                 .await
         }
     }
@@ -386,6 +434,23 @@ impl AsyncProjectionStore for AsyncSqliteProjectionStore {
         async move {
             actor
                 .execute(move |store| ProjectionStore::eligible_candidates(store, &shard, now, max))
+                .await
+        }
+    }
+
+    fn select_item_claim(
+        &self,
+        shard: QueueKey,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    ProjectionStore::select_item_claim(store, &shard, &compatibility, now, max)
+                })
                 .await
         }
     }
@@ -458,11 +523,13 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use pqueue_core::{
-        ClientItemKey, EligibilityPolicy, Metadata, OrderingMode, PriorityDirection, PriorityModel,
-        PriorityModelKind, PriorityTieBreaker, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
+        BodyHash, ClientItemKey, CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GroupKey,
+        Metadata, MetadataValue, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+        PriorityTieBreaker, QueueId, RecurrencePolicy, RequestId, RetryPolicy, TenantId,
     };
     use pqueue_engine::{
-        CommandChecksum, CommandEnvelope, CommandId, PushCommand, PushItem, QueueCommand,
+        CommandChecksum, CommandEnvelope, CommandId, PauseQueueCommand, PushCommand, PushItem,
+        QueueCommand, RequestOutcome,
     };
 
     use super::*;
@@ -533,7 +600,55 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn actor_item_selector_preserves_group_and_metadata_filters() {
+        let store = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition())
+            .await
+            .unwrap();
+        let item_id = ItemId::mint(4, 0, 0);
+        let mut envelope = push(item_id);
+        let QueueCommand::Push(command) = &mut envelope.command else {
+            unreachable!()
+        };
+        command.items[0].group_key = Some(GroupKey::new("group-a").unwrap());
+        command.items[0]
+            .metadata
+            .insert("region", MetadataValue::String("east".to_string()));
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard(), 1, 0)],
+            vec![envelope],
+        )
+        .await
+        .unwrap();
+        let selected = AsyncProjectionStore::select_item_claim(
+            &store,
+            shard(),
+            ClaimCompatibility {
+                group_key: Some(GroupKey::new("group-a").unwrap()),
+                metadata_equals: std::collections::BTreeMap::from([(
+                    "region".to_string(),
+                    MetadataValue::String("east".to_string()),
+                )]),
+                ..ClaimCompatibility::default()
+            },
+            UtcTimestamp::new(10, 0).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(selected, vec![item_id]);
+    }
+
     fn assert_send<T: Send>(_: T) {}
+
+    fn legacy_fingerprint(value: u64) -> PushFingerprint {
+        PushFingerprint {
+            canonical_sha256: [0; 32],
+            legacy_body_hash: BodyHash(value),
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn every_async_projection_future_is_send() {
@@ -547,6 +662,14 @@ mod tests {
         let item = ItemId::mint(1, 0, 0);
         assert_send(store.ensure_shard(definition()));
         assert_send(store.admit_mutation(shard()));
+        assert_send(store.validate_push(shard(), Vec::new(), UtcTimestamp::new(0, 0).unwrap()));
+        assert_send(store.pause_blocks_intake(shard()));
+        assert_send(store.push_idempotency(
+            shard(),
+            RequestId::new("request").unwrap(),
+            legacy_fingerprint(1),
+            UtcTimestamp::new(0, 0).unwrap(),
+        ));
         assert_send(store.apply_live(Vec::new(), Vec::new()));
         assert_send(store.apply_recovery(Vec::new(), Vec::new()));
         assert_send(store.eligible_candidates(shard(), UtcTimestamp::new(0, 0).unwrap(), 1));
@@ -556,6 +679,497 @@ mod tests {
         assert_send(store.recovery_high_water(shard()));
         assert_send(store.recover_definitions());
         assert_send(store.close_and_drain());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_capabilities_are_read_only_and_follow_durable_projection_state() {
+        let store = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        store.ensure_shard(definition()).await.unwrap();
+        assert!(store.supports_gates());
+
+        let first_id = ItemId::mint(3, 0, 0);
+        let first = push(first_id);
+        let first_item = match &first.command {
+            QueueCommand::Push(command) => command.items[0].clone(),
+            _ => unreachable!(),
+        };
+        store
+            .validate_push(
+                shard(),
+                vec![first_item.clone()],
+                UtcTimestamp::new(1, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        // Validation does not materialize its candidate.
+        assert_eq!(store.item_state(shard(), first_id).await.unwrap(), None);
+
+        store
+            .apply_live(vec![CommandPosition::new(shard(), 3, 0)], vec![first])
+            .await
+            .unwrap();
+        let mut duplicate_key = first_item.clone();
+        duplicate_key.item_id = ItemId::mint(3, 0, 1);
+        assert_eq!(
+            store
+                .validate_push(
+                    shard(),
+                    vec![duplicate_key],
+                    UtcTimestamp::new(1, 0).unwrap()
+                )
+                .await,
+            Err(EngineError::Conflict)
+        );
+        let mut duplicate_id = first_item.clone();
+        duplicate_id.client_item_key = ClientItemKey::new("different-key").unwrap();
+        assert_eq!(
+            store
+                .validate_push(
+                    shard(),
+                    vec![duplicate_id],
+                    UtcTimestamp::new(1, 0).unwrap(),
+                )
+                .await,
+            Err(EngineError::Conflict)
+        );
+        store
+            .enqueue(|projection| {
+                let g = projection.lock();
+                g.conn
+                    .execute(
+                        "UPDATE pqueue_items SET superseded=1 WHERE tenant_id='tenant' \
+                         AND queue_id='queue' AND client_item_key='item'",
+                        [],
+                    )
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        let mut reusable_superseded_key = first_item.clone();
+        reusable_superseded_key.item_id = ItemId::mint(3, 0, 5);
+        store
+            .validate_push(
+                shard(),
+                vec![reusable_superseded_key],
+                UtcTimestamp::new(1, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut duplicate_in_batch = first_item.clone();
+        duplicate_in_batch.item_id = ItemId::mint(3, 0, 2);
+        duplicate_in_batch.client_item_key = ClientItemKey::new("batch-key").unwrap();
+        let mut second_duplicate = duplicate_in_batch.clone();
+        second_duplicate.item_id = ItemId::mint(3, 0, 3);
+        assert_eq!(
+            store
+                .validate_push(
+                    shard(),
+                    vec![duplicate_in_batch, second_duplicate],
+                    UtcTimestamp::new(1, 0).unwrap()
+                )
+                .await,
+            Err(EngineError::Conflict)
+        );
+
+        assert!(!store.pause_blocks_intake(shard()).await.unwrap());
+        let pause = |drain_intake, sequence| CommandEnvelope {
+            command_id: CommandId::new(format!("pause-{sequence}")),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: Vec::new(),
+            command: QueueCommand::PauseQueue(PauseQueueCommand { drain_intake }),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(11 + sequence as i64, 0).unwrap(),
+        };
+        store
+            .apply_live(
+                vec![CommandPosition::new(shard(), 3, 1)],
+                vec![pause(false, 1)],
+            )
+            .await
+            .unwrap();
+        assert!(!store.pause_blocks_intake(shard()).await.unwrap());
+        store
+            .apply_live(
+                vec![CommandPosition::new(shard(), 3, 2)],
+                vec![pause(true, 2)],
+            )
+            .await
+            .unwrap();
+        assert!(store.pause_blocks_intake(shard()).await.unwrap());
+
+        let request_id = RequestId::new("durable-push").unwrap();
+        let replay_id = ItemId::mint(3, 0, 4);
+        let mut recorded = push(replay_id);
+        recorded.command_id = CommandId::new("recorded-push");
+        recorded.request_id = Some(request_id.clone());
+        recorded.request_fingerprint = Some(42);
+        recorded.request_outcome = Some(RequestOutcome::Push {
+            item_ids: vec![replay_id],
+        });
+        recorded.created_at = UtcTimestamp::new(20, 0).unwrap();
+        if let QueueCommand::Push(command) = &mut recorded.command {
+            command.items[0].client_item_key = ClientItemKey::new("replay-key").unwrap();
+        }
+        let recorded_fingerprint = match &recorded.command {
+            QueueCommand::Push(command) => PushFingerprint {
+                canonical_sha256: pqueue_engine::push_items_fingerprint_sha256(&command.items)
+                    .unwrap(),
+                legacy_body_hash: BodyHash(42),
+            },
+            _ => unreachable!(),
+        };
+        store
+            .apply_live(vec![CommandPosition::new(shard(), 3, 3)], vec![recorded])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .push_idempotency(
+                    shard(),
+                    request_id.clone(),
+                    recorded_fingerprint,
+                    UtcTimestamp::new(21, 0).unwrap(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Replay(vec![replay_id])
+        );
+        assert_eq!(
+            store
+                .push_idempotency(
+                    shard(),
+                    request_id.clone(),
+                    PushFingerprint {
+                        canonical_sha256: [43; 32],
+                        legacy_body_hash: BodyHash(43),
+                    },
+                    UtcTimestamp::new(21, 0).unwrap(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Conflict
+        );
+        store
+            .enqueue(|projection| {
+                let g = projection.lock();
+                g.conn
+                    .execute(
+                        "UPDATE pqueue_request_idempotency SET request_fingerprint=?1 \
+                         WHERE tenant_id='tenant' AND queue_id='queue' AND operation='push' \
+                         AND request_id='durable-push'",
+                        [BodyHash(42).0.to_be_bytes().as_slice()],
+                    )
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .push_idempotency(
+                    shard(),
+                    request_id.clone(),
+                    recorded_fingerprint,
+                    UtcTimestamp::new(21, 0).unwrap(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Replay(vec![replay_id]),
+            "legacy eight-byte fingerprints remain replayable during migration"
+        );
+        assert_eq!(
+            store
+                .push_idempotency(
+                    shard(),
+                    request_id,
+                    recorded_fingerprint,
+                    UtcTimestamp::new(81, 0).unwrap(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Expired
+        );
+        store.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_validation_enforces_timed_relational_constraints_exactly() {
+        let store = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        let mut queue = definition();
+        queue.max_eligible_group_size = Some(2);
+        queue.cohort_policy = Some(CohortPolicy {
+            enabled: true,
+            completion_bound_ms: Some(1_000),
+            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+            max_cohort_size: Some(2),
+        });
+        store.ensure_shard(queue).await.unwrap();
+
+        let mut candidate = match push(ItemId::mint(4, 0, 0)).command {
+            QueueCommand::Push(command) => command.items[0].clone(),
+            _ => unreachable!(),
+        };
+        candidate.client_item_key = ClientItemKey::new("retained-key").unwrap();
+        store
+            .enqueue(|projection| {
+                let g = projection.lock();
+                g.conn
+                    .execute(
+                        "INSERT INTO pqueue_item_key_retention \
+                         (tenant_id,queue_id,client_item_key,item_id,expires_at) \
+                         VALUES ('tenant','queue','retained-key','old',10000000000)",
+                        [],
+                    )
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .validate_push(
+                    shard(),
+                    vec![candidate.clone()],
+                    UtcTimestamp::new(9, 0).unwrap(),
+                )
+                .await,
+            Err(EngineError::Conflict)
+        );
+        store
+            .validate_push(
+                shard(),
+                vec![candidate.clone()],
+                UtcTimestamp::new(10, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let mut malformed = candidate.clone();
+        malformed.client_item_key = ClientItemKey::new("malformed").unwrap();
+        malformed.cohort_size = Some(1);
+        assert!(matches!(
+            store
+                .validate_push(shard(), vec![malformed], UtcTimestamp::new(10, 0).unwrap(),)
+                .await,
+            Err(EngineError::Invalid("cohort_size requires group_key"))
+        ));
+
+        let mut group_items = Vec::new();
+        for index in 0..3 {
+            let mut item = candidate.clone();
+            item.item_id = ItemId::mint(4, 0, 10 + index);
+            item.client_item_key = ClientItemKey::new(format!("group-{index}")).unwrap();
+            item.group_key = Some(GroupKey::new("bounded-group").unwrap());
+            if index == 0 {
+                item.cohort_size = Some(2);
+            }
+            group_items.push(item);
+        }
+        assert_eq!(
+            store
+                .validate_push(shard(), group_items, UtcTimestamp::new(10, 0).unwrap())
+                .await,
+            Err(EngineError::Conflict)
+        );
+
+        store
+            .enqueue(|projection| {
+                let g = projection.lock();
+                g.conn
+                    .execute(
+                        "INSERT INTO pqueue_cohorts \
+                         (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
+                          cohort_created_at,retention_until,created_at) \
+                         VALUES ('tenant','queue','generation','old-generation',5,5,'terminal',0,10000000000,0)",
+                        [],
+                    )
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap();
+        let mut next_generation = candidate;
+        next_generation.item_id = ItemId::mint(4, 0, 20);
+        next_generation.client_item_key = ClientItemKey::new("next-generation").unwrap();
+        next_generation.group_key = Some(GroupKey::new("generation").unwrap());
+        next_generation.cohort_size = Some(2);
+        assert_eq!(
+            store
+                .validate_push(
+                    shard(),
+                    vec![next_generation.clone()],
+                    UtcTimestamp::new(9, 0).unwrap(),
+                )
+                .await,
+            Err(EngineError::Conflict)
+        );
+        store
+            .validate_push(
+                shard(),
+                vec![next_generation],
+                UtcTimestamp::new(10, 0).unwrap(),
+            )
+            .await
+            .unwrap();
+        store.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_push_envelope_cannot_create_a_push_replay_row() {
+        let store = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        store.ensure_shard(definition()).await.unwrap();
+        let request_id = RequestId::new("not-a-push").unwrap();
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new("pause-with-forged-push-outcome"),
+            request_id: Some(request_id.clone()),
+            request_fingerprint: Some(7),
+            request_outcome: Some(RequestOutcome::Push {
+                item_ids: vec![ItemId::mint(5, 0, 0)],
+            }),
+            item_ids: Vec::new(),
+            command: QueueCommand::PauseQueue(PauseQueueCommand::default()),
+            checksum: CommandChecksum(0),
+            created_at: UtcTimestamp::new(1, 0).unwrap(),
+        };
+        store
+            .apply_live(vec![CommandPosition::new(shard(), 1, 0)], vec![envelope])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .push_idempotency(
+                    shard(),
+                    request_id,
+                    legacy_fingerprint(7),
+                    UtcTimestamp::new(2, 0).unwrap(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Proceed
+        );
+        store.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn conflicting_push_replay_row_rolls_back_the_whole_apply_batch() {
+        let store = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        store.ensure_shard(definition()).await.unwrap();
+        let request_id = RequestId::new("colliding-request").unwrap();
+        let first_id = ItemId::mint(6, 0, 0);
+        let second_id = ItemId::mint(6, 0, 1);
+        let mut first = push(first_id);
+        first.command_id = CommandId::new("first-collision");
+        first.request_id = Some(request_id.clone());
+        first.request_fingerprint = Some(11);
+        first.request_outcome = Some(RequestOutcome::Push {
+            item_ids: vec![first_id],
+        });
+        let mut second = push(second_id);
+        second.command_id = CommandId::new("second-collision");
+        second.request_id = Some(request_id.clone());
+        second.request_fingerprint = Some(12);
+        second.request_outcome = Some(RequestOutcome::Push {
+            item_ids: vec![second_id],
+        });
+        if let QueueCommand::Push(command) = &mut second.command {
+            command.items[0].client_item_key = ClientItemKey::new("second-item").unwrap();
+        }
+
+        assert_eq!(
+            store
+                .apply_live(
+                    vec![
+                        CommandPosition::new(shard(), 6, 0),
+                        CommandPosition::new(shard(), 6, 1),
+                    ],
+                    vec![first, second],
+                )
+                .await,
+            Err(EngineError::RequestIdConflict)
+        );
+        assert_eq!(store.item_state(shard(), first_id).await.unwrap(), None);
+        assert_eq!(store.item_state(shard(), second_id).await.unwrap(), None);
+        assert_eq!(store.recovery_high_water(shard()).await.unwrap(), None);
+        assert_eq!(
+            store
+                .push_idempotency(
+                    shard(),
+                    request_id,
+                    legacy_fingerprint(11),
+                    UtcTimestamp::new(11, 0).unwrap(),
+                )
+                .await
+                .unwrap(),
+            IdempotencyDecision::Proceed
+        );
+        store.close_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_apply_fences_stale_epochs_but_recovery_accepts_historical_epochs() {
+        let live = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        live.ensure_shard(definition()).await.unwrap();
+        let current_id = ItemId::mint(7, 0, 0);
+        live.apply_live(
+            vec![CommandPosition::new(shard(), 7, 0)],
+            vec![push(current_id)],
+        )
+        .await
+        .unwrap();
+        let stale_id = ItemId::mint(6, 0, 1);
+        let mut stale = push(stale_id);
+        if let QueueCommand::Push(command) = &mut stale.command {
+            command.items[0].client_item_key = ClientItemKey::new("stale-item").unwrap();
+        }
+        assert_eq!(
+            live.apply_live(vec![CommandPosition::new(shard(), 6, 1)], vec![stale],)
+                .await,
+            Err(EngineError::EpochFenced)
+        );
+        assert_eq!(live.item_state(shard(), stale_id).await.unwrap(), None);
+        assert_eq!(
+            live.recovery_high_water(shard()).await.unwrap(),
+            Some(CommandPosition::new(shard(), 7, 0))
+        );
+        live.close_and_drain().await.unwrap();
+
+        let recovery = AsyncSqliteProjectionStore::in_memory().await.unwrap();
+        recovery.ensure_shard(definition()).await.unwrap();
+        let older_id = ItemId::mint(6, 0, 1);
+        let mut older = push(older_id);
+        if let QueueCommand::Push(command) = &mut older.command {
+            command.items[0].client_item_key = ClientItemKey::new("historical-item").unwrap();
+        }
+        recovery
+            .apply_recovery(
+                vec![
+                    CommandPosition::new(shard(), 7, 0),
+                    CommandPosition::new(shard(), 6, 1),
+                ],
+                vec![push(current_id), older],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recovery.item_state(shard(), current_id).await.unwrap(),
+            Some(ItemState::Pending)
+        );
+        assert_eq!(
+            recovery.item_state(shard(), older_id).await.unwrap(),
+            Some(ItemState::Pending)
+        );
+        assert_eq!(
+            recovery.recovery_high_water(shard()).await.unwrap(),
+            Some(CommandPosition::new(shard(), 7, 1))
+        );
+        recovery.close_and_drain().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]

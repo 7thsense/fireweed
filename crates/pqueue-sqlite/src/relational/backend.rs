@@ -839,13 +839,24 @@ impl ClaimPort for SqliteRelationalBackend {
                         eligibility_at,
                         req.max_items,
                         max_groups,
+                        &req.compatibility,
                     )?
                 }
-                ClaimUnit::SameGroupKey => {
-                    select_same_group(&tx, &req.shard, eligibility_at, req.max_items)?
-                }
+                ClaimUnit::SameGroupKey => select_same_group(
+                    &tx,
+                    &req.shard,
+                    eligibility_at,
+                    req.max_items,
+                    &req.compatibility,
+                )?,
                 ClaimUnit::WholeCohort => {
-                    match select_whole_cohort(&tx, &req.shard, eligibility_at, req.max_items)? {
+                    match select_whole_cohort(
+                        &tx,
+                        &req.shard,
+                        eligibility_at,
+                        req.max_items,
+                        &req.compatibility,
+                    )? {
                         Some(selected) => {
                             selected_cohort = Some(selected.cohort_id);
                             selected.item_ids

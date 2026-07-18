@@ -8,12 +8,12 @@ use std::sync::Arc;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken,
-    QueueDefinition, QueueIndex, UtcTimestamp, is_retry_exhausted,
+    QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
 };
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
-    CommandPosition, EngineError, EngineResult, FinalizeKind, PayloadUpdate, PushItem,
-    QueueCommand, QueueKey, RichClaimSelection,
+    CommandPosition, EngineError, EngineResult, FinalizeKind, IdempotencyDecision, PayloadUpdate,
+    PushFingerprint, PushItem, QueueCommand, QueueKey, RequestOutcome, RichClaimSelection,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -40,6 +40,13 @@ fn integer(value: &Value) -> EngineResult<i64> {
     match value {
         Value::Integer(value) => Ok(*value),
         other => Err(storage(format!("expected integer, got {other:?}"))),
+    }
+}
+
+fn blob(value: &Value) -> EngineResult<Vec<u8>> {
+    match value {
+        Value::Blob(value) => Ok(value.clone()),
+        other => Err(storage(format!("expected blob, got {other:?}"))),
     }
 }
 
@@ -683,6 +690,72 @@ async fn candidate_groups(
     Ok(groups)
 }
 
+async fn candidate_groups_for_claim(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    now: i64,
+    compatibility: &ClaimCompatibility,
+) -> EngineResult<Vec<GroupKey>> {
+    if compatibility.metadata_equals.is_empty() {
+        return candidate_groups(transaction, tenant, queue).await;
+    }
+    const PAGE_SIZE: i64 = 128;
+    let mut groups = Vec::new();
+    let mut seen = HashSet::new();
+    let mut offset = 0_i64;
+    loop {
+        let mut rows = transaction
+            .query(
+                "SELECT group_key,metadata FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
+                 AND group_key IS NOT NULL AND (not_before IS NULL OR not_before<=?3) \
+                 AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+                 JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+                 AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
+                 AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
+                 ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5",
+                vec![
+                    tenant.to_string().into(),
+                    queue.to_string().into(),
+                    Value::Integer(now),
+                    Value::Integer(PAGE_SIZE),
+                    Value::Integer(offset),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        let mut page_len = 0_i64;
+        while let Some(row) = rows.next().await.map_err(storage)? {
+            page_len += 1;
+            let group =
+                GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?;
+            if compatibility
+                .group_key
+                .as_ref()
+                .is_some_and(|required| required != &group)
+            {
+                continue;
+            }
+            let metadata = metadata_from_json(text(&row.get_value(1).map_err(storage)?)?)?;
+            if compatibility
+                .metadata_equals
+                .iter()
+                .all(|(key, expected)| metadata.get(key) == Some(expected))
+                && seen.insert(group.clone())
+            {
+                groups.push(group);
+            }
+        }
+        drop(rows);
+        if page_len < PAGE_SIZE {
+            return Ok(groups);
+        }
+        offset += PAGE_SIZE;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn group_eligible_items(
     transaction: &Connection,
     tenant: &str,
@@ -691,39 +764,122 @@ async fn group_eligible_items(
     now: i64,
     limit: usize,
     cohort: bool,
-) -> EngineResult<Vec<ItemId>> {
+    compatibility: &ClaimCompatibility,
+) -> EngineResult<GroupEligibility> {
     let cohort_predicate = if cohort {
         "cohort_size IS NOT NULL"
     } else {
         "cohort_size IS NULL"
     };
-    let mut rows = transaction
-        .query(
+    const PAGE_SIZE: i64 = 128;
+    let mut ids = Vec::new();
+    let mut eligible_count = 0_usize;
+    let mut offset = 0_i64;
+    loop {
+        let mut rows = transaction
+            .query(
             format!(
-                "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                "SELECT item_id,metadata FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
                  AND group_key=?3 AND lifecycle_state='Pending' AND superseded=0 \
                  AND {cohort_predicate} AND (not_before IS NULL OR not_before<=?4) \
                  AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
                  JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
                  AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                  WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-                 AND ig.item_id=pqueue_items.item_id) ORDER BY priority_sort,created_seq LIMIT ?5"
+                 AND ig.item_id=pqueue_items.item_id) ORDER BY priority_sort,created_seq LIMIT ?5 OFFSET ?6"
             ),
             vec![
                 Value::Text(tenant.to_string()),
                 Value::Text(queue.to_string()),
                 Value::Text(group.as_str().to_string()),
                 Value::Integer(now),
-                Value::Integer(i64::try_from(limit).map_err(storage)?),
+                Value::Integer(PAGE_SIZE),
+                Value::Integer(offset),
             ],
         )
         .await
         .map_err(storage)?;
-    let mut ids = Vec::new();
-    while let Some(row) = rows.next().await.map_err(storage)? {
-        ids.push(ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
+        let mut page_len = 0_i64;
+        while let Some(row) = rows.next().await.map_err(storage)? {
+            page_len += 1;
+            let metadata = metadata_from_json(text(&row.get_value(1).map_err(storage)?)?)?;
+            if compatibility
+                .metadata_equals
+                .iter()
+                .all(|(key, expected)| metadata.get(key) == Some(expected))
+            {
+                eligible_count += 1;
+                if ids.len() < limit {
+                    ids.push(
+                        ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?,
+                    );
+                }
+            }
+        }
+        drop(rows);
+        if page_len < PAGE_SIZE {
+            return Ok(GroupEligibility {
+                item_ids: ids,
+                eligible_count,
+            });
+        }
+        offset += PAGE_SIZE;
     }
-    Ok(ids)
+}
+
+struct GroupEligibility {
+    item_ids: Vec<ItemId>,
+    eligible_count: usize,
+}
+
+async fn active_group_member_count(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    group: &GroupKey,
+    cohort: bool,
+) -> EngineResult<usize> {
+    let cohort_predicate = if cohort {
+        "cohort_size IS NOT NULL"
+    } else {
+        "cohort_size IS NULL"
+    };
+    let row = one_row(
+        transaction,
+        &format!(
+            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+             AND superseded=0 AND {cohort_predicate} AND lifecycle_state NOT IN ('Complete','Failed')"
+        ),
+        vec![
+            tenant.to_string().into(),
+            queue.to_string().into(),
+            group.as_str().to_string().into(),
+        ],
+    )
+    .await?
+    .ok_or_else(|| storage("active group count returned no row"))?;
+    usize::try_from(integer(&row[0])?).map_err(storage)
+}
+
+async fn group_has_active_lease(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    group: &GroupKey,
+) -> EngineResult<bool> {
+    let row = one_row(
+        transaction,
+        "SELECT EXISTS(SELECT 1 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+         AND group_key=?3 AND superseded=0 AND cohort_size IS NULL AND lifecycle_state='Leased')",
+        vec![
+            tenant.to_string().into(),
+            queue.to_string().into(),
+            group.as_str().to_string().into(),
+        ],
+    )
+    .await?
+    .ok_or_else(|| storage("group lease contention check returned no row"))?;
+    Ok(integer(&row[0])? != 0)
 }
 
 async fn select_group_batching(
@@ -733,10 +889,11 @@ async fn select_group_batching(
     now: i64,
     max_items: usize,
     max_groups: u32,
+    compatibility: &ClaimCompatibility,
 ) -> EngineResult<Vec<ItemId>> {
     let mut selected = Vec::new();
     let mut used = 0_u32;
-    for group in candidate_groups(transaction, tenant, queue).await? {
+    for group in candidate_groups_for_claim(transaction, tenant, queue, now, compatibility).await? {
         if used >= max_groups {
             break;
         }
@@ -748,18 +905,22 @@ async fn select_group_batching(
             now,
             max_items.saturating_add(1),
             false,
+            compatibility,
         )
         .await?;
-        if eligible.is_empty() {
+        if group_has_active_lease(transaction, tenant, queue, &group).await? {
             continue;
         }
-        if eligible.len() > max_items {
+        if eligible.item_ids.is_empty() {
+            continue;
+        }
+        if eligible.eligible_count > max_items {
             return Err(EngineError::BatchTooLarge);
         }
-        if selected.len().saturating_add(eligible.len()) > max_items {
+        if selected.len().saturating_add(eligible.item_ids.len()) > max_items {
             break;
         }
-        selected.extend(eligible);
+        selected.extend(eligible.item_ids);
         used += 1;
     }
     Ok(selected)
@@ -771,12 +932,29 @@ async fn select_same_group(
     queue: &str,
     now: i64,
     max_items: usize,
+    compatibility: &ClaimCompatibility,
 ) -> EngineResult<Vec<ItemId>> {
-    for group in candidate_groups(transaction, tenant, queue).await? {
-        let eligible =
-            group_eligible_items(transaction, tenant, queue, &group, now, max_items, false).await?;
-        if !eligible.is_empty() {
-            return Ok(eligible);
+    for group in candidate_groups_for_claim(transaction, tenant, queue, now, compatibility).await? {
+        if compatibility
+            .group_key
+            .as_ref()
+            .is_some_and(|required| required != &group)
+        {
+            continue;
+        }
+        let eligible = group_eligible_items(
+            transaction,
+            tenant,
+            queue,
+            &group,
+            now,
+            max_items,
+            false,
+            compatibility,
+        )
+        .await?;
+        if !eligible.item_ids.is_empty() {
+            return Ok(eligible.item_ids);
         }
     }
     Ok(Vec::new())
@@ -788,6 +966,7 @@ async fn select_whole_cohort(
     queue: &str,
     now: i64,
     max_items: usize,
+    compatibility: &ClaimCompatibility,
 ) -> EngineResult<RichClaimSelection> {
     let mut rows = transaction
         .query(
@@ -837,16 +1016,20 @@ async fn select_whole_cohort(
             now,
             size.saturating_add(1),
             true,
+            compatibility,
         )
         .await?;
-        if eligible.len() != size {
+        if eligible.eligible_count != size
+            || eligible.eligible_count
+                != active_group_member_count(transaction, tenant, queue, &group_key, true).await?
+        {
             continue;
         }
         if size > max_items {
             return Err(EngineError::BatchTooLarge);
         }
         return Ok(RichClaimSelection {
-            item_ids: eligible,
+            item_ids: eligible.item_ids,
             cohort_id: Some(CohortId::new(cohort_id).map_err(storage)?),
         });
     }
@@ -964,6 +1147,7 @@ async fn apply_owned(
     live_tokens: Arc<Mutex<HashMap<(QueueKey, ItemId), LeaseToken>>>,
     positions: Vec<CommandPosition>,
     commands: Vec<CommandEnvelope>,
+    enforce_live_epoch: bool,
 ) -> EngineResult<()> {
     if positions.len() != commands.len() {
         return Err(storage("positions/commands length mismatch"));
@@ -976,6 +1160,38 @@ async fn apply_owned(
     let mut next_by_queue: HashMap<QueueKey, i64> = HashMap::new();
     let mut max_epoch: HashMap<QueueKey, i64> = HashMap::new();
     let mut token_ops = Vec::new();
+
+    // Fence the complete live batch before executing any command. A later position may
+    // target a queue already seen in the batch, so checking only while initializing
+    // `next_by_queue` would allow that later stale epoch to mutate state.
+    if enforce_live_epoch {
+        let mut floors = HashMap::new();
+        for position in &positions {
+            let floor = match floors.get(&position.queue) {
+                Some(floor) => *floor,
+                None => {
+                    let row = one_row(
+                        &transaction,
+                        sql::SELECT_CURSOR,
+                        vec![
+                            position.queue.tenant_id.as_str().to_string().into(),
+                            position.queue.queue_id.as_str().to_string().into(),
+                        ],
+                    )
+                    .await?
+                    .ok_or(EngineError::NotFound)?;
+                    let floor = nonnegative_u64(integer(&row[1])?, "assignment epoch")?;
+                    floors.insert(position.queue.clone(), floor);
+                    floor
+                }
+            };
+            if position.backend_epoch < floor {
+                transaction.rollback().await.map_err(storage)?;
+                return Err(EngineError::EpochFenced);
+            }
+            floors.insert(position.queue.clone(), floor.max(position.backend_epoch));
+        }
+    }
 
     for (position, envelope) in positions.iter().zip(&commands) {
         let tenant = position.queue.tenant_id.as_str().to_string();
@@ -990,6 +1206,13 @@ async fn apply_owned(
                 )
                 .await?
                 .ok_or(EngineError::NotFound)?;
+                if enforce_live_epoch
+                    && position.backend_epoch
+                        < nonnegative_u64(integer(&row[1])?, "assignment epoch")?
+                {
+                    transaction.rollback().await.map_err(storage)?;
+                    return Err(EngineError::EpochFenced);
+                }
                 let cursor = integer(&row[0])?;
                 next_by_queue.insert(position.queue.clone(), cursor);
                 cursor
@@ -1123,6 +1346,47 @@ async fn apply_owned(
                     .collect();
                 for group in groups {
                     refresh_group_summary(&transaction, &tenant, &queue, &group, now).await?;
+                }
+                if let (
+                    Some(request_id),
+                    Some(_fingerprint),
+                    Some(RequestOutcome::Push { item_ids }),
+                ) = (
+                    &envelope.request_id,
+                    envelope.request_fingerprint,
+                    &envelope.request_outcome,
+                ) {
+                    let response = serde_json::to_string(
+                        &item_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    )
+                    .map_err(storage)?;
+                    let command_positions =
+                        serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
+                            .map_err(storage)?;
+                    let expires_at = now.saturating_add(
+                        i64::try_from(definition.request_id_retention_ms)
+                            .unwrap_or(i64::MAX)
+                            .saturating_mul(1_000_000),
+                    );
+                    let canonical =
+                        pqueue_engine::push_items_fingerprint_sha256(&push.items)?.to_vec();
+                    let affected = transaction.execute(
+                        "INSERT INTO pqueue_request_idempotency \
+                         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,command_positions,expires_at,created_at) \
+                         VALUES (?1,?2,'push',?3,?4,?5,?6,?7,?8) \
+                         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+                         request_fingerprint=excluded.request_fingerprint,response_payload=excluded.response_payload,\
+                         command_positions=excluded.command_positions,expires_at=excluded.expires_at,created_at=excluded.created_at \
+                         WHERE pqueue_request_idempotency.expires_at<=excluded.created_at OR \
+                         (pqueue_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+                         AND pqueue_request_idempotency.response_payload=excluded.response_payload)",
+                        vec![tenant.clone().into(), queue.clone().into(), request_id.as_str().to_string().into(),
+                             Value::Blob(canonical), response.into(), command_positions.into(),
+                             Value::Integer(expires_at), Value::Integer(now)],
+                    ).await.map_err(storage)?;
+                    if affected == 0 {
+                        return Err(EngineError::RequestIdConflict);
+                    }
                 }
             }
             QueueCommand::Claim(claim) => {
@@ -1902,11 +2166,15 @@ async fn apply_owned(
                 )
                 .await?;
             }
-            QueueCommand::PauseQueue(_) => {
+            QueueCommand::PauseQueue(pause) => {
                 transaction
                     .execute(
                         sql::PAUSE_QUEUE,
-                        vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                        vec![
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                            Value::Integer(i64::from(pause.drain_intake)),
+                        ],
                     )
                     .await
                     .map_err(storage)?;
@@ -2065,6 +2333,10 @@ async fn apply_owned(
 }
 
 impl AsyncProjectionStore for TursoRelational {
+    fn supports_gates(&self) -> bool {
+        true
+    }
+
     fn ensure_shard(
         &self,
         definition: QueueDefinition,
@@ -2080,6 +2352,124 @@ impl AsyncProjectionStore for TursoRelational {
         std::future::ready(Ok(()))
     }
 
+    fn validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            let mut connection = writer.lock().await;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(storage)?;
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let result = async {
+                let definition = definition_in_transaction(&transaction, &shard).await?;
+                let mut keys = HashSet::new();
+                let mut item_ids = HashSet::new();
+                let mut grouped = HashMap::<String, u64>::new();
+                for item in &items {
+                    if !keys.insert(item.client_item_key.as_str().to_string())
+                        || !item_ids.insert(item.item_id.to_string())
+                    {
+                        return Err(EngineError::Conflict);
+                    }
+                    if item.cohort_size.is_some() && item.group_key.is_none() {
+                        return Err(EngineError::Invalid("cohort_size requires group_key"));
+                    }
+                    if let Some(group) = &item.group_key {
+                        *grouped.entry(group.as_str().to_string()).or_default() += 1;
+                    }
+                    let existing = one_row(&transaction,
+                        "SELECT 1 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                         AND (item_id=?3 OR (client_item_key=?4 AND superseded=0)) \
+                         UNION ALL SELECT 1 FROM pqueue_item_key_retention WHERE tenant_id=?1 AND queue_id=?2 \
+                         AND client_item_key=?4 AND expires_at>?5 LIMIT 1",
+                        vec![tenant.clone().into(), queue.clone().into(), item.item_id.to_string().into(),
+                             item.client_item_key.as_str().to_string().into(), Value::Integer(ts_nanos(now))]).await?;
+                    if existing.is_some() { return Err(EngineError::Conflict); }
+                }
+                for (group, added) in grouped {
+                    let Some(max) = definition.max_eligible_group_size else { continue };
+                    let row = one_row(&transaction,
+                        "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                         AND group_key=?3 AND lifecycle_state IN ('Pending','Leased') AND superseded=0",
+                        vec![tenant.clone().into(), queue.clone().into(), group.into()]).await?
+                        .ok_or_else(|| storage("group count missing"))?;
+                    if nonnegative_u64(integer(&row[0])?, "group count")?.saturating_add(added) > max {
+                        return Err(EngineError::Conflict);
+                    }
+                }
+                maintain_typed_indexes_on_insert(&transaction, &tenant, &queue, &definition.typed_indexes, &items).await?;
+                upsert_cohorts(&transaction, &tenant, &queue, &items, ts_nanos(now)).await?;
+                Ok(())
+            }.await;
+            transaction.rollback().await.map_err(storage)?;
+            result
+        }
+    }
+
+    fn pause_blocks_intake(
+        &self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<bool>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            let connection = writer.lock().await;
+            let row = one_row(
+                &connection,
+                "SELECT pause_drain_intake FROM queues WHERE tenant=?1 AND queue=?2",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                ],
+            )
+            .await?;
+            row.map(|row| integer(&row[0]).map(|paused| paused != 0))
+                .unwrap_or(Err(EngineError::NotFound))
+        }
+    }
+
+    fn push_idempotency(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: PushFingerprint,
+        now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<IdempotencyDecision<Vec<ItemId>>>> + Send
+    {
+        let writer = self.writer.clone();
+        async move {
+            let connection = writer.lock().await;
+            let row = one_row(&connection,
+                "SELECT request_fingerprint,response_payload,expires_at FROM pqueue_request_idempotency \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND operation='push' AND request_id=?3",
+                vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), request_id.as_str().to_string().into()]).await?;
+            let Some(row) = row else {
+                return Ok(IdempotencyDecision::Proceed);
+            };
+            if integer(&row[2])? <= ts_nanos(now) {
+                return Ok(IdempotencyDecision::Expired);
+            }
+            let stored = blob(&row[0])?;
+            if stored != fingerprint.canonical_sha256
+                && stored != fingerprint.legacy_body_hash.0.to_be_bytes()
+            {
+                return Ok(IdempotencyDecision::Conflict);
+            }
+            let raw: Vec<String> = serde_json::from_str(&text(&row[1])?).map_err(storage)?;
+            let ids = raw
+                .into_iter()
+                .map(|id| ItemId::new(id).map_err(storage))
+                .collect::<EngineResult<Vec<_>>>()?;
+            Ok(IdempotencyDecision::Replay(ids))
+        }
+    }
+
     fn apply_live(
         &self,
         positions: Vec<CommandPosition>,
@@ -2087,7 +2477,7 @@ impl AsyncProjectionStore for TursoRelational {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let writer = self.writer.clone();
         let tokens = self.live_tokens.clone();
-        async move { apply_owned(writer, tokens, positions, commands).await }
+        async move { apply_owned(writer, tokens, positions, commands, true).await }
     }
 
     fn apply_recovery(
@@ -2095,7 +2485,9 @@ impl AsyncProjectionStore for TursoRelational {
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        self.apply_live(positions, commands)
+        let writer = self.writer.clone();
+        let tokens = self.live_tokens.clone();
+        async move { apply_owned(writer, tokens, positions, commands, false).await }
     }
 
     fn eligible_candidates(
@@ -2151,6 +2543,92 @@ impl AsyncProjectionStore for TursoRelational {
         }
     }
 
+    fn select_item_claim(
+        &self,
+        shard: QueueKey,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let writer = self.writer.clone();
+        async move {
+            if max == 0 {
+                return Ok(Vec::new());
+            }
+            if compatibility.group_key.is_none() && compatibility.metadata_equals.is_empty() {
+                return self.eligible_candidates(shard, now, max).await;
+            }
+            let mut connection = writer.lock().await;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .await
+                .map_err(storage)?;
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let result =
+                async {
+                    if queue_paused(&transaction, &tenant, &queue).await? {
+                        return Ok(Vec::new());
+                    }
+                    let mut selected = Vec::new();
+                    const PAGE_SIZE: i64 = 128;
+                    let mut offset = 0_i64;
+                    loop {
+                        let mut rows = transaction
+                            .query(
+                                sql::SELECT_ELIGIBLE_FILTERABLE,
+                                vec![
+                                    tenant.clone().into(),
+                                    queue.clone().into(),
+                                    Value::Integer(ts_nanos(now)),
+                                    Value::Integer(PAGE_SIZE),
+                                    Value::Integer(offset),
+                                ],
+                            )
+                            .await
+                            .map_err(storage)?;
+                        let mut page_len = 0_i64;
+                        while let Some(row) = rows.next().await.map_err(storage)? {
+                            page_len += 1;
+                            let group_key = optional_text(&row.get_value(1).map_err(storage)?)?;
+                            if compatibility.group_key.as_ref().is_some_and(|required| {
+                                group_key.as_deref() != Some(required.as_str())
+                            }) {
+                                continue;
+                            }
+                            let metadata =
+                                metadata_from_json(text(&row.get_value(2).map_err(storage)?)?)?;
+                            if compatibility
+                                .metadata_equals
+                                .iter()
+                                .all(|(key, expected)| metadata.get(key) == Some(expected))
+                            {
+                                selected.push(
+                                    ItemId::new(text(&row.get_value(0).map_err(storage)?)?)
+                                        .map_err(storage)?,
+                                );
+                                if selected.len() == max {
+                                    return Ok(selected);
+                                }
+                            }
+                        }
+                        drop(rows);
+                        if page_len < PAGE_SIZE {
+                            return Ok(selected);
+                        }
+                        offset += PAGE_SIZE;
+                    }
+                }
+                .await;
+            let rollback = transaction.rollback().await.map_err(storage);
+            match (result, rollback) {
+                (_, Err(error)) => Err(error),
+                (Err(error), Ok(())) => Err(error),
+                (Ok(selected), Ok(())) => Ok(selected),
+            }
+        }
+    }
+
     fn select_rich_claim(
         &self,
         shard: QueueKey,
@@ -2195,18 +2673,34 @@ impl AsyncProjectionStore for TursoRelational {
                                 now,
                                 max_items,
                                 max_groups,
+                                &compatibility,
                             )
                             .await?,
                             cohort_id: None,
                         })
                     }
                     ClaimUnit::SameGroupKey => Ok(RichClaimSelection {
-                        item_ids: select_same_group(&transaction, &tenant, &queue, now, max_items)
-                            .await?,
+                        item_ids: select_same_group(
+                            &transaction,
+                            &tenant,
+                            &queue,
+                            now,
+                            max_items,
+                            &compatibility,
+                        )
+                        .await?,
                         cohort_id: None,
                     }),
                     ClaimUnit::WholeCohort => {
-                        select_whole_cohort(&transaction, &tenant, &queue, now, max_items).await
+                        select_whole_cohort(
+                            &transaction,
+                            &tenant,
+                            &queue,
+                            now,
+                            max_items,
+                            &compatibility,
+                        )
+                        .await
                     }
                 }
             }

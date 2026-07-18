@@ -309,16 +309,20 @@ impl ProjectionStore for SqliteRelational {
                     .as_ref()
                     .map(|gb| gb.max_groups)
                     .unwrap_or(0);
-                select_group_batching(&tx, shard, now, max_items, max_groups)?
+                select_group_batching(&tx, shard, now, max_items, max_groups, compatibility)?
             }
-            ClaimUnit::SameGroupKey => select_same_group(&tx, shard, now, max_items)?,
-            ClaimUnit::WholeCohort => match select_whole_cohort(&tx, shard, now, max_items)? {
-                Some(selected) => {
-                    cohort_id = Some(selected.cohort_id);
-                    selected.item_ids
+            ClaimUnit::SameGroupKey => {
+                select_same_group(&tx, shard, now, max_items, compatibility)?
+            }
+            ClaimUnit::WholeCohort => {
+                match select_whole_cohort(&tx, shard, now, max_items, compatibility)? {
+                    Some(selected) => {
+                        cohort_id = Some(selected.cohort_id);
+                        selected.item_ids
+                    }
+                    None => Vec::new(),
                 }
-                None => Vec::new(),
-            },
+            }
         };
         // ROLL BACK the selection transaction (drop without commit): this is a SELECT-only unit of work, and
         // the `refresh_due_group_summaries` write above is a transient selection aid, NOT a durable mutation.
@@ -382,6 +386,16 @@ impl ProjectionStore for SqliteRelational {
             now,
             max,
         )
+    }
+
+    fn select_item_claim(
+        &self,
+        shard: &QueueKey,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        filter_item_claim_candidates(&self.lock().conn, shard, compatibility, now, max)
     }
 
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {

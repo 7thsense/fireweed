@@ -24,11 +24,12 @@
 //! `std::sync::MutexGuard` or borrowed blocking transaction across an `.await`, and must not offload
 //! individual statements belonging to the same transaction.
 
-use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, TenantId, UtcTimestamp};
+use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp};
 
 use crate::{
     ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, QueueKey, RichClaimSelection,
+    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, IdempotencyDecision,
+    PushFingerprint, PushItem, QueueKey, RichClaimSelection,
 };
 
 /// Native-async command-log, epoch-fence, replay, and high-water operations needed by initial composition.
@@ -100,6 +101,36 @@ pub trait AsyncProjectionStore: Send + Sync {
         shard: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
 
+    /// Validate every projection-owned pre-append push constraint (client keys, cohorts/groups, and
+    /// typed-index uniqueness) against one owned candidate batch. Unsupported projections fail closed.
+    fn validate_push(
+        &self,
+        _shard: QueueKey,
+        _items: Vec<PushItem>,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn pause_blocks_intake(
+        &self,
+        _shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<bool>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    /// Resolve retained push idempotency from state updated by the same commit/apply boundary.
+    fn push_idempotency(
+        &self,
+        _shard: QueueKey,
+        _request_id: RequestId,
+        _fingerprint: PushFingerprint,
+        _now: UtcTimestamp,
+    ) -> impl std::future::Future<Output = EngineResult<IdempotencyDecision<Vec<ItemId>>>> + Send
+    {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
     /// Apply a committed owned batch to the live serving image.
     fn apply_live(
         &self,
@@ -120,6 +151,23 @@ pub trait AsyncProjectionStore: Send + Sync {
         now: UtcTimestamp,
         max: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+
+    /// Select item-level candidates while preserving the item-compatible group/metadata predicates.
+    /// Stores without a filter-capable read model fail closed when either predicate is present.
+    fn select_item_claim(
+        &self,
+        shard: QueueKey,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        async move {
+            if compatibility.group_key.is_some() || !compatibility.metadata_equals.is_empty() {
+                return Err(EngineError::Unavailable);
+            }
+            self.eligible_candidates(shard, now, max).await
+        }
+    }
 
     /// Select a relational rich-claim unit without durably mutating projection state. Implementations that
     /// do not materialize group/cohort state fail closed rather than degrading to item-level selection.
@@ -190,8 +238,9 @@ mod tests {
     use std::future::{Ready, ready};
 
     use pqueue_core::{
-        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-        PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
+        BodyHash, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
+        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
+        RetryPolicy, TenantId,
     };
 
     use super::*;
@@ -393,6 +442,21 @@ mod tests {
         let projection = ImmediateProjection;
         assert_send(projection.ensure_shard(definition()));
         assert_send(projection.admit_mutation(shard()));
+        assert_send(projection.validate_push(
+            shard(),
+            Vec::new(),
+            UtcTimestamp::new(0, 0).unwrap(),
+        ));
+        assert_send(projection.pause_blocks_intake(shard()));
+        assert_send(projection.push_idempotency(
+            shard(),
+            RequestId::new("request").unwrap(),
+            PushFingerprint {
+                canonical_sha256: [1; 32],
+                legacy_body_hash: BodyHash(1),
+            },
+            UtcTimestamp::new(0, 0).unwrap(),
+        ));
         assert_send(projection.apply_live(Vec::new(), Vec::new()));
         assert_send(projection.apply_recovery(Vec::new(), Vec::new()));
         assert_send(projection.eligible_candidates(shard(), UtcTimestamp::new(0, 0).unwrap(), 1));
@@ -427,6 +491,35 @@ mod tests {
             10,
         ));
         assert!(matches!(result, Err(EngineError::Unavailable)));
+    }
+
+    #[test]
+    fn default_push_preappend_capabilities_fail_closed() {
+        let projection = ImmediateProjection;
+        assert!(matches!(
+            futures::executor::block_on(projection.validate_push(
+                shard(),
+                Vec::new(),
+                UtcTimestamp::new(0, 0).unwrap(),
+            )),
+            Err(EngineError::Unavailable)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(projection.pause_blocks_intake(shard())),
+            Err(EngineError::Unavailable)
+        ));
+        assert!(matches!(
+            futures::executor::block_on(projection.push_idempotency(
+                shard(),
+                RequestId::new("request").unwrap(),
+                PushFingerprint {
+                    canonical_sha256: [1; 32],
+                    legacy_body_hash: BodyHash(1)
+                },
+                UtcTimestamp::new(0, 0).unwrap(),
+            )),
+            Err(EngineError::Unavailable)
+        ));
     }
 
     #[test]

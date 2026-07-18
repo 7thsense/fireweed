@@ -12,10 +12,11 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 
-use pqueue_core::{ItemId, ItemState, QueueDefinition, UtcTimestamp};
+use pqueue_core::{ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope,
-    CommandPosition, EngineError, EngineResult, ProjectionStore, QueueKey, RichClaimSelection,
+    CommandPosition, EngineError, EngineResult, IdempotencyDecision, ProjectionStore,
+    PushFingerprint, PushItem, QueueKey, RichClaimSelection,
 };
 
 use crate::PostgresRelational;
@@ -390,8 +391,7 @@ impl AsyncPostgresRelationalProjection {
 
 impl AsyncProjectionStore for AsyncPostgresRelationalProjection {
     fn supports_gates(&self) -> bool {
-        // Immutable capability: PostgresRelational currently inherits ProjectionStore's fail-closed default.
-        false
+        true
     }
 
     fn ensure_shard(
@@ -411,6 +411,49 @@ impl AsyncProjectionStore for AsyncPostgresRelationalProjection {
         async move {
             actor
                 .execute(move |store| ProjectionStore::admit_mutation(store, &shard))
+                .await
+        }
+    }
+
+    fn validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.async_validate_push(&shard, &items, now))
+                .await
+        }
+    }
+
+    fn pause_blocks_intake(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<bool>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| store.async_pause_blocks_intake(&shard))
+                .await
+        }
+    }
+
+    fn push_idempotency(
+        &self,
+        shard: QueueKey,
+        request_id: RequestId,
+        fingerprint: PushFingerprint,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<IdempotencyDecision<Vec<ItemId>>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    store.async_push_idempotency(&shard, &request_id, fingerprint, now)
+                })
                 .await
         }
     }
@@ -451,6 +494,23 @@ impl AsyncProjectionStore for AsyncPostgresRelationalProjection {
         async move {
             actor
                 .execute(move |store| ProjectionStore::eligible_candidates(store, &shard, now, max))
+                .await
+        }
+    }
+
+    fn select_item_claim(
+        &self,
+        shard: QueueKey,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let actor = self.clone();
+        async move {
+            actor
+                .execute(move |store| {
+                    ProjectionStore::select_item_claim(store, &shard, &compatibility, now, max)
+                })
                 .await
         }
     }

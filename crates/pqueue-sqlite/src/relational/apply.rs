@@ -1460,16 +1460,16 @@ pub(crate) fn apply_command_sql(
             )?;
             Ok(())
         }
-        QueueCommand::PauseQueue(_) => {
+        QueueCommand::PauseQueue(command) => {
             st(tx.execute(
-                "UPDATE queues SET paused=1 WHERE tenant=?1 AND queue=?2",
-                params![t, q],
+                "UPDATE queues SET paused=1,pause_drain_intake=?3 WHERE tenant=?1 AND queue=?2",
+                params![t, q, command.drain_intake],
             ))?;
             Ok(())
         }
         QueueCommand::ResumeQueue => {
             st(tx.execute(
-                "UPDATE queues SET paused=0 WHERE tenant=?1 AND queue=?2",
+                "UPDATE queues SET paused=0,pause_drain_intake=0 WHERE tenant=?1 AND queue=?2",
                 params![t, q],
             ))?;
             Ok(())

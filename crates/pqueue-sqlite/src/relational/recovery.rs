@@ -5,8 +5,8 @@ use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, QueueDefinition, QueueId, RequestId, TenantId, WorkerId,
 };
 use pqueue_engine::{
-    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, QueueCounters,
-    QueueKey, RequestOutcome, compile_entity_schema,
+    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, QueueCommand,
+    QueueCounters, QueueKey, RequestOutcome, compile_entity_schema, push_items_fingerprint_sha256,
 };
 use pqueue_projection::{ProjectionImage, ProjectionImageItem};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -179,21 +179,56 @@ pub(crate) fn persist_request_outcome_sql(
     env: &CommandEnvelope,
     pos: &CommandPosition,
 ) -> EngineResult<()> {
+    let QueueCommand::Push(push) = &env.command else {
+        return Ok(());
+    };
     let Some(request_id) = env.request_id.as_ref() else {
         return Ok(());
     };
-    let (Some(fingerprint), Some(RequestOutcome::Push { item_ids })) =
+    let (Some(_), Some(RequestOutcome::Push { item_ids })) =
         (env.request_fingerprint, env.request_outcome.as_ref())
     else {
         return Ok(());
     };
+    let canonical_fingerprint = push_items_fingerprint_sha256(&push.items)?;
+    let legacy_fingerprint = env
+        .request_fingerprint
+        .expect("checked above")
+        .to_be_bytes();
+    let (tenant, queue) = parts(shard);
+    let prior: Option<(Vec<u8>, String, i64)> = st(tx
+        .query_row(
+            "SELECT request_fingerprint,response_payload,expires_at \
+             FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+             AND operation=?3 AND request_id=?4",
+            params![
+                tenant,
+                queue,
+                IDEMPOTENCY_OPERATION_PUSH,
+                request_id.as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional())?;
+    if let Some((stored_fingerprint, response, expires_at)) = prior
+        && expires_at > ts_nanos(env.created_at)
+    {
+        if stored_fingerprint != canonical_fingerprint && stored_fingerprint != legacy_fingerprint {
+            return Err(EngineError::RequestIdConflict);
+        }
+        if item_ids_from_json(response)? != *item_ids {
+            return Err(EngineError::RequestIdConflict);
+        }
+        return Ok(());
+    }
+
     let expires_at = request_expires_at(queues, shard, env.created_at)?;
     record_request_idempotency(
         tx,
         shard,
         IDEMPOTENCY_OPERATION_PUSH,
         request_id,
-        &fingerprint.to_be_bytes(),
+        &canonical_fingerprint,
         item_ids,
         std::slice::from_ref(pos),
         env.created_at,
@@ -355,6 +390,7 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
          PRAGMA busy_timeout=5000;",
     ))?;
     st(conn.execute_batch(RELATIONAL_SCHEMA))?;
+    ensure_queue_pause_drain_intake_column(&conn)?;
     ensure_item_fields_column(&conn)?;
     ensure_item_metadata_column(&conn)?;
     ensure_item_entity_document_column(&conn)?;
@@ -430,10 +466,10 @@ pub(crate) fn export_projection_image_sql(
         )
         .optional())?;
     let (next_seq, next_item_seq, assignment_epoch) = cursor.ok_or(EngineError::NotFound)?;
-    let paused: i64 = st(conn.query_row(
-        "SELECT paused FROM queues WHERE tenant=?1 AND queue=?2",
+    let (paused, pause_drain_intake): (i64, i64) = st(conn.query_row(
+        "SELECT paused,pause_drain_intake FROM queues WHERE tenant=?1 AND queue=?2",
         params![t, q],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     ))?;
 
     let mut gate_keys_by_item = item_gate_key_map(conn, shard)?;
@@ -555,7 +591,7 @@ pub(crate) fn export_projection_image_sql(
     Ok(ProjectionImage {
         high_water,
         paused: paused != 0,
-        pause_drain_intake: false,
+        pause_drain_intake: pause_drain_intake != 0,
         next_seq: next_item_seq as u64,
         items,
         side_records,
@@ -616,6 +652,7 @@ pub(crate) fn apply_committed_sql(
         envelope.created_at,
         &envelope.command,
     )?;
+    persist_request_outcome_sql(&tx, queues, &position.queue, envelope, position)?;
     let new_next_seq = position
         .sequence
         .checked_add(1)
@@ -702,6 +739,7 @@ pub(crate) fn apply_committed_batch_sql(
             env.created_at,
             &env.command,
         )?;
+        persist_request_outcome_sql(&tx, queues, &pos.queue, env, pos)?;
         let new_next = incoming
             .checked_add(1)
             .ok_or_else(|| EngineError::Storage("command sequence overflow".into()))?;

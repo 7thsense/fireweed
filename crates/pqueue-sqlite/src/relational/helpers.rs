@@ -651,6 +651,21 @@ pub(crate) fn ensure_item_fields_column(conn: &Connection) -> EngineResult<()> {
     ensure_item_text_column(conn, "fields", "{}")
 }
 
+pub(crate) fn ensure_queue_pause_drain_intake_column(conn: &Connection) -> EngineResult<()> {
+    match conn.execute(
+        "ALTER TABLE queues ADD COLUMN pause_drain_intake INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(EngineError::Storage(e.to_string())),
+    }
+}
+
 pub(crate) fn ensure_item_metadata_column(conn: &Connection) -> EngineResult<()> {
     ensure_item_text_column(conn, "metadata", "{}")
 }
