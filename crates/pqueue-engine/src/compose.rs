@@ -63,6 +63,7 @@ use crate::port::{
     generate_query_lease_token, validate_api001_reserved_write_fields, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
+use crate::sequenced_metadata::{AdvanceThenDelete, RetainedAddress, RetentionFloorClass};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
 use crate::{
     BufferedByteBudget, ByteAdmissionError, OwnedBytePermit, retained_records_plus_frame_bytes,
@@ -1536,18 +1537,27 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         // (b) Durable floor FIRST via the epoch-fenced manifest CAS. A fenced/raced advance means another owner
         // is authoritative here — skip cleanly (delete nothing) rather than deleting under a floor we did not
         // durably set.
-        match inner
-            .log
-            .advance_retention_floor(shard, floor_pos, expected_epoch)
-        {
-            Ok(()) => {}
+        let newly_deleted =
+            AdvanceThenDelete::<RetentionFloorClass, RetainedAddress>::publish_then_delete(
+                inner,
+                |inner| {
+                    inner
+                        .log
+                        .advance_retention_floor(shard, floor_pos, expected_epoch)
+                },
+                |inner| {
+                    inner
+                        .log
+                        .expire_segments_through(shard, trim_through_seq, now_ms)
+                },
+            );
+        match newly_deleted {
+            Ok(count) => deleted += count,
             Err(EngineError::EpochFenced) | Err(EngineError::Conflict) => return Ok(deleted),
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
-        // (c) THEN delete the segment objects, and record the completed watermark (below any branch pin).
-        deleted += inner
-            .log
-            .expire_segments_through(shard, trim_through_seq, now_ms)?;
+        // (c) The typed boundary has now deleted the segment objects after the floor publication. Record the
+        // completed watermark below any branch pin.
         Self::record_trim_watermark_locked(inner, shard, trim_through_seq, now_ms)?;
         Ok(deleted)
     }

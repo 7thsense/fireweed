@@ -2245,6 +2245,49 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
         std::future::ready(Ok(result))
     }
 
+    fn hydrate_projection_for_ownership(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
+        let result = (|| {
+            let definition = self
+                .queues
+                .lock()
+                .expect("segmented queues poisoned")
+                .get(shard)
+                .cloned()
+                .ok_or(EngineError::NotFound)?;
+            let projection = Arc::new(Mutex::new(
+                ProjectionData::new(
+                    definition.priority_model,
+                    definition.ordering_mode,
+                    definition.max_rank_error,
+                    definition.recurrence,
+                    &definition.secondary_indexes,
+                )
+                .with_typed_indexes(&definition.typed_indexes),
+            ));
+            let replayed = self.replay_queue(shard, &projection)?;
+            self.projections
+                .lock()
+                .expect("segmented inmemory projections poisoned")
+                .insert(shard.clone(), projection);
+            self.recovery_stats
+                .lock()
+                .expect("inmemory recovery stats poisoned")
+                .insert(
+                    shard.clone(),
+                    RecoveryStats {
+                        start_seq: 0,
+                        tail_replayed: replayed,
+                        snapshot_used: false,
+                    },
+                );
+            Ok(())
+        })();
+        std::future::ready(result)
+    }
+
     fn current_epoch(
         &self,
         shard: &QueueKey,

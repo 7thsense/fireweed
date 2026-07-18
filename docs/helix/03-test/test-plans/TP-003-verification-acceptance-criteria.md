@@ -22,7 +22,7 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: 37fa4c0857ad98ff397edca5e20d2078b4fdeef9b1ba764f35afff50922610cd
+    self_hash: e4cdf81601d5246355ffc3ac09c4ac92ea0370f8fa9ce4cea801ec784e3717cb
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
@@ -38,12 +38,12 @@ ddx:
       td-object-log-turso-projection: 0626539eb10dced9b304c0fc48cb292d4ed25dd49e5c474b87829caec9384488
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
-      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
+      td-s3-object-log-sqlite-projection-mode: 8bacf6c79d2e3b82ee35cf5be4528818f720eed51bf9cfcbe200de48fc373caa
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
       tp-scale-substantiation: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
-    reviewed_at: "2026-07-18T19:52:55Z"
+    reviewed_at: "2026-07-18T21:09:02Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -106,6 +106,27 @@ Violation count MUST be **0**.
 | INV-12 | Success visibility (API-001 external transaction contract) | A successful mutating response whose accepted effects are not visible to the next read/claim/idempotency replay on the authoritative owner = **0**. |
 | INV-13 | Rejection no-effect (API-001 external transaction contract) | A structured envelope rejection with any durable item effect, or a per-item rejection with a durable effect for that item = **0** after restart/replay. |
 | INV-14 | Unknown outcome resolves once (API-001 external transaction contract) | Retrying an interrupted/timed-out mutating `request_id` produces more than one committed state-machine transition, or fails to resolve a committed original result within retention = **0**. |
+
+SP-03 verification reuses the SP-02 phase-addressed store and independent model. It covers exact-reread
+resolution of create-only effect-then-error, CAS loss, crash after authority-head fence publication, reopen,
+non-serving `PendingFence` admission shutdown, an already-admitted old-epoch prefix before the storage fence,
+old-epoch retry rejection after that fence, floor-before-delete, no watermark past a present/failed-delete segment, stale-cache
+non-authority, and retained-address collision. The 128-seed/48-operation generated suite and typed corpus
+expect confirmed success—not unknown outcome—when the exact authoritative reread proves the create landed.
+`pending_fence_gap_has_one_safe_old_prefix_then_fences_stale_retry` is the non-skipping CP/storage-gap test;
+the live Postgres/S3 equivalent is
+`pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_stale_retry`. The maintenance
+budget test `deletion_watermark_proof_request_budget_is_linear_and_bounded` bounds the legacy maintenance
+path's GET, PUT, LIST, and DELETE growth linearly in reclaimed entries.
+`authority_mode_deletion_proof_cost_ignores_total_head_history` uses underlying-store counters to prove the
+incremental completed-prefix proof adds no LIST and costs only per reclaimed entry at 8 versus 128 retained
+head versions. This does not claim total authority-mode maintenance is O(reclaimed): the default
+`read_manifest_head` recovery step still scans retained head versions and remains a release-scale benchmark/
+optimization condition. `successful_create_performs_zero_rereads` protects the successful create-only hot
+path. `stale_high_read_horizon_cache_cannot_fence_reopened_writer_or_suppress_seal` proves the compatibility
+cache cannot become authority after reopen, while
+`forged_high_cache_cannot_suppress_standalone_authoritative_marker` proves it cannot suppress standalone
+marker progress after physical deletion.
 
 ## 3. Acceptance Criteria by Area
 

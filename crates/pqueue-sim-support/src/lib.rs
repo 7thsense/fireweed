@@ -296,7 +296,10 @@ impl Model {
                 }
                 match result {
                     StoreResult::Success => self.commit_buffer(now_ms, true),
-                    StoreResult::EffectThenError => self.commit_buffer(now_ms, false),
+                    // SP-03 create-only publication resolves effect-then-error by rereading the exact
+                    // authoritative address before returning, so this is a confirmed acknowledgement rather
+                    // than an externally unknown outcome.
+                    StoreResult::EffectThenError => self.commit_buffer(now_ms, true),
                     StoreResult::FailureBeforeEffect | StoreResult::CasLoss => {
                         self.buffered.clear();
                         self.last_disposition = Disposition::Rejected;
@@ -311,11 +314,7 @@ impl Model {
                     self.epoch += 1;
                     self.next_manifest += 1;
                     self.buffered.clear();
-                    self.last_disposition = if result == StoreResult::Success {
-                        Disposition::Success
-                    } else {
-                        Disposition::Unknown
-                    };
+                    self.last_disposition = Disposition::Success;
                 }
                 _ => self.last_disposition = Disposition::Rejected,
             },

@@ -6,11 +6,11 @@ ddx:
     - {kind: part_of, to: build-slatedb-pattern-adoption-roadmap}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: c212bb092c036690b331e446a3b53ee8d5d5ae47eb6237524d038b6e7fdb53db
+    self_hash: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
     deps:
-      build-sp02-deterministic-storage-simulation: a7e7545464a051bd23046ffbb1b0f04fece7c450eb071e593a82084a08ed66ff
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-    reviewed_at: "2026-07-18T16:20:32Z"
+      build-sp02-deterministic-storage-simulation: 822bd8ebd2a9e07bdec818a12eb2ea8c21a2feca965422830eae41a839a407c8
+      td-s3-object-log-sqlite-projection-mode: 8bacf6c79d2e3b82ee35cf5be4528818f720eed51bf9cfcbe200de48fc373caa
+    reviewed_at: "2026-07-18T21:09:03Z"
 ---
 
 # Implementation Plan: SP-03 Typed Sequenced Metadata Boundary
@@ -43,12 +43,12 @@ contiguous delete prefix and must never hide work still needed by deletion.
 
 | Slice | Change | Validation |
 |---|---|---|
-| 0 | Close or formally discharge HCAS-F1/F2, including crash at the fence-entry gap and legacy-path disposition | no known blocking defect in migration baseline |
+| 0 | **Complete:** close HCAS-F1/F2 with versioned authority and crash-after-fence/reopen evidence | CP `PendingFence` stops new routing/admission; an already-admitted old-epoch operation may linearize before the storage fence while the new owner is non-serving; old-epoch retries after the storage fence are rejected |
 | 1 | Amend TD-004 with per-class state machines, authority, ordering, recovery, head-protocol compatibility, and typed key map | HELIX and Fable review |
-| 2 | Add `FencedPublication` and `MonotoneMarker` families, retained/free address types, and independent models | compile-time type separation; generated state-machine tests |
-| 3 | Implement over create-only `put_if_absent` CAS and versioned-head convention; bounded protocol loops own retry | CAS/precondition loss, typed ambiguity, list staleness, address collision |
-| 4 | Migrate floor, authoritative head with legacy dispatch/mirroring, then watermark marker+cache; consolidate duplicate eligibility classification | deterministic simulation or explicit interleaving fallback; legacy recovery |
-| 5 | Benchmark steady-state seal and bounded GC metadata operations | no extra GET/PUT/LIST on hot path beyond budget; roadmap bars |
+| 2 | **Complete:** typed create-only, advance→delete, delete→advance, retained/free address families | compile-time separation; boundary unit tests |
+| 3 | **Complete:** create-only CAS ambiguity resolves by exact-address reread | effect-then-error success; CAS loss rejection; no success-path GET |
+| 4 | **Complete:** migrate composed trim, head/floor, marker/cache, and shared classifier | deterministic simulation and legacy recovery green |
+| 5 | **Local condition met:** successful seal request shape unchanged; maintenance adds physical-absence GETs | full release performance matrix remains pending |
 
 ## Issue Decomposition
 
@@ -64,16 +64,43 @@ while preserving authority markers, winner mirroring, and fail-closed total-auth
 
 ## Validation Plan
 
-- [ ] Floor advance is durable before eligible segment deletion; watermark advance occurs only after the
+- [x] Floor advance is durable before eligible segment deletion; watermark advance occurs only after the
       entire contiguous eligible prefix is deleted.
-- [ ] Post-create checks prevent late candidates from escaping the bound.
-- [ ] Concurrent creators/advancers/deleters converge without hiding live metadata.
-- [ ] Recovery never trusts cache-only metadata and never falls below the durable horizon.
-- [ ] Reclaimed manifest addresses remain occupied and still reject stale create-only writes.
-- [ ] Watermark never advances past an undeleted, failed-delete, or branch-pinned entry.
-- [ ] If SP-02 stops negatively, hand-written interleavings over the independent models cover the same
+- [x] Post-create checks prevent late candidates from escaping the bound.
+- [x] Concurrent creators/advancers/deleters converge without hiding live metadata.
+- [x] Recovery never trusts cache-only metadata and never falls below the durable horizon.
+- [x] Reclaimed manifest addresses remain occupied and still reject stale create-only writes.
+- [x] Watermark never advances past an undeleted, failed-delete, or branch-pinned entry.
+- [x] SP-02 remains positive; generated independent-model traces cover the same
       INV-2/INV-10/INV-12 cases before migration.
-- [ ] Seal and bounded-GC benchmarks gate GET, PUT, and LIST counts as well as latency.
+- [ ] Full release-lane seal and bounded-GC benchmarks gate GET, PUT, LIST, and latency; focused inspection
+      confirms no successful-hot-path request increase.
+
+## Implementation Evidence
+
+`pqueue-engine::sequenced_metadata` owns the reusable types, so `ComposedBackend` enforces floor publication
+before deletion without depending on the adapter. The segmented adapter uses retained create-only publication
+for authority/compatibility heads and a private, proof-minted completed-prefix token before watermark
+advancement; no downstream crate can forge it. Watermark publication is typed as `DeletionWatermarkClass`,
+while `FreeAddress` applies only to the ordered deletion closure for segment/legacy objects. The
+three real eligibility walks share one classifier. Standalone watermark persistence verifies segment absence,
+so a stale claimed boundary or compatibility cache cannot suppress unfinished work. SP-02's independent model
+and corpus now model exact-reread-confirmed effect-then-error as success.
+
+The completed-prefix proof receives authority mode from the manifest read that already established it; it
+does not rescan retained authority-head versions. Its underlying-store request cost is therefore proportional
+to the reclaimed prefix and independent of 8 versus 128 retained head versions. This is an incremental proof
+bound, not an end-to-end authority-maintenance claim: the default authority-head recovery read still scans
+retained versions and remains a release-scale optimization/benchmark condition.
+
+HCAS-F1 is discharged by the PendingFence linearization rule, not by claiming immediate storage rejection:
+CP `PendingFence` is non-serving. An operation admitted at the old epoch may finish before the storage fence;
+the new owner cannot respond until fence, hydration, and CP confirm complete. The non-skipping in-memory test
+`pending_fence_gap_has_one_safe_old_prefix_then_fences_stale_retry` and live Postgres/S3 counterpart pause
+between CP reservation and storage fencing, prove old routing is unavailable, commit one already-admitted
+prefix, then prove the stale retry fails after the fence and the new owner sees the prefix. The in-memory
+object-log backend now performs the same reset-and-replay ownership hydration as the durable projection
+adapters instead of inheriting the no-op control-plane default.
 
 ## Risks and Rollbacks
 

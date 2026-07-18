@@ -3669,6 +3669,66 @@ impl FaultHook for FailAtCut {
     }
 }
 
+/// SP-03 slice 0 (HCAS-F1/F2): the externally allocated epoch is committed in the single versioned
+/// authority head before it can be used. Losing the response at that boundary must still leave a reopened
+/// reader on the new epoch, and an old owner must neither acknowledge nor expose its buffered prefix.
+#[test]
+fn hcas_f1_f2_crash_after_fence_head_reopens_fenced_and_keeps_prefix_invisible() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let queue = unique_qdef("hcas-f1-f2-fence-crash");
+    let shard = QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+    let stale = SegmentedObjectLog::open(store.clone(), cfg);
+    let fencing = SegmentedObjectLog::open(store.clone(), cfg);
+    stale.create_queue(&queue).unwrap();
+    fencing.create_queue(&queue).unwrap();
+    stale.fence_epoch(&shard, 0, 0).unwrap();
+    stale.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+
+    fencing.set_fault_hook(Some(std::sync::Arc::new(FailAtCut {
+        cut: FaultCutPoint::DuringOwnerReassignment,
+        fired: AtomicBool::new(false),
+    })));
+    assert!(matches!(
+        fencing.fence_epoch(&shard, 1, 2),
+        Err(EngineError::Storage(_))
+    ));
+
+    let reopened = SegmentedObjectLog::open(store, cfg);
+    reopened.create_queue(&queue).unwrap();
+    assert_eq!(reopened.fence_epoch(&shard, 1, 3).unwrap(), 1);
+    assert_eq!(stale.seal(&shard, 0, 4), Err(EngineError::EpochFenced));
+    assert!(reopened.read_all(&shard).unwrap().is_empty());
+}
+
+#[test]
+fn stale_high_read_horizon_cache_cannot_fence_reopened_writer_or_suppress_seal() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let queue = unique_qdef("stale-high-read-horizon-cache");
+    let shard = QueueKey::new(queue.tenant_id.clone(), queue.queue_id.clone());
+    let initial = SegmentedObjectLog::open(store.clone(), cfg);
+    initial.create_queue(&queue).unwrap();
+    initial.fence_epoch(&shard, 0, 0).unwrap();
+    store
+        .put(
+            &read_horizon_key_s(&shard),
+            &serde_json::to_vec(&serde_json::json!({ "index": 99 })).unwrap(),
+        )
+        .unwrap();
+
+    let reopened = SegmentedObjectLog::open(store, cfg);
+    reopened.create_queue(&queue).unwrap();
+    reopened.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+    assert_eq!(reopened.seal(&shard, 0, 2).unwrap().len(), 1);
+    assert_eq!(reopened.read_all(&shard).unwrap().len(), 1);
+    assert_eq!(
+        reopened.read_manifest_deletion_watermark(&shard).unwrap(),
+        None,
+        "compatibility cache never becomes durable marker authority"
+    );
+}
+
 #[test]
 fn segmented_stale_append_prepared_before_fence_cannot_advance_authoritative_tail() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
@@ -5160,8 +5220,8 @@ fn TestDeletionWatermarkOwnerFenceIndependence() {
         "the durable head object still exists and continues to fence stale writers"
     );
     assert!(
-        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_some(),
-        "the watermark never becomes the ownership fence by freeing the manifest address"
+        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none(),
+        "the legacy compatibility mirror is freeable after retained-head proof"
     );
 
     owner_a.enqueue(&shard(), &pushes(3), 0, 5_000).unwrap();
@@ -5330,8 +5390,8 @@ fn TestPermanentFenceMarkerBlocksReclaimedIndex() {
     );
     assert_eq!(
         store.inner.object_count(),
-        objects_before,
-        "the stale seal must not write a fresh manifest or segment object"
+        objects_before + 1,
+        "the stale seal may leave one unreachable segment before losing the retained-head CAS"
     );
 }
 
@@ -5364,8 +5424,8 @@ fn TestPermanentFenceSurvivesReopen() {
     );
     assert_eq!(
         store.inner.object_count(),
-        objects_before,
-        "the stale seal must not publish a fresh segment or manifest object"
+        objects_before + 1,
+        "the stale seal may leave one unreachable segment but cannot publish a manifest entry"
     );
 }
 
@@ -5398,8 +5458,8 @@ fn TestReopenFenceReloadsBeforeSeal() {
     );
     assert_eq!(
         store.inner.object_count(),
-        objects_before,
-        "the stale writer must not emit a new durable object before it is fenced"
+        objects_before + 1,
+        "the stale writer may leave one unreachable segment before the retained-head fence rejects it"
     );
 }
 
@@ -5417,8 +5477,8 @@ fn assert_reclaimed_cached_writer_rejects_before_ack() {
     );
     assert_eq!(
         store.inner.object_count(),
-        objects_before,
-        "the stale writer must not publish a fresh segment or manifest object before it is fenced"
+        objects_before + 1,
+        "the stale writer may leave one unreachable segment but cannot publish it through the retained head"
     );
 }
 
@@ -5474,12 +5534,11 @@ fn TestNoTailValidateRollbackSubstituteForCachedWriter() {
     );
 }
 
-/// Test 7 — THE FENCE IS UNTOUCHED. A stale-epoch writer whose cached `next_manifest_index` points BELOW the
-/// advanced read-horizon is STILL fenced: the below-horizon manifest object was NEVER freed, so its
-/// `put_if_absent` still COLLIDES → CAS-lost → recover_manifest → EpochFenced. This is the whole safety
-/// argument — advancing the horizon must NOT free the address.
+/// Test 7 — THE RETAINED FENCE IS UNTOUCHED. A stale-epoch writer whose cached `next_manifest_index` points
+/// below the advanced read horizon is still fenced by the retained manifest-head address even though its
+/// legacy compatibility mirror is freeable.
 #[test]
-fn stale_writer_below_horizon_is_still_fenced_address_never_freed() {
+fn stale_writer_below_horizon_is_fenced_by_retained_head_address() {
     let store = std::sync::Arc::new(InMemoryBlobStore::new());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
 
@@ -5509,12 +5568,15 @@ fn stale_writer_below_horizon_is_still_fenced_address_never_freed() {
         "the horizon advanced past manifest index 1 (W = {horizon})"
     );
 
-    // FENCE-PRESERVED PROOF: the below-horizon manifest object at index 1 still EXISTS (its address was never
-    // freed), so a stale writer's create-only CAS there must still collide.
+    // FENCE-PRESERVED PROOF: the retained head at index 1 still exists while the legacy mirror is reclaimed.
     assert!(
-        store.get(&manifest_key_s(&shard(), 1)).unwrap().is_some(),
-        "the below-horizon manifest index 1 object still EXISTS — the horizon NEVER frees the address"
+        store
+            .get(&manifest_head_key_s(&shard(), 1))
+            .unwrap()
+            .is_some(),
+        "the below-horizon retained head address remains occupied"
     );
+    assert!(store.get(&manifest_key_s(&shard(), 1)).unwrap().is_none());
 
     // Owner A — still cached at epoch 0, next_manifest_index 1 (BELOW the horizon) — tries to seal. Its
     // put_if_absent at manifest/{1} collides with B's still-present fence tombstone → EpochFenced.
@@ -5523,7 +5585,7 @@ fn stale_writer_below_horizon_is_still_fenced_address_never_freed() {
     assert_eq!(
         err,
         EngineError::EpochFenced,
-        "the stale writer whose cached index is below the horizon is STILL fenced (address never freed)"
+        "the stale writer whose cached index is below the horizon is fenced by retained head authority"
     );
 }
 
@@ -7021,6 +7083,11 @@ fn TestManifestDeletionWatermarkStorageNoCorruptOnStale() {
 
     log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
         .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&shard, 3, 999).unwrap(),
+        2,
+        "the watermark boundary is backed by completed physical deletion"
+    );
     log.persist_manifest_deletion_watermark(&shard, 3, 1_000)
         .unwrap();
     assert_eq!(log.read_read_horizon(&shard).unwrap(), Some(1));

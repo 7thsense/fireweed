@@ -2599,8 +2599,112 @@ mod byte_admission_wiring_tests {
         EligibilityPolicy, Metadata, OrderingMode, PriorityDirection, PriorityModel,
         PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
     };
-    use pqueue_engine::{ControlPlaneStore, PushPort, PushSpec};
+    use pqueue_engine::{
+        AcquireOutcome, ControlPlaneConfig, ControlPlaneStore, InMemoryControlPlane, LeaseState,
+        OwnerEndpointAdvertisement, OwnerResolution, ProjectionRead, PushPort, PushSpec,
+        QueueControlPlane, QueueLease,
+    };
     use pqueue_objectlog::segmented::InMemoryBlobStore;
+    use std::sync::mpsc;
+
+    struct PauseAfterAcquire {
+        inner: Arc<InMemoryControlPlane>,
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl QueueControlPlane for PauseAfterAcquire {
+        fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+            self.inner.register_owner(owner, now)
+        }
+        fn advertise_owner_endpoint(
+            &self,
+            owner: &OwnerId,
+            endpoint: &str,
+            now: UtcTimestamp,
+        ) -> EngineResult<()> {
+            self.inner.advertise_owner_endpoint(owner, endpoint, now)
+        }
+        fn live_owner_endpoints(
+            &self,
+            now: UtcTimestamp,
+        ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
+            self.inner.live_owner_endpoints(now)
+        }
+        fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+            self.inner.heartbeat(owner, now)
+        }
+        fn resolve_queue_owner(
+            &self,
+            queue: &QueueKey,
+            now: UtcTimestamp,
+        ) -> EngineResult<OwnerResolution> {
+            self.inner.resolve_queue_owner(queue, now)
+        }
+        fn acquire_queue_lease(
+            &self,
+            queue: &QueueKey,
+            owner: &OwnerId,
+            now: UtcTimestamp,
+        ) -> EngineResult<AcquireOutcome> {
+            let outcome = self.inner.acquire_queue_lease(queue, owner, now)?;
+            self.entered
+                .send(())
+                .map_err(|_| EngineError::Unavailable)?;
+            self.resume
+                .lock()
+                .expect("pause receiver poisoned")
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| EngineError::Unavailable)?;
+            Ok(outcome)
+        }
+        fn confirm_queue_lease_fence(
+            &self,
+            queue: &QueueKey,
+            owner: &OwnerId,
+            expected_epoch: u64,
+            now: UtcTimestamp,
+        ) -> EngineResult<QueueLease> {
+            self.inner
+                .confirm_queue_lease_fence(queue, owner, expected_epoch, now)
+        }
+        fn renew_queue_lease(
+            &self,
+            queue: &QueueKey,
+            owner: &OwnerId,
+            expected_epoch: u64,
+            now: UtcTimestamp,
+        ) -> EngineResult<QueueLease> {
+            self.inner
+                .renew_queue_lease(queue, owner, expected_epoch, now)
+        }
+        fn begin_drain(
+            &self,
+            queue: &QueueKey,
+            expected_epoch: u64,
+            target_owner: &OwnerId,
+            now: UtcTimestamp,
+        ) -> EngineResult<QueueLease> {
+            self.inner
+                .begin_drain(queue, expected_epoch, target_owner, now)
+        }
+        fn release_queue_lease(
+            &self,
+            queue: &QueueKey,
+            owner: &OwnerId,
+            expected_epoch: u64,
+            now: UtcTimestamp,
+        ) -> EngineResult<()> {
+            self.inner
+                .release_queue_lease(queue, owner, expected_epoch, now)
+        }
+        fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
+            self.inner.lease(queue)
+        }
+        fn is_ephemeral(&self) -> bool {
+            true
+        }
+    }
 
     fn queue_definition() -> QueueDefinition {
         QueueDefinition {
@@ -2785,5 +2889,103 @@ mod byte_admission_wiring_tests {
             .err()
             .expect("direct Config must not bypass segment-target validation");
         assert!(matches!(error, EngineError::Invalid(_)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pending_fence_gap_has_one_safe_old_prefix_then_fences_stale_retry() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let config = SegmentConfig::new(4_096, 1).unwrap();
+        let a_backend = Arc::new(
+            SegmentedObjectLogInMemoryBackend::open_with_blob_store(store.clone(), config).unwrap(),
+        );
+        let b_backend = Arc::new(
+            SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, config).unwrap(),
+        );
+        let a_flusher = a_backend.spawn_flusher();
+        let b_flusher = b_backend.spawn_flusher();
+        let cp = Arc::new(InMemoryControlPlane::new(ControlPlaneConfig {
+            heartbeat_ttl_ms: 5_000,
+            lease_ttl_ms: 10_000,
+        }));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let a_owner = OwnerId::new("owner-a").unwrap();
+        let b_owner = OwnerId::new("owner-b").unwrap();
+        let a = Arc::new(OwnershipRuntime::new(
+            a_backend.clone(),
+            cp.clone(),
+            a_owner,
+            "127.0.0.1:7101".into(),
+        ));
+        let b = Arc::new(OwnershipRuntime::new(
+            b_backend.clone(),
+            Arc::new(PauseAfterAcquire {
+                inner: cp.clone(),
+                entered: entered_tx,
+                resume: Mutex::new(resume_rx),
+            }),
+            b_owner,
+            "127.0.0.1:7102".into(),
+        ));
+        let definition = queue_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        a_backend.create_queue(definition.clone()).await.unwrap();
+        b_backend.create_queue(definition).await.unwrap();
+        a_backend.fence_epoch(&queue, 0).await.unwrap();
+        a.register_owner(UtcTimestamp::new(0, 0).unwrap()).unwrap();
+        a.acquire_queue(&queue, UtcTimestamp::new(0, 0).unwrap())
+            .await
+            .unwrap();
+        b.register_owner(UtcTimestamp::new(20, 0).unwrap()).unwrap();
+
+        let acquiring = {
+            let b = b.clone();
+            let queue = queue.clone();
+            tokio::spawn(async move {
+                b.acquire_queue(&queue, UtcTimestamp::new(20, 0).unwrap())
+                    .await
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(cp.lease(&queue).unwrap().state, LeaseState::PendingFence);
+        let routing_key = format!("{}:{}", queue.tenant_id.as_str(), queue.queue_id.as_str());
+        assert_eq!(
+            a.route_command(
+                "GET",
+                &[],
+                routing_key.as_bytes(),
+                UtcTimestamp::new(20, 0).unwrap(),
+                false,
+            )
+            .await
+            .unwrap(),
+            RouteDecision::Unavailable
+        );
+        a_backend
+            .push(
+                &queue,
+                vec![push_spec()],
+                UtcTimestamp::new(20, 0).unwrap(),
+                Some(1),
+            )
+            .await
+            .unwrap();
+        resume_tx.send(()).unwrap();
+        acquiring.await.unwrap().unwrap();
+        assert_eq!(
+            a_backend
+                .push(
+                    &queue,
+                    vec![push_spec()],
+                    UtcTimestamp::new(21, 0).unwrap(),
+                    Some(1),
+                )
+                .await,
+            Err(EngineError::EpochFenced)
+        );
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 1);
+        assert_eq!(b_backend.current_epoch(&queue).await.unwrap(), 2);
+        a_flusher.abort();
+        b_flusher.abort();
     }
 }

@@ -29,6 +29,7 @@ mod operator;
 mod ownership;
 mod port;
 pub mod schema_validation;
+pub mod sequenced_metadata;
 mod types;
 
 pub use active_scope::{

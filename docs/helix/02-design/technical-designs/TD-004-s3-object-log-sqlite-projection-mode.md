@@ -14,7 +14,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
+    self_hash: 8bacf6c79d2e3b82ee35cf5be4528818f720eed51bf9cfcbe200de48fc373caa
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -27,7 +27,7 @@ ddx:
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-18T18:16:00Z"
+    reviewed_at: "2026-07-18T21:09:02Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -81,8 +81,8 @@ In scope:
   durable request-id replay.
 - Periodic SQLite snapshot to object storage at a committed log position.
 - Bounded replay and recovery: snapshot + log-tail, with safe segment expiry.
-- Manifest-commit epoch fencing **validated against the current control-plane epoch**, bound to the
-  TD-003 queue-lease/epoch model.
+- Manifest-commit epoch fencing validated against the epoch authoritative at the commit linearization point:
+  guarded control-plane/CAS-row epoch for implementation (a), or storage-head epoch for implementation (b).
 - Object-store conditional-write (CAS) as a first-class required backend capability, with a defined
   fallback for stores that lack it.
 - Cohort (`cohort_policy` / `whole_cohort`, G6) projection, shared-lease, expiry, and replay bindings
@@ -147,12 +147,11 @@ It follows TD-001's capability boundaries unchanged:
   naming its segment is committed via a conditional (compare-and-set) object write. Success remains illegal
   until the operation's accepted effects are also visible through the local projection or equivalent
   committed response state.
-- **Fencing is enforced against the current control-plane epoch.** The manifest commit is the
-  enforcement point of TD-001 `append_batch(expected_epoch)`. The CAS guards the manifest tail; the
-  epoch check validates against the epoch currently recorded in the Postgres control plane for the
-  queue, not merely the highest epoch already in the manifest (see "Manifest Commit and Epoch Fencing").
-  This `assignment_epoch` is the same `u64` queue epoch TD-003 allocates and threads through
-  `CommandPosition.backend_epoch`.
+- **Fencing is enforced at commit linearization.** The manifest commit is the enforcement point of TD-001
+  `append_batch(expected_epoch)`. The CAS guards the manifest tail. Implementation (a) validates the guarded
+  control-plane/CAS-row epoch; implementation (b) validates the storage-head epoch after CP has stopped new
+  admission with non-serving `PendingFence`. This `assignment_epoch` is the same `u64` queue epoch TD-003
+  allocates and threads through `CommandPosition.backend_epoch`.
 - **SQLite is a projection, never an authority.** `apply_committed` is the only writer of committed
   state; in-flight claim reservations are a separate, non-authoritative bookkeeping table that holds no
   acknowledged state (see "Claim Reservation"). Acknowledged state survives via object-store segments +
@@ -252,15 +251,17 @@ This backend's fencing primitive is the conditional manifest write, which is the
 the TD-001 `LogStore.append_batch(queue, expected_epoch, …)` fence. It binds to the TD-003 queue
 lease/epoch model: TD-003 owns assignment, lease renewal, monotonic `assignment_epoch` allocation,
 reassignment, drain, and recovery; TD-004 owns how a stale writer is prevented from extending the
-durable log. The TD-003 safety invariant — "regardless of lease-clock skew, an append whose
-`expected_epoch` is not the current epoch for that queue MUST be rejected" — MUST hold for this backend.
+durable log. The TD-003 safety invariant is evaluated at the storage commit linearization point. A control-
+plane `PendingFence(E+1)` is a non-serving reservation, not yet storage authority: an operation already
+admitted under `Assigned(E)` MAY finish and linearize before the storage fence. New routing/admission is
+disabled while pending, and every `E` commit attempt after the storage head advances to `E+1` MUST be rejected.
 
 | Element | Rule |
 |---------|------|
-| Epoch source | The `assignment_epoch` a writer commits with MUST be the epoch of its active TD-003 queue lease for `(tenant, queue)`. A writer with no current lease MUST NOT seal or commit segments. |
-| Current-epoch validation (the core fix) | Manifest commit MUST succeed only if the writer's `assignment_epoch` equals the epoch **currently authoritative in the control plane** for that queue, not merely "≥ the highest epoch already in the manifest." A manifest CAS that checks only the manifest-recorded epoch is INSUFFICIENT: if the control plane advances the epoch (reassignment) before the new owner writes any manifest entry, an old-epoch writer's tail-matching CAS would otherwise still pass. The commit path MUST therefore validate against the current control-plane epoch. TWO conformant implementations are permitted, and a backend MUST use at least one: |
-| — (a) epoch-on-commit check | The committing writer validates its `expected_epoch` against the current control-plane epoch as part of the commit (e.g., a guarded control-plane read/transaction that the manifest commit is conditioned on, or the Postgres-manifest-pointer fallback whose CAS row carries the current epoch). This makes "fence published in control plane → old writer cannot commit" immediate. |
-| — (b) epoch fence published to manifest before handoff | Epoch advancement MUST publish a fence record into the queue's manifest (a manifest entry recording the new `assignment_epoch` and no segment, or a fence marker) BEFORE the new owner begins committing data segments, so any subsequent old-epoch CAS observes the higher epoch and fails. Under this implementation, the manifest-recorded-epoch check is sufficient *only because* advancement is guaranteed to fence the manifest first. Recovery (below) MUST perform this fence publication as its first manifest write. |
+| Epoch source | New routing/admission requires a serving TD-003 `Assigned(E)` lease. Work already admitted under that lease carries `E` through commit; it MAY finish while CP records non-serving `PendingFence(E+1)`, but only before storage authority advances. A node MUST NOT admit new work from a pending or absent lease. |
+| Current-epoch validation (the core fix) | Manifest commit MUST succeed only when the writer's `assignment_epoch` equals the epoch authoritative at that commit's linearization point. Under implementation (a), that is the guarded CP/CAS-row epoch. Under implementation (b), that is the manifest/storage head epoch; CP `PendingFence` alone is only a reservation. The new owner cannot serve until the storage fence, hydration, and CP confirmation finish. TWO conformant implementations are permitted, and a backend MUST use at least one: |
+| — (a) epoch-on-commit check | The committing writer validates its `expected_epoch` against the serving control-plane/CAS-row epoch as part of the commit. Publishing the guarded epoch immediately prevents an older commit from linearizing afterward. |
+| — (b) epoch fence published to manifest before serving handoff | CP first enters non-serving `PendingFence(E+1)`, stopping new old-owner admission. Storage then publishes `E+1` into the manifest head before the new owner hydrates or serves. An already-admitted `E` operation may linearize before that storage CAS; every `E` attempt after it loses to the higher head. Recovery MUST publish/confirm the storage fence before hydration and CP `Assigned(E+1)`. |
 | Manifest tail CAS | In addition to the epoch validation, manifest commit MUST be conditional on the manifest tail still matching the writer's expected tail, so two writers at the same epoch (transient split-brain) cannot both extend the log from the same point. |
 | Fenced writer | A writer whose commit fails because the current epoch has advanced (or a fence record now records a higher epoch) MUST treat itself as fenced: it MUST discard its in-flight buffer and roll back its in-flight claim reservations (see "Claim Reservation") without ack, and MUST NOT retry the commit under the old epoch. Unacked commands are re-driven by the new epoch holder on the normal replay path (caller retries by `request_id`). |
 | Recovery read | A newly assigned epoch holder MUST (1) under implementation (b), publish its epoch fence to the manifest as its first write; (2) read the latest committed snapshot; (3) replay manifest segments with `sequence > snapshot_sequence`, validating per-segment and per-command checksums; before sealing any new data segment. This reproduces acknowledged state (TD-001 conformance: snapshot recovery). |
@@ -590,6 +591,49 @@ This backend defends `whole_cohort` (G6 `cohort_policy`), not just Postgres/TD-0
 | Schema version | A snapshot MUST record `projection_schema_version`; recovery MUST reject or migrate a snapshot whose schema version it cannot apply, falling back to full log replay. |
 
 ## Retention and Expiry (normative)
+
+Sequenced metadata uses two non-interchangeable typed protocols. The retention floor is
+advance-then-delete: its epoch-fenced monotone manifest publication completes before segment deletion, and
+the create-only manifest address remains occupied as a stale-writer collision fence. The deletion watermark
+is delete-then-advance: every segment in the contiguous prefix is proven physically absent before an
+append-only marker advances. `read_horizon.json` is a compatibility cache, never deletion authority.
+
+Create-only head publication distinguishes applied, identical already-applied, precondition-lost, and
+ambiguous outcomes. A failed response is resolved by rereading the exact authoritative address before retry
+or use; successful publication adds no hot-path read. Partial-expiry visibility, contiguous-watermark
+derivation, and reclamation-candidate selection share one pure floor/fence/data classifier. Branch-pin and
+physical-absence checks remain explicit I/O. Candidate GC retains the horizon root, and reclamation never
+frees an address needed by the authoritative head/candidate walk or create-only collision history.
+
+Key and authority map:
+
+| Metadata class | Typed identity | Durable key/address | Authority and retention |
+|---|---|---|---|
+| Authority head / epoch fence | `HeadVersion`, `AssignmentEpoch` | `authority_head/{version}.json` names an immutable `manifest_candidates/...` object | Versioned head is authoritative and retained; a candidate is visible only when named by the winning head. |
+| Retention floor | `CommandSequence`, `ManifestIndex`, `AssignmentEpoch` | Floor fields in the winning authority candidate/head, or retained legacy `manifest_head/{index}.json` | Winning fenced publication is authoritative; its collision address is retained. |
+| Deletion watermark | `ManifestIndex` | Append-only `manifest_head/{index}~watermark.json` | Marker history is authoritative and retained. `read_horizon.json` is a rebuildable compatibility cache only. |
+| Reclaimed data | `ManifestIndex` | Segment object plus legacy `manifest/{index}.json` mirror | These addresses are `FreeAddress` targets after proof; the corresponding head/candidate collision history remains retained. |
+
+State-transition matrix:
+
+| Class | Required order | Serving/visibility rule | Idempotent terminal state |
+|---|---|---|---|
+| Authority head / epoch fence | CP `Assigned(E)` → CP `PendingFence(E+1)` → storage fence `E+1` → projection hydration → CP `Assigned(E+1)` | `PendingFence` never serves. An operation admitted under `E` may linearize before the storage fence; after the fence every `E` retry is rejected. | Winning head reread reports the exact epoch and CP confirm publishes that owner. |
+| Retention floor | Read current floor → validate monotonicity → fenced create-only advance → classify eligible entries → physical expiry | No delete is eligible before the durable advance. Equal advance is a no-op; regression is invalid. | Durable floor is greater than or equal to the requested floor. |
+| Deletion watermark | Delete segment → prove segment absent → delete freeable legacy mirror → prove retained head/authority lineage → publish append-only marker → refresh cache | Readers and seal/recovery consult marker authority, never the cache, for fencing or suppression. | Exact marker body exists; cache may lag without changing authority. |
+| Reclaimed manifest address | Prove entry is behind the durable floor and not branch-pinned → reclaim freeable objects → preserve winning-chain root/collision address | A stale writer must still collide at every retained create-only address. | Freeable objects are absent and retained lineage remains readable. |
+
+Failure and recovery table:
+
+| Cut/failure | Required result | Recovery action |
+|---|---|---|
+| Crash after CP writes `PendingFence`, before storage fence | No new owner serves; at most the already-admitted old-epoch prefix can commit. | Reacquire/fence at the same or greater epoch, hydrate the complete prefix, then confirm. |
+| Create-only response lost after durable effect | Do not blindly retry or report failure. | Exact-key reread with identical body yields `AppliedAfterAmbiguity`. |
+| Exact-key reread is missing/fails, or contains a different body | Missing/failed stays typed `Ambiguous`; different body is `PreconditionLost`. | Caller fails closed or retries from refreshed authority; it must not delete or serve based on the attempted value. |
+| Any segment delete or physical-absence proof fails | Deletion watermark does not advance. | Retry idempotent deletion and proof from the last authoritative marker. |
+| Marker succeeds but cache refresh fails | Marker remains authoritative; cache lag cannot suppress recovery/seal. | Rebuild `read_horizon.json` from append-only marker history. |
+| Cache contains a stale high value | It cannot fence a writer or hide unsealed/recoverable data. | Ignore it for authority decisions and derive the horizon from markers. |
+| Candidate/head lineage required by recovery is missing | Fail closed. | Repair or restore retained authority history; never infer it from LIST or the cache. |
 
 | Element | Rule |
 |---------|------|

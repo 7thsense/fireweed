@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -254,6 +254,102 @@ impl QueueControlPlane for FailReleaseControlPlane {
     }
 }
 
+struct PauseAfterAcquireControlPlane {
+    inner: PostgresControlPlane,
+    entered: mpsc::Sender<()>,
+    resume: Mutex<mpsc::Receiver<()>>,
+}
+
+impl QueueControlPlane for PauseAfterAcquireControlPlane {
+    fn register_owner(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        self.inner.register_owner(owner, now)
+    }
+    fn advertise_owner_endpoint(
+        &self,
+        owner: &OwnerId,
+        endpoint: &str,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.inner.advertise_owner_endpoint(owner, endpoint, now)
+    }
+    fn live_owner_endpoints(
+        &self,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerEndpointAdvertisement>> {
+        self.inner.live_owner_endpoints(now)
+    }
+    fn heartbeat(&self, owner: &OwnerId, now: UtcTimestamp) -> EngineResult<()> {
+        self.inner.heartbeat(owner, now)
+    }
+    fn resolve_queue_owner(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<OwnerResolution> {
+        self.inner.resolve_queue_owner(queue, now)
+    }
+    fn acquire_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<AcquireOutcome> {
+        let outcome = self.inner.acquire_queue_lease(queue, owner, now)?;
+        self.entered
+            .send(())
+            .map_err(|_| EngineError::Unavailable)?;
+        self.resume
+            .lock()
+            .expect("pause receiver poisoned")
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| EngineError::Unavailable)?;
+        Ok(outcome)
+    }
+    fn confirm_queue_lease_fence(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.inner
+            .confirm_queue_lease_fence(queue, owner, expected_epoch, now)
+    }
+    fn renew_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.inner
+            .renew_queue_lease(queue, owner, expected_epoch, now)
+    }
+    fn begin_drain(
+        &self,
+        queue: &QueueKey,
+        expected_epoch: u64,
+        target_owner: &OwnerId,
+        now: UtcTimestamp,
+    ) -> EngineResult<QueueLease> {
+        self.inner
+            .begin_drain(queue, expected_epoch, target_owner, now)
+    }
+    fn release_queue_lease(
+        &self,
+        queue: &QueueKey,
+        owner: &OwnerId,
+        expected_epoch: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        self.inner
+            .release_queue_lease(queue, owner, expected_epoch, now)
+    }
+    fn lease(&self, queue: &QueueKey) -> EngineResult<QueueLease> {
+        self.inner.lease(queue)
+    }
+}
+
 #[test]
 fn acquire_fences_manifest_before_serving() {
     let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP ACQUIRE") else {
@@ -339,6 +435,88 @@ fn concurrent_acquires_publish_exactly_one_usable_owner() {
     let lease = observer.lease(&queue).unwrap();
     assert_eq!(lease.state, LeaseState::Assigned);
     assert_eq!(lease.assignment_epoch, 1);
+}
+
+#[test]
+fn pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_stale_retry() {
+    let Some((pg, store)) = live_env("OBJECTLOG PENDING FENCE LINEARIZATION") else {
+        return;
+    };
+    let (schema, definition, queue) = unique("pending-gap");
+    let config = ControlPlaneConfig {
+        heartbeat_ttl_ms: 5_000,
+        lease_ttl_ms: 10_000,
+    };
+    let cp_a = Arc::new(PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let cp_b = Arc::new(PauseAfterAcquireControlPlane {
+        inner: PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap(),
+        entered: entered_tx,
+        resume: Mutex::new(resume_rx),
+    });
+    let observer = PostgresControlPlane::connect_in_schema(&pg, &schema, config).unwrap();
+    let a_backend = backend(store.clone(), "pending-gap-a");
+    let b_backend = backend(store, "pending-gap-b");
+    let a = Arc::new(OwnershipRuntime::new(
+        a_backend.clone(),
+        cp_a,
+        owner("owner-a"),
+        "127.0.0.1:7101".into(),
+    ));
+    let b = Arc::new(OwnershipRuntime::new(
+        b_backend.clone(),
+        cp_b,
+        owner("owner-b"),
+        "127.0.0.1:7102".into(),
+    ));
+    a.register_owner(ts(0)).unwrap();
+    b.register_owner(ts(20)).unwrap();
+
+    test_runtime().block_on(async {
+        a_backend.create_queue(definition.clone()).await.unwrap();
+        b_backend.create_queue(definition).await.unwrap();
+        a_backend.fence_epoch(&queue, 0).await.unwrap();
+        a.acquire_queue(&queue, ts(0)).await.unwrap();
+
+        let acquiring = {
+            let b = b.clone();
+            let queue = queue.clone();
+            tokio::spawn(async move { b.acquire_queue(&queue, ts(20)).await })
+        };
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(
+            observer.lease(&queue).unwrap().state,
+            LeaseState::PendingFence
+        );
+        let routing_key = format!("{}:{}", queue.tenant_id.as_str(), queue.queue_id.as_str());
+        assert_eq!(
+            a.route_command("GET", &[], routing_key.as_bytes(), ts(20), false)
+                .await
+                .unwrap(),
+            RouteDecision::Unavailable
+        );
+
+        // This operation was admitted at epoch 1 before the handoff. With owner B still non-serving it may
+        // linearize before the epoch-2 storage fence; no epoch-2 response can overlap it.
+        a_backend
+            .push(&queue, vec![spec("gap-prefix")], ts(20), Some(1))
+            .await
+            .unwrap();
+        resume_tx.send(()).unwrap();
+        acquiring.await.unwrap().unwrap();
+
+        assert_eq!(
+            a_backend
+                .push(&queue, vec![spec("stale-retry")], ts(21), Some(1))
+                .await,
+            Err(EngineError::EpochFenced)
+        );
+        assert_eq!(b_backend.metrics(&queue).await.unwrap().pending, 1);
+        assert_eq!(b_backend.current_epoch(&queue).await.unwrap(), 2);
+    });
 }
 
 #[test]

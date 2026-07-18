@@ -1475,7 +1475,11 @@ fn phase_scripts_hit_intended_durable_effects() {
                 && event.result == StoreResult::EffectThenError
                 && event.effect)
     );
-    assert_eq!(runner.disposition, Disposition::Unknown);
+    assert_eq!(
+        runner.disposition,
+        Disposition::Success,
+        "SP-03 resolves effect-then-error by rereading the exact authoritative create-only address"
+    );
 
     let mut cas_loser = ProductionRunner::new(SutMutant::None);
     cas_loser.apply(&Operation::Accept {
@@ -1528,7 +1532,7 @@ fn fence_phase_matrix_records_authoritative_epoch_outcomes() {
             Disposition::Rejected,
             false,
         ),
-        (StoreResult::EffectThenError, 1, Disposition::Unknown, true),
+        (StoreResult::EffectThenError, 1, Disposition::Success, true),
         (StoreResult::CasLoss, 0, Disposition::Rejected, false),
     ] {
         let mut runner = ProductionRunner::new(SutMutant::None);

@@ -196,15 +196,7 @@ fn write_legacy_manifest_entry<S: BlobStore>(
 fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
     for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
         for key in store.list(&prefix).unwrap() {
-            let Some(bytes) = store.get(&key).unwrap() else {
-                continue;
-            };
-            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            if parsed
-                .get("compacted_through_index")
-                .and_then(|v| v.as_u64())
-                .is_some()
-            {
+            if key.ends_with("~watermark.json") {
                 store.delete(&key).unwrap();
             }
         }
@@ -215,15 +207,7 @@ fn delete_watermark_marker<S: BlobStore>(store: &S, shard: &pqueue_engine::Queue
 fn delete_watermark_markers_only<S: BlobStore>(store: &S, shard: &pqueue_engine::QueueKey) {
     for prefix in [manifest_head_prefix_s(shard), manifest_prefix_s(shard)] {
         for key in store.list(&prefix).unwrap() {
-            let Some(bytes) = store.get(&key).unwrap() else {
-                continue;
-            };
-            let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            if parsed
-                .get("compacted_through_index")
-                .and_then(|v| v.as_u64())
-                .is_some()
-            {
+            if key.ends_with("~watermark.json") {
                 store.delete(&key).unwrap();
             }
         }

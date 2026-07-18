@@ -14,14 +14,14 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 94bfe631039cd60cfc7238a2556f0218aff8a4dd69d49a54619353b5cb7bb869
+    self_hash: c7f663e75e5e249d4e430faead6955fba5c905f1b1d994c08a34ef0711c954e9
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
+      td-s3-object-log-sqlite-projection-mode: 8bacf6c79d2e3b82ee35cf5be4528818f720eed51bf9cfcbe200de48fc373caa
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       tp-scale-substantiation: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
-      tp-verification-acceptance-criteria: 37fa4c0857ad98ff397edca5e20d2078b4fdeef9b1ba764f35afff50922610cd
-    reviewed_at: "2026-07-18T19:52:55Z"
+      tp-verification-acceptance-criteria: e4cdf81601d5246355ffc3ac09c4ac92ea0370f8fa9ce4cea801ec784e3717cb
+    reviewed_at: "2026-07-18T21:09:03Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption
@@ -60,7 +60,7 @@ explicit cost ceiling.
 |---|---|---|---|---|
 | 1 | SP-01 byte admission | Implement | Prevents memory blow-up during all later fault tests | Global and tenant byte budgets with exact permit release and telemetry |
 | 2 | SP-02 deterministic simulation | Local GO with conditions: independent model + real segmented-log trace runner | Makes later metadata/GC migrations testable under durable schedule faults | Stable replay, real cuts, typed corpus, <=32-op identity shrink; cross-host/clean-CI/untargeted gates pending |
-| 3 | SP-03 sequenced metadata | Implement | Removes repeated metadata/deletion race logic before maintenance refactor | Typed fenced-publication and monotone-marker families with per-class ordering and scoped post-create validation |
+| 3 | SP-03 sequenced metadata | Implemented locally; release gates pending | Shared eligibility classification removes repeated race logic before maintenance refactor | Typed retained create-only publication, real advance→delete and delete→advance paths, ambiguity reread, HCAS-F1/F2 crash evidence; full release perf matrix pending |
 | 4 | SP-04 object-store telemetry | Implement | Supplies evidence for maintenance and warmup policy | Metrics below retry layer with stable low-cardinality labels |
 | 5 | SP-05 maintenance separation | Implement | Uses typed metadata and telemetry to bound execution | Pure planner plus resumable, dry-run executor |
 | 6 | SP-06 targeted handoff warmup | Evidence-gated spike | Avoids speculative cache complexity | Adopt only if failover/recovery bars improve within memory budget |

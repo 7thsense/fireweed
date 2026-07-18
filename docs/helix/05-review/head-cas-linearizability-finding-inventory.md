@@ -20,14 +20,14 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F1` |
 | **Severity** | BLOCKING |
-| **Disposition** | blocking |
-| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:52-53` §Findings row F1 — review transcript documents control-plane epoch gap; `docs/helix/02-design/technical-designs/TD-004-s3-object-log-sqlite-projection-mode.md:235-237` — current-epoch validation rule requiring manifest commit to validate against control-plane epoch; `crates/pqueue-objectlog/src/segmented.rs:1662` — `seal()` code location where epoch check against manifest-recorded epoch occurs |
+| **Disposition** | discharged by SP-03 PendingFence linearization evidence |
+| **Evidence** | CP `PendingFence` is non-serving. The non-skipping `pending_fence_gap_has_one_safe_old_prefix_then_fences_stale_retry` and live Postgres/S3 `pending_fence_gap_linearizes_old_commit_before_storage_fence_then_rejects_stale_retry` pause after the CP reservation but before storage fencing: old routing is unavailable; one already-admitted old-epoch prefix may linearize while no new-epoch operation can serve; after storage fence+reset-and-replay hydration+confirm, its stale retry is rejected and the new owner recovers the prefix. `hcas_f1_f2_crash_after_fence_head_reopens_fenced_and_keeps_prefix_invisible` covers crash after head publication. |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F1 |
 | **Area** | Epoch fencing: current-epoch validation |
 | **Governing spec** | TD-004:235–237 (Manifest Commit and Epoch Fencing) |
 | **Code location** | `crates/pqueue-objectlog/src/segmented.rs:1662` |
 | **Context** | `seal()` checks `expected_epoch == buf.committed_epoch` against the manifest-recorded epoch, not the current control-plane epoch. TD-004:235 requires "the writer's `assignment_epoch` equals the epoch currently authoritative in the control plane." The code relies on option (b) — epoch fence published to manifest before handoff via `acquire_epoch()` — but does not independently validate against the control plane. If a fence entry is lost (crash during `acquire_epoch` after CAS success but before local epoch update), a stale writer could present `expected_epoch` matching the stale `buf.committed_epoch` while the control plane has already advanced. |
-| **Proposed disposition** | Add control-plane epoch read + compare inside `seal()` before manifest CAS (option a per TD-004:236), or prove in test suite that no window exists where a control-plane advance escapes the manifest before a fence entry commits. Add crash-at-fence-entry-gap test. |
+| **Proposed disposition** | Discharged for safety: PendingFence is reservation, not serving handoff. The storage fence is the linearization boundary between old-epoch and new-epoch writes; no new-epoch response precedes it. |
 
 ### F2: Versioned head stale after fence entry commit
 
@@ -35,13 +35,13 @@ explicitly excluded.
 |-------|-------|
 | **ID** | `HCAS-F2` |
 | **Severity** | BLOCKING |
-| **Disposition** | blocking |
-| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:53` §Findings row F2 — review transcript documents versioned-head staleness after fence entry; `crates/pqueue-objectlog/src/segmented.rs:1506` — `acquire_epoch()` lacks `update_manifest_head_if_version()` call after fence entry commit; `crates/pqueue-objectlog/src/segmented.rs:163` — `update_manifest_head_if_version()` exists but unused by epoch acquisition path |
+| **Disposition** | resolved by SP-03 slice 0 |
+| **Evidence** | Authoritative data, floor, and fence publication share the versioned authority-head CAS; immutable candidates become visible only when named by that head. Exact-key reread resolves ambiguous creates. Non-empty legacy queues fail closed rather than being adopted concurrently. The HCAS-F1/F2 crash test proves reopened head visibility. |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F2 |
 | **Area** | Manifest entry CAS: reader-visible atomicity |
 | **Code location** | `crates/pqueue-objectlog/src/segmented.rs` — `acquire_epoch()` at 1506, `commit_manifest_entry()` at 1096, `read_manifest_head()` at 134, `update_manifest_head_if_version()` at 163 |
 | **Context** | `commit_manifest_entry()` writes a per-index manifest entry via `put_if_absent` at `manifest_head/{index:020}.json`. The versioned manifest head (`ManifestHeadBlob`, updated by `update_manifest_head_if_version()`) is a separate object. `acquire_epoch()` commits a fence entry via `commit_manifest_entry()` but does NOT appear to call `update_manifest_head_if_version()`, leaving the versioned head stale relative to the latest fence entry. Readers using `read_manifest_head()` observe an index lower than the highest committed fence entry. Recovery uses `recover_manifest()` (scans all `manifest_head/` objects) and is unaffected. |
-| **Proposed disposition** | Ensure `acquire_epoch()` calls `update_manifest_head_if_version()` after fence entry commit, or document that `read_manifest_head()` may return stale state and callers must use `recover_manifest()` for authoritative tail. |
+| **Proposed disposition** | Closed on the migration surface: the authority head is the single publication point; legacy compatibility remains a separate explicit protocol and cannot be concurrently migrated. |
 
 ### F3: Non-atomic create_new on FUSE/overlay in LocalFsBlobStore
 
@@ -64,11 +64,11 @@ explicitly excluded.
 | **ID** | `HCAS-F4` |
 | **Severity** | WARNING |
 | **Disposition** | non-blocking |
-| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:55` §Findings row F4 — review transcript documents watermark staleness bypassing reclaim-time fence; `crates/pqueue-objectlog/src/segmented.rs:1668-1684` — reclaim-time fence code in `seal()`; `crates/pqueue-objectlog/src/segmented.rs:1122` — `mark_manifest_entry_reclaimed()` address-retention invariant |
+| **Evidence** | `docs/helix/05-review/head-cas-linearizability-review.md:55` §Findings row F4 documents watermark staleness bypassing the early reclaim fence. `stale_writer_below_horizon_is_fenced_by_retained_head_address` and the shared stale-writer substrate fixture prove the exact footprint: stale seal returns `EpochFenced`, retained head remains occupied, freeable legacy mirror remains absent, no manifest entry becomes visible, and at most one unreachable segment object is left. |
 | **Source** | `docs/helix/05-review/head-cas-linearizability-review.md` §Findings, row F4 |
 | **Area** | Reclaim-time fence caching |
 | **Code location** | `crates/pqueue-objectlog/src/segmented.rs:1668–1684` (reclaim-time fence in seal()) |
-| **Context** | `seal()` checks a cached `manifest_deletion_watermark` and self-fences if the target index was reclaimed. The watermark is loaded once during `recover_manifest()` at open time and NEVER refreshed during a writer session. If a concurrent writer advances the watermark, the stale writer's cached check passes (wrongly), permitting a seal attempt at a reclaimed index. The per-index `put_if_absent` at the reclaimed address still fails (address retained as zero-byte marker by `mark_manifest_entry_reclaimed()` at 1122), so the CAS ultimately rejects — but the epoch fence was bypassed, a segment write is wasted as an orphan. This is a correctness-preserving waste, not a data-safety hole. |
+| **Context** | `seal()` checks its in-memory `manifest_deletion_watermark` and self-fences if the target index was already known reclaimed. A concurrent trim can advance marker authority after that cache was loaded. The stale seal may therefore write one content-addressed segment before its create-only publication loses at the retained manifest-head/authority address. The segment is unreachable, the legacy compatibility mirror remains freeable, and the operation returns `EpochFenced`; this is bounded correctness-preserving waste, not a data-safety hole. Avoiding it would add an object-store read/LIST to the successful steady-state seal path. |
 | **Proposed disposition** | Either refresh the watermark periodically during a long-lived writer session, or add telemetry for orphan segment writes to detect the stale-watermark pattern in production. |
 
 ### F5: Postgres-manifest-pointer fallback epoch-atomicity untested at BlobStore trait level
@@ -104,8 +104,8 @@ explicitly excluded.
 
 | Entry ID | Severity | Status | Disposition |
 |----------|----------|--------|-------------|
-| HCAS-F1 | BLOCKING | CLASSIFIED | blocking |
-| HCAS-F2 | BLOCKING | CLASSIFIED | blocking |
+| HCAS-F1 | BLOCKING | DISCHARGED | SP-03 PendingFence linearization |
+| HCAS-F2 | BLOCKING | RESOLVED | SP-03 slice 0 |
 | HCAS-F3 | WARNING | CLASSIFIED | non-blocking |
 | HCAS-F4 | WARNING | CLASSIFIED | non-blocking |
 | HCAS-F5 | NOTE | CLASSIFIED | non-blocking |
