@@ -111,7 +111,8 @@ echo "--- strict validation of any smoke rows emitted by correctness tests ---"
 if ((DEFER_QUIET_HOST_EVIDENCE)); then
     ${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
         --ledger-dir "${PQUEUE_LEDGER_DIR}" \
-        --strict
+        --strict \
+        --require-smoke-evidence E3
 else
     ${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
         --ledger-dir "${PQUEUE_LEDGER_DIR}" \
@@ -152,7 +153,7 @@ bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
 
 echo "=== release gate (SMOKE lane) PASSED ==="
 if ((DEFER_QUIET_HOST_EVIDENCE)); then
-    echo "    Correctness, coverage, and closure passed; no quiet-host performance evidence verdict was made."
+    echo "    Required E3 smoke evidence is present; no quiet-host E2 performance evidence verdict was made."
 else
     echo "    Required smoke evidence E2,E3 present + well-formed; coverage bars met."
 fi
