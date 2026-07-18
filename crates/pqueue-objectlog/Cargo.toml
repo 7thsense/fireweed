@@ -41,6 +41,7 @@ pqueue-conformance = { path = "../pqueue-conformance" }
 pqueue-release = { path = "../pqueue-release" }
 pqueue-engine = { path = "../pqueue-engine" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
+pqueue-turso = { path = "../pqueue-turso", features = ["local"] }
 
 [[test]]
 name = "conformance"
@@ -65,3 +66,7 @@ path = "tests/segmented_s3_substrate_tests.rs"
 [[test]]
 name = "composed_sqlite_projection"
 path = "tests/composed_sqlite_projection.rs"
+
+[[test]]
+name = "async_turso_commit"
+path = "tests/async_turso_commit.rs"

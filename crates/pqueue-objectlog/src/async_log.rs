@@ -585,6 +585,30 @@ impl AsyncObjectLog {
         .await
     }
 
+    /// Enqueue this owned batch and force-seal the queue buffer in one keyed actor operation.
+    /// No public enqueue, flush, or second committer can interleave between the two substrate calls.
+    pub async fn group_commit_enqueue_and_seal(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        if !self.actor.group_commit {
+            return Err(EngineError::Unavailable);
+        }
+        let key = shard.clone();
+        self.actor
+            .group_shards
+            .lock()
+            .expect("object-log group shard set poisoned")
+            .insert(key.clone());
+        self.execute(key, move |log| {
+            log.shared_gc_enqueue_seal_and_advance(&shard, &commands, expected_epoch, now_ms)
+        })
+        .await
+    }
+
     /// Seal a latency-due group buffer and monotonically advance high-water as one keyed operation.
     pub async fn group_commit_flush_due(
         &self,

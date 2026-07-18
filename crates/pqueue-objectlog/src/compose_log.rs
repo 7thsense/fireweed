@@ -256,6 +256,19 @@ impl ObjectLog {
         Ok(positions)
     }
 
+    pub(crate) fn shared_gc_enqueue_seal_and_advance(
+        &self,
+        shard: &QueueKey,
+        commands: &[CommandEnvelope],
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        let mut positions =
+            self.shared_gc_enqueue_and_advance(shard, commands, expected_epoch, now_ms)?;
+        positions.extend(self.shared_gc_seal_and_advance(shard, expected_epoch, now_ms)?);
+        Ok(positions)
+    }
+
     pub(crate) fn shared_gc_flush_due_and_advance(
         &self,
         shard: &QueueKey,

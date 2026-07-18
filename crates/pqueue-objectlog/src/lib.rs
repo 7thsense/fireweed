@@ -16,10 +16,14 @@
 //! pre-validate — see the INVARIANT). Object names are zero-padded sequence numbers so lexical order is
 //! replay order; the next sequence is `max(existing)+1`, compaction-safe.
 
+mod async_commit;
 mod async_log;
 pub mod compose_log;
 pub mod segmented;
 
+pub use async_commit::{
+    GroupCommitObjectLogProjectionCommitter, MAX_RECOVERY_PAGE_SIZE, ObjectLogProjectionCommitter,
+};
 pub use async_log::{
     AsyncObjectLog, DEFAULT_ASYNC_OBJECT_LOG_CAPACITY, DEFAULT_ASYNC_OBJECT_LOG_WORKERS,
 };

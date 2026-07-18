@@ -2702,6 +2702,7 @@ dependencies = [
  "pqueue-projection",
  "pqueue-release",
  "pqueue-sqlite",
+ "pqueue-turso",
  "rustls",
  "serde",
  "serde_json",
