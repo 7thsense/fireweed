@@ -2,17 +2,17 @@
 // implementation's public return type to `async fn`.
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, QueueDefinition, UtcTimestamp,
-    is_retry_exhausted,
+    ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken,
+    QueueDefinition, QueueIndex, UtcTimestamp, is_retry_exhausted,
 };
 use pqueue_engine::{
     AsyncProjectionStore, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    FinalizeKind, PayloadUpdate, QueueCommand, QueueKey,
+    FinalizeKind, PayloadUpdate, PushItem, QueueCommand, QueueKey,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -169,18 +169,405 @@ fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
         | QueueCommand::ResumeQueue
         | QueueCommand::PurgeItems(_)
         | QueueCommand::SetGates(_) => {}
-        QueueCommand::Push(push) => {
-            if push
-                .items
-                .iter()
-                .any(|item| item.group_key.is_some() || item.cohort_size.is_some())
-            {
-                return Err(EngineError::Unavailable);
-            }
-        }
+        QueueCommand::Push(_)
+        | QueueCommand::CohortClaim(_)
+        | QueueCommand::CohortRenewLease(_)
+        | QueueCommand::CohortFinalize(_)
+        | QueueCommand::CohortExpired(_) => {}
         _ => return Err(EngineError::Unavailable),
     }
     Ok(())
+}
+
+fn cohort_id_for(group_key: &str, now: i64) -> String {
+    format!("coh:{group_key}:{now}")
+}
+
+fn cohort_retention_until(definition: &QueueDefinition, now: i64) -> i64 {
+    now.saturating_add(
+        i64::try_from(definition.terminal_retention_ms)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000_000),
+    )
+}
+
+fn index_is_unique(index: &QueueIndex) -> bool {
+    match &index.declaration {
+        IndexDeclaration::Single(definition) => definition.unique,
+        IndexDeclaration::Compound(definition) => definition.unique,
+    }
+}
+
+fn typed_index_keys(
+    indexes: &[QueueIndex],
+    entity: Option<&serde_json::Value>,
+) -> EngineResult<Vec<(String, Vec<u8>)>> {
+    let Some(entity) = entity else {
+        return Ok(Vec::new());
+    };
+    indexes
+        .iter()
+        .filter_map(|index| {
+            let key = match &index.declaration {
+                IndexDeclaration::Single(definition) => definition.index_key(entity),
+                IndexDeclaration::Compound(definition) => definition.index_key(entity),
+            };
+            match key {
+                Ok(Some(key)) => Some(Ok((index.name.clone(), key))),
+                Ok(None) => None,
+                Err(error) => Some(Err(storage(error))),
+            }
+        })
+        .collect()
+}
+
+async fn maintain_typed_indexes_on_insert(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    indexes: &[QueueIndex],
+    items: &[PushItem],
+) -> EngineResult<()> {
+    let mut batch_unique: HashMap<(String, Vec<u8>), String> = HashMap::new();
+    let mut rows = Vec::with_capacity(items.len());
+    for item in items {
+        let item_id = item.item_id.to_string();
+        let keys = typed_index_keys(indexes, item.entity_document.as_ref())?;
+        for (name, key) in &keys {
+            let unique = indexes
+                .iter()
+                .find(|index| index.name == *name)
+                .is_some_and(index_is_unique);
+            if !unique {
+                continue;
+            }
+            if one_row(
+                transaction,
+                "SELECT item_id FROM pqueue_item_index WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND index_name=?3 AND index_key=?4 LIMIT 1",
+                vec![
+                    tenant.to_string().into(),
+                    queue.to_string().into(),
+                    name.clone().into(),
+                    Value::Blob(key.clone()),
+                ],
+            )
+            .await?
+            .is_some()
+            {
+                return Err(EngineError::Conflict);
+            }
+            let batch_key = (name.clone(), key.clone());
+            if batch_unique
+                .insert(batch_key, item_id.clone())
+                .is_some_and(|previous| previous != item_id)
+            {
+                return Err(EngineError::Conflict);
+            }
+        }
+        rows.push((item_id, keys));
+    }
+    for (item_id, keys) in rows {
+        for (name, key) in keys {
+            transaction
+                .execute(
+                    "INSERT INTO pqueue_item_index \
+                     (tenant_id,queue_id,index_name,index_key,item_id) VALUES(?1,?2,?3,?4,?5) \
+                     ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
+                     index_key=excluded.index_key",
+                    vec![
+                        tenant.to_string().into(),
+                        queue.to_string().into(),
+                        name.into(),
+                        Value::Blob(key),
+                        item_id.clone().into(),
+                    ],
+                )
+                .await
+                .map_err(storage)?;
+        }
+    }
+    Ok(())
+}
+
+async fn upsert_cohorts(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    items: &[PushItem],
+    now: i64,
+) -> EngineResult<()> {
+    let mut cohorts: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    for item in items {
+        if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
+            let size = i64::try_from(size).map_err(|_| EngineError::Conflict)?;
+            let entry = cohorts
+                .entry(group.as_str().to_string())
+                .or_insert((size, 0));
+            if entry.0 != size {
+                return Err(EngineError::Conflict);
+            }
+            entry.1 += 1;
+        }
+    }
+    for (group, (size, added)) in cohorts {
+        let existing = one_row(
+            transaction,
+            "SELECT cohort_size,member_count,state,retention_until FROM pqueue_cohorts \
+             WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+            vec![
+                tenant.to_string().into(),
+                queue.to_string().into(),
+                group.clone().into(),
+            ],
+        )
+        .await?;
+        match existing {
+            None => {
+                if added > size {
+                    return Err(EngineError::Conflict);
+                }
+                let state = if added >= size { "complete" } else { "forming" };
+                transaction
+                    .execute(
+                        "INSERT INTO pqueue_cohorts \
+                         (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
+                          cohort_created_at,first_eligible_at,created_at) \
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?8)",
+                        vec![
+                            tenant.to_string().into(),
+                            queue.to_string().into(),
+                            group.clone().into(),
+                            cohort_id_for(&group, now).into(),
+                            Value::Integer(size),
+                            Value::Integer(added),
+                            state.into(),
+                            Value::Integer(now),
+                            if state == "complete" {
+                                Value::Integer(now)
+                            } else {
+                                Value::Null
+                            },
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+            }
+            Some(row) => {
+                let old_size = integer(&row[0])?;
+                let old_count = integer(&row[1])?;
+                let old_state = text(&row[2])?;
+                let retention = optional_integer(&row[3])?;
+                if old_state == "terminal" {
+                    if retention.is_some_and(|until| until > now) || added > size {
+                        return Err(EngineError::Conflict);
+                    }
+                    let state = if added >= size { "complete" } else { "forming" };
+                    transaction.execute(
+                        "UPDATE pqueue_cohorts SET cohort_id=?4,cohort_size=?5,member_count=?6,\
+                         state=?7,cohort_created_at=?8,first_eligible_at=?9,expire_command_pos=NULL,\
+                         cohort_lease_token_hash=NULL,retention_until=NULL,created_at=?8 \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                        vec![tenant.to_string().into(), queue.to_string().into(), group.clone().into(),
+                             cohort_id_for(&group, now).into(), Value::Integer(size), Value::Integer(added),
+                             state.into(), Value::Integer(now),
+                             if state == "complete" { Value::Integer(now) } else { Value::Null }],
+                    ).await.map_err(storage)?;
+                } else {
+                    if old_size != size || old_count.saturating_add(added) > old_size {
+                        return Err(EngineError::Conflict);
+                    }
+                    let count = old_count + added;
+                    let state = if old_state == "leased" {
+                        "leased"
+                    } else if count >= old_size {
+                        "complete"
+                    } else {
+                        "forming"
+                    };
+                    transaction
+                        .execute(
+                            "UPDATE pqueue_cohorts SET member_count=?4,state=?5,\
+                         first_eligible_at=CASE WHEN ?5='complete' AND first_eligible_at IS NULL \
+                         THEN ?6 ELSE first_eligible_at END \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                            vec![
+                                tenant.to_string().into(),
+                                queue.to_string().into(),
+                                group.into(),
+                                Value::Integer(count),
+                                state.into(),
+                                Value::Integer(now),
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cohort_item_ids(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    cohort_id: &CohortId,
+) -> EngineResult<(GroupKey, Vec<ItemId>)> {
+    let row = one_row(
+        transaction,
+        "SELECT group_key FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+        vec![
+            tenant.to_string().into(),
+            queue.to_string().into(),
+            cohort_id.as_str().to_string().into(),
+        ],
+    )
+    .await?
+    .ok_or(EngineError::NotFound)?;
+    let group = GroupKey::new(text(&row[0])?).map_err(storage)?;
+    let mut rows = transaction
+        .query(
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+             AND superseded=0 AND cohort_size IS NOT NULL AND lifecycle_state NOT IN ('Complete','Failed') \
+             ORDER BY priority_sort,created_seq",
+            vec![
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Text(group.as_str().to_string()),
+            ],
+        )
+        .await
+        .map_err(storage)?;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        ids.push(ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
+    }
+    Ok((group, ids))
+}
+
+async fn groups_for_items(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    ids: &[ItemId],
+) -> EngineResult<Vec<GroupKey>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut params = vec![
+        Value::Text(tenant.to_string()),
+        Value::Text(queue.to_string()),
+    ];
+    append_item_ids(&mut params, ids);
+    let mut rows = transaction
+        .query(
+            format!(
+                "SELECT DISTINCT group_key FROM pqueue_items WHERE tenant_id=? AND queue_id=? \
+                 AND group_key IS NOT NULL AND item_id IN ({})",
+                vec!["?"; ids.len()].join(",")
+            ),
+            params,
+        )
+        .await
+        .map_err(storage)?;
+    let mut groups = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        groups.push(GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
+    }
+    Ok(groups)
+}
+
+async fn refresh_group_summary(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    group: &GroupKey,
+    now: i64,
+) -> EngineResult<()> {
+    let params = vec![
+        tenant.to_string().into(),
+        queue.to_string().into(),
+        group.as_str().to_string().into(),
+        Value::Integer(now),
+    ];
+    let aggregate = one_row(
+        transaction,
+        "SELECT COUNT(*),MIN(eligible_since) FROM pqueue_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 AND lifecycle_state='Pending' \
+         AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+         WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+         AND ig.item_id=pqueue_items.item_id)",
+        params.clone(),
+    )
+    .await?
+    .ok_or_else(|| storage("group aggregate returned no row"))?;
+    let representative = one_row(
+        transaction,
+        "SELECT priority_sort,created_at,item_id FROM pqueue_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 AND lifecycle_state='Pending' \
+         AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+         ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+         WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+         AND ig.item_id=pqueue_items.item_id) ORDER BY priority_sort,created_seq LIMIT 1",
+        params,
+    )
+    .await?;
+    let (priority, created, item) = representative
+        .map_or((Value::Null, Value::Null, Value::Null), |row| {
+            (row[0].clone(), row[1].clone(), row[2].clone())
+        });
+    transaction
+        .execute(
+            "INSERT INTO pqueue_group_summary \
+             (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,\
+              rep_priority_sort,rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+             VALUES(?1,?2,?3,?4,NULL,?5,?6,?7,?8,0,?9) \
+             ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
+              oldest_eligible_at=excluded.oldest_eligible_at,\
+              rep_progress_guard_sort=excluded.rep_progress_guard_sort,\
+              rep_priority_sort=excluded.rep_priority_sort,rep_created_at=excluded.rep_created_at,\
+              rep_item_id=excluded.rep_item_id,eligible_item_count=excluded.eligible_item_count,\
+              at_risk_count=excluded.at_risk_count,updated_at=excluded.updated_at",
+            vec![
+                tenant.to_string().into(),
+                queue.to_string().into(),
+                group.as_str().to_string().into(),
+                aggregate[1].clone(),
+                priority,
+                created,
+                item,
+                aggregate[0].clone(),
+                Value::Integer(now),
+            ],
+        )
+        .await
+        .map_err(storage)?;
+    Ok(())
+}
+
+async fn cohort_state(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    cohort_id: &CohortId,
+) -> EngineResult<String> {
+    let row = one_row(
+        transaction,
+        "SELECT state FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3",
+        vec![
+            tenant.to_string().into(),
+            queue.to_string().into(),
+            cohort_id.as_str().to_string().into(),
+        ],
+    )
+    .await?
+    .ok_or(EngineError::NotFound)?;
+    text(&row[0])
 }
 
 enum TokenOp {
@@ -327,10 +714,6 @@ async fn apply_owned(
             QueueCommand::CreateQueue(_) => {}
             QueueCommand::Push(push) => {
                 let definition = definition_in_transaction(&transaction, &position.queue).await?;
-                if !definition.typed_indexes.is_empty() {
-                    transaction.rollback().await.map_err(storage)?;
-                    return Err(EngineError::Unavailable);
-                }
                 let row = one_row(
                     &transaction,
                     sql::SELECT_NEXT_ITEM_SEQUENCE,
@@ -362,6 +745,11 @@ async fn apply_owned(
                         .transpose()
                         .map_err(storage)?;
                     let not_before = ts_nanos_opt(item.not_before);
+                    let cohort_size = item
+                        .cohort_size
+                        .map(i64::try_from)
+                        .transpose()
+                        .map_err(|_| EngineError::Conflict)?;
                     let entity = item
                         .entity_document
                         .as_ref()
@@ -380,8 +768,10 @@ async fn apply_owned(
                                 Value::Blob(elig_sort(&item.priority, &definition.priority_model)),
                                 not_before.map_or(Value::Null, Value::Integer),
                                 Value::Integer(not_before.unwrap_or(now)),
-                                Value::Null,
-                                Value::Null,
+                                item.group_key.as_ref().map_or(Value::Null, |group| {
+                                    Value::Text(group.as_str().to_string())
+                                }),
+                                cohort_size.map_or(Value::Null, Value::Integer),
                                 item.payload
                                     .as_ref()
                                     .map_or(Value::Null, |value| Value::Blob(value.to_vec())),
@@ -414,9 +804,28 @@ async fn apply_owned(
                             .map_err(storage)?;
                     }
                 }
+                upsert_cohorts(&transaction, &tenant, &queue, &push.items, now).await?;
+                maintain_typed_indexes_on_insert(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    &definition.typed_indexes,
+                    &push.items,
+                )
+                .await?;
+                let groups: HashSet<GroupKey> = push
+                    .items
+                    .iter()
+                    .filter_map(|item| item.group_key.clone())
+                    .collect();
+                for group in groups {
+                    refresh_group_summary(&transaction, &tenant, &queue, &group, now).await?;
+                }
             }
             QueueCommand::Claim(claim) => {
                 if !claim.item_ids.is_empty() {
+                    let groups =
+                        groups_for_items(&transaction, &tenant, &queue, &claim.item_ids).await?;
                     let mut params = vec![
                         Value::Blob(lease_hash(&claim.lease_token)),
                         Value::Integer(ts_nanos(claim.lease_expires_at)),
@@ -442,7 +851,79 @@ async fn apply_owned(
                     token_ops.extend(claim.item_ids.iter().map(|item| {
                         TokenOp::Set(position.queue.clone(), *item, claim.lease_token.clone())
                     }));
+                    for group in groups {
+                        refresh_group_summary(
+                            &transaction,
+                            &tenant,
+                            &queue,
+                            &group,
+                            ts_nanos(envelope.created_at),
+                        )
+                        .await?;
+                    }
                 }
+            }
+            QueueCommand::CohortClaim(claim) => {
+                if cohort_state(&transaction, &tenant, &queue, &claim.cohort_id).await?
+                    != "complete"
+                {
+                    return Err(EngineError::Conflict);
+                }
+                let (group, expected_ids) =
+                    cohort_item_ids(&transaction, &tenant, &queue, &claim.cohort_id).await?;
+                if expected_ids.is_empty()
+                    || expected_ids.iter().copied().collect::<HashSet<_>>()
+                        != claim.item_ids.iter().copied().collect::<HashSet<_>>()
+                    || expected_ids.len() != claim.item_ids.len()
+                {
+                    return Err(EngineError::Conflict);
+                }
+                let mut params = vec![
+                    Value::Blob(lease_hash(&claim.lease_token)),
+                    Value::Integer(ts_nanos(claim.lease_expires_at)),
+                    Value::Integer(ts_nanos(envelope.created_at)),
+                    Value::Integer(incoming),
+                    Value::Text(tenant.clone()),
+                    Value::Text(queue.clone()),
+                ];
+                append_item_ids(&mut params, &claim.item_ids);
+                let changed = transaction
+                    .execute(
+                        &sql::claim_items(claim.item_ids.len()).replace("worker_id=?,", ""),
+                        params,
+                    )
+                    .await
+                    .map_err(storage)?;
+                if changed != u64::try_from(claim.item_ids.len()).map_err(storage)? {
+                    return Err(storage("cohort claim changed an unexpected row count"));
+                }
+                let cohort_changed = transaction
+                    .execute(
+                        "UPDATE pqueue_cohorts SET state='leased',cohort_lease_token_hash=?4 \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3 AND state='complete'",
+                        vec![
+                            tenant.clone().into(),
+                            queue.clone().into(),
+                            claim.cohort_id.as_str().to_string().into(),
+                            Value::Blob(lease_hash(&claim.lease_token)),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                if cohort_changed != 1 {
+                    return Err(EngineError::Conflict);
+                }
+                token_ops.extend(claim.item_ids.iter().map(|item| {
+                    TokenOp::Set(position.queue.clone(), *item, claim.lease_token.clone())
+                }));
+                refresh_group_summary(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    &group,
+                    ts_nanos(envelope.created_at),
+                )
+                .await?;
             }
             QueueCommand::RenewLease(renew) => {
                 execute_for_items(
@@ -466,6 +947,32 @@ async fn apply_owned(
                 )
                 .await?;
             }
+            QueueCommand::CohortRenewLease(renew) => {
+                if cohort_state(&transaction, &tenant, &queue, &renew.cohort_id).await? != "leased"
+                {
+                    return Err(EngineError::Conflict);
+                }
+                let (_group, ids) =
+                    cohort_item_ids(&transaction, &tenant, &queue, &renew.cohort_id).await?;
+                if ids.is_empty() {
+                    return Err(EngineError::NotFound);
+                }
+                let mut params = vec![
+                    Value::Integer(ts_nanos(renew.lease_expires_at)),
+                    Value::Integer(ts_nanos(envelope.created_at)),
+                    Value::Integer(incoming),
+                    Value::Text(tenant.clone()),
+                    Value::Text(queue.clone()),
+                ];
+                append_item_ids(&mut params, &ids);
+                let changed = transaction
+                    .execute(&sql::renew_lease(ids.len()), params)
+                    .await
+                    .map_err(storage)?;
+                if changed != u64::try_from(ids.len()).map_err(storage)? {
+                    return Err(storage("cohort renewal changed an unexpected row count"));
+                }
+            }
             QueueCommand::ReassignLease(reassign) => {
                 execute_for_items(
                     &transaction,
@@ -486,6 +993,13 @@ async fn apply_owned(
                 }));
             }
             QueueCommand::Finalize(finalize) => {
+                let finalized_ids: Vec<ItemId> = finalize
+                    .outcomes
+                    .iter()
+                    .map(|outcome| outcome.item_id)
+                    .collect();
+                let groups =
+                    groups_for_items(&transaction, &tenant, &queue, &finalized_ids).await?;
                 let retry_ids: Vec<ItemId> = finalize
                     .outcomes
                     .iter()
@@ -594,6 +1108,143 @@ async fn apply_owned(
                     )
                     .await?;
                 }
+                for group in groups {
+                    refresh_group_summary(&transaction, &tenant, &queue, &group, now).await?;
+                }
+            }
+            QueueCommand::CohortFinalize(finalize) => {
+                if matches!(finalize.kind, FinalizeKind::Rearm) {
+                    return Err(EngineError::Invalid("cohort rearm is invalid"));
+                }
+                if cohort_state(&transaction, &tenant, &queue, &finalize.cohort_id).await?
+                    != "leased"
+                {
+                    return Err(EngineError::Conflict);
+                }
+                let (group, ids) =
+                    cohort_item_ids(&transaction, &tenant, &queue, &finalize.cohort_id).await?;
+                if ids.is_empty() {
+                    return Err(EngineError::NotFound);
+                }
+                let mut complete = Vec::new();
+                let mut failed = Vec::new();
+                let mut pending = Vec::new();
+                if matches!(finalize.kind, FinalizeKind::Retry) {
+                    let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+                    append_item_ids(&mut params, &ids);
+                    let mut rows = transaction
+                        .query(&sql::select_retry_info(ids.len()), params)
+                        .await
+                        .map_err(storage)?;
+                    while let Some(row) = rows.next().await.map_err(storage)? {
+                        let item = ItemId::new(text(&row.get_value(0).map_err(storage)?)?)
+                            .map_err(storage)?;
+                        let attempts = nonnegative_u32(
+                            integer(&row.get_value(1).map_err(storage)?)?,
+                            "retry_count",
+                        )?;
+                        let max_attempts = nonnegative_u32(
+                            integer(&row.get_value(2).map_err(storage)?)?,
+                            "max_attempts",
+                        )?;
+                        if is_retry_exhausted(attempts, max_attempts) {
+                            failed.push(item);
+                        } else {
+                            pending.push(item);
+                        }
+                    }
+                    if failed.len() + pending.len() != ids.len() {
+                        return Err(storage("cohort finalize could not read every member"));
+                    }
+                } else {
+                    match finalize.kind {
+                        FinalizeKind::Complete => complete.clone_from(&ids),
+                        FinalizeKind::Fail => failed.clone_from(&ids),
+                        FinalizeKind::Release => pending.clone_from(&ids),
+                        FinalizeKind::Retry | FinalizeKind::Rearm => unreachable!(),
+                    }
+                }
+                let now = ts_nanos(envelope.created_at);
+                let epoch = i64::try_from(position.backend_epoch)
+                    .map_err(|_| storage("backend epoch exceeds relational integer range"))?;
+                for (state, terminal_at, terminal_epoch, members) in [
+                    ("Complete", Some(now), Some(epoch), &complete),
+                    ("Failed", Some(now), Some(epoch), &failed),
+                    ("Pending", None, None, &pending),
+                ] {
+                    if members.is_empty() {
+                        continue;
+                    }
+                    let mut params = vec![
+                        Value::Text(state.to_string()),
+                        Value::Integer(0),
+                        terminal_at.map_or(Value::Null, Value::Integer),
+                        terminal_epoch.map_or(Value::Null, Value::Integer),
+                        Value::Integer(now),
+                        Value::Integer(incoming),
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                    ];
+                    append_item_ids(&mut params, members);
+                    let changed = transaction
+                        .execute(&sql::finalize_items(members.len()), params)
+                        .await
+                        .map_err(storage)?;
+                    if changed != u64::try_from(members.len()).map_err(storage)? {
+                        return Err(storage("cohort finalize changed an unexpected row count"));
+                    }
+                }
+                if matches!(finalize.kind, FinalizeKind::Retry)
+                    && let Some(not_before) = finalize.not_before
+                    && !pending.is_empty()
+                {
+                    execute_for_items(
+                        &transaction,
+                        sql::finalize_backoff(pending.len()),
+                        vec![
+                            Value::Integer(ts_nanos(not_before)),
+                            Value::Integer(ts_nanos(not_before)),
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                        ],
+                        &pending,
+                    )
+                    .await?;
+                }
+                let definition = definition_in_transaction(&transaction, &position.queue).await?;
+                let next_state =
+                    if matches!(finalize.kind, FinalizeKind::Complete | FinalizeKind::Fail) {
+                        "terminal"
+                    } else {
+                        "complete"
+                    };
+                let changed = transaction
+                    .execute(
+                        "UPDATE pqueue_cohorts SET state=?4,cohort_lease_token_hash=NULL,\
+                         retention_until=?5 WHERE tenant_id=?1 AND queue_id=?2 AND cohort_id=?3 \
+                         AND state='leased'",
+                        vec![
+                            tenant.clone().into(),
+                            queue.clone().into(),
+                            finalize.cohort_id.as_str().to_string().into(),
+                            next_state.into(),
+                            if next_state == "terminal" {
+                                Value::Integer(cohort_retention_until(&definition, now))
+                            } else {
+                                Value::Null
+                            },
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                if changed != 1 {
+                    return Err(EngineError::Conflict);
+                }
+                token_ops.extend(
+                    ids.iter()
+                        .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
+                );
+                refresh_group_summary(&transaction, &tenant, &queue, &group, now).await?;
             }
             QueueCommand::UpdateFields(update) => {
                 let current = one_row(
@@ -678,7 +1329,15 @@ async fn apply_owned(
             }
             QueueCommand::ReplacePending(replace) => {
                 let definition = definition_in_transaction(&transaction, &position.queue).await?;
+                let old_groups = groups_for_items(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    std::slice::from_ref(&replace.superseded_item_id),
+                )
+                .await?;
                 if !definition.typed_indexes.is_empty()
+                    || !old_groups.is_empty()
                     || replace.replacement.group_key.is_some()
                     || replace.replacement.cohort_size.is_some()
                 {
@@ -780,6 +1439,8 @@ async fn apply_owned(
                 }
             }
             QueueCommand::LeaseExpired(expired) => {
+                let groups =
+                    groups_for_items(&transaction, &tenant, &queue, &expired.item_ids).await?;
                 execute_for_items(
                     &transaction,
                     sql::lease_expired(expired.item_ids.len()),
@@ -798,6 +1459,108 @@ async fn apply_owned(
                         .iter()
                         .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
                 );
+                for group in groups {
+                    refresh_group_summary(
+                        &transaction,
+                        &tenant,
+                        &queue,
+                        &group,
+                        ts_nanos(envelope.created_at),
+                    )
+                    .await?;
+                }
+            }
+            QueueCommand::CohortExpired(expired) => {
+                let cohort = one_row(
+                    &transaction,
+                    "SELECT state FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
+                    vec![
+                        tenant.clone().into(),
+                        queue.clone().into(),
+                        expired.group_key.as_str().to_string().into(),
+                    ],
+                )
+                .await?
+                .ok_or(EngineError::NotFound)?;
+                if text(&cohort[0])? == "terminal" {
+                    return Err(EngineError::Conflict);
+                }
+                let mut rows = transaction
+                    .query(
+                        "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                         AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL \
+                         AND lifecycle_state NOT IN ('Complete','Failed')",
+                        vec![
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                            Value::Text(expired.group_key.as_str().to_string()),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                let mut ids = Vec::new();
+                while let Some(row) = rows.next().await.map_err(storage)? {
+                    ids.push(
+                        ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?,
+                    );
+                }
+                drop(rows);
+                if ids.is_empty() {
+                    return Err(EngineError::NotFound);
+                }
+                let now = ts_nanos(envelope.created_at);
+                let epoch = i64::try_from(position.backend_epoch)
+                    .map_err(|_| storage("backend epoch exceeds relational integer range"))?;
+                let mut params = vec![
+                    Value::Integer(now),
+                    Value::Integer(epoch),
+                    Value::Integer(now),
+                    Value::Integer(incoming),
+                    Value::Text(tenant.clone()),
+                    Value::Text(queue.clone()),
+                ];
+                append_item_ids(&mut params, &ids);
+                let changed = transaction
+                    .execute(
+                        &format!(
+                            "UPDATE pqueue_items SET lifecycle_state='Failed',\
+                             item_version=item_version+1,terminal_at=?,terminal_command_epoch=?,\
+                             updated_at=?,last_command_sequence=? WHERE tenant_id=? AND queue_id=? \
+                             AND item_id IN ({})",
+                            vec!["?"; ids.len()].join(",")
+                        ),
+                        params,
+                    )
+                    .await
+                    .map_err(storage)?;
+                if changed != u64::try_from(ids.len()).map_err(storage)? {
+                    return Err(storage("cohort expiry changed an unexpected row count"));
+                }
+                let definition = definition_in_transaction(&transaction, &position.queue).await?;
+                let cohort_changed = transaction
+                    .execute(
+                        "UPDATE pqueue_cohorts SET state='terminal',expire_command_pos=?4,\
+                         cohort_lease_token_hash=NULL,retention_until=?5 \
+                         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 AND state!='terminal'",
+                        vec![
+                            tenant.clone().into(),
+                            queue.clone().into(),
+                            expired.group_key.as_str().to_string().into(),
+                            Value::Integer(incoming),
+                            Value::Integer(cohort_retention_until(&definition, now)),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+                if cohort_changed != 1 {
+                    return Err(EngineError::Conflict);
+                }
+                token_ops.extend(
+                    ids.iter()
+                        .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
+                );
+                refresh_group_summary(&transaction, &tenant, &queue, &expired.group_key, now)
+                    .await?;
             }
             QueueCommand::FenceLease(fence) => {
                 execute_for_items(
@@ -856,6 +1619,8 @@ async fn apply_owned(
             }
             QueueCommand::PurgeItems(purge) => {
                 if !purge.item_ids.is_empty() {
+                    let groups =
+                        groups_for_items(&transaction, &tenant, &queue, &purge.item_ids).await?;
                     let definition =
                         definition_in_transaction(&transaction, &position.queue).await?;
                     let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
@@ -921,6 +1686,16 @@ async fn apply_owned(
                             .iter()
                             .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
                     );
+                    for group in groups {
+                        refresh_group_summary(
+                            &transaction,
+                            &tenant,
+                            &queue,
+                            &group,
+                            ts_nanos(envelope.created_at),
+                        )
+                        .await?;
+                    }
                 }
             }
             _ => unreachable!("validated minimal command set"),

@@ -2,12 +2,14 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, EligibilityPolicy, ItemId, LeaseToken, Metadata, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
+    ClientItemKey, CohortId, EligibilityPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType,
+    ItemId, LeaseToken, Metadata, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueIndex,
+    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    AsyncProjectionStore, ClaimCommand, CommandChecksum, CommandEnvelope, CommandId,
+    AsyncProjectionStore, ClaimCommand, CohortClaimCommand, CohortExpiredCommand,
+    CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum, CommandEnvelope, CommandId,
     CommandPosition, FenceLeaseCommand, FinalizeCommand, FinalizeKind, FinalizeOutcome,
     LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, ProjectionStore, PurgeItemsCommand,
     PushCommand, PushItem, QueueCommand, QueueKey, ReassignLeaseCommand, RenewLeaseCommand,
@@ -24,6 +26,668 @@ use turso::Value;
 
 fn timestamp(seconds: i64) -> UtcTimestamp {
     UtcTimestamp::new(seconds, 0).expect("timestamp")
+}
+
+fn cohort_item(item_id: ItemId, key: &str, group: &GroupKey, email: &str) -> PushItem {
+    PushItem {
+        client_item_key: ClientItemKey::new(key).unwrap(),
+        item_id,
+        priority: None,
+        not_before: None,
+        group_key: Some(group.clone()),
+        max_attempts: 3,
+        payload: None,
+        fields: Default::default(),
+        metadata: Metadata::default(),
+        cohort_size: Some(2),
+        gate_keys: vec!["capacity".to_string()],
+        entity_document: Some(serde_json::json!({ "email": email })),
+    }
+}
+
+#[tokio::test]
+async fn grouped_typed_cohort_lifecycle_is_atomic_and_refreshes_summary() {
+    let mut definition = definition();
+    definition.typed_indexes = vec![QueueIndex {
+        name: "by_email".to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: "email".to_string(),
+            index_type: IndexType::String,
+            unique: true,
+        }),
+    }];
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    let group = GroupKey::new("cohort-a").unwrap();
+    let first = ItemId::mint(20, 0, 0);
+    let second = ItemId::mint(20, 0, 1);
+    let push = envelope(
+        "cohort-push",
+        QueueCommand::Push(PushCommand {
+            items: vec![
+                cohort_item(first, "first", &group, "a@example.com"),
+                cohort_item(second, "second", &group, "b@example.com"),
+            ],
+        }),
+        vec![first, second],
+        10,
+    );
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 2, 0)],
+        vec![push],
+    )
+    .await
+    .unwrap();
+
+    let cohort_id = CohortId::new("coh:cohort-a:10000000000").unwrap();
+    let cohort = turso
+        .query(
+            "SELECT cohort_id,cohort_size,member_count,state FROM pqueue_cohorts",
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cohort[0].values,
+        vec![
+            Value::Text(cohort_id.as_str().to_string()),
+            Value::Integer(2),
+            Value::Integer(2),
+            Value::Text("complete".to_string()),
+        ]
+    );
+    assert_eq!(
+        turso
+            .query("SELECT COUNT(*) FROM pqueue_item_index", vec![])
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(2)]
+    );
+    assert_eq!(
+        turso
+            .query(
+                "SELECT eligible_item_count FROM pqueue_group_summary WHERE group_key=?1",
+                vec![Value::Text(group.as_str().to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(2)]
+    );
+
+    let typed_update = envelope(
+        "unsupported-typed-update",
+        QueueCommand::UpdateFields(UpdateFieldsCommand {
+            item_id: first,
+            field_ops: std::collections::BTreeMap::from([(
+                "must_rollback".to_string(),
+                Some(Bytes::from_static(b"yes")),
+            )]),
+            payload: PayloadUpdate::Keep,
+            set_priority: ScheduleUpdate::Keep,
+            set_not_before: ScheduleUpdate::Keep,
+            set_entity_document: Some(serde_json::json!({ "email": "changed@example.com" })),
+        }),
+        vec![first],
+        11,
+    );
+    assert!(matches!(
+        AsyncProjectionStore::apply_live(
+            &turso,
+            vec![CommandPosition::new(shard.clone(), 2, 1)],
+            vec![typed_update],
+        )
+        .await,
+        Err(pqueue_engine::EngineError::Unavailable)
+    ));
+    assert_eq!(
+        turso
+            .query(
+                "SELECT fields FROM pqueue_items WHERE item_id=?1",
+                vec![Value::Text(first.to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Text("{}".to_string())]
+    );
+    let typed_replace = envelope(
+        "unsupported-typed-replace",
+        QueueCommand::ReplacePending(ReplacePendingCommand {
+            client_item_key: ClientItemKey::new("first").unwrap(),
+            superseded_item_id: first,
+            replacement: push_item(ItemId::mint(20, 0, 2), "first", 3),
+        }),
+        vec![first],
+        11,
+    );
+    assert!(matches!(
+        AsyncProjectionStore::apply_live(
+            &turso,
+            vec![CommandPosition::new(shard.clone(), 2, 1)],
+            vec![typed_replace],
+        )
+        .await,
+        Err(pqueue_engine::EngineError::Unavailable)
+    ));
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        0
+    );
+
+    let invalid_claim = envelope(
+        "bad-cohort-claim",
+        QueueCommand::CohortClaim(CohortClaimCommand {
+            cohort_id: cohort_id.clone(),
+            item_ids: vec![first],
+            lease_token: LeaseToken::new("bad-token").unwrap(),
+            lease_expires_at: timestamp(30),
+        }),
+        vec![first],
+        11,
+    );
+    assert!(matches!(
+        AsyncProjectionStore::apply_live(
+            &turso,
+            vec![CommandPosition::new(shard.clone(), 2, 1)],
+            vec![invalid_claim],
+        )
+        .await,
+        Err(pqueue_engine::EngineError::Conflict)
+    ));
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard.clone())
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        0
+    );
+
+    let lease = LeaseToken::new("cohort-token").unwrap();
+    AsyncProjectionStore::apply_live(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 2, 1)],
+        vec![envelope(
+            "cohort-claim",
+            QueueCommand::CohortClaim(CohortClaimCommand {
+                cohort_id: cohort_id.clone(),
+                item_ids: vec![first, second],
+                lease_token: lease,
+                lease_expires_at: timestamp(30),
+            }),
+            vec![first, second],
+            11,
+        )],
+    )
+    .await
+    .unwrap();
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 2, 2)],
+        vec![envelope(
+            "cohort-renew",
+            QueueCommand::CohortRenewLease(CohortRenewLeaseCommand {
+                cohort_id: cohort_id.clone(),
+                lease_expires_at: timestamp(40),
+            }),
+            vec![first, second],
+            12,
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        turso
+            .query("SELECT DISTINCT lease_expires_at FROM pqueue_items", vec![],)
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(40_000_000_000)]
+    );
+    AsyncProjectionStore::apply_live(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 2, 3)],
+        vec![envelope(
+            "cohort-finalize",
+            QueueCommand::CohortFinalize(CohortFinalizeCommand {
+                cohort_id,
+                kind: FinalizeKind::Complete,
+                not_before: None,
+            }),
+            vec![first, second],
+            13,
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        turso
+            .query("SELECT state,retention_until FROM pqueue_cohorts", vec![],)
+            .await
+            .unwrap()[0]
+            .values,
+        vec![
+            Value::Text("terminal".to_string()),
+            Value::Integer(73_000_000_000),
+        ]
+    );
+    assert_eq!(
+        turso
+            .query(
+                "SELECT eligible_item_count FROM pqueue_group_summary",
+                vec![],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(0)]
+    );
+}
+
+#[tokio::test]
+async fn grouped_push_unique_conflict_and_cohort_expiry_roll_back_or_converge() {
+    let mut definition = definition();
+    definition.typed_indexes = vec![QueueIndex {
+        name: "by_email".to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: "email".to_string(),
+            index_type: IndexType::String,
+            unique: true,
+        }),
+    }];
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    let group = GroupKey::new("cohort-b").unwrap();
+    let first = ItemId::mint(21, 0, 0);
+    let second = ItemId::mint(21, 0, 1);
+    let unrelated = ItemId::mint(21, 0, 2);
+    let conflicting = envelope(
+        "conflicting-push",
+        QueueCommand::Push(PushCommand {
+            items: vec![
+                cohort_item(first, "first", &group, "same@example.com"),
+                cohort_item(second, "second", &group, "same@example.com"),
+            ],
+        }),
+        vec![first, second],
+        20,
+    );
+    assert!(matches!(
+        AsyncProjectionStore::apply_recovery(
+            &turso,
+            vec![CommandPosition::new(shard.clone(), 3, 0)],
+            vec![conflicting],
+        )
+        .await,
+        Err(pqueue_engine::EngineError::Conflict)
+    ));
+    assert_eq!(
+        turso
+            .query("SELECT COUNT(*) FROM pqueue_items", vec![])
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(0)]
+    );
+    let valid = envelope(
+        "valid-push",
+        QueueCommand::Push(PushCommand {
+            items: vec![
+                cohort_item(first, "first", &group, "a@example.com"),
+                cohort_item(second, "second", &group, "b@example.com"),
+                PushItem {
+                    group_key: Some(group.clone()),
+                    entity_document: Some(serde_json::json!({ "email": "other@example.com" })),
+                    ..push_item(unrelated, "unrelated", 3)
+                },
+            ],
+        }),
+        vec![first, second, unrelated],
+        20,
+    );
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 3, 0)],
+        vec![valid],
+    )
+    .await
+    .unwrap();
+    AsyncProjectionStore::apply_recovery(
+        &turso,
+        vec![CommandPosition::new(shard.clone(), 3, 1)],
+        vec![envelope(
+            "cohort-expired",
+            QueueCommand::CohortExpired(CohortExpiredCommand {
+                group_key: group.clone(),
+            }),
+            vec![first, second],
+            21,
+        )],
+    )
+    .await
+    .unwrap();
+    let states = turso
+        .query(
+            "SELECT item_id,lifecycle_state FROM pqueue_items ORDER BY item_id",
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(states[0].values[1], Value::Text("Failed".to_string()));
+    assert_eq!(states[1].values[1], Value::Text("Failed".to_string()));
+    assert_eq!(states[2].values[1], Value::Text("Pending".to_string()));
+    assert_eq!(
+        turso
+            .query(
+                "SELECT eligible_item_count FROM pqueue_group_summary WHERE group_key=?1",
+                vec![Value::Text(group.as_str().to_string())],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(1)]
+    );
+    assert_eq!(
+        turso
+            .query(
+                "SELECT state,expire_command_pos,retention_until FROM pqueue_cohorts",
+                vec![],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![
+            Value::Text("terminal".to_string()),
+            Value::Integer(1),
+            Value::Integer(81_000_000_000),
+        ]
+    );
+}
+
+async fn apply_turso(
+    turso: &TursoRelational,
+    shard: &QueueKey,
+    sequence: u64,
+    command: CommandEnvelope,
+) -> Result<(), pqueue_engine::EngineError> {
+    AsyncProjectionStore::apply_live(
+        turso,
+        vec![CommandPosition::new(shard.clone(), 4, sequence)],
+        vec![command],
+    )
+    .await
+}
+
+async fn group_summary_count(turso: &TursoRelational, group: &GroupKey) -> i64 {
+    match &turso
+        .query(
+            "SELECT eligible_item_count FROM pqueue_group_summary WHERE group_key=?1",
+            vec![Value::Text(group.as_str().to_string())],
+        )
+        .await
+        .unwrap()[0]
+        .values[0]
+    {
+        Value::Integer(count) => *count,
+        value => panic!("unexpected summary count: {value:?}"),
+    }
+}
+
+#[tokio::test]
+async fn noncohort_group_summary_tracks_ordinary_item_lifecycle() {
+    let definition = definition();
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    let group = GroupKey::new("ordinary-group").unwrap();
+    let first = ItemId::mint(22, 0, 0);
+    let second = ItemId::mint(22, 0, 1);
+    let grouped = |item, key| PushItem {
+        group_key: Some(group.clone()),
+        ..push_item(item, key, 3)
+    };
+    apply_turso(
+        &turso,
+        &shard,
+        0,
+        envelope(
+            "grouped-push",
+            QueueCommand::Push(PushCommand {
+                items: vec![grouped(first, "first"), grouped(second, "second")],
+            }),
+            vec![first, second],
+            30,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 2);
+
+    let token = LeaseToken::new("ordinary-token").unwrap();
+    apply_turso(
+        &turso,
+        &shard,
+        1,
+        envelope(
+            "ordinary-claim",
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![first],
+                lease_token: token.clone(),
+                lease_expires_at: timestamp(60),
+                worker_id: None,
+            }),
+            vec![first],
+            31,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 1);
+    apply_turso(
+        &turso,
+        &shard,
+        2,
+        envelope(
+            "ordinary-release",
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(first, FinalizeKind::Release)],
+            }),
+            vec![first],
+            32,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 2);
+
+    apply_turso(
+        &turso,
+        &shard,
+        3,
+        envelope(
+            "ordinary-reclaim",
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![first],
+                lease_token: token.clone(),
+                lease_expires_at: timestamp(60),
+                worker_id: None,
+            }),
+            vec![first],
+            33,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 1);
+    apply_turso(
+        &turso,
+        &shard,
+        4,
+        envelope(
+            "ordinary-expiry",
+            QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                item_ids: vec![first],
+            }),
+            vec![first],
+            34,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 2);
+
+    apply_turso(
+        &turso,
+        &shard,
+        5,
+        envelope(
+            "ordinary-final-claim",
+            QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![first],
+                lease_token: token,
+                lease_expires_at: timestamp(60),
+                worker_id: None,
+            }),
+            vec![first],
+            35,
+        ),
+    )
+    .await
+    .unwrap();
+    apply_turso(
+        &turso,
+        &shard,
+        6,
+        envelope(
+            "ordinary-complete",
+            QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(first, FinalizeKind::Complete)],
+            }),
+            vec![first],
+            36,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 1);
+    apply_turso(
+        &turso,
+        &shard,
+        7,
+        envelope(
+            "ordinary-purge",
+            QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![first],
+                force: false,
+            }),
+            vec![first],
+            37,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 1);
+
+    apply_turso(
+        &turso,
+        &shard,
+        8,
+        envelope(
+            "ordinary-pending-purge",
+            QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![second],
+                force: true,
+            }),
+            vec![second],
+            38,
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(group_summary_count(&turso, &group).await, 0);
+}
+
+#[tokio::test]
+async fn grouped_replace_is_rejected_before_projection_mutation() {
+    let definition = definition();
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    let group = GroupKey::new("replace-group").unwrap();
+    let original = ItemId::mint(23, 0, 0);
+    let replacement = ItemId::mint(23, 0, 1);
+    apply_turso(
+        &turso,
+        &shard,
+        0,
+        envelope(
+            "replace-source",
+            QueueCommand::Push(PushCommand {
+                items: vec![PushItem {
+                    group_key: Some(group.clone()),
+                    ..push_item(original, "replace-key", 3)
+                }],
+            }),
+            vec![original],
+            40,
+        ),
+    )
+    .await
+    .unwrap();
+    let result = apply_turso(
+        &turso,
+        &shard,
+        1,
+        envelope(
+            "grouped-replace",
+            QueueCommand::ReplacePending(ReplacePendingCommand {
+                client_item_key: ClientItemKey::new("replace-key").unwrap(),
+                superseded_item_id: original,
+                replacement: push_item(replacement, "replace-key", 3),
+            }),
+            vec![replacement],
+            41,
+        ),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(pqueue_engine::EngineError::Unavailable)
+    ));
+    assert_eq!(group_summary_count(&turso, &group).await, 1);
+    assert_eq!(
+        turso
+            .query("SELECT item_id,superseded FROM pqueue_items", vec![],)
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Text(original.to_string()), Value::Integer(0)]
+    );
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&turso, shard)
+            .await
+            .unwrap()
+            .unwrap()
+            .sequence,
+        0
+    );
 }
 
 fn definition() -> QueueDefinition {
