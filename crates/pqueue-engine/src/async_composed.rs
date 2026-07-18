@@ -25,7 +25,7 @@ pub struct AsyncComposedBackend<S, D> {
 impl<S, D> AsyncComposedBackend<S, D>
 where
     S: AsyncCommitStrategy<Request = RawCommitRequest>,
-    D: OwnedTaskDispatcher<S::Output>,
+    D: OwnedTaskDispatcher,
 {
     pub fn new(strategy: S, dispatcher: D, max_queued_commits: usize) -> Self {
         let durability = strategy.durability_class();
@@ -46,13 +46,14 @@ where
     /// The factory is invoked only after dispatcher acceptance. Its owned task retains the queue permit
     /// across every phase it contains, such as validation, idempotency, claim planning, commit, and render.
     /// This remains a narrow composition primitive and does not imply operation-port parity.
-    pub(crate) async fn submit_operation<F>(
+    pub(crate) async fn submit_operation<T, F>(
         &self,
         queue: QueueKey,
         operation: F,
-    ) -> Result<S::Output, AsyncCommitSubmitError>
+    ) -> Result<T, AsyncCommitSubmitError>
     where
-        F: FnOnce() -> OwnedTask<S::Output> + Send + 'static,
+        T: Send + 'static,
+        F: FnOnce() -> OwnedTask<T> + Send + 'static,
     {
         let permit = self
             .admission
@@ -123,37 +124,56 @@ mod tests {
         future.poll(&mut Context::from_waker(Waker::noop()))
     }
 
-    struct TaskSlot<T> {
-        task: OwnedTask<T>,
-        outcome: TaskOutcomeSender<T>,
+    trait ErasedTask: Send {
+        fn poll_erased(&mut self, context: &mut Context<'_>) -> Poll<()>;
     }
 
-    struct DispatchState<T> {
+    struct TypedTask<T> {
+        task: OwnedTask<T>,
+        outcome: Option<TaskOutcomeSender<T>>,
+    }
+
+    impl<T: Send + 'static> ErasedTask for TypedTask<T> {
+        fn poll_erased(&mut self, context: &mut Context<'_>) -> Poll<()> {
+            match self.task.as_mut().poll(context) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(value) => {
+                    self.outcome
+                        .take()
+                        .expect("typed task outcome sender missing")
+                        .send(value);
+                    Poll::Ready(())
+                }
+            }
+        }
+    }
+
+    struct DispatchState {
         closed: bool,
         capacity: usize,
         next_id: u64,
         accepted: usize,
         live: HashSet<u64>,
         ready: VecDeque<u64>,
-        tasks: HashMap<u64, TaskSlot<T>>,
+        tasks: HashMap<u64, Box<dyn ErasedTask>>,
         drainers: Vec<TaskOutcomeSender<()>>,
     }
 
-    struct DispatchInner<T> {
-        state: Mutex<DispatchState<T>>,
+    struct DispatchInner {
+        state: Mutex<DispatchState>,
     }
 
     #[derive(Clone)]
-    struct ControlledDispatcher<T> {
-        inner: Arc<DispatchInner<T>>,
+    struct ControlledDispatcher {
+        inner: Arc<DispatchInner>,
     }
 
-    struct TaskWake<T> {
+    struct TaskWake {
         id: u64,
-        dispatcher: Weak<DispatchInner<T>>,
+        dispatcher: Weak<DispatchInner>,
     }
 
-    impl<T: Send + 'static> Wake for TaskWake<T> {
+    impl Wake for TaskWake {
         fn wake(self: Arc<Self>) {
             self.wake_by_ref();
         }
@@ -168,7 +188,7 @@ mod tests {
         }
     }
 
-    impl<T: Send + 'static> ControlledDispatcher<T> {
+    impl ControlledDispatcher {
         fn new(capacity: usize) -> Self {
             Self {
                 inner: Arc::new(DispatchInner {
@@ -210,11 +230,11 @@ mod tests {
                 id,
                 dispatcher: Arc::downgrade(&self.inner),
             }));
-            match slot.task.as_mut().poll(&mut Context::from_waker(&waker)) {
+            match slot.poll_erased(&mut Context::from_waker(&waker)) {
                 Poll::Pending => {
                     self.inner.state.lock().unwrap().tasks.insert(id, slot);
                 }
-                Poll::Ready(value) => {
+                Poll::Ready(()) => {
                     let drainers = {
                         let mut state = self.inner.state.lock().unwrap();
                         state.live.remove(&id);
@@ -225,7 +245,6 @@ mod tests {
                             Vec::new()
                         }
                     };
-                    slot.outcome.send(value);
                     for drainer in drainers {
                         drainer.send(());
                     }
@@ -235,8 +254,11 @@ mod tests {
         }
     }
 
-    impl<T: Send + 'static> OwnedTaskDispatcher<T> for ControlledDispatcher<T> {
-        fn submit(&self, factory: OwnedTaskFactory<T>) -> Result<TaskOutcome<T>, DispatchError> {
+    impl OwnedTaskDispatcher for ControlledDispatcher {
+        fn submit<T: Send + 'static>(
+            &self,
+            factory: OwnedTaskFactory<T>,
+        ) -> Result<TaskOutcome<T>, DispatchError> {
             let id = {
                 let mut state = self.inner.state.lock().unwrap();
                 if state.closed {
@@ -256,10 +278,10 @@ mod tests {
             let mut state = self.inner.state.lock().unwrap();
             state.tasks.insert(
                 id,
-                TaskSlot {
+                Box::new(TypedTask {
                     task,
-                    outcome: outcome_sender,
-                },
+                    outcome: Some(outcome_sender),
+                }),
             );
             state.ready.push_back(id);
             Ok(outcome)
@@ -365,14 +387,12 @@ mod tests {
         RawCommitRequest::new(queue(name), Vec::new(), 1)
     }
 
-    type TestBackend = AsyncComposedBackend<
-        UnifiedAtomicCommit<ControlledCommitter>,
-        ControlledDispatcher<QueueKey>,
-    >;
+    type TestBackend =
+        AsyncComposedBackend<UnifiedAtomicCommit<ControlledCommitter>, ControlledDispatcher>;
 
     struct Fixture {
         backend: TestBackend,
-        dispatcher: ControlledDispatcher<QueueKey>,
+        dispatcher: ControlledDispatcher,
         constructed: Arc<AtomicUsize>,
         completed: Arc<Mutex<Vec<QueueKey>>>,
         phases: Arc<Mutex<HashMap<QueueKey, Arc<Phase>>>>,
@@ -528,6 +548,39 @@ mod tests {
         stalled_phase.release();
         assert!(fixture.dispatcher.drive_next());
         assert!(matches!(poll_once(stalled.as_mut()), Poll::Ready(Ok(_))));
+    }
+
+    #[test]
+    fn one_backend_dispatches_commit_and_distinct_operation_response_types() {
+        let fixture = fixture(2);
+        fixture
+            .phases
+            .lock()
+            .unwrap()
+            .insert(queue("commit"), Phase::new(true));
+        let mut commit = Box::pin(fixture.backend.submit_commit(request("commit")));
+        let mut rendered = Box::pin(
+            fixture
+                .backend
+                .submit_operation::<String, _>(queue("render"), || {
+                    Box::pin(async { "rendered-response".to_string() })
+                }),
+        );
+
+        assert!(matches!(poll_once(commit.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(rendered.as_mut()), Poll::Pending));
+        assert_eq!(fixture.dispatcher.accepted(), 2);
+        assert!(fixture.dispatcher.drive_next());
+        assert!(fixture.dispatcher.drive_next());
+        assert!(matches!(
+            poll_once(commit.as_mut()),
+            Poll::Ready(Ok(key)) if key == queue("commit")
+        ));
+        assert!(matches!(
+            poll_once(rendered.as_mut()),
+            Poll::Ready(Ok(value)) if value == "rendered-response"
+        ));
+        assert_eq!(fixture.constructed.load(Ordering::Acquire), 1);
     }
 
     #[test]

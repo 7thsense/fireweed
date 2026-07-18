@@ -278,10 +278,17 @@ pub fn task_outcome_channel<T>() -> (TaskOutcomeSender<T>, TaskOutcome<T>) {
 }
 
 /// Runtime-neutral owned-task submission. Implementations supply their executor/actor below this boundary.
-pub trait OwnedTaskDispatcher<T: Send + 'static>: Send + Sync {
+///
+/// The generic submission method intentionally makes this a static-dispatch capability. One dispatcher
+/// can accept the heterogeneous result types of typed queue operations without exposing type erasure at
+/// the storage boundary.
+pub trait OwnedTaskDispatcher: Send + Sync {
     /// Accept `factory` or reject it without invoking it. After acceptance the dispatcher invokes the
     /// factory exactly once and drives its task to one resolution.
-    fn submit(&self, factory: OwnedTaskFactory<T>) -> Result<TaskOutcome<T>, DispatchError>;
+    fn submit<T: Send + 'static>(
+        &self,
+        factory: OwnedTaskFactory<T>,
+    ) -> Result<TaskOutcome<T>, DispatchError>;
 
     /// Stop accepting new tasks. Already submitted work remains owned and must be drained by the adapter.
     fn close(&self);
