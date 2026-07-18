@@ -18,7 +18,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use bytes::Bytes;
-    use pqueue_core::{ItemState, UtcTimestamp};
+    use pqueue_core::{ItemId, ItemState, UtcTimestamp};
 
     use super::*;
 
@@ -54,5 +54,20 @@ mod tests {
         ] {
             assert_eq!(parse_state(state_str(state)).expect("decode state"), state);
         }
+    }
+
+    #[test]
+    fn claim_by_query_replay_item_ids_ignore_other_response_fields() {
+        let item = ItemId::mint(1, 2, 3);
+        let raw = serde_json::json!({
+            "item_ids": [item],
+            "lease_token": "opaque-token",
+            "worker_id": null,
+        })
+        .to_string();
+        assert_eq!(
+            claim_by_query_replay_item_ids(&raw).expect("decode replay"),
+            vec![item]
+        );
     }
 }

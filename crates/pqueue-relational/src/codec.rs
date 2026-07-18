@@ -15,6 +15,19 @@ fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
     serde_json::to_string(value).map_err(|e| EngineError::Storage(e.to_string()))
 }
 
+#[derive(serde::Deserialize)]
+struct ClaimByQueryReplayItemIds {
+    item_ids: Vec<ItemId>,
+}
+
+/// Decode the item-id portion of a retained claim-by-query response without coupling a driver to
+/// the response's JSON representation.
+pub fn claim_by_query_replay_item_ids(raw: &str) -> EngineResult<Vec<ItemId>> {
+    serde_json::from_str::<ClaimByQueryReplayItemIds>(raw)
+        .map(|replay| replay.item_ids)
+        .map_err(|error| EngineError::Storage(error.to_string()))
+}
+
 pub fn fields_to_json(fields: &BTreeMap<String, Bytes>) -> EngineResult<String> {
     let raw: BTreeMap<&str, Vec<u8>> = fields
         .iter()

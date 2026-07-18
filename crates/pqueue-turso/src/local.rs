@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use pqueue_core::{ItemId, LeaseToken};
+use pqueue_engine::QueueKey;
 use pqueue_relational::{OWNED_PROJECTION_TABLES, RELATIONAL_SCHEMA};
 use tokio::sync::Mutex;
 use turso::{Builder, Connection, Database, Value, transaction::TransactionBehavior};
@@ -166,10 +167,12 @@ pub struct SchemaReport {
 ///
 /// SQLite-family stores have one durable writer. The async mutex preserves that invariant without
 /// blocking a Tokio worker or manufacturing a private runtime/thread boundary.
+/// Mutation cancellation safety is composition-owned: production profile integration must dispatch
+/// these directly-awaited futures through the engine's owned-task commit path before enabling this adapter.
 pub struct TursoRelational {
     database: Database,
     pub(crate) writer: Arc<Mutex<Connection>>,
-    pub(crate) live_tokens: Arc<Mutex<HashMap<ItemId, LeaseToken>>>,
+    pub(crate) live_tokens: Arc<Mutex<HashMap<(QueueKey, ItemId), LeaseToken>>>,
     config: TursoConfig,
 }
 

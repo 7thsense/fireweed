@@ -2,21 +2,22 @@
 // implementation's public return type to `async fn`.
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, ItemState, LeaseToken, QueueDefinition, UtcTimestamp,
+    is_retry_exhausted,
 };
 use pqueue_engine::{
     AsyncProjectionStore, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    QueueCommand, QueueKey,
+    FinalizeKind, QueueCommand, QueueKey,
 };
 use pqueue_relational::{
-    async_projection as sql, elig_sort, fields_from_json, fields_to_json, lease_hash,
-    metadata_from_json, metadata_to_json, nanos_ts, parse_priority, parse_state, ts_nanos,
-    ts_nanos_opt,
+    async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
+    fields_to_json, lease_hash, metadata_from_json, metadata_to_json, nanos_ts, parse_priority,
+    parse_state, ts_nanos, ts_nanos_opt,
 };
 use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
@@ -39,6 +40,14 @@ fn integer(value: &Value) -> EngineResult<i64> {
         Value::Integer(value) => Ok(*value),
         other => Err(storage(format!("expected integer, got {other:?}"))),
     }
+}
+
+fn nonnegative_u64(value: i64, field: &str) -> EngineResult<u64> {
+    u64::try_from(value).map_err(|_| storage(format!("negative or invalid {field}: {value}")))
+}
+
+fn nonnegative_u32(value: i64, field: &str) -> EngineResult<u32> {
+    u32::try_from(value).map_err(|_| storage(format!("negative or invalid {field}: {value}")))
 }
 
 fn optional_text(value: &Value) -> EngineResult<Option<String>> {
@@ -106,6 +115,19 @@ async fn ensure_shard_owned(
             transaction.rollback().await.map_err(storage)?;
             return Err(EngineError::QueueDefinitionConflict);
         }
+        let cursor = one_row(
+            &transaction,
+            sql::SELECT_CURSOR_STATE,
+            vec![tenant.clone().into(), queue.clone().into()],
+        )
+        .await?
+        .ok_or_else(|| storage("queue exists without its relational cursor"))?;
+        for (index, name) in ["next_seq", "next_item_seq", "assignment_epoch"]
+            .into_iter()
+            .enumerate()
+        {
+            nonnegative_u64(integer(&cursor[index])?, name)?;
+        }
         transaction.commit().await.map_err(storage)?;
         return Ok(());
     }
@@ -131,21 +153,93 @@ async fn ensure_shard_owned(
     transaction.commit().await.map_err(storage)
 }
 
-fn validate_minimal_commands(commands: &[CommandEnvelope]) -> EngineResult<()> {
-    for envelope in commands {
-        match &envelope.command {
-            QueueCommand::CreateQueue(_) | QueueCommand::Claim(_) => {}
-            QueueCommand::Push(push) => {
-                if push.items.iter().any(|item| {
-                    item.group_key.is_some()
-                        || item.cohort_size.is_some()
-                        || !item.gate_keys.is_empty()
-                }) {
-                    return Err(EngineError::Unavailable);
-                }
+fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
+    match &envelope.command {
+        QueueCommand::CreateQueue(_)
+        | QueueCommand::Claim(_)
+        | QueueCommand::RenewLease(_)
+        | QueueCommand::ReassignLease(_)
+        | QueueCommand::Finalize(_)
+        | QueueCommand::LeaseExpired(_)
+        | QueueCommand::FenceLease(_)
+        | QueueCommand::UnfenceLease(_) => {}
+        QueueCommand::Push(push) => {
+            if push.items.iter().any(|item| {
+                item.group_key.is_some() || item.cohort_size.is_some() || !item.gate_keys.is_empty()
+            }) {
+                return Err(EngineError::Unavailable);
             }
-            _ => return Err(EngineError::Unavailable),
         }
+        _ => return Err(EngineError::Unavailable),
+    }
+    Ok(())
+}
+
+enum TokenOp {
+    Set(QueueKey, ItemId, LeaseToken),
+    Clear(QueueKey, ItemId),
+}
+
+fn append_item_ids(params: &mut Vec<Value>, ids: &[ItemId]) {
+    params.extend(ids.iter().map(|item| Value::Text(item.to_string())));
+}
+
+async fn execute_for_items(
+    transaction: &Connection,
+    query: String,
+    mut params: Vec<Value>,
+    ids: &[ItemId],
+) -> EngineResult<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    append_item_ids(&mut params, ids);
+    transaction.execute(&query, params).await.map_err(storage)?;
+    Ok(())
+}
+
+async fn extend_claim_by_query_replays(
+    transaction: &Connection,
+    shard: &QueueKey,
+    renewed_item_ids: &[ItemId],
+    renewed_expires_at: UtcTimestamp,
+) -> EngineResult<()> {
+    if renewed_item_ids.is_empty() {
+        return Ok(());
+    }
+    let tenant = shard.tenant_id.as_str().to_string();
+    let queue = shard.queue_id.as_str().to_string();
+    let renewed: HashSet<ItemId> = renewed_item_ids.iter().copied().collect();
+    let mut rows = transaction
+        .query(
+            sql::SELECT_CLAIM_BY_QUERY_REPLAYS,
+            vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+        )
+        .await
+        .map_err(storage)?;
+    let mut request_ids = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        let request_id = text(&row.get_value(0).map_err(storage)?)?;
+        let payload = text(&row.get_value(1).map_err(storage)?)?;
+        let replay_ids = claim_by_query_replay_item_ids(&payload)?;
+        if !replay_ids.is_empty() && replay_ids.iter().all(|item| renewed.contains(item)) {
+            request_ids.push(request_id);
+        }
+    }
+    drop(rows);
+    for request_id in request_ids {
+        transaction
+            .execute(
+                sql::EXTEND_CLAIM_BY_QUERY_REPLAY,
+                vec![
+                    Value::Text(tenant.clone()),
+                    Value::Text(queue.clone()),
+                    Value::Text(request_id),
+                    Value::Integer(ts_nanos(renewed_expires_at)),
+                ],
+            )
+            .await
+            .map_err(storage)?;
     }
     Ok(())
 }
@@ -169,14 +263,13 @@ async fn definition_in_transaction(
 
 async fn apply_owned(
     writer: Arc<Mutex<Connection>>,
-    live_tokens: Arc<Mutex<HashMap<ItemId, LeaseToken>>>,
+    live_tokens: Arc<Mutex<HashMap<(QueueKey, ItemId), LeaseToken>>>,
     positions: Vec<CommandPosition>,
     commands: Vec<CommandEnvelope>,
 ) -> EngineResult<()> {
     if positions.len() != commands.len() {
         return Err(storage("positions/commands length mismatch"));
     }
-    validate_minimal_commands(&commands)?;
     let mut connection = writer.lock().await;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -215,6 +308,11 @@ async fn apply_owned(
                 "Turso projection replay gap for {}:{}: expected sequence {cursor}, got {incoming}",
                 tenant, queue
             )));
+        }
+
+        if let Err(error) = validate_minimal_command(envelope) {
+            transaction.rollback().await.map_err(storage)?;
+            return Err(error);
         }
 
         match &envelope.command {
@@ -296,41 +394,222 @@ async fn apply_owned(
                 }
             }
             QueueCommand::Claim(claim) => {
-                if claim.item_ids.is_empty() {
-                    next_by_queue.insert(position.queue.clone(), incoming + 1);
-                    continue;
+                if !claim.item_ids.is_empty() {
+                    let mut params = vec![
+                        Value::Blob(lease_hash(&claim.lease_token)),
+                        Value::Integer(ts_nanos(claim.lease_expires_at)),
+                        claim.worker_id.as_ref().map_or(Value::Null, |worker| {
+                            Value::Text(worker.as_str().to_string())
+                        }),
+                        Value::Integer(ts_nanos(envelope.created_at)),
+                        Value::Integer(incoming),
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                    ];
+                    append_item_ids(&mut params, &claim.item_ids);
+                    let changed = transaction
+                        .execute(sql::claim_items(claim.item_ids.len()), params)
+                        .await
+                        .map_err(storage)?;
+                    let expected = u64::try_from(claim.item_ids.len())
+                        .map_err(|_| storage("claim item count exceeds u64"))?;
+                    if changed != expected {
+                        transaction.rollback().await.map_err(storage)?;
+                        return Err(storage("claim changed an unexpected row count"));
+                    }
+                    token_ops.extend(claim.item_ids.iter().map(|item| {
+                        TokenOp::Set(position.queue.clone(), *item, claim.lease_token.clone())
+                    }));
                 }
-                let mut params = vec![
-                    Value::Blob(lease_hash(&claim.lease_token)),
-                    Value::Integer(ts_nanos(claim.lease_expires_at)),
-                    claim.worker_id.as_ref().map_or(Value::Null, |worker| {
-                        Value::Text(worker.as_str().to_string())
-                    }),
-                    Value::Integer(ts_nanos(envelope.created_at)),
-                    Value::Integer(incoming),
-                    Value::Text(tenant.clone()),
-                    Value::Text(queue.clone()),
-                ];
-                params.extend(
-                    claim
-                        .item_ids
-                        .iter()
-                        .map(|item| Value::Text(item.to_string())),
-                );
-                let changed = transaction
-                    .execute(sql::claim_items(claim.item_ids.len()), params)
-                    .await
-                    .map_err(storage)?;
-                if changed != claim.item_ids.len() as u64 {
-                    transaction.rollback().await.map_err(storage)?;
-                    return Err(storage("claim changed an unexpected row count"));
+            }
+            QueueCommand::RenewLease(renew) => {
+                execute_for_items(
+                    &transaction,
+                    sql::renew_lease(renew.item_ids.len()),
+                    vec![
+                        Value::Integer(ts_nanos(renew.lease_expires_at)),
+                        Value::Integer(ts_nanos(envelope.created_at)),
+                        Value::Integer(incoming),
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                    ],
+                    &renew.item_ids,
+                )
+                .await?;
+                extend_claim_by_query_replays(
+                    &transaction,
+                    &position.queue,
+                    &renew.item_ids,
+                    renew.lease_expires_at,
+                )
+                .await?;
+            }
+            QueueCommand::ReassignLease(reassign) => {
+                execute_for_items(
+                    &transaction,
+                    sql::reassign_lease(reassign.item_ids.len()),
+                    vec![
+                        Value::Blob(lease_hash(&reassign.lease_token)),
+                        Value::Integer(ts_nanos(reassign.lease_expires_at)),
+                        Value::Integer(ts_nanos(envelope.created_at)),
+                        Value::Integer(incoming),
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                    ],
+                    &reassign.item_ids,
+                )
+                .await?;
+                token_ops.extend(reassign.item_ids.iter().map(|item| {
+                    TokenOp::Set(position.queue.clone(), *item, reassign.lease_token.clone())
+                }));
+            }
+            QueueCommand::Finalize(finalize) => {
+                let retry_ids: Vec<ItemId> = finalize
+                    .outcomes
+                    .iter()
+                    .filter(|outcome| matches!(outcome.kind, FinalizeKind::Retry))
+                    .map(|outcome| outcome.item_id)
+                    .collect();
+                let mut retry_info = HashMap::new();
+                if !retry_ids.is_empty() {
+                    let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+                    append_item_ids(&mut params, &retry_ids);
+                    let mut rows = transaction
+                        .query(&sql::select_retry_info(retry_ids.len()), params)
+                        .await
+                        .map_err(storage)?;
+                    while let Some(row) = rows.next().await.map_err(storage)? {
+                        retry_info.insert(
+                            text(&row.get_value(0).map_err(storage)?)?,
+                            (
+                                integer(&row.get_value(1).map_err(storage)?)?,
+                                integer(&row.get_value(2).map_err(storage)?)?,
+                            ),
+                        );
+                    }
                 }
+
+                let mut complete = Vec::new();
+                let mut failed = Vec::new();
+                let mut pending = Vec::new();
+                let mut rearmed = Vec::new();
+                let mut backoff: HashMap<i64, Vec<ItemId>> = HashMap::new();
+                for outcome in &finalize.outcomes {
+                    let state = match outcome.kind {
+                        FinalizeKind::Complete => ItemState::Complete,
+                        FinalizeKind::Fail => ItemState::Failed,
+                        FinalizeKind::Retry => {
+                            let (attempts, max_attempts) = retry_info
+                                .get(&outcome.item_id.to_string())
+                                .copied()
+                                .ok_or(EngineError::NotFound)?;
+                            if is_retry_exhausted(
+                                nonnegative_u32(attempts, "retry_count")?,
+                                nonnegative_u32(max_attempts, "max_attempts")?,
+                            ) {
+                                ItemState::Failed
+                            } else {
+                                ItemState::Pending
+                            }
+                        }
+                        FinalizeKind::Release | FinalizeKind::Rearm => ItemState::Pending,
+                    };
+                    match (state, outcome.kind) {
+                        (ItemState::Complete, _) => complete.push(outcome.item_id),
+                        (ItemState::Failed, _) => failed.push(outcome.item_id),
+                        (ItemState::Pending, FinalizeKind::Rearm) => rearmed.push(outcome.item_id),
+                        (ItemState::Pending, _) => pending.push(outcome.item_id),
+                        (ItemState::Leased, _) => unreachable!("finalize never targets leased"),
+                    }
+                    if matches!(outcome.kind, FinalizeKind::Retry)
+                        && state == ItemState::Pending
+                        && let Some(not_before) = outcome.not_before
+                    {
+                        backoff
+                            .entry(ts_nanos(not_before))
+                            .or_default()
+                            .push(outcome.item_id);
+                    }
+                    token_ops.push(TokenOp::Clear(position.queue.clone(), outcome.item_id));
+                }
+                let now = ts_nanos(envelope.created_at);
+                let epoch = i64::try_from(position.backend_epoch)
+                    .map_err(|_| storage("backend epoch exceeds relational integer range"))?;
+                for (state, reset, terminal_at, terminal_epoch, ids) in [
+                    ("Complete", false, Some(now), Some(epoch), &complete),
+                    ("Failed", false, Some(now), Some(epoch), &failed),
+                    ("Pending", false, None, None, &pending),
+                    ("Pending", true, None, None, &rearmed),
+                ] {
+                    execute_for_items(
+                        &transaction,
+                        sql::finalize_items(ids.len()),
+                        vec![
+                            Value::Text(state.to_string()),
+                            Value::Integer(i64::from(reset)),
+                            terminal_at.map_or(Value::Null, Value::Integer),
+                            terminal_epoch.map_or(Value::Null, Value::Integer),
+                            Value::Integer(now),
+                            Value::Integer(incoming),
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                        ],
+                        ids,
+                    )
+                    .await?;
+                }
+                for (not_before, ids) in backoff {
+                    execute_for_items(
+                        &transaction,
+                        sql::finalize_backoff(ids.len()),
+                        vec![
+                            Value::Integer(not_before),
+                            Value::Integer(not_before),
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                        ],
+                        &ids,
+                    )
+                    .await?;
+                }
+            }
+            QueueCommand::LeaseExpired(expired) => {
+                execute_for_items(
+                    &transaction,
+                    sql::lease_expired(expired.item_ids.len()),
+                    vec![
+                        Value::Integer(ts_nanos(envelope.created_at)),
+                        Value::Integer(incoming),
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                    ],
+                    &expired.item_ids,
+                )
+                .await?;
                 token_ops.extend(
-                    claim
+                    expired
                         .item_ids
                         .iter()
-                        .map(|item| (*item, claim.lease_token.clone())),
+                        .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
                 );
+            }
+            QueueCommand::FenceLease(fence) => {
+                execute_for_items(
+                    &transaction,
+                    sql::fence_lease(fence.item_ids.len(), true),
+                    vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                    &fence.item_ids,
+                )
+                .await?;
+            }
+            QueueCommand::UnfenceLease(unfence) => {
+                execute_for_items(
+                    &transaction,
+                    sql::fence_lease(unfence.item_ids.len(), false),
+                    vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                    &unfence.item_ids,
+                )
+                .await?;
             }
             _ => unreachable!("validated minimal command set"),
         }
@@ -363,8 +642,15 @@ async fn apply_owned(
     }
     transaction.commit().await.map_err(storage)?;
     let mut tokens = live_tokens.lock().await;
-    for (item, token) in token_ops {
-        tokens.insert(item, token);
+    for op in token_ops {
+        match op {
+            TokenOp::Set(shard, item, token) => {
+                tokens.insert((shard, item), token);
+            }
+            TokenOp::Clear(shard, item) => {
+                tokens.remove(&(shard, item));
+            }
+        }
     }
     Ok(())
 }
@@ -409,38 +695,50 @@ impl AsyncProjectionStore for TursoRelational {
         now: UtcTimestamp,
         max: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let writer = self.writer.clone();
         async move {
-            let paused = self
-                .query(
-                    "SELECT paused FROM queues WHERE tenant=?1 AND queue=?2",
-                    vec![
-                        shard.tenant_id.as_str().to_string().into(),
-                        shard.queue_id.as_str().to_string().into(),
-                    ],
-                )
+            let mut connection = writer.lock().await;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
                 .await
                 .map_err(storage)?;
-            let Some(paused) = paused.first() else {
+            let tenant = shard.tenant_id.as_str().to_string();
+            let queue = shard.queue_id.as_str().to_string();
+            let paused = one_row(
+                &transaction,
+                "SELECT paused FROM queues WHERE tenant=?1 AND queue=?2",
+                vec![tenant.clone().into(), queue.clone().into()],
+            )
+            .await?;
+            let Some(paused) = paused else {
+                transaction.rollback().await.map_err(storage)?;
                 return Err(EngineError::NotFound);
             };
-            if integer(&paused.values[0])? != 0 {
+            if integer(&paused[0])? != 0 {
+                transaction.commit().await.map_err(storage)?;
                 return Ok(Vec::new());
             }
-            let rows = self
+            let mut rows = transaction
                 .query(
                     sql::SELECT_ELIGIBLE,
                     vec![
-                        shard.tenant_id.as_str().to_string().into(),
-                        shard.queue_id.as_str().to_string().into(),
-                        ts_nanos(now).into(),
-                        i64::try_from(max).map_err(storage)?.into(),
+                        Value::Text(tenant),
+                        Value::Text(queue),
+                        Value::Integer(ts_nanos(now)),
+                        Value::Integer(i64::try_from(max).map_err(storage)?),
                     ],
                 )
                 .await
                 .map_err(storage)?;
-            rows.into_iter()
-                .map(|row| ItemId::new(text(&row.values[0])?).map_err(storage))
-                .collect()
+            let mut eligible = Vec::new();
+            while let Some(row) = rows.next().await.map_err(storage)? {
+                eligible.push(
+                    ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?,
+                );
+            }
+            drop(rows);
+            transaction.commit().await.map_err(storage)?;
+            Ok(eligible)
         }
     }
 
@@ -453,7 +751,7 @@ impl AsyncProjectionStore for TursoRelational {
             let tokens = self.live_tokens.lock().await.clone();
             let mut claimed = Vec::new();
             for id in ids {
-                let Some(token) = tokens.get(&id).cloned() else {
+                let Some(token) = tokens.get(&(shard.clone(), id)).cloned() else {
                     continue;
                 };
                 let rows = self
@@ -475,7 +773,7 @@ impl AsyncProjectionStore for TursoRelational {
                 claimed.push(ClaimedItem {
                     item_id: id,
                     client_item_key: ClientItemKey::new(text(&values[0])?).map_err(storage)?,
-                    item_version: integer(&values[1])? as u64,
+                    item_version: nonnegative_u64(integer(&values[1])?, "item_version")?,
                     priority: parse_priority(optional_text(&values[2])?)?,
                     group_key: optional_text(&values[3])?
                         .map(GroupKey::new)
@@ -484,7 +782,7 @@ impl AsyncProjectionStore for TursoRelational {
                     not_before: optional_integer(&values[4])?.map(nanos_ts),
                     lease_token: Some(token),
                     lease_expires_at: nanos_ts(expires),
-                    attempt_count: integer(&values[6])? as u32,
+                    attempt_count: nonnegative_u32(integer(&values[6])?, "retry_count")?,
                     payload: optional_blob(&values[7])?.map(Bytes::from),
                     fields: fields_from_json(text(&values[8])?)?,
                     metadata: metadata_from_json(text(&values[9])?)?,
@@ -536,7 +834,9 @@ impl AsyncProjectionStore for TursoRelational {
                 .await
                 .map_err(storage)?;
             rows.first()
-                .map(|row| integer(&row.values[0]).map(|value| value as u64))
+                .map(|row| {
+                    integer(&row.values[0]).and_then(|value| nonnegative_u64(value, "item_version"))
+                })
                 .transpose()
         }
     }

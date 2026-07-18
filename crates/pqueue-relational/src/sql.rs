@@ -18,6 +18,8 @@ pub mod async_projection {
         next_item_seq,assignment_epoch) VALUES(?1,?2,0,0,0)";
     pub const SELECT_CURSOR: &str = "SELECT next_seq,assignment_epoch FROM relational_cursor \
         WHERE tenant=?1 AND queue=?2";
+    pub const SELECT_CURSOR_STATE: &str = "SELECT next_seq,next_item_seq,assignment_epoch FROM relational_cursor \
+         WHERE tenant=?1 AND queue=?2";
     pub const SELECT_NEXT_ITEM_SEQUENCE: &str = "SELECT next_item_seq FROM relational_cursor \
         WHERE tenant=?1 AND queue=?2";
     pub const UPDATE_NEXT_ITEM_SEQUENCE: &str = "UPDATE relational_cursor SET next_item_seq=?3 \
@@ -45,6 +47,12 @@ pub mod async_projection {
         not_before,lease_expires_at,retry_count,payload,fields,metadata FROM pqueue_items \
         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND item_id=?3";
     pub const SELECT_DEFINITIONS: &str = "SELECT definition FROM queues ORDER BY tenant,queue";
+    pub const SELECT_CLAIM_BY_QUERY_REPLAYS: &str = "SELECT request_id,response_payload \
+        FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+        AND operation='claim_by_query'";
+    pub const EXTEND_CLAIM_BY_QUERY_REPLAY: &str = "UPDATE pqueue_request_idempotency \
+        SET expires_at=max(expires_at,?4) WHERE tenant_id=?1 AND queue_id=?2 \
+        AND operation='claim_by_query' AND request_id=?3";
 
     pub fn claim_items(placeholders: usize) -> String {
         let ids = vec!["?"; placeholders].join(",");
@@ -53,6 +61,75 @@ pub mod async_projection {
              lease_expires_at=?,worker_id=?,retry_count=retry_count+1,item_version=item_version+1,\
              updated_at=?,last_command_sequence=? WHERE tenant_id=? AND queue_id=? \
              AND lifecycle_state='Pending' AND item_id IN ({ids})"
+        )
+    }
+
+    fn with_item_ids(prefix: &str, placeholders: usize) -> String {
+        let ids = vec!["?"; placeholders].join(",");
+        format!("{prefix} ({ids})")
+    }
+
+    pub fn renew_lease(placeholders: usize) -> String {
+        with_item_ids(
+            "UPDATE pqueue_items SET lease_expires_at=?,item_version=item_version+1,\
+             updated_at=?,last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn reassign_lease(placeholders: usize) -> String {
+        with_item_ids(
+            "UPDATE pqueue_items SET lease_token_hash=?,lease_expires_at=?,\
+             retry_count=retry_count+1,item_version=item_version+1,updated_at=?,\
+             last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn select_retry_info(placeholders: usize) -> String {
+        with_item_ids(
+            "SELECT item_id,retry_count,max_attempts FROM pqueue_items \
+             WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn finalize_items(placeholders: usize) -> String {
+        with_item_ids(
+            "UPDATE pqueue_items SET lifecycle_state=?,lease_token_hash=NULL,\
+             lease_expires_at=NULL,worker_id=NULL,fenced=0,item_version=item_version+1,\
+             retry_count=CASE WHEN ? THEN 0 ELSE retry_count END,terminal_at=?,\
+             terminal_command_epoch=?,updated_at=?,last_command_sequence=? \
+             WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn finalize_backoff(placeholders: usize) -> String {
+        with_item_ids(
+            "UPDATE pqueue_items SET not_before=?,eligible_since=? \
+             WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn lease_expired(placeholders: usize) -> String {
+        with_item_ids(
+            "UPDATE pqueue_items SET lifecycle_state='Pending',lease_token_hash=NULL,\
+             lease_expires_at=NULL,worker_id=NULL,item_version=item_version+1,updated_at=?,\
+             last_command_sequence=? WHERE tenant_id=? AND queue_id=? AND item_id IN",
+            placeholders,
+        )
+    }
+
+    pub fn fence_lease(placeholders: usize, fenced: bool) -> String {
+        with_item_ids(
+            if fenced {
+                "UPDATE pqueue_items SET fenced=1 WHERE tenant_id=? AND queue_id=? AND item_id IN"
+            } else {
+                "UPDATE pqueue_items SET fenced=0 WHERE tenant_id=? AND queue_id=? AND item_id IN"
+            },
+            placeholders,
         )
     }
 }
