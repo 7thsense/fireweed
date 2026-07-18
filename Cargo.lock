@@ -2701,6 +2701,7 @@ dependencies = [
  "pqueue-engine",
  "pqueue-projection",
  "pqueue-release",
+ "pqueue-sim-support",
  "pqueue-sqlite",
  "pqueue-turso",
  "rustls",
@@ -2807,6 +2808,10 @@ dependencies = [
  "tokio",
  "tokio-util",
 ]
+
+[[package]]
+name = "pqueue-sim-support"
+version = "0.17.3"
 
 [[package]]
 name = "pqueue-sqlite"

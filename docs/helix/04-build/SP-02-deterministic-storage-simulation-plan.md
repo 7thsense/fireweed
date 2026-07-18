@@ -6,12 +6,12 @@ ddx:
     - {kind: part_of, to: build-slatedb-pattern-adoption-roadmap}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: a7e7545464a051bd23046ffbb1b0f04fece7c450eb071e593a82084a08ed66ff
+    self_hash: 822bd8ebd2a9e07bdec818a12eb2ea8c21a2feca965422830eae41a839a407c8
     deps:
-      build-sp01-global-buffer-byte-admission: 6211670110ed7f75c2ffb82a3ba5bde0aad9573d7a1963266b93a2b42065a8f1
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
+      build-sp01-global-buffer-byte-admission: 5cfbe42a94ec4813e4855e431f0319152c6c8d11c5b081dcc77954a1ecf933b7
+      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-18T16:20:32Z"
+    reviewed_at: "2026-07-18T19:52:55Z"
 ---
 
 # Technical Spike Plan: SP-02 Deterministic Storage Simulation
@@ -70,13 +70,55 @@ success is represented as a durable effect followed by `Err` for recovery resolu
 
 ## Validation Plan
 
-- [ ] INV-1, INV-2, INV-10, INV-12, and INV-14 have executable predicates.
-- [ ] No acknowledged command disappears; no stale epoch commits; no visible prefix is deleted early.
-- [ ] Restart at every named cut reconstructs the model-equivalent durable prefix.
-- [ ] Seed corpus includes the previously fixed manifest watermark and group-seal races.
-- [ ] The harness detects at least one generated mutant class not covered by the hand-enumerated segment-commit tests.
-- [ ] Fake-store traces cover durable-success/lost-response, ambiguous create, CAS loss, and list staleness.
-- [ ] Command, environment, seed, trace schema, and result are recorded in the TP-003 verification ledger.
+- [x] INV-1, INV-2, INV-10, INV-12, and INV-14 have executable storage predicates.
+- [x] No acknowledged command disappears; no stale epoch commits; no visible prefix is deleted early.
+- [x] Every executed durable boundary compares disposition, epoch/sequence, floor/horizon, visible IDs,
+  acknowledgements, unknown outcomes, committed time, and physical deletion progress with the independent model.
+- [x] The versioned seed corpus includes the previously fixed manifest watermark and group-seal races.
+- [ ] Untargeted seed search rediscovers both historical bugs. The typed corpus detects both historical bugs
+  and all required synthetic mutants; broader untargeted discovery remains a retained-spike condition.
+- [x] Fake-store traces cover durable-success/lost-response, ambiguous create, CAS loss, and list staleness/incomplete pagination.
+- [x] Command, environment, seed, trace schema, and result are recorded in the TP-003 verification ledger below.
+
+## Spike Result and Evidence (2026-07-18): GO with conditions
+
+The spike is retained. `pqueue-sim-support` has no dependencies and provides the runtime-free model,
+seeded generator, stable trace renderer, invariant predicates, and deterministic shrinker. The
+`deterministic_storage_simulation` adapter applies the same operations to the real synchronous
+`SegmentedObjectLog` over a phase-addressed scripted versioned `BlobStore`; it compares model predicates and
+rich recovered production snapshots after every executed seal, fence, floor advance, deletion, crash,
+restart, and retry boundary. `FaultHook` interrupts the real production pipeline at before-segment,
+after-segment, candidate-before-head, manifest-before-ack, owner-reassignment, and segment-expiry cuts.
+
+Focused evidence on Rust 1.92, local in-memory object store, seed `0x5eed`, trace schema/harness v2:
+
+- `cargo test -p pqueue-sim-support`: 5 passed, including distinct invariant negative controls, per-record
+  floor/suffix behavior, 100 byte-identical replays, generated crash
+  operations, and invariant-identity-preserving shrink.
+- `cargo test -p pqueue-objectlog --test deterministic_storage_simulation`: 8 passed, including 128
+  independently seeded 48-operation production/model traces with generated crashes.
+- Typed JSONL corpus: committed-time manifest corruption; incomplete-delete plus stale compatibility-cache
+  authority; stale writer; delete-before-advance; ambiguous-create retry; acknowledged loss; next-read hiding.
+- Required INV-1, INV-2, INV-10, INV-12, and INV-14 predicates are distinct and non-vacuous. Named SUT/store
+  mutants trip their expected invariant; GC progress has a separate identity. Minimized failures preserve
+  identity and print schema, harness, seed, full trace, failing index, and <=32-operation minimized trace.
+- Phase scripts record the target, result, durable effect, and key for segment, manifest candidate/head CAS,
+  epoch head, floor/horizon, deletion, and paginated LIST. Ambiguous effect-then-error and CAS loss are
+  asserted at the manifest-head phase; stale/incomplete pages drive real recovery.
+- `scripts/ci/deterministic-simulation-suites.toml` is the bounded repeat-suite entrypoint. It contains no
+  quiet-host benchmark or Tokio scheduler simulation.
+- `repeat-suite.sh --count 100 --max-flaky-rate 0`: v2 passed 100/100, 0 failures, 0.000000 flaky rate,
+  82.38 seconds elapsed (below five minutes), 101,068 KiB maximum resident set. Incremental target-dir
+  growth was not isolated from the prewarmed shared workspace and remains a clean-CI measurement.
+- After the final oracle/adapter reconciliation, the complete eight-test deterministic integration target
+  passed another 100/100 process invocations with zero failures.
+
+The separate TP-003 process-kill matrix, cross-host 100-repeat evidence, and long release seed campaigns
+remain deferred to their existing release lanes. This iteration makes no claim about deterministic Tokio
+scheduling, full multi-owner acquire-to-fence handoff, or lease-level INV-1 beyond the storage prerequisite
+of one durable transition per request. The suite TOML is deliberately not added to a broad GitHub Actions
+workflow; the exact local/release command above is the integration seam until CI cost and clean target growth
+are measured. Therefore the spike is retained as a local GO-with-conditions, not a completed release gate.
 
 ## Risks and Rollbacks
 
@@ -87,5 +129,6 @@ TD-003/TD-004. If the spike fails its gates, commit only the findings/decision a
 
 A retained harness must be deterministic, mutation-sensitive, bounded in CI, directly reusable by SP-03 and
 SP-07 (and transitively by SP-05 through SP-03), rediscover both historical bugs from untargeted seed search,
-and detect at least one mutant class missed by existing enumerated tests. Otherwise the spike records a
-negative decision and removes prototype code.
+and detect at least one mutant class missed by existing enumerated tests. The local determinism,
+mutation-sensitivity, reuse, and bounded-runtime gates pass. Untargeted rediscovery, cross-host repeat, and
+clean target-growth gates remain explicit conditions before this becomes a release gate.

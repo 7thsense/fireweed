@@ -21,6 +21,7 @@ members = [
     "crates/pqueue-server",
     "crates/pqueue-release",
     "crates/pqueue-loadgen",
+    "crates/pqueue-sim-support",
 ]
 resolver = "3"
 

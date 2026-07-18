@@ -20,6 +20,9 @@ mod async_commit;
 mod async_log;
 pub mod compose_log;
 pub mod segmented;
+#[doc(hidden)]
+#[doc(hidden)]
+pub mod simulation_support;
 
 pub use async_commit::{
     ByteAdmissionWaitPolicy, GroupCommitObjectLogProjectionCommitter, MAX_RECOVERY_PAGE_SIZE,

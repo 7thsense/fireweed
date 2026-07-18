@@ -16,7 +16,7 @@ path = "src/lib.rs"
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 pqueue-projection = { path = "../pqueue-projection" }
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bytes = "1"
 futures = "0.3"
@@ -42,6 +42,11 @@ pqueue-release = { path = "../pqueue-release" }
 pqueue-engine = { path = "../pqueue-engine" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-turso = { path = "../pqueue-turso", features = ["local"] }
+pqueue-sim-support = { path = "../pqueue-sim-support" }
+
+[[test]]
+name = "deterministic_storage_simulation"
+path = "tests/deterministic_storage_simulation.rs"
 
 [[test]]
 name = "conformance"

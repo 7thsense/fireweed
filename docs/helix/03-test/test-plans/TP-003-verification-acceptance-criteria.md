@@ -22,7 +22,7 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: 3be9892333e1c4809668936e22718d4ed6d88b68837758b3d1a09c204f496882
+    self_hash: 37fa4c0857ad98ff397edca5e20d2078b4fdeef9b1ba764f35afff50922610cd
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
@@ -43,7 +43,7 @@ ddx:
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
       tp-scale-substantiation: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
-    reviewed_at: "2026-07-18T18:16:00Z"
+    reviewed_at: "2026-07-18T19:52:55Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -380,6 +380,34 @@ builds.
 | AC-HYB-8 Async poison, repair, debt, and backpressure gates | Run `objectlog/hybrid-async`; inject durable async SQLite apply failure, repeated retry failure, local SQLite corruption/missing-file recovery, replay-tail debt above budget, and an operator repair/redrive/purge attempt against leased and terminal items while async apply is poisoned or backpressured | TD-004 async poison/fail-closed, API-002 operator repair, bounded async apply debt, backpressure gates, INV-5, INV-10, INV-11, INV-12, INV-14 | Poisoned async apply records the failed batch sequence, SQLite error class, memory high-water, `sqlite_high_water`, async apply debt, replay debt, and operator-visible repair state; all later reads that require SQLite authority, validation, writes, recovery high-water advancement, and retention decisions fail closed until repair/recovery clears lineage; owner-local memory reads that remain allowed by TD-004 continue to satisfy INV-12; operator repair is rejected or queued with a typed poison/backpressure result until it can preserve lease fences, idempotency, and high-water lineage; after repair, same-body `request_id`/`operation_id` replay returns the original result and conflicting bodies fail; when SQLite lag or replay debt exceeds budget, mutating admission applies typed backpressure without acknowledging new commands and resumes only after measured debt falls below the configured threshold |
 | AC-HYB-9 Hybrid-async crash matrix release gate | Run `objectlog/hybrid-async` against the full crash matrix for push, claim, renew, finalize, retry/release, update, purge, and operator-style mutations; inject crash/restart cut points before manifest commit, after manifest commit before memory apply/render, during memory apply/render, after memory apply/render before response, during async SQLite apply, during partial SQLite batch transactions, after SQLite lag recovery, during replay, and during high-water recovery; force ordered batching with delayed sealed batches and include request-id same-body and conflicting-body retries | TD-004 async success barrier, ordered batching contract, lineage validation, bounded async apply debt, retention frontier gates, INV-5, INV-10, INV-11, INV-12, INV-14 | The hybrid-async crash matrix records manifest tail, segment sequence ranges, batch_sequence ordering, memory high-water, `sqlite_high_water`, request-id replay outcome, async SQLite lag, replay contract outcome, lineage validation result, retention_frontier inputs, and typed poison/backpressure state for every cut point; success is acknowledged only after manifest commit plus memory apply/render; `sqlite_high_water` advances only after complete logical batch apply; restart/replay/high-water recovery produce 0 lost accepted commands, 0 duplicate state transitions, 0 read-after-success gaps, and no retention or high-water advancement without complete lineage and debt evidence |
 | AC-HYB-10 Hybrid-async perf matrix release gate | Compare `objectlog/hybrid-async` with `objectlog/inmemory`, `objectlog/sqlite`, and the committed release-lane backend profile under identical object-log segment settings, telemetry enabled, and release-lane hot-path mixes for push, claim, renew, finalize, retry/release, update, purge, replay, recovery, and hot read/claim paths; run both no-lag and injected-lag async SQLite profiles with ordered batching enabled | TD-004 performance model, async success barrier, ordered batching contract, lineage validation, retention frontier authority, release-lane hot path evidence | The perf matrix records p50/p95/p99 ack latency, push throughput, claim/finalize hot path latency, replay latency, recovery elapsed time, segment batch density, object PUT count, memory high-water, `sqlite_high_water`, lineage validation status, retention_frontier, async SQLite lag (`sqlite_apply_lag_ms`, pending logical batches, oldest unapplied `batch_sequence`), async apply debt bytes/commands, replay debt, configured debt/backpressure thresholds, typed backpressure count/duration, replay contract counters, high-water advancement decisions, and release-lane hot-path comparison deltas; async mode stays within the stated AC-HYB-5 bars or fails the release gate, and WAL/fsync/checkpoint state is never treated as logical high-water or retention authority |
+
+### 3.11 Deterministic object-log model corpus (SP-02)
+
+The bounded deterministic suite complements, but does not replace, AC-TXN-4's process-kill harness:
+
+```text
+scripts/ci/repeat-suite.sh --count 100 --max-flaky-rate 0 --suite-list scripts/ci/deterministic-simulation-suites.toml
+```
+
+One seed controls operation choice, logical time, retry, crash, and scripted store outcomes. The independent
+`pqueue-sim-support` crate has no engine/object-log/runtime dependency. The production adapter drives the real
+synchronous `SegmentedObjectLog`, advances the real durable retention floor, performs real expiry, and
+compares recovery visibility plus executable storage projections of INV-1, INV-2, INV-10, INV-12, and INV-14
+after every executed durable cut. Corpus records are schema v2 and require harness v2. Failure output includes
+the seed, failing index, and compact trace; delta debugging preserves violated-invariant identity and retains
+the failure in at most 32 operations.
+
+Local v2 evidence dated 2026-07-18: seed `0x5eed`; 100 byte-identical in-process replays; 5/5 model tests and
+8/8 production-adapter tests passed. The adapter test includes 128 independently seeded 48-operation traces
+with generated crashes. The repeat-suite command above passed 100/100 process runs with zero
+failures in 82.38 seconds at 101,068 KiB maximum RSS. Phase-addressed outcomes covered pre-effect failure,
+durable-effect-then-error/ambiguous create, CAS loss, stale LIST, incomplete page, and partial deletion.
+After final oracle/adapter reconciliation, the complete eight-test integration target also passed another
+100/100 process invocations with zero failures.
+The typed corpus detects the two historical and five synthetic mutants with expected invariant identity.
+Untargeted discovery of both historical bugs, cross-host repeats, clean target-dir growth, and process-kill
+replay remain release evidence and were not claimed or run here. The suite has a precise repeat-suite entry
+but is not wired into broad GitHub Actions; no quiet-host test is part of this suite.
 
 ## 5. CI Quality Gates (the green set)
 
