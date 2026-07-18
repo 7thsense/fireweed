@@ -793,6 +793,24 @@ impl ObjectLogSqliteLifecycle {
     fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
         self.backend
             .with_quiesced_log_and_projection_mut(|log, projection| {
+                // Async writes may have advanced the authoritative log while their bounded SQLite
+                // checkpoint remains queued. Drain every admitted chunk under the lifecycle lock before
+                // comparing axes. Keep this barrier verification-specific: repair paths must be able to
+                // discard and rebuild a poisoned deferred checkpoint.
+                loop {
+                    let before = projection.deferred_command_count();
+                    if before == 0 {
+                        break;
+                    }
+                    pqueue_engine::ProjectionStore::flush_deferred(projection)?;
+                    let after = projection.deferred_command_count();
+                    if after >= before {
+                        return Err(EngineError::Storage(
+                            "deferred SQLite checkpoint made no progress during projection verification"
+                                .into(),
+                        ));
+                    }
+                }
                 verify_objectlog_sqlite_axes(log, projection, true)
             })
     }

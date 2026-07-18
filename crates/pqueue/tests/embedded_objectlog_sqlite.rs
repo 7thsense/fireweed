@@ -231,6 +231,28 @@ fn public_objectlog_sqlite_lifecycle_interleaves_without_replay_gaps() {
 }
 
 #[test]
+fn public_objectlog_sqlite_async_verify_drains_deferred_checkpoint() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-verify-drain-{}", nonce()));
+    let root = fixture.join("objects");
+    let sqlite = fixture.join("projection.sqlite");
+    let mut config = local_config(&root, &sqlite);
+    config.response_barrier = EmbeddedResponseBarrier::AsyncProjection;
+    config.segments = EmbeddedSegmentConfig::new(1, 60_000).unwrap();
+    let pq = pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let key = queue("verify-drain-queue");
+    block_on(pq.create_queue(definition("verify-drain-queue"))).unwrap();
+    block_on(pq.push(&key, item(1))).unwrap();
+
+    let verification = block_on(pq.verify_projection()).unwrap();
+    assert_eq!(
+        verification.projection_sequence, verification.authoritative_sequence,
+        "verification must synchronously drain an already-admitted async SQLite checkpoint"
+    );
+    drop(pq);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
 fn public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted() {
     let fixture = std::env::temp_dir().join(format!("pqueue-public-strict-offline-{}", nonce()));
     let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
