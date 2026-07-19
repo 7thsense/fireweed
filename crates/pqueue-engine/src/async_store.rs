@@ -48,18 +48,6 @@ pub trait BlockingStoreOperation<S>: Send + 'static {
     fn run(self, store: &mut S) -> EngineResult<Self::Output>;
 }
 
-impl<S, O, F> BlockingStoreOperation<S> for F
-where
-    F: FnOnce(&mut S) -> EngineResult<O> + Send + 'static,
-    O: Send + 'static,
-{
-    type Output = O;
-
-    fn run(self, store: &mut S) -> EngineResult<Self::Output> {
-        self(store)
-    }
-}
-
 #[derive(Clone)]
 struct BoundedBlockingExecutor {
     permits: Arc<BlockingPermits>,
@@ -77,14 +65,20 @@ impl BoundedBlockingExecutor {
         })
     }
 
-    fn execute<T, F>(&self, task: F) -> BlockingTaskFuture<T>
+    fn execute<T, F>(&self, task: F) -> BlockingTaskFuture<EngineResult<T>>
     where
         T: Send + 'static,
-        F: FnOnce() -> T + Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
     {
         BlockingTaskFuture {
             permits: self.permits.clone(),
-            task: Some(Box::new(task)),
+            task: Some(Box::new(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).unwrap_or_else(|_| {
+                    Err(EngineError::Storage(
+                        "blocking storage operation panicked".to_string(),
+                    ))
+                })
+            })),
             state: Arc::new(Mutex::new(BlockingTaskState {
                 started: false,
                 result: None,
@@ -113,22 +107,18 @@ impl BlockingPermits {
         }
     }
 
-    fn try_acquire(self: &Arc<Self>) -> Option<BlockingPermit> {
+    fn acquire_or_park(self: &Arc<Self>, waker: &Waker) -> Option<BlockingPermit> {
         let mut inner = self.inner.lock().expect("blocking permit mutex poisoned");
         if inner.available == 0 {
+            if !inner.waiters.iter().any(|queued| queued.will_wake(waker)) {
+                inner.waiters.push(waker.clone());
+            }
             return None;
         }
         inner.available -= 1;
         Some(BlockingPermit {
             permits: self.clone(),
         })
-    }
-
-    fn park(&self, waker: &Waker) {
-        let mut inner = self.inner.lock().expect("blocking permit mutex poisoned");
-        if !inner.waiters.iter().any(|queued| queued.will_wake(waker)) {
-            inner.waiters.push(waker.clone());
-        }
     }
 
     fn release(&self) {
@@ -181,8 +171,7 @@ impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
             }
         }
 
-        let Some(permit) = this.permits.try_acquire() else {
-            this.permits.park(cx.waker());
+        let Some(permit) = this.permits.acquire_or_park(cx.waker()) else {
             return Poll::Pending;
         };
 
@@ -215,12 +204,15 @@ impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
 /// Immediate ready-future adapter for a synchronous log store.
 pub struct ImmediateLogStore<S> {
     store: Arc<Mutex<S>>,
+    durability_class: DurabilityClass,
 }
 
-impl<S> ImmediateLogStore<S> {
+impl<S: LogStore> ImmediateLogStore<S> {
     pub fn new(store: S) -> Self {
+        let durability_class = store.durability_class();
         Self {
             store: Arc::new(Mutex::new(store)),
+            durability_class,
         }
     }
 }
@@ -228,12 +220,15 @@ impl<S> ImmediateLogStore<S> {
 /// Immediate ready-future adapter for a synchronous projection store.
 pub struct ImmediateProjectionStore<S> {
     store: Arc<Mutex<S>>,
+    supports_gates: bool,
 }
 
-impl<S> ImmediateProjectionStore<S> {
+impl<S: ProjectionStore> ImmediateProjectionStore<S> {
     pub fn new(store: S) -> Self {
+        let supports_gates = store.supports_gates();
         Self {
             store: Arc::new(Mutex::new(store)),
+            supports_gates,
         }
     }
 }
@@ -255,17 +250,25 @@ impl<S> ImmediateControlPlane<S> {
 pub struct BlockingLogStore<S> {
     store: Arc<Mutex<S>>,
     executor: BoundedBlockingExecutor,
+    durability_class: DurabilityClass,
 }
 
-impl<S> BlockingLogStore<S> {
+impl<S: LogStore> BlockingLogStore<S> {
     pub fn new(store: S, max_in_flight: usize) -> EngineResult<Self> {
+        let durability_class = store.durability_class();
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             executor: BoundedBlockingExecutor::new(max_in_flight)?,
+            durability_class,
         })
     }
 
-    pub fn run_operation<O>(
+    /// Execute one caller-defined, owned transaction operation on the blocking store.
+    ///
+    /// Unlike the adapter's private single-axis compatibility calls, this public boundary accepts only a
+    /// named [`BlockingStoreOperation`]. Closures deliberately do not implement that trait, preventing a
+    /// caller from accidentally offloading individual statements of one transaction.
+    pub fn run_owned_operation<O>(
         &self,
         operation: O,
     ) -> impl Future<Output = EngineResult<O::Output>> + Send
@@ -279,23 +282,39 @@ impl<S> BlockingLogStore<S> {
             operation.run(&mut *store)
         })
     }
+
+    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store.lock().expect("blocking log store mutex poisoned");
+            operation(&mut *store)
+        })
+    }
 }
 
 /// Bounded blocking adapter for a synchronous projection store.
 pub struct BlockingProjectionStore<S> {
     store: Arc<Mutex<S>>,
     executor: BoundedBlockingExecutor,
+    supports_gates: bool,
 }
 
-impl<S> BlockingProjectionStore<S> {
+impl<S: ProjectionStore> BlockingProjectionStore<S> {
     pub fn new(store: S, max_in_flight: usize) -> EngineResult<Self> {
+        let supports_gates = store.supports_gates();
         Ok(Self {
             store: Arc::new(Mutex::new(store)),
             executor: BoundedBlockingExecutor::new(max_in_flight)?,
+            supports_gates,
         })
     }
 
-    pub fn run_operation<O>(
+    pub fn run_owned_operation<O>(
         &self,
         operation: O,
     ) -> impl Future<Output = EngineResult<O::Output>> + Send
@@ -309,6 +328,21 @@ impl<S> BlockingProjectionStore<S> {
                 .lock()
                 .expect("blocking projection store mutex poisoned");
             operation.run(&mut *store)
+        })
+    }
+
+    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store
+                .lock()
+                .expect("blocking projection store mutex poisoned");
+            operation(&mut *store)
         })
     }
 }
@@ -327,7 +361,7 @@ impl<S> BlockingControlPlane<S> {
         })
     }
 
-    pub fn run_operation<O>(
+    pub fn run_owned_operation<O>(
         &self,
         operation: O,
     ) -> impl Future<Output = EngineResult<O::Output>> + Send
@@ -339,6 +373,19 @@ impl<S> BlockingControlPlane<S> {
         self.executor.execute(move || {
             let mut store = store.lock().expect("blocking control plane mutex poisoned");
             operation.run(&mut *store)
+        })
+    }
+
+    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store.lock().expect("blocking control plane mutex poisoned");
+            operation(&mut *store)
         })
     }
 }
@@ -699,10 +746,7 @@ where
     S: LogStore + Send,
 {
     fn durability_class(&self) -> DurabilityClass {
-        self.store
-            .lock()
-            .expect("immediate log store mutex poisoned")
-            .durability_class()
+        self.durability_class
     }
 
     fn ensure_shard(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
@@ -840,10 +884,7 @@ where
     S: ProjectionStore + Send,
 {
     fn supports_gates(&self) -> bool {
-        self.store
-            .lock()
-            .expect("immediate projection store mutex poisoned")
-            .supports_gates()
+        self.supports_gates
     }
 
     fn ensure_shard(
@@ -1061,22 +1102,19 @@ where
     S: LogStore + Send + 'static,
 {
     fn durability_class(&self) -> DurabilityClass {
-        self.store
-            .lock()
-            .expect("blocking log store mutex poisoned")
-            .durability_class()
+        self.durability_class
     }
 
     fn ensure_shard(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_operation(move |store: &mut S| store.ensure_shard(&shard))
+        self.run_sync(move |store: &mut S| store.ensure_shard(&shard))
     }
 
     fn current_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
-        self.run_operation(move |store: &mut S| store.current_epoch(&shard))
+        self.run_sync(move |store: &mut S| store.current_epoch(&shard))
     }
 
     fn acquire_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
-        self.run_operation(move |store: &mut S| store.acquire_epoch(&shard))
+        self.run_sync(move |store: &mut S| store.acquire_epoch(&shard))
     }
 
     fn append(
@@ -1085,7 +1123,7 @@ where
         commands: Vec<CommandEnvelope>,
         expected_epoch: u64,
     ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
-        self.run_operation(move |store: &mut S| store.append(&shard, &commands, expected_epoch))
+        self.run_sync(move |store: &mut S| store.append(&shard, &commands, expected_epoch))
     }
 
     fn read_from(
@@ -1094,14 +1132,14 @@ where
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl Future<Output = EngineResult<CommandPage>> + Send {
-        self.run_operation(move |store: &mut S| store.read_from(&shard, from, limit))
+        self.run_sync(move |store: &mut S| store.read_from(&shard, from, limit))
     }
 
     fn high_water(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
-        self.run_operation(move |store: &mut S| store.high_water(&shard))
+        self.run_sync(move |store: &mut S| store.high_water(&shard))
     }
 
     fn set_high_water(
@@ -1109,7 +1147,7 @@ where
         shard: QueueKey,
         position: CommandPosition,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_operation(move |store: &mut S| store.set_high_water(&shard, position))
+        self.run_sync(move |store: &mut S| store.set_high_water(&shard, position))
     }
 
     fn write_snapshot(
@@ -1118,27 +1156,27 @@ where
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl Future<Output = EngineResult<SnapshotRef>> + Send {
-        self.run_operation(move |store: &mut S| store.write_snapshot(&shard, position, snapshot))
+        self.run_sync(move |store: &mut S| store.write_snapshot(&shard, position, snapshot))
     }
 
     fn latest_snapshot(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
-        self.run_operation(move |store: &mut S| store.latest_snapshot(&shard))
+        self.run_sync(move |store: &mut S| store.latest_snapshot(&shard))
     }
 
     fn read_snapshot(
         &self,
         snapshot_ref: SnapshotRef,
     ) -> impl Future<Output = EngineResult<ProjectionSnapshot>> + Send {
-        self.run_operation(move |store: &mut S| store.read_snapshot(&snapshot_ref))
+        self.run_sync(move |store: &mut S| store.read_snapshot(&snapshot_ref))
     }
 
     fn recover_definitions(
         &self,
     ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
-        self.run_operation(move |store: &mut S| store.recover_definitions())
+        self.run_sync(move |store: &mut S| store.recover_definitions())
     }
 }
 
@@ -1147,21 +1185,18 @@ where
     S: ProjectionStore + Send + 'static,
 {
     fn supports_gates(&self) -> bool {
-        self.store
-            .lock()
-            .expect("blocking projection store mutex poisoned")
-            .supports_gates()
+        self.supports_gates
     }
 
     fn ensure_shard(
         &self,
         definition: QueueDefinition,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_operation(move |store: &mut S| store.ensure_shard(&definition))
+        self.run_sync(move |store: &mut S| store.ensure_shard(&definition))
     }
 
     fn admit_mutation(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_operation(move |store: &mut S| store.admit_mutation(&shard))
+        self.run_sync(move |store: &mut S| store.admit_mutation(&shard))
     }
 
     fn validate_push(
@@ -1170,14 +1205,14 @@ where
         items: Vec<PushItem>,
         _now: UtcTimestamp,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_operation(move |store: &mut S| store.index_validate_push(&shard, &items))
+        self.run_sync(move |store: &mut S| store.index_validate_push(&shard, &items))
     }
 
     fn pause_blocks_intake(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<bool>> + Send {
-        self.run_operation(move |store: &mut S| store.pause_blocks_intake(&shard))
+        self.run_sync(move |store: &mut S| store.pause_blocks_intake(&shard))
     }
 
     fn apply_live(
@@ -1185,7 +1220,7 @@ where
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_operation(move |store: &mut S| store.apply_live_owned(positions, commands))
+        self.run_sync(move |store: &mut S| store.apply_live_owned(positions, commands))
     }
 
     fn apply_recovery(
@@ -1193,7 +1228,7 @@ where
         positions: Vec<CommandPosition>,
         commands: Vec<CommandEnvelope>,
     ) -> impl Future<Output = EngineResult<()>> + Send {
-        self.run_operation(move |store: &mut S| store.apply_recovery(&positions, &commands))
+        self.run_sync(move |store: &mut S| store.apply_recovery(&positions, &commands))
     }
 
     fn eligible_candidates(
@@ -1202,7 +1237,7 @@ where
         now: UtcTimestamp,
         max: usize,
     ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        self.run_operation(move |store: &mut S| store.eligible_candidates(&shard, now, max))
+        self.run_sync(move |store: &mut S| store.eligible_candidates(&shard, now, max))
     }
 
     fn select_item_claim(
@@ -1212,7 +1247,7 @@ where
         now: UtcTimestamp,
         max: usize,
     ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        self.run_operation(move |store: &mut S| {
+        self.run_sync(move |store: &mut S| {
             store.select_item_claim(&shard, &compatibility, now, max)
         })
     }
@@ -1225,7 +1260,7 @@ where
         now: UtcTimestamp,
         max_items: usize,
     ) -> impl Future<Output = EngineResult<RichClaimSelection>> + Send {
-        self.run_operation(move |store: &mut S| {
+        self.run_sync(move |store: &mut S| {
             store.select_rich_claim(&shard, unit, &compatibility, now, max_items)
         })
     }
@@ -1235,7 +1270,7 @@ where
         shard: QueueKey,
         ids: Vec<ItemId>,
     ) -> impl Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
-        self.run_operation(move |store: &mut S| store.render_claimed(&shard, &ids))
+        self.run_sync(move |store: &mut S| store.render_claimed(&shard, &ids))
     }
 
     fn item_state(
@@ -1243,7 +1278,7 @@ where
         shard: QueueKey,
         id: ItemId,
     ) -> impl Future<Output = EngineResult<Option<ItemState>>> + Send {
-        self.run_operation(move |store: &mut S| store.item_state(&shard, &id))
+        self.run_sync(move |store: &mut S| store.item_state(&shard, &id))
     }
 
     fn item_version(
@@ -1251,20 +1286,20 @@ where
         shard: QueueKey,
         id: ItemId,
     ) -> impl Future<Output = EngineResult<Option<u64>>> + Send {
-        self.run_operation(move |store: &mut S| store.item_version(&shard, &id))
+        self.run_sync(move |store: &mut S| store.item_version(&shard, &id))
     }
 
     fn recovery_high_water(
         &self,
         shard: QueueKey,
     ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
-        self.run_operation(move |store: &mut S| store.recovery_high_water(&shard))
+        self.run_sync(move |store: &mut S| store.recovery_high_water(&shard))
     }
 
     fn recover_definitions(
         &self,
     ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
-        self.run_operation(move |store: &mut S| store.recover_definitions())
+        self.run_sync(move |store: &mut S| store.recover_definitions())
     }
 }
 
@@ -1276,21 +1311,21 @@ where
         &self,
         definition: QueueDefinition,
     ) -> impl Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        self.run_operation(move |store: &mut S| store.create_queue(definition))
+        self.run_sync(move |store: &mut S| store.create_queue(definition))
     }
 
     fn queue_definition(
         &self,
         key: QueueKey,
     ) -> impl Future<Output = EngineResult<QueueDefinition>> + Send {
-        self.run_operation(move |store: &mut S| store.queue_definition(&key))
+        self.run_sync(move |store: &mut S| store.queue_definition(&key))
     }
 
     fn list_queues(
         &self,
         tenant: TenantId,
     ) -> impl Future<Output = EngineResult<Vec<QueueId>>> + Send {
-        self.run_operation(move |store: &mut S| store.list_queues(&tenant))
+        self.run_sync(move |store: &mut S| store.list_queues(&tenant))
     }
 }
 
@@ -1301,11 +1336,14 @@ mod tests {
     #![allow(refining_impl_trait)]
 
     use std::future::{Ready, ready};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::task::Wake;
+    use std::time::Duration;
 
     use pqueue_core::{
-        BodyHash, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
-        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
-        RetryPolicy, TenantId,
+        BodyHash, CohortId, EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection,
+        PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
+        RecurrencePolicy, RetryPolicy, TenantId,
     };
 
     use super::*;
@@ -1550,10 +1588,46 @@ mod tests {
             },
             UtcTimestamp::new(0, 0).unwrap(),
         ));
+        let now = UtcTimestamp::new(0, 0).unwrap();
+        assert_send(projection.renew_validate(
+            shard(),
+            vec![RenewTarget {
+                item_id: ItemId::new("10").unwrap(),
+                lease_token: LeaseToken::new("renew-token").unwrap(),
+            }],
+            now,
+        ));
+        assert_send(projection.finalize_validate(
+            shard(),
+            vec![FinalizeTarget {
+                item_id: ItemId::new("11").unwrap(),
+                lease_token: LeaseToken::new("finalize-token").unwrap(),
+                item_version: 1,
+                kind: crate::FinalizeKind::Complete,
+                not_before: None,
+            }],
+            now,
+            3,
+        ));
+        assert_send(projection.cohort_lease_validate(
+            shard(),
+            crate::CohortLeaseTarget {
+                cohort_id: CohortId::new("cohort").unwrap(),
+                cohort_lease_token: LeaseToken::new("cohort-token").unwrap(),
+            },
+            now,
+        ));
+        assert_send(projection.purge_validate(shard(), vec![ItemId::new("12").unwrap()], true));
         assert_send(projection.apply_live(Vec::new(), Vec::new()));
         assert_send(projection.apply_recovery(Vec::new(), Vec::new()));
         assert_send(projection.expired_leases(shard(), UtcTimestamp::new(0, 0).unwrap(), 16));
         assert_send(projection.eligible_candidates(shard(), UtcTimestamp::new(0, 0).unwrap(), 1));
+        assert_send(projection.select_item_claim(
+            shard(),
+            ClaimCompatibility::default(),
+            UtcTimestamp::new(0, 0).unwrap(),
+            1,
+        ));
         assert_send(projection.select_rich_claim(
             shard(),
             ClaimUnit::SameGroupKey,
@@ -1626,16 +1700,80 @@ mod tests {
 
     #[test]
     fn blocking_adapter_accepts_owned_whole_operation() {
-        let adapter = BlockingProjectionStore::new(Vec::<String>::new(), 1).unwrap();
-        let future = adapter.run_operation(OwnedWholeOperation {
+        let adapter = BlockingControlPlane::new(Vec::<String>::new(), 1).unwrap();
+        let future = adapter.run_owned_operation(OwnedWholeOperation {
             value: "committed transaction".to_string(),
         });
         assert_send(future);
 
-        let len = futures::executor::block_on(adapter.run_operation(OwnedWholeOperation {
+        let len = futures::executor::block_on(adapter.run_owned_operation(OwnedWholeOperation {
             value: "committed transaction".to_string(),
         }))
         .unwrap();
         assert_eq!(len, 1);
+    }
+
+    struct CountingWake(AtomicUsize);
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn blocking_permit_registration_and_acquire_are_atomic() {
+        let permits = Arc::new(BlockingPermits::new(1));
+        let wake_count = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = Waker::from(wake_count.clone());
+
+        let held = permits
+            .acquire_or_park(&waker)
+            .expect("first permit is available");
+        assert!(permits.acquire_or_park(&waker).is_none());
+        drop(held);
+
+        assert_eq!(wake_count.0.load(AtomicOrdering::SeqCst), 1);
+        assert!(permits.acquire_or_park(&waker).is_some());
+    }
+
+    #[test]
+    fn blocking_executor_wakes_saturated_work_and_contains_panics() {
+        let executor = BoundedBlockingExecutor::new(1).unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = executor.execute(move || {
+            release_rx.recv().expect("release first operation");
+            Ok::<_, EngineError>(1usize)
+        });
+        let second = executor.execute(|| Ok::<_, EngineError>(2usize));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            release_tx.send(()).expect("first operation is waiting");
+        });
+
+        let (first, second) = futures::executor::block_on(async { futures::join!(first, second) });
+        assert_eq!(first.unwrap(), 1);
+        assert_eq!(second.unwrap(), 2);
+
+        let panic_result = futures::executor::block_on(
+            executor.execute::<(), _>(|| panic!("injected blocking operation panic")),
+        );
+        assert!(
+            matches!(panic_result, Err(EngineError::Storage(message)) if message.contains("panicked"))
+        );
+    }
+
+    #[test]
+    fn dropping_unpolled_blocking_work_cancels_before_start() {
+        let executor = BoundedBlockingExecutor::new(1).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_task = ran.clone();
+        let future = executor.execute(move || {
+            ran_in_task.store(true, AtomicOrdering::SeqCst);
+            Ok::<_, EngineError>(())
+        });
+        drop(future);
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!ran.load(AtomicOrdering::SeqCst));
     }
 }
