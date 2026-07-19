@@ -12,6 +12,13 @@ SQLite projection, and provisions 1,001 queues through the generated bootstrap
 inventory (`density:q0` through `density:q1000`). `density:q1000` is the hot
 queue; the other 1,000 queues are cold neighbors.
 
+As in the governed multi-node TP-002 kind run, the pod mounts `/data` from a
+bounded 4 GiB `emptyDir` tmpfs. The service still executes the real object-log
+fsync and SQLite projection code paths, while unrelated host-disk contention
+cannot become an accidental release condition. Kubernetes accounts the volume
+against the pod's fixed memory limit. This one-node diagnostic excludes pod or
+node failover, so it makes no persistence claim beyond the live deployment.
+
 The release command fails closed if the worktree is dirty. It always rebuilds
 the image, labels it with the full 40-character Git revision, records the
 image's SHA-256 ID, and confirms that both the service pod and load Job run that
