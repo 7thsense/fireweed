@@ -648,6 +648,15 @@ pub struct RichClaimSelection {
 /// All reads/validation are `&self`; `apply`/`ensure_shard` are `&mut self`. The composition calls these
 /// under its UoW lock, so a claim's `select → append → apply → render` is one atomic unit.
 pub trait ProjectionStore: Send {
+    /// Hot-query capabilities actually implemented by this projection axis.
+    ///
+    /// Composed backends must report projection behavior, not capabilities of the generic
+    /// orchestration layer. The safe default keeps projections that inherit the `Unavailable`
+    /// query methods from advertising a surface they cannot serve.
+    fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
+        QueryCapabilityFlags::default()
+    }
+
     /// Materialize a shard's projection from its [`QueueDefinition`] (called from `create_queue`).
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()>;
 
@@ -4627,14 +4636,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
     for ComposedBackend<L, P, C>
 {
     fn hot_projection_capabilities(&self, _shard: &QueueKey) -> QueryCapabilityFlags {
-        QueryCapabilityFlags {
-            range_scan: true,
-            grouped_aggregate: true,
-            declared_bucket_segment: true,
-            bounded_mutation: true,
-            claim_by_query: true,
-            side_record_query: false,
-        }
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .hot_projection_capabilities()
     }
 
     fn range_scan(
