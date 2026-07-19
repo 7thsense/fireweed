@@ -384,6 +384,7 @@ fn commit_transition_entry(
 ) -> pqueue_engine::CommitTransitionEntry {
     pqueue_engine::CommitTransitionEntry {
         claim_ref,
+        additional_claim_refs: Vec::new(),
         finalize,
         side_records: vec![SideRecord {
             key: side_key.as_bytes().to_vec(),
@@ -657,6 +658,7 @@ pub async fn commit_transition_request_id_replays_without_double_write<
                 request_id: Some(rid.clone()),
                 entries: vec![pqueue_engine::CommitTransitionEntry {
                     claim_ref,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Fail,
                     side_records: vec![SideRecord {
                         key: b"state/run-1".to_vec(),
@@ -707,6 +709,7 @@ pub async fn commit_transition_explain_commit_recovers_transition_and_survives_r
                 request_id: Some(rid.clone()),
                 entries: vec![pqueue_engine::CommitTransitionEntry {
                     claim_ref,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![SideRecord {
                         key: b"audit/run-1".to_vec(),

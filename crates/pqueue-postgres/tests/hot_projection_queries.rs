@@ -38,6 +38,7 @@ fn explicit_decline_transition() -> CommitTransition {
                 lease_expires_at: pqueue_conformance::ts(1),
                 item_version: 0,
             },
+            additional_claim_refs: Vec::new(),
             finalize: FinalizeKind::Complete,
             side_records: vec![SideRecord {
                 key: b"state/run".to_vec(),

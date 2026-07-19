@@ -60,6 +60,7 @@ mod composed_capability_parity {
                 request_id: Some(rid),
                 entries: vec![CommitTransitionEntry {
                     claim_ref,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![SideRecord {
                         key: b"state/run-1".to_vec(),
@@ -136,6 +137,7 @@ mod composed_capability_parity {
                 request_id: Some(rid.clone()),
                 entries: vec![CommitTransitionEntry {
                     claim_ref: mk_ref(),
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![],
                     lifecycle_items: vec![],
@@ -155,6 +157,7 @@ mod composed_capability_parity {
                     request_id: Some(rid),
                     entries: vec![CommitTransitionEntry {
                         claim_ref: mk_ref(),
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![],
                         lifecycle_items: vec![PushSpec::default()],
@@ -241,6 +244,7 @@ mod composed_capability_parity {
                 request_id: Some(rid.clone()),
                 entries: vec![CommitTransitionEntry {
                     claim_ref,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![SideRecord {
                         key: b"state/run".to_vec(),
@@ -658,6 +662,7 @@ async fn commit_path_propagates_request_id_into_every_command_envelope() {
                 request_id: Some(rid.clone()),
                 entries: vec![CommitTransitionEntry {
                     claim_ref,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![SideRecord {
                         key: b"state/run".to_vec(),

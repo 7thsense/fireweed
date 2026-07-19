@@ -125,6 +125,7 @@ async fn seeded_commit_transition_sqlite_backend() -> pqueue_sqlite::ComposedSql
             request_id: Some(rid),
             entries: vec![CommitTransitionEntry {
                 claim_ref,
+                additional_claim_refs: Vec::new(),
                 finalize: FinalizeKind::Complete,
                 side_records: vec![SideRecord {
                     key: b"state/run-1".to_vec(),

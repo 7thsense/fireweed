@@ -2463,11 +2463,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                         else {
                             continue;
                         };
+                        let additional_consumed_input_ids = cmd
+                            .outcomes
+                            .iter()
+                            .skip(1)
+                            .map(|outcome| outcome.item_id)
+                            .collect();
                         let side_record_keys = std::mem::take(&mut accum.pending_side_keys);
                         let instance = accum.pending_instance.take();
                         let lifecycle_item_ids = std::mem::take(&mut accum.pending_lifecycle_ids);
                         accum.entries.push(EntryRecovery {
                             consumed_input_id,
+                            additional_consumed_input_ids,
                             instance,
                             side_record_keys,
                             lifecycle_item_ids,
@@ -2884,6 +2891,7 @@ fn outcomes_from_recovery(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome>
 fn outcome_entry_from_recovery(r: &EntryRecovery) -> CommitOutcomeEntry {
     CommitOutcomeEntry {
         consumed_input_id: r.consumed_input_id,
+        additional_consumed_input_ids: r.additional_consumed_input_ids.clone(),
         instance: r.instance.clone(),
         side_record_keys: r.side_record_keys.clone(),
         lifecycle_item_ids: r.lifecycle_item_ids.clone(),
@@ -2903,6 +2911,7 @@ fn recovery_from_outcome_entry(e: CommitOutcomeEntry) -> EntryRecovery {
     };
     EntryRecovery {
         consumed_input_id: e.consumed_input_id,
+        additional_consumed_input_ids: e.additional_consumed_input_ids,
         instance: e.instance,
         side_record_keys: e.side_record_keys,
         lifecycle_item_ids: e.lifecycle_item_ids,
@@ -3369,6 +3378,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         // post-reopen retry computes the identical fingerprint → Replay (not Conflict).
         let entry = crate::port::CommitTransitionEntry {
             claim_ref: claim_ref.clone(),
+            additional_claim_refs: Vec::new(),
             finalize,
             side_records: Vec::new(),
             lifecycle_items: Vec::new(),
@@ -3435,10 +3445,28 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
             }
             let claim_ref = entry.claim_ref;
             let consumed_input_id = claim_ref.item_id;
-            match g
-                .projection
-                .commit_validate(shard, std::slice::from_ref(&claim_ref), now)
+            let additional_claim_refs = entry.additional_claim_refs;
+            let additional_consumed_input_ids = additional_claim_refs
+                .iter()
+                .map(|claim| claim.item_id)
+                .collect::<Vec<_>>();
+            let mut claim_refs = Vec::with_capacity(1 + additional_claim_refs.len());
+            claim_refs.push(claim_ref);
+            claim_refs.extend(additional_claim_refs);
+            if let Err(error) =
+                crate::port::validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
             {
+                recovery.push(EntryRecovery {
+                    consumed_input_id,
+                    additional_consumed_input_ids,
+                    instance: None,
+                    side_record_keys: Vec::new(),
+                    lifecycle_item_ids: Vec::new(),
+                    status: CommitEntryStatus::Rejected(error),
+                });
+                continue;
+            }
+            match g.projection.commit_validate(shard, &claim_refs, now) {
                 Ok(()) => {
                     let command_id = Self::next_command_id(&mut g, self.node_id);
                     envelopes.push(CommandEnvelope {
@@ -3446,15 +3474,19 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
                         request_id: Some(request_id.clone()),
                         request_fingerprint: Some(commit_fingerprint),
                         request_outcome: None,
-                        item_ids: vec![consumed_input_id],
+                        item_ids: claim_refs.iter().map(|claim| claim.item_id).collect(),
                         command: QueueCommand::Finalize(FinalizeCommand {
-                            outcomes: vec![FinalizeOutcome::new(consumed_input_id, entry.finalize)],
+                            outcomes: claim_refs
+                                .iter()
+                                .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
+                                .collect(),
                         }),
                         checksum: CommandChecksum(0),
                         created_at: now,
                     });
                     recovery.push(EntryRecovery {
                         consumed_input_id,
+                        additional_consumed_input_ids,
                         instance: None,
                         side_record_keys: Vec::new(),
                         lifecycle_item_ids: Vec::new(),
@@ -3463,6 +3495,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
                 }
                 Err(e) => recovery.push(EntryRecovery {
                     consumed_input_id,
+                    additional_consumed_input_ids,
                     instance: None,
                     side_record_keys: Vec::new(),
                     lifecycle_item_ids: Vec::new(),
@@ -4887,8 +4920,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
             for entry in entries {
                 let claim_ref = entry.claim_ref;
                 let consumed_input_id = claim_ref.item_id;
+                let additional_claim_refs = entry.additional_claim_refs;
+                let additional_consumed_input_ids = additional_claim_refs
+                    .iter()
+                    .map(|claim| claim.item_id)
+                    .collect::<Vec<_>>();
+                let mut claim_refs = Vec::with_capacity(1 + additional_claim_refs.len());
+                claim_refs.push(claim_ref);
+                claim_refs.extend(additional_claim_refs);
                 let reject = |e: EngineError| EntryRecovery {
                     consumed_input_id,
+                    additional_consumed_input_ids: additional_consumed_input_ids.clone(),
                     instance: None,
                     side_record_keys: Vec::new(),
                     lifecycle_item_ids: Vec::new(),
@@ -4898,14 +4940,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 // In-commit duplicate-input guard: a prior entry in THIS commit already finalized this input,
                 // so it is no longer a live claim (mirrors the sequential-apply rejection — its lease is gone —
                 // and prevents a second Finalize for the same item, which would be an apply error).
-                if finalized_in_commit.contains(&consumed_input_id) {
+                if let Err(error) =
+                    crate::port::validate_distinct_commit_claims(&claim_refs[0], &claim_refs[1..])
+                {
+                    recovery.push(reject(error));
+                    continue;
+                }
+                if claim_refs
+                    .iter()
+                    .any(|claim| finalized_in_commit.contains(&claim.item_id))
+                {
                     recovery.push(reject(EngineError::Terminal));
                     continue;
                 }
-                if let Err(e) =
-                    g.projection
-                        .commit_validate(shard, std::slice::from_ref(&claim_ref), now)
-                {
+                if let Err(e) = g.projection.commit_validate(shard, &claim_refs, now) {
                     recovery.push(reject(e));
                     continue;
                 }
@@ -5020,15 +5068,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 let e = mk_env(
                     &mut g,
                     QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: vec![FinalizeOutcome::new(consumed_input_id, entry.finalize)],
+                        outcomes: claim_refs
+                            .iter()
+                            .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
+                            .collect(),
                     }),
-                    vec![consumed_input_id],
+                    claim_refs.iter().map(|claim| claim.item_id).collect(),
                 );
                 envelopes.push(e);
 
                 // Accept: fold this committed entry's effects into the in-commit overlays and collect its
                 // envelopes for the single atomic append below (NOT appended yet).
-                finalized_in_commit.insert(consumed_input_id);
+                finalized_in_commit.extend(claim_refs.iter().map(|claim| claim.item_id));
                 if let Some((key, next)) = &instance {
                     staged_fences.insert(key.clone(), *next);
                 }
@@ -5036,6 +5087,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 committed_envelopes.append(&mut envelopes);
                 recovery.push(EntryRecovery {
                     consumed_input_id,
+                    additional_consumed_input_ids,
                     instance,
                     side_record_keys,
                     lifecycle_item_ids,

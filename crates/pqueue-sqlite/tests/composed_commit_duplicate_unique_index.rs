@@ -112,6 +112,7 @@ where
                 entries: vec![
                     CommitTransitionEntry {
                         claim_ref: claim_ref(0),
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![],
                         lifecycle_items: vec![lifecycle_with_email(20, "dup@example.com")],
@@ -119,6 +120,7 @@ where
                     },
                     CommitTransitionEntry {
                         claim_ref: claim_ref(1),
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![],
                         lifecycle_items: vec![lifecycle_with_email(20, "dup@example.com")],

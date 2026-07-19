@@ -150,6 +150,7 @@ async fn relational_commit_rejects_bad_token_and_bad_version_without_writing() {
                     request_id: None,
                     entries: vec![CommitTransitionEntry {
                         claim_ref,
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("state/x", "v")],
                         lifecycle_items: vec![item(20)],
@@ -196,6 +197,7 @@ async fn relational_commit_rejects_bad_token_and_bad_version_without_writing() {
                     request_id: None,
                     entries: vec![CommitTransitionEntry {
                         claim_ref,
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("state/x", "v")],
                         lifecycle_items: vec![item(20)],
@@ -240,6 +242,7 @@ async fn relational_commit_request_id_replays_without_double_write() {
         request_id: Some(rid.clone()),
         entries: vec![CommitTransitionEntry {
             claim_ref: cr,
+            additional_claim_refs: Vec::new(),
             finalize: FinalizeKind::Complete,
             side_records: vec![side("state/run-1", "v1")],
             lifecycle_items: vec![item(20)],
@@ -285,6 +288,7 @@ async fn relational_commit_request_id_replays_without_double_write() {
                 request_id: Some(rid.clone()),
                 entries: vec![CommitTransitionEntry {
                     claim_ref,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Fail, // different body
                     side_records: vec![side("state/run-1", "v1")],
                     lifecycle_items: vec![item(20)],
@@ -342,6 +346,7 @@ async fn relational_commit_advances_validates_and_rejects_instance_fence() {
                 request_id: Some(RequestId::new("fence-1").unwrap()),
                 entries: vec![CommitTransitionEntry {
                     claim_ref: cr1,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![side("state/run-1", "v1")],
                     lifecycle_items: vec![],
@@ -373,6 +378,7 @@ async fn relational_commit_advances_validates_and_rejects_instance_fence() {
                 request_id: None,
                 entries: vec![CommitTransitionEntry {
                     claim_ref: cr2,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![side("state/should-not-write", "x")],
                     lifecycle_items: vec![item(20)],
@@ -417,6 +423,7 @@ async fn relational_commit_advances_validates_and_rejects_instance_fence() {
                 request_id: None,
                 entries: vec![CommitTransitionEntry {
                     claim_ref: cr3,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![],
                     lifecycle_items: vec![],
@@ -482,6 +489,7 @@ async fn relational_explain_commit_recovers_transition_and_survives_reopen() {
                     request_id: Some(rid.clone()),
                     entries: vec![CommitTransitionEntry {
                         claim_ref: cr,
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("audit/run-1", "audit-bytes")],
                         lifecycle_items: vec![item(20)],
@@ -535,6 +543,102 @@ async fn relational_explain_commit_recovers_transition_and_survives_reopen() {
     );
     assert_eq!(claimed.items[0].item_id, lifecycle_id);
 
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn relational_multi_claim_commit_replays_and_survives_reopen() {
+    let path = unique_path("multi-claim-reopen");
+    let _ = std::fs::remove_file(&path);
+    let q = shard();
+    let rid = RequestId::new("result-await-continuation-sqlite").unwrap();
+    let primary_id;
+    let additional_id;
+    let continuation_id;
+
+    {
+        let backend = SqliteRelationalBackend::open(&path).unwrap();
+        backend.create_queue(qdef()).await.unwrap();
+        backend
+            .push(&q, vec![item(10), item(11)], ts(0), None)
+            .await
+            .unwrap();
+        let claimed = backend.claim(claim_req(2, 600, 0)).await.unwrap();
+        assert_eq!(claimed.items.len(), 2);
+        let to_ref = |item: &pqueue_engine::ClaimedItem| ClaimRef {
+            item_id: item.item_id,
+            lease_token: item
+                .lease_token
+                .clone()
+                .expect("claimed item carries token"),
+            lease_expires_at: item.lease_expires_at,
+            item_version: item.item_version,
+        };
+        let primary = to_ref(&claimed.items[0]);
+        let additional = to_ref(&claimed.items[1]);
+        primary_id = primary.item_id;
+        additional_id = additional.item_id;
+        let body = CommitTransition {
+            request_id: Some(rid.clone()),
+            entries: vec![CommitTransitionEntry {
+                claim_ref: primary,
+                additional_claim_refs: vec![additional],
+                finalize: FinalizeKind::Complete,
+                side_records: vec![side("instance/result-await", "revision-2")],
+                lifecycle_items: vec![item(20)],
+                instance_fence: Some(InstanceFence {
+                    instance_key: b"result-await".to_vec(),
+                    expected: 0,
+                    next: 2,
+                }),
+            }],
+        };
+        let first = backend
+            .commit_transition(&q, body.clone(), ts(1), None)
+            .await
+            .unwrap();
+        let replay = backend
+            .commit_transition(&q, body, ts(2), None)
+            .await
+            .unwrap();
+        assert_eq!(replay, first);
+        continuation_id = match &first[0] {
+            CommitEntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
+            other => panic!("expected committed multi-claim entry, got {other:?}"),
+        };
+        assert_eq!(backend.metrics(&q).await.unwrap().complete, 2);
+    }
+
+    let reopened = SqliteRelationalBackend::open(&path).unwrap();
+    let recovery = reopened
+        .explain_commit(&q, rid)
+        .await
+        .unwrap()
+        .expect("multi-claim recovery survives reopen");
+    assert_eq!(recovery.entries[0].consumed_input_id, primary_id);
+    assert_eq!(
+        recovery.entries[0].additional_consumed_input_ids,
+        vec![additional_id]
+    );
+    assert_eq!(
+        reopened
+            .side_record(&q, b"instance/result-await")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"revision-2".as_slice())
+    );
+    let claimed = reopened.claim(claim_req(10, 600, 3)).await.unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(claimed.items[0].item_id, continuation_id);
+    assert!(
+        reopened
+            .claim(claim_req(10, 600, 4))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -594,6 +698,7 @@ where
                 request_id: None,
                 entries: vec![CommitTransitionEntry {
                     claim_ref,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![side("schema/run-1", "bytes")],
                     lifecycle_items: vec![typed_item(20, false)],

@@ -1273,6 +1273,27 @@ pub struct CommitRequest {
     pub entries: Vec<CommitEntry>,
 }
 
+/// One atomic transition that consumes more than one claimed work item. This is the result/await
+/// continuation shape: every claim is validated before the projection, fence, continuation, or any
+/// finalization becomes visible. `additional_claim_refs` may be empty, although [`CommitEntry`] is simpler
+/// for that case.
+#[derive(Debug, Clone)]
+pub struct MultiClaimCommitEntry {
+    pub claim_ref: ClaimRef,
+    pub additional_claim_refs: Vec<ClaimRef>,
+    pub finalize: FinalizeKind,
+    pub side_records: Vec<SideRecord>,
+    pub lifecycle_items: Vec<NewItem>,
+    pub instance_fence: Option<InstanceFence>,
+}
+
+/// A vectorized request whose individual entries may atomically consume multiple claims.
+#[derive(Debug, Clone, Default)]
+pub struct MultiClaimCommitRequest {
+    pub request_id: Option<RequestId>,
+    pub entries: Vec<MultiClaimCommitEntry>,
+}
+
 /// The per-entry result of a [`Pqueue::commit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryOutcome {
@@ -1791,14 +1812,15 @@ impl<B: LibBackend> Pqueue<B> {
         self.note(queue, r)
     }
 
-    /// Authoritative vectorized claimed-work commit (Snorri StateStore boundary, epic pqueue-2201fd37).
+    /// Authoritative vectorized single-claim commit (Snorri StateStore boundary, epic pqueue-2201fd37).
     /// Each [`CommitEntry`] is ONE recoverable transition: it validates a lease-token + version-fenced
     /// [`ClaimRef`], writes opaque non-work `side_records` (authoritative workflow state/audit that is NOT
     /// claimable work), enqueues `lifecycle_items` as ordinary dispatchable work (outbox/await/timer), and
     /// finalizes the input claim — atomically per entry. `request_id` gives the whole body retained
     /// replay/conflict/expired semantics, so a retried transition returns the prior outcomes without
     /// double-writing. Per-entry [`EntryOutcome`]s are independent (all-or-nothing is NOT required across
-    /// entries). Backends without an atomic transition boundary reject with [`EngineError::Unavailable`].
+    /// entries). Use [`Pqueue::commit_multi_claim`] when one entry must consume multiple claims. Backends
+    /// without an atomic transition boundary reject with [`EngineError::Unavailable`].
     pub async fn commit(
         &self,
         queue: &QueueKey,
@@ -1812,6 +1834,7 @@ impl<B: LibBackend> Pqueue<B> {
             .into_iter()
             .map(|e| CommitTransitionEntry {
                 claim_ref: e.claim_ref,
+                additional_claim_refs: Vec::new(),
                 finalize: e.finalize,
                 side_records: e.side_records,
                 lifecycle_items: e
@@ -1842,6 +1865,61 @@ impl<B: LibBackend> Pqueue<B> {
                 CommitEntryOutcome::Rejected(e) => EntryOutcome::Rejected(e),
             })
             .collect())
+    }
+
+    /// Commit entries that each finalize a primary claim plus zero or more additional claims as one atomic
+    /// transition. This preserves the scalar [`CommitEntry`] surface while supporting workflow boundaries
+    /// that must consume a result and its matching await before appending a continuation.
+    pub async fn commit_multi_claim(
+        &self,
+        queue: &QueueKey,
+        request: MultiClaimCommitRequest,
+    ) -> EngineResult<Vec<EntryOutcome>> {
+        let MultiClaimCommitRequest {
+            request_id,
+            entries,
+        } = request;
+        let entries = entries
+            .into_iter()
+            .map(|entry| CommitTransitionEntry {
+                claim_ref: entry.claim_ref,
+                additional_claim_refs: entry.additional_claim_refs,
+                finalize: entry.finalize,
+                side_records: entry.side_records,
+                lifecycle_items: entry
+                    .lifecycle_items
+                    .into_iter()
+                    .map(new_item_to_spec)
+                    .collect(),
+                instance_fence: entry.instance_fence,
+            })
+            .collect();
+        let epoch = self.session_epoch(queue).await?;
+        let now = self.clock.now();
+        let outcomes = self
+            .note(
+                queue,
+                self.backend
+                    .commit_transition(
+                        queue,
+                        CommitTransition {
+                            request_id,
+                            entries,
+                        },
+                        now,
+                        epoch,
+                    )
+                    .await,
+            )?
+            .into_iter()
+            .map(|outcome| match outcome {
+                CommitEntryOutcome::Committed { lifecycle_item_ids } => {
+                    EntryOutcome::Committed { lifecycle_item_ids }
+                }
+                CommitEntryOutcome::Rejected(error) => EntryOutcome::Rejected(error),
+            })
+            .collect();
+        Ok(outcomes)
     }
 
     /// The backend's authoritative-commit capability descriptors (epic pqueue-2201fd37, ADR-009). A consumer

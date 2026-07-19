@@ -1049,6 +1049,8 @@ pub enum RequestOutcome {
 pub struct CommitOutcomeEntry {
     pub consumed_input_id: ItemId,
     #[serde(default)]
+    pub additional_consumed_input_ids: Vec<ItemId>,
+    #[serde(default)]
     pub instance: Option<(Vec<u8>, u64)>,
     #[serde(default)]
     pub side_record_keys: Vec<Vec<u8>>,

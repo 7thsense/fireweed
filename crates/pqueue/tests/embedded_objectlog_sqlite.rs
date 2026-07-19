@@ -11,10 +11,11 @@ use pqueue::{
     CompoundIndexField, EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig,
     EmbeddedProjectionConfig, EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret,
     EmbeddedSegmentConfig, EngineError, EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration,
-    IndexType, InstanceFence, LeaseToken, MetricsByQueryRequest, NewItem, OrderingMode,
-    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey, RecurrencePolicy, RequestId,
-    RetryPolicy, SideRecord, TenantId, TypedValue, UtcTimestamp,
+    IndexType, InstanceFence, LeaseToken, MetricsByQueryRequest, MultiClaimCommitEntry,
+    MultiClaimCommitRequest, NewItem, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryFilter, QueueDefinition, QueueId,
+    QueueIndex, QueueKey, RecurrencePolicy, RequestId, RetryPolicy, SideRecord, TenantId,
+    TypedValue, UtcTimestamp,
 };
 use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
@@ -309,6 +310,88 @@ fn public_objectlog_sqlite_strict_commit_transition_round_trip() {
     let sqlite = fixture.join("projection.sqlite");
     let config = local_config(&root, &sqlite);
     assert_strict_commit_transition_round_trip(config, "strict-transition-queue");
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_multi_claim_continuation_rehydrates_exactly_once() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-multi-claim-{}", nonce()));
+    let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
+    let queue_id = "multi-claim-transition";
+    let key = queue(queue_id);
+    let pq =
+        pqueue::open_embedded_sqlite(config.clone(), Arc::new(ManualClock::at(1_000))).unwrap();
+    block_on(pq.create_queue(definition(queue_id))).unwrap();
+    block_on(pq.push_batch(&key, vec![item(10), item(11)])).unwrap();
+    let claimed = block_on(pq.claim(&key, 2, 30_000)).unwrap();
+    assert_eq!(claimed.len(), 2);
+    let to_ref = |item: &pqueue::ClaimedItem| ClaimRef {
+        item_id: item.item_id,
+        lease_token: item
+            .lease_token
+            .clone()
+            .expect("claimed item carries token"),
+        lease_expires_at: item.lease_expires_at,
+        item_version: item.item_version,
+    };
+    let primary = to_ref(&claimed[0]);
+    let additional = to_ref(&claimed[1]);
+    let request_id = RequestId::new("strict-result-await-continuation").unwrap();
+    let request = MultiClaimCommitRequest {
+        request_id: Some(request_id.clone()),
+        entries: vec![MultiClaimCommitEntry {
+            claim_ref: primary.clone(),
+            additional_claim_refs: vec![additional.clone()],
+            finalize: FinalizeKind::Complete,
+            side_records: vec![SideRecord {
+                key: b"instance/result-await".to_vec(),
+                payload: Bytes::copy_from_slice(b"revision-2"),
+            }],
+            lifecycle_items: vec![item(20)],
+            instance_fence: Some(InstanceFence {
+                instance_key: b"result-await".to_vec(),
+                expected: 0,
+                next: 2,
+            }),
+        }],
+    };
+    let first = block_on(pq.commit_multi_claim(&key, request.clone())).unwrap();
+    let continuation_id = match &first[0] {
+        EntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
+        other => panic!("expected committed multi-claim entry, got {other:?}"),
+    };
+    block_on(pq.delete_projection()).unwrap();
+    block_on(pq.rehydrate_projection()).unwrap();
+    assert_eq!(
+        block_on(pq.commit_multi_claim(&key, request)).unwrap(),
+        first
+    );
+    drop(pq);
+
+    let reopened = pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(2_000))).unwrap();
+    let recovery = block_on(reopened.explain_commit(&key, request_id))
+        .unwrap()
+        .expect("multi-claim commit survives strict reopen");
+    assert_eq!(recovery.entries[0].consumed_input_id, primary.item_id);
+    assert_eq!(
+        recovery.entries[0].additional_consumed_input_ids,
+        vec![additional.item_id]
+    );
+    assert_eq!(
+        block_on(reopened.side_record(&key, b"instance/result-await"))
+            .unwrap()
+            .as_deref(),
+        Some(b"revision-2".as_slice())
+    );
+    let continuation = block_on(reopened.claim(&key, 10, 30_000)).unwrap();
+    assert_eq!(continuation.len(), 1);
+    assert_eq!(continuation[0].item_id, continuation_id);
+    assert!(
+        block_on(reopened.claim(&key, 10, 30_000))
+            .unwrap()
+            .is_empty()
+    );
+    drop(reopened);
     let _ = fs::remove_dir_all(fixture);
 }
 

@@ -761,15 +761,36 @@ pub fn validate_instance_fence(stored: u64, fence: &InstanceFence) -> EngineResu
     Ok(())
 }
 
-/// One entry of a vectorized transition commit: validate `claim_ref`, write opaque non-work `side_records`,
-/// enqueue ordinary `lifecycle_items` (dispatchable outbox/await/timer work), and finalize the input claim
-/// with `finalize`. Each entry's writes commit atomically; per-entry outcomes are independent.
+/// Reject a malformed atomic entry that names the same claim more than once. Without this guard the
+/// validation phase could pass twice and the finalization command would attempt two lifecycle transitions
+/// for one item.
+pub fn validate_distinct_commit_claims(
+    primary: &ClaimRef,
+    additional: &[ClaimRef],
+) -> EngineResult<()> {
+    let mut ids = std::collections::HashSet::with_capacity(1 + additional.len());
+    ids.insert(primary.item_id);
+    if additional.iter().any(|claim| !ids.insert(claim.item_id)) {
+        return Err(EngineError::Invalid("duplicate claim in commit entry"));
+    }
+    Ok(())
+}
+
+/// One entry of a vectorized transition commit: validate `claim_ref` plus any
+/// `additional_claim_refs`, write opaque non-work `side_records`, enqueue ordinary `lifecycle_items`
+/// (dispatchable outbox/await/timer work), and finalize every claim with `finalize`. Each entry's writes
+/// commit atomically; per-entry outcomes are independent.
 ///
 /// `Serialize` (not `Deserialize`, since [`PushSpec`] is serialize-only) so a backend can fingerprint the
 /// whole commit body for request-id idempotency.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CommitTransitionEntry {
     pub claim_ref: ClaimRef,
+    /// Additional claimed items finalized with the same disposition as `claim_ref`. Every claim is
+    /// validated before any entry write becomes visible, so the claims and the entry's side records,
+    /// lifecycle items, and instance fence form one atomic transition boundary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_claim_refs: Vec<ClaimRef>,
     pub finalize: FinalizeKind,
     pub side_records: Vec<SideRecord>,
     pub lifecycle_items: Vec<PushSpec>,
@@ -885,6 +906,8 @@ pub enum CommitEntryStatus {
 pub struct EntryRecovery {
     /// The input event id this entry consumed/finalized.
     pub consumed_input_id: ItemId,
+    /// Any additional input ids finalized by the same atomic entry.
+    pub additional_consumed_input_ids: Vec<ItemId>,
     /// The advanced instance/state fence, if the entry carried one: `(instance_key, fence_after_advance)`.
     pub instance: Option<(Vec<u8>, u64)>,
     /// The opaque non-work side-record keys this entry wrote (empty when it wrote none).

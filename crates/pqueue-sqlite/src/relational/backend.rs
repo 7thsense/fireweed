@@ -1158,14 +1158,30 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
             let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
             for entry in entries {
                 let consumed_input_id = entry.claim_ref.item_id;
+                let additional_consumed_input_ids = entry
+                    .additional_claim_refs
+                    .iter()
+                    .map(|claim| claim.item_id)
+                    .collect::<Vec<_>>();
                 let reject = |e: EngineError| EntryRecovery {
                     consumed_input_id,
+                    additional_consumed_input_ids: additional_consumed_input_ids.clone(),
                     instance: None,
                     side_record_keys: Vec::new(),
                     lifecycle_item_ids: Vec::new(),
                     status: CommitEntryStatus::Rejected(e),
                 };
-                if let Err(e) = commit_validate_sql(&tx, shard, &entry.claim_ref, now) {
+                if let Err(error) = pqueue_engine::validate_distinct_commit_claims(
+                    &entry.claim_ref,
+                    &entry.additional_claim_refs,
+                ) {
+                    recovery.push(reject(error));
+                    continue;
+                }
+                if let Some(e) = std::iter::once(&entry.claim_ref)
+                    .chain(&entry.additional_claim_refs)
+                    .find_map(|claim| commit_validate_sql(&tx, shard, claim, now).err())
+                {
                     recovery.push(reject(e));
                     continue;
                 }
@@ -1240,15 +1256,16 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                 }
                 apply(
                     &QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: vec![FinalizeOutcome::new(
-                            entry.claim_ref.item_id,
-                            entry.finalize,
-                        )],
+                        outcomes: std::iter::once(&entry.claim_ref)
+                            .chain(&entry.additional_claim_refs)
+                            .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
+                            .collect(),
                     }),
                     &mut token_ops,
                 )?;
                 recovery.push(EntryRecovery {
                     consumed_input_id,
+                    additional_consumed_input_ids,
                     instance,
                     side_record_keys,
                     lifecycle_item_ids,

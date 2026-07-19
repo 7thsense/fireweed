@@ -325,6 +325,8 @@ pub(crate) fn commit_request_fingerprint(
 pub(crate) struct StoredEntryRecovery {
     consumed_input_id: String,
     #[serde(default)]
+    additional_consumed_input_ids: Vec<String>,
+    #[serde(default)]
     instance: Option<(Vec<u8>, u64)>,
     #[serde(default)]
     side_record_keys: Vec<Vec<u8>>,
@@ -441,6 +443,11 @@ pub(crate) fn encode_commit_recovery(recovery: &[EntryRecovery]) -> EngineResult
         .iter()
         .map(|r| StoredEntryRecovery {
             consumed_input_id: r.consumed_input_id.to_string(),
+            additional_consumed_input_ids: r
+                .additional_consumed_input_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             instance: r.instance.clone(),
             side_record_keys: r.side_record_keys.clone(),
             lifecycle_item_ids: r
@@ -466,6 +473,11 @@ pub(crate) fn decode_commit_recovery(raw: &str) -> EngineResult<Vec<EntryRecover
     stored
         .into_iter()
         .map(|s| {
+            let additional_consumed_input_ids = s
+                .additional_consumed_input_ids
+                .into_iter()
+                .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+                .collect::<EngineResult<Vec<_>>>()?;
             let lifecycle_item_ids = s
                 .lifecycle_item_ids
                 .into_iter()
@@ -480,6 +492,7 @@ pub(crate) fn decode_commit_recovery(raw: &str) -> EngineResult<Vec<EntryRecover
             Ok(EntryRecovery {
                 consumed_input_id: ItemId::new(s.consumed_input_id)
                     .map_err(|e| EngineError::Storage(e.to_string()))?,
+                additional_consumed_input_ids,
                 instance: s.instance,
                 side_record_keys: s.side_record_keys,
                 lifecycle_item_ids,

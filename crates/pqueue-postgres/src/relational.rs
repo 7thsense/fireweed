@@ -422,6 +422,8 @@ fn commit_request_fingerprint(entries: &[CommitTransitionEntry]) -> EngineResult
 struct StoredEntryRecovery {
     consumed_input_id: String,
     #[serde(default)]
+    additional_consumed_input_ids: Vec<String>,
+    #[serde(default)]
     instance: Option<(Vec<u8>, u64)>,
     #[serde(default)]
     side_record_keys: Vec<Vec<u8>>,
@@ -530,6 +532,11 @@ fn encode_commit_recovery(recovery: &[EntryRecovery]) -> EngineResult<String> {
         .iter()
         .map(|r| StoredEntryRecovery {
             consumed_input_id: r.consumed_input_id.to_string(),
+            additional_consumed_input_ids: r
+                .additional_consumed_input_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             instance: r.instance.clone(),
             side_record_keys: r.side_record_keys.clone(),
             lifecycle_item_ids: r
@@ -555,6 +562,11 @@ fn decode_commit_recovery(raw: &str) -> EngineResult<Vec<EntryRecovery>> {
     stored
         .into_iter()
         .map(|s| {
+            let additional_consumed_input_ids = s
+                .additional_consumed_input_ids
+                .into_iter()
+                .map(|id| ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string())))
+                .collect::<EngineResult<Vec<_>>>()?;
             let lifecycle_item_ids = s
                 .lifecycle_item_ids
                 .into_iter()
@@ -569,6 +581,7 @@ fn decode_commit_recovery(raw: &str) -> EngineResult<Vec<EntryRecovery>> {
             Ok(EntryRecovery {
                 consumed_input_id: ItemId::new(s.consumed_input_id)
                     .map_err(|e| EngineError::Storage(e.to_string()))?,
+                additional_consumed_input_ids,
                 instance: s.instance,
                 side_record_keys: s.side_record_keys,
                 lifecycle_item_ids,
@@ -4333,14 +4346,30 @@ impl CommitTransitionPort for PostgresRelationalBackend {
             let mut recovery: Vec<EntryRecovery> = Vec::with_capacity(entries.len());
             for entry in entries {
                 let consumed_input_id = entry.claim_ref.item_id;
+                let additional_consumed_input_ids = entry
+                    .additional_claim_refs
+                    .iter()
+                    .map(|claim| claim.item_id)
+                    .collect::<Vec<_>>();
                 let reject = |e: EngineError| EntryRecovery {
                     consumed_input_id,
+                    additional_consumed_input_ids: additional_consumed_input_ids.clone(),
                     instance: None,
                     side_record_keys: Vec::new(),
                     lifecycle_item_ids: Vec::new(),
                     status: CommitEntryStatus::Rejected(e),
                 };
-                if let Err(e) = commit_validate_sql(&mut tx, shard, &entry.claim_ref, now) {
+                if let Err(error) = pqueue_engine::validate_distinct_commit_claims(
+                    &entry.claim_ref,
+                    &entry.additional_claim_refs,
+                ) {
+                    recovery.push(reject(error));
+                    continue;
+                }
+                if let Some(e) = std::iter::once(&entry.claim_ref)
+                    .chain(&entry.additional_claim_refs)
+                    .find_map(|claim| commit_validate_sql(&mut tx, shard, claim, now).err())
+                {
                     recovery.push(reject(e));
                     continue;
                 }
@@ -4435,15 +4464,16 @@ impl CommitTransitionPort for PostgresRelationalBackend {
                     seq,
                     now,
                     &QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: vec![FinalizeOutcome::new(
-                            entry.claim_ref.item_id,
-                            entry.finalize,
-                        )],
+                        outcomes: std::iter::once(&entry.claim_ref)
+                            .chain(&entry.additional_claim_refs)
+                            .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
+                            .collect(),
                     }),
                 )?;
                 seq += 1;
                 recovery.push(EntryRecovery {
                     consumed_input_id,
+                    additional_consumed_input_ids,
                     instance,
                     side_record_keys,
                     lifecycle_item_ids,
@@ -6837,9 +6867,9 @@ mod commit_transition_tests {
     use pqueue_conformance::{qdef, shard, ts};
     use pqueue_core::{LeaseToken, PriorityValue, RequestId, WorkerId};
     use pqueue_engine::{
-        ClaimPort, ClaimRef, CommitEntryOutcome, CommitTransition, CommitTransitionEntry,
-        CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind, ProjectionRead,
-        PushPort, RecoveryReadPort, RenewLeasePort, SideRecord,
+        ClaimPort, ClaimRef, ClaimedItem, CommitEntryOutcome, CommitTransition,
+        CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind,
+        InstanceFence, ProjectionRead, PushPort, RecoveryReadPort, RenewLeasePort, SideRecord,
     };
 
     fn unique_schema(tag: &str) -> String {
@@ -6947,6 +6977,7 @@ mod commit_transition_tests {
                 request_id: None,
                 entries: vec![CommitTransitionEntry {
                     claim_ref: bad_token,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![side("state/bad-token", "x")],
                     lifecycle_items: vec![item(20)],
@@ -6971,6 +7002,7 @@ mod commit_transition_tests {
                 request_id: None,
                 entries: vec![CommitTransitionEntry {
                     claim_ref: bad_version,
+                    additional_claim_refs: Vec::new(),
                     finalize: FinalizeKind::Complete,
                     side_records: vec![side("state/bad-version", "y")],
                     lifecycle_items: vec![item(30)],
@@ -7004,6 +7036,7 @@ mod commit_transition_tests {
             request_id: Some(rid.clone()),
             entries: vec![CommitTransitionEntry {
                 claim_ref: cr,
+                additional_claim_refs: Vec::new(),
                 finalize: FinalizeKind::Complete,
                 side_records: vec![side("state/replay", "v1")],
                 lifecycle_items: vec![item(20)],
@@ -7039,6 +7072,68 @@ mod commit_transition_tests {
     }
 
     #[test]
+    fn commit_transition_atomically_finalizes_multiple_claims() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_atomically_finalizes_multiple_claims) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = unique_schema("multi_claim");
+        let backend = block_on(backend_for_schema(&url, &schema));
+        block_on(backend.push(&shard(), vec![item(10), item(11)], ts(0), None)).unwrap();
+        let claimed = block_on(backend.claim(claim_req(2, 600, 0))).unwrap();
+        assert_eq!(claimed.items.len(), 2);
+        let to_ref = |item: &ClaimedItem| ClaimRef {
+            item_id: item.item_id,
+            lease_token: item
+                .lease_token
+                .clone()
+                .expect("claimed item carries token"),
+            lease_expires_at: item.lease_expires_at,
+            item_version: item.item_version,
+        };
+        let primary = to_ref(&claimed.items[0]);
+        let additional = to_ref(&claimed.items[1]);
+        let additional_id = additional.item_id;
+        let rid = RequestId::new("result-await-continuation-postgres").unwrap();
+        let body = CommitTransition {
+            request_id: Some(rid.clone()),
+            entries: vec![CommitTransitionEntry {
+                claim_ref: primary,
+                additional_claim_refs: vec![additional],
+                finalize: FinalizeKind::Complete,
+                side_records: vec![side("instance/result-await", "revision-2")],
+                lifecycle_items: vec![item(20)],
+                instance_fence: Some(InstanceFence {
+                    instance_key: b"result-await".to_vec(),
+                    expected: 0,
+                    next: 2,
+                }),
+            }],
+        };
+        let first =
+            block_on(backend.commit_transition(&shard(), body.clone(), ts(1), None)).unwrap();
+        let replay = block_on(backend.commit_transition(&shard(), body, ts(2), None)).unwrap();
+        assert_eq!(replay, first);
+        assert_eq!(block_on(backend.metrics(&shard())).unwrap().complete, 2);
+        let recovery = block_on(backend.explain_commit(&shard(), rid))
+            .unwrap()
+            .expect("multi-claim recovery retained");
+        assert_eq!(
+            recovery.entries[0].additional_consumed_input_ids,
+            vec![additional_id]
+        );
+        let continuation_id = match &first[0] {
+            CommitEntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
+            other => panic!("expected committed multi-claim entry, got {other:?}"),
+        };
+        let next = block_on(backend.claim(claim_req(10, 600, 3))).unwrap();
+        assert_eq!(next.items.len(), 1);
+        assert_eq!(next.items[0].item_id, continuation_id);
+    }
+
+    #[test]
     fn commit_transition_conflict_is_per_entry_during_race() {
         let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
             eprintln!(
@@ -7061,6 +7156,7 @@ mod commit_transition_tests {
                 entries: vec![
                     CommitTransitionEntry {
                         claim_ref: stale,
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("state/stale", "x")],
                         lifecycle_items: vec![item(20)],
@@ -7068,6 +7164,7 @@ mod commit_transition_tests {
                     },
                     CommitTransitionEntry {
                         claim_ref: live.clone(),
+                        additional_claim_refs: Vec::new(),
                         finalize: FinalizeKind::Complete,
                         side_records: vec![side("state/live", "y")],
                         lifecycle_items: vec![item(30)],

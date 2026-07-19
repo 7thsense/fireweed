@@ -10,15 +10,17 @@ use std::sync::Arc;
 
 use pqueue::{
     ClaimRef, CommitEntry, CommitEntryStatus, CommitRequest, EngineError, EntryOutcome,
-    FinalizeKind, InstanceFence, NewItem, Pqueue, PriorityValue, RequestId, SideRecord,
+    FinalizeKind, InstanceFence, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem, Pqueue,
+    PriorityValue, RequestId, SideRecord,
 };
 use pqueue_core::{
-    EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
-    UtcTimestamp,
+    EligibilityPolicy, IndexDeclaration, IndexDef, IndexType, OrderingMode, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueIndex,
+    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 use pqueue_engine::QueueKey;
 use pqueue_memory::{ManualClock, composed_memory_backend};
+use serde_json::json;
 
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
@@ -83,6 +85,165 @@ fn side(key: &str, payload: &str) -> SideRecord {
         key: key.as_bytes().to_vec(),
         payload: pqueue::Bytes::copy_from_slice(payload.as_bytes()),
     }
+}
+
+fn indexed_item(record_kind: &str, key: &str, priority: i64) -> NewItem {
+    let mut item = item(priority);
+    item.client_item_key = Some(pqueue::ClientItemKey::new(key).unwrap());
+    item.fields.insert(
+        "record_kind".to_string(),
+        pqueue::Bytes::copy_from_slice(record_kind.as_bytes()),
+    );
+    item.entity = Some(json!({"record_kind": record_kind}));
+    item
+}
+
+fn claim_ref(item: &pqueue::ClaimedItem) -> ClaimRef {
+    ClaimRef {
+        item_id: item.item_id,
+        lease_token: item.lease_token.clone().expect("claimed item has token"),
+        lease_expires_at: item.lease_expires_at,
+        item_version: item.item_version,
+    }
+}
+
+/// A result and its matching await are one logical workflow boundary. Both claims, the fenced projection,
+/// and the indexed continuation must therefore commit (or reject) together.
+#[tokio::test]
+async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_continuation() {
+    let backend = Arc::new(composed_memory_backend());
+    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let q = qkey();
+    let mut definition = qdef(60_000);
+    definition.typed_indexes = vec![QueueIndex {
+        name: "by_record_kind".to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: "record_kind".to_string(),
+            index_type: IndexType::String,
+            unique: false,
+        }),
+    }];
+    pq.create_queue(definition).await.unwrap();
+    pq.push_batch(
+        &q,
+        vec![
+            indexed_item("result", "result-1", 10),
+            indexed_item("await", "await-1", 11),
+        ],
+    )
+    .await
+    .unwrap();
+    let claimed = pq.claim(&q, 2, 60_000).await.unwrap();
+    assert_eq!(claimed.len(), 2);
+    let primary = claim_ref(&claimed[0]);
+    let additional = claim_ref(&claimed[1]);
+    let request_id = RequestId::new("result-await-continuation-1").unwrap();
+    let request = MultiClaimCommitRequest {
+        request_id: Some(request_id.clone()),
+        entries: vec![MultiClaimCommitEntry {
+            claim_ref: primary.clone(),
+            additional_claim_refs: vec![additional.clone()],
+            finalize: FinalizeKind::Complete,
+            side_records: vec![side("instance/workflow-1", "revision-2")],
+            lifecycle_items: vec![indexed_item("transition", "transition-2", 20)],
+            instance_fence: Some(InstanceFence {
+                instance_key: b"workflow-1".to_vec(),
+                expected: 0,
+                next: 1,
+            }),
+        }],
+    };
+
+    let first = pq.commit_multi_claim(&q, request.clone()).await.unwrap();
+    let replay = pq.commit_multi_claim(&q, request.clone()).await.unwrap();
+    assert_eq!(replay, first);
+    assert!(
+        matches!(first.as_slice(), [EntryOutcome::Committed { lifecycle_item_ids }] if lifecycle_item_ids.len() == 1)
+    );
+    let metrics = pq.metrics(&q).await.unwrap();
+    assert_eq!(
+        (metrics.pending, metrics.leased, metrics.complete),
+        (1, 0, 2)
+    );
+    assert_eq!(
+        pq.side_record(&q, b"instance/workflow-1")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(b"revision-2".as_slice())
+    );
+    let recovery = pq
+        .explain_commit(&q, request_id.clone())
+        .await
+        .unwrap()
+        .expect("commit recovery");
+    assert_eq!(recovery.entries[0].consumed_input_id, primary.item_id);
+    assert_eq!(
+        recovery.entries[0].additional_consumed_input_ids,
+        vec![additional.item_id]
+    );
+
+    let mut conflicting = request;
+    conflicting.entries[0].side_records[0].payload =
+        pqueue::Bytes::copy_from_slice(b"different-revision");
+    assert_eq!(
+        pq.commit_multi_claim(&q, conflicting).await.unwrap_err(),
+        EngineError::RequestIdConflict
+    );
+    assert_eq!(pq.claim(&q, 10, 60_000).await.unwrap().len(), 1);
+    assert!(pq.claim(&q, 10, 60_000).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
+    let pq = Pqueue::new(
+        Arc::new(composed_memory_backend()),
+        Arc::new(ManualClock::at(0)),
+    );
+    let q = qkey();
+    pq.create_queue(qdef(60_000)).await.unwrap();
+    pq.push_batch(&q, vec![item(10), item(11)]).await.unwrap();
+    let claimed = pq.claim(&q, 2, 60_000).await.unwrap();
+    let primary = claim_ref(&claimed[0]);
+    let mut stale = claim_ref(&claimed[1]);
+    stale.item_version += 1;
+
+    let outcomes = pq
+        .commit_multi_claim(
+            &q,
+            MultiClaimCommitRequest {
+                request_id: Some(RequestId::new("multi-claim-reject-1").unwrap()),
+                entries: vec![MultiClaimCommitEntry {
+                    claim_ref: primary,
+                    additional_claim_refs: vec![stale],
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![side("instance/rejected", "must-not-exist")],
+                    lifecycle_items: vec![item(20)],
+                    instance_fence: Some(InstanceFence {
+                        instance_key: b"rejected".to_vec(),
+                        expected: 0,
+                        next: 1,
+                    }),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes,
+        vec![EntryOutcome::Rejected(EngineError::Conflict)]
+    );
+    let metrics = pq.metrics(&q).await.unwrap();
+    assert_eq!(
+        (metrics.pending, metrics.leased, metrics.complete),
+        (0, 2, 0)
+    );
+    assert!(
+        pq.side_record(&q, b"instance/rejected")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// Acceptance #2: one entry — valid claim_ref + opaque side record + dispatchable lifecycle item +

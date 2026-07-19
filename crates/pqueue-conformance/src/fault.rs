@@ -56,8 +56,8 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use pqueue_core::{ClientItemKey, GroupKey, LeaseToken, Metadata, PriorityValue, RequestId};
 use pqueue_engine::{
-    Backend, ClaimCompatibility, ClaimRef, CommandEnvelope, CommandPosition, CommitEntryOutcome,
-    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
+    Backend, ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
+    CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
     CommitTransitionPort, ControlPlaneStore, DurabilityClass, EngineError, EntryRecovery,
     FenceLeaseCommand, FinalizeKind, FinalizeOutcome, GroupBatching, LogRead, PayloadUpdate,
     PushCommand, PushSpec, QueueCommand, RawCommitFault, RawCommitRequest, RecoveryReadPort,
@@ -1604,33 +1604,42 @@ pub async fn ac_txn_3_commit_transition_request_id<
     caps: TxnCaps,
 ) -> AcOutcome {
     let rid = RequestId::new("ac-txn-3-commit-transition").unwrap();
-    // Seed: push + claim one item so we hold a valid lease-token/version-fenced ClaimRef to finalize.
+    // Seed a result + await pair and claim both so one entry must validate/finalize the pair atomically.
     let a = make("txn3-ct");
     a.create_queue(qdef())
         .await
         .map_err(|e| format!("create_queue: {e:?}"))?;
-    a.push(&shard(), vec![spec("txn3-ct-a", 5)], ts(0), None)
-        .await
-        .map_err(|e| format!("seed push: {e:?}"))?;
+    a.push(
+        &shard(),
+        vec![spec("txn3-ct-result", 5), spec("txn3-ct-await", 6)],
+        ts(0),
+        None,
+    )
+    .await
+    .map_err(|e| format!("seed push: {e:?}"))?;
     let claimed = a
-        .claim(claim_req(1, 500, 1))
+        .claim(claim_req(2, 500, 1))
         .await
         .map_err(|e| format!("claim: {e:?}"))?;
-    ensure!(claimed.items.len() == 1, "claim leased one item");
-    let ci = &claimed.items[0];
-    let claim_ref = ClaimRef {
-        item_id: ci.item_id,
-        lease_token: ci
-            .lease_token
-            .clone()
-            .ok_or_else(|| "claimed item is missing its lease token".to_string())?,
-        lease_expires_at: ci.lease_expires_at,
-        item_version: ci.item_version,
+    ensure!(claimed.items.len() == 2, "claim leased result + await");
+    let to_ref = |ci: &ClaimedItem| -> Result<ClaimRef, String> {
+        Ok(ClaimRef {
+            item_id: ci.item_id,
+            lease_token: ci
+                .lease_token
+                .clone()
+                .ok_or_else(|| "claimed item is missing its lease token".to_string())?,
+            lease_expires_at: ci.lease_expires_at,
+            item_version: ci.item_version,
+        })
     };
+    let claim_ref = to_ref(&claimed.items[0])?;
+    let additional_claim_ref = to_ref(&claimed.items[1])?;
     let transition = |finalize: FinalizeKind| CommitTransition {
         request_id: Some(rid.clone()),
         entries: vec![CommitTransitionEntry {
             claim_ref: claim_ref.clone(),
+            additional_claim_refs: vec![additional_claim_ref.clone()],
             finalize,
             side_records: Vec::new(),
             lifecycle_items: Vec::new(),
@@ -1680,8 +1689,8 @@ pub async fn ac_txn_3_commit_transition_request_id<
         .await
         .map_err(|e| format!("metrics: {e:?}"))?;
     ensure!(
-        m.complete == 1 && m.leased == 0,
-        "commit_transition + replay must finalize the input exactly once; got complete={} leased={}",
+        m.complete == 2 && m.leased == 0,
+        "commit_transition + replay must finalize both inputs exactly once; got complete={} leased={}",
         m.complete,
         m.leased
     );
@@ -1724,10 +1733,19 @@ pub async fn ac_txn_3_commit_transition_request_id<
         .await
         .map_err(|e| format!("metrics after restart: {e:?}"))?;
     ensure!(
-        m.complete == 1 && m.leased == 0,
-        "after restart the input must remain finalized exactly once (0 duplicate); got complete={} leased={}",
+        m.complete == 2 && m.leased == 0,
+        "after restart both inputs must remain finalized exactly once (0 duplicate); got complete={} leased={}",
         m.complete,
         m.leased
+    );
+    let recovery = b
+        .explain_commit(&shard(), rid.clone())
+        .await
+        .map_err(|e| format!("explain multi-claim commit after restart: {e:?}"))?
+        .ok_or_else(|| "multi-claim recovery missing after restart".to_string())?;
+    ensure!(
+        recovery.entries[0].additional_consumed_input_ids == vec![additional_claim_ref.item_id],
+        "AfterApplyBeforeResponse recovery must retain the additional finalized claim"
     );
     drop(b);
     asserts.push(
@@ -1746,28 +1764,37 @@ pub async fn ac_txn_3_commit_transition_request_id<
     a.create_queue(qdef())
         .await
         .map_err(|e| format!("mid create_queue: {e:?}"))?;
-    a.push(&shard(), vec![spec("txn3-ct-mid-a", 5)], ts(0), None)
-        .await
-        .map_err(|e| format!("mid seed push: {e:?}"))?;
+    a.push(
+        &shard(),
+        vec![spec("txn3-ct-mid-result", 5), spec("txn3-ct-mid-await", 6)],
+        ts(0),
+        None,
+    )
+    .await
+    .map_err(|e| format!("mid seed push: {e:?}"))?;
     let claimed = a
-        .claim(claim_req(1, 500, 1))
+        .claim(claim_req(2, 500, 1))
         .await
         .map_err(|e| format!("mid claim: {e:?}"))?;
-    ensure!(claimed.items.len() == 1, "mid claim leased one item");
-    let ci = &claimed.items[0];
-    let claim_ref_mid = ClaimRef {
-        item_id: ci.item_id,
-        lease_token: ci
-            .lease_token
-            .clone()
-            .ok_or_else(|| "mid claimed item is missing its lease token".to_string())?,
-        lease_expires_at: ci.lease_expires_at,
-        item_version: ci.item_version,
+    ensure!(claimed.items.len() == 2, "mid claim leased result + await");
+    let to_mid_ref = |ci: &ClaimedItem| -> Result<ClaimRef, String> {
+        Ok(ClaimRef {
+            item_id: ci.item_id,
+            lease_token: ci
+                .lease_token
+                .clone()
+                .ok_or_else(|| "mid claimed item is missing its lease token".to_string())?,
+            lease_expires_at: ci.lease_expires_at,
+            item_version: ci.item_version,
+        })
     };
+    let claim_ref_mid = to_mid_ref(&claimed.items[0])?;
+    let additional_claim_ref_mid = to_mid_ref(&claimed.items[1])?;
     let mid_transition = |finalize: FinalizeKind| CommitTransition {
         request_id: Some(rid_mid.clone()),
         entries: vec![CommitTransitionEntry {
             claim_ref: claim_ref_mid.clone(),
+            additional_claim_refs: vec![additional_claim_ref_mid.clone()],
             finalize,
             side_records: Vec::new(),
             lifecycle_items: Vec::new(),
@@ -1775,16 +1802,20 @@ pub async fn ac_txn_3_commit_transition_request_id<
         }],
     };
     // Build the EXACT durable request_id-bearing commit envelope commit_transition would append.
-    let (env, _fp) = a
-        .build_request_id_commit_envelope(
+    let (mut envelopes, _fp) = a
+        .build_request_id_commit_envelopes(
             &shard(),
             rid_mid.clone(),
-            claim_ref_mid.clone(),
-            FinalizeKind::Complete,
+            mid_transition(FinalizeKind::Complete).entries,
             ts(2),
             None,
         )
-        .map_err(|e| format!("build_request_id_commit_envelope: {e:?}"))?;
+        .map_err(|e| format!("build_request_id_commit_envelopes: {e:?}"))?;
+    ensure!(
+        envelopes.len() == 1,
+        "multi-claim finalize-only entry must build one atomic envelope"
+    );
+    let env = envelopes.remove(0);
     ensure!(
         env.request_id.as_ref() == Some(&rid_mid) && env.request_fingerprint.is_some(),
         "the mid-pipeline commit envelope must carry the request_id AND the whole-body fingerprint (else the cut is not request_id-bearing)"
@@ -1833,10 +1864,19 @@ pub async fn ac_txn_3_commit_transition_request_id<
         .await
         .map_err(|e| format!("mid metrics after restart: {e:?}"))?;
     ensure!(
-        m.complete == 1 && m.leased == 0,
-        "AfterAppendBeforeApply: the input must be finalized exactly once across the mid-pipeline kill (0 duplicate); got complete={} leased={}",
+        m.complete == 2 && m.leased == 0,
+        "AfterAppendBeforeApply: both inputs must be finalized exactly once across the mid-pipeline kill (0 duplicate); got complete={} leased={}",
         m.complete,
         m.leased
+    );
+    let recovery = b
+        .explain_commit(&shard(), rid_mid.clone())
+        .await
+        .map_err(|e| format!("mid explain multi-claim commit after restart: {e:?}"))?
+        .ok_or_else(|| "mid multi-claim recovery missing after restart".to_string())?;
+    ensure!(
+        recovery.entries[0].additional_consumed_input_ids == vec![additional_claim_ref_mid.item_id],
+        "AfterAppendBeforeApply recovery must retain the additional finalized claim"
     );
     asserts.push(
         "commit_transition AfterAppendBeforeApply (request_id-bearing) across-restart request_id replay PROVEN: a kill in the append->apply window leaves the request_id-bearing commit durable-but-unapplied; on reopen recovery replays it exactly once AND rebuilds commit_idempotency from that durable envelope, so a retry by request_id replays the ONE committed per-entry outcome (same body -> Replay, different body -> RequestIdConflict, 0 duplicate state transitions)".into(),
@@ -1855,6 +1895,7 @@ pub async fn ac_txn_3_commit_transition_request_id<
         vec![
             CommitTransitionEntry {
                 claim_ref: valid.clone(),
+                additional_claim_refs: Vec::new(),
                 finalize: finalize0,
                 side_records: Vec::new(),
                 lifecycle_items: Vec::new(),
@@ -1862,6 +1903,7 @@ pub async fn ac_txn_3_commit_transition_request_id<
             },
             CommitTransitionEntry {
                 claim_ref: stale.clone(),
+                additional_claim_refs: Vec::new(),
                 finalize: FinalizeKind::Complete,
                 side_records: Vec::new(),
                 lifecycle_items: Vec::new(),
@@ -2136,6 +2178,7 @@ pub async fn ac_txn_3_commit_transition_request_id<
         request_id: Some(rid_allrej.clone()),
         entries: vec![CommitTransitionEntry {
             claim_ref: claim_ref_v0.clone(),
+            additional_claim_refs: Vec::new(),
             finalize: FinalizeKind::Complete,
             side_records: Vec::new(),
             lifecycle_items: Vec::new(),
