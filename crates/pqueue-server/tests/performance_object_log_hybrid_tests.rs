@@ -579,17 +579,25 @@ where
     let mut ack_latencies = Vec::new();
     let start = Instant::now();
     let push_io_start = ProcIoSnapshot::read();
+    let mut pushes = tokio::task::JoinSet::new();
     let mut id = 0u64;
     while id < resident {
         let n = (resident - id).min(load_batch);
         let items: Vec<PushSpec> = (0..n).map(|_| empty_spec()).collect();
-        let t = Instant::now();
-        backend
-            .push(&shard, items, ts(id as i64), None)
-            .await
-            .expect("push");
-        ack_latencies.push(t.elapsed().as_secs_f64() * 1000.0);
+        let backend = backend.clone();
+        let shard = shard.clone();
+        pushes.spawn(async move {
+            let t = Instant::now();
+            backend
+                .push(&shard, items, ts(id as i64), None)
+                .await
+                .expect("push");
+            t.elapsed().as_secs_f64() * 1000.0
+        });
         id += n;
+    }
+    while let Some(result) = pushes.join_next().await {
+        ack_latencies.push(result.expect("push task"));
     }
     let push_elapsed = start.elapsed().as_secs_f64();
     let hot_push_io = ProcIoSnapshot::read().delta_since(push_io_start, push_elapsed * 1000.0);
@@ -612,26 +620,32 @@ where
             .div_ceil(claim_batch.max(1) as u64)
             .min(rmw_window as u64) as usize;
         let claim_start = Instant::now();
-        let claims: Vec<_> = (0..claim_ops)
-            .map(|op| {
-                let offset = claimed_total + (op as u64 * claim_batch as u64);
-                let token = LeaseToken::new(format!("lt-{backend_profile}-{offset}")).unwrap();
-                backend.claim(ClaimRequest {
-                    eligibility_time: None,
-                    shard: shard.clone(),
-                    worker_id: WorkerId::new("w").unwrap(),
-                    max_items: claim_batch.min((resident - offset) as usize),
-                    lease_token: token,
-                    lease_expires_at: ts(60_000),
-                    now: ts(0),
-                    compatibility: ClaimCompatibility::default(),
-                    expected_epoch: None,
-                })
-            })
-            .collect();
+        let mut claims = tokio::task::JoinSet::new();
+        for op in 0..claim_ops {
+            let offset = claimed_total + (op as u64 * claim_batch as u64);
+            let token = LeaseToken::new(format!("lt-{backend_profile}-{offset}")).unwrap();
+            let backend = backend.clone();
+            let shard = shard.clone();
+            claims.spawn(async move {
+                backend
+                    .claim(ClaimRequest {
+                        eligibility_time: None,
+                        shard,
+                        worker_id: WorkerId::new("w").unwrap(),
+                        max_items: claim_batch.min((resident - offset) as usize),
+                        lease_token: token,
+                        lease_expires_at: ts(60_000),
+                        now: ts(0),
+                        compatibility: ClaimCompatibility::default(),
+                        expected_epoch: None,
+                    })
+                    .await
+                    .expect("claim")
+            });
+        }
         let mut claimed_batches = Vec::with_capacity(claim_ops);
-        for claim in claims {
-            let claimed = claim.await.expect("claim");
+        while let Some(result) = claims.join_next().await {
+            let claimed = result.expect("claim task");
             if !claimed.items.is_empty() {
                 claimed_batches.push(claimed);
             }
@@ -645,21 +659,26 @@ where
             .map(|claimed| claimed.items.len() as u64)
             .sum();
         let outcome_start = Instant::now();
-        let finalizes: Vec<_> = claimed_batches
-            .iter()
-            .map(|claimed| {
-                let outcomes: Vec<FinalizeOutcome> = claimed
-                    .items
-                    .iter()
-                    .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
-                    .collect();
-                backend.finalize(&shard, outcomes, ts(1), None)
-            })
-            .collect();
+        let mut finalizes = tokio::task::JoinSet::new();
+        for claimed in &claimed_batches {
+            let outcomes: Vec<FinalizeOutcome> = claimed
+                .items
+                .iter()
+                .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+                .collect();
+            let backend = backend.clone();
+            let shard = shard.clone();
+            finalizes.spawn(async move {
+                backend
+                    .finalize(&shard, outcomes, ts(1), None)
+                    .await
+                    .expect("finalize")
+            });
+        }
         let outcome_wall_ms = outcome_start.elapsed().as_secs_f64() * 1000.0;
         let finalize_start = Instant::now();
-        for finalize in finalizes {
-            finalize.await.expect("finalize");
+        while let Some(result) = finalizes.join_next().await {
+            result.expect("finalize task");
         }
         let finalize_wall_ms = finalize_start.elapsed().as_secs_f64() * 1000.0;
         claimed_total += claimed_in_window;
