@@ -270,14 +270,19 @@ WITH candidates AS ( \
     ORDER BY priority_sort, created_seq \
     LIMIT $4 \
     FOR UPDATE SKIP LOCKED \
-) \
+), updated AS ( \
 UPDATE pqueue_items i \
 SET lifecycle_state='Leased', lease_token_hash=$5, lease_expires_at=$6, \
     retry_count=retry_count+1, item_version=item_version+1, updated_at=$7, last_command_sequence=$8 \
 FROM candidates c \
 	WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=c.item_id \
 		RETURNING i.item_id, i.client_item_key, i.item_version, i.priority, i.group_key, i.not_before, \
-		          i.lease_expires_at, i.retry_count, i.payload, i.fields, i.metadata";
+		          i.lease_expires_at, i.retry_count, i.payload, i.fields, i.metadata, \
+		          i.priority_sort AS claim_priority_sort, i.created_seq AS claim_created_seq \
+) \
+SELECT item_id, client_item_key, item_version, priority, group_key, not_before, lease_expires_at, \
+       retry_count, payload, fields, metadata FROM updated \
+ORDER BY claim_priority_sort, claim_created_seq";
 
 pub(crate) const ITEM_GATE_KEYS_BATCH_SQL: &str = "\
 SELECT item_id, gate_key FROM pqueue_item_gates \
@@ -6346,6 +6351,10 @@ mod sql_shape_tests {
             "the postgres claim MUST take a real row lock, not rely on a Mutex"
         );
         assert!(CLAIM_CTE.contains("ORDER BY priority_sort, created_seq"));
+        assert!(
+            CLAIM_CTE.contains("FROM updated ORDER BY claim_priority_sort, claim_created_seq"),
+            "UPDATE RETURNING order is unspecified; claim responses MUST restore queue order"
+        );
         assert!(
             CLAIM_CTE.contains("RETURNING"),
             "claim leases + returns the rich rows in one statement"
