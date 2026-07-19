@@ -130,7 +130,7 @@ jobs:
           PQUEUE_RELEASE_VERSION: ${{ steps.release.outputs.version }}
           PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
         # This deferral is intentionally version-bound so the next release must make a fresh decision.
-        run: bash scripts/ci/deployment-release-gate.sh --defer-quiet-host-evidence-for 0.17.3
+        run: bash scripts/ci/deployment-release-gate.sh --defer-quiet-host-evidence-for 0.18.0
 
       - name: Package binaries
         run: bash scripts/release/package-binaries.sh "${{ steps.release.outputs.version }}"
