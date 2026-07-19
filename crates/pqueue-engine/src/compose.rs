@@ -33,8 +33,8 @@ use pqueue_core::{
     BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
     CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
-    OrderingMode, PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest,
-    RangeScanResponse, RequestId, TenantId, UtcTimestamp,
+    MetricsByQueryRequest, OrderingMode, PriorityValue, QueryCapabilityFlags, QueueDefinition,
+    QueueId, RangeScanRequest, RangeScanResponse, RequestId, TenantId, UtcTimestamp,
 };
 
 use crate::active_scope::{ActiveScope, DiscoveryGranularity};
@@ -919,6 +919,14 @@ pub trait ProjectionStore: Send {
         _shard: &QueueKey,
         _request: GroupedAggregateRequest,
     ) -> EngineResult<GroupedAggregateResponse> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn metrics_by_query(
+        &self,
+        _shard: &QueueKey,
+        _request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
         Err(EngineError::Unavailable)
     }
 
@@ -4563,6 +4571,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         std::future::ready(result)
     }
 
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
+        let result = self
+            .inner
+            .lock()
+            .expect("poisoned")
+            .projection
+            .metrics_by_query(shard, request);
+        std::future::ready(result)
+    }
+
     fn declared_bucket_segment(
         &self,
         shard: &QueueKey,
@@ -5849,18 +5871,26 @@ mod ordered_tests {
             Ok(keys.iter().map(|_| None).collect())
         }
 
-        fn grouped_aggregate(
-            &self,
-            _shard: &QueueKey,
-            _request: GroupedAggregateRequest,
-        ) -> EngineResult<GroupedAggregateResponse> {
-            Err(EngineError::Unavailable)
-        }
+    fn grouped_aggregate(
+        &self,
+        _shard: &QueueKey,
+        _request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        Err(EngineError::Unavailable)
+    }
 
-        fn declared_bucket_segment(
-            &self,
-            _shard: &QueueKey,
-            _request: DeclaredBucketSegmentRequest,
+    fn metrics_by_query(
+        &self,
+        _shard: &QueueKey,
+        _request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
+        Err(EngineError::Unavailable)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        _shard: &QueueKey,
+        _request: DeclaredBucketSegmentRequest,
         ) -> EngineResult<DeclaredBucketSegmentResponse> {
             Err(EngineError::Unavailable)
         }

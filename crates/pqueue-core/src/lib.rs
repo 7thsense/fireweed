@@ -27,7 +27,8 @@ pub use domain::{
 pub use query::{
     AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, BucketRule,
     ClaimByQueryRequest, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp,
-    GroupByField, GroupedAggregateRequest, GroupedAggregateResponse, MutationOutcome,
-    MutationResult, OrderField, QueryCapabilityFlags, QueryCursor, QueryFilter, QueryRequestError,
-    RangeScanRequest, RangeScanResponse, RangeScanRow, SortDirection, TimeBucket, TypedValue,
+    GroupByField, GroupedAggregateRequest, GroupedAggregateResponse, MetricsByQueryRequest,
+    MutationOutcome, MutationResult, OrderField, QueryCapabilityFlags, QueryCursor, QueryFilter,
+    QueryRequestError, RangeScanRequest, RangeScanResponse, RangeScanRow, SortDirection, TimeBucket,
+    TypedValue,
 };

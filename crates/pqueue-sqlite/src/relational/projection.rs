@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, RequestId, UtcTimestamp};
+use pqueue_core::{
+    ClientItemKey, ItemId, ItemState, MetricsByQueryRequest, QueueDefinition, RequestId,
+    UtcTimestamp,
+};
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{
     AsOfProjectionStore, ClaimRef, ClaimedItem, CohortLeaseTarget, CommandEnvelope,
@@ -11,7 +14,7 @@ use pqueue_engine::{
     PushFingerprint, PushItem, QueueCounters, QueueKey, QueueMetrics,
 };
 use pqueue_engine::{ProjectionSnapshot, ProjectionStore};
-use pqueue_projection::{InMemoryProjection, ProjectionImage};
+use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::*;
@@ -1104,6 +1107,20 @@ impl ProjectionStore for SqliteProjectionStore {
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         metrics_sql(&self.lock().conn, shard)
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
+        let definition = {
+            let g = self.lock();
+            g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
+        };
+        let image = self.export_projection_image(shard)?;
+        let projection = ProjectionData::from_image(&definition, image)?;
+        projection.metrics_by_query(request)
     }
 
     fn terminal_emission_metrics(

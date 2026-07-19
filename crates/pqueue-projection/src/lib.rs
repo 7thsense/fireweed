@@ -30,11 +30,11 @@ use pqueue_core::{
     AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, ClientItemKey,
     DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexSpec, IndexType,
-    ItemEvent, ItemId, ItemState, LeaseToken, Metadata, MutationOutcome, MutationResult,
-    OrderField, OrderingMode, PriorityModel, PriorityValue, QueryCursor, QueryFilter,
-    QueueDefinition, QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow, RecurrenceMode,
-    RecurrencePolicy, SortDirection, TimeBucket, TypedValue, UtcTimestamp, apply_transition,
-    failure_event, priority_sort,
+    ItemEvent, ItemId, ItemState, LeaseToken, Metadata, MetricsByQueryRequest, MutationOutcome,
+    MutationResult, OrderField, OrderingMode, PriorityModel, PriorityValue, QueryCursor,
+    QueryFilter, QueueDefinition, QueueIndex, RangeScanRequest, RangeScanResponse, RangeScanRow,
+    RecurrenceMode, RecurrencePolicy, SortDirection, TimeBucket, TypedValue, UtcTimestamp,
+    apply_transition, failure_event, priority_sort,
 };
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
@@ -2090,6 +2090,41 @@ impl ProjectionData {
     /// `ProjectionRead::metrics` — per-state counts (superseded items excluded).
     pub fn metrics(&self) -> QueueMetrics {
         self.metrics.clone()
+    }
+
+    /// Filtered lifecycle metrics over the authoritative projection.
+    pub fn metrics_by_query(&self, request: MetricsByQueryRequest) -> EngineResult<QueueMetrics> {
+        let spec = self.typed_range_index(request.index.as_deref())?;
+        let fields = index_fields(spec);
+        for filter in &request.filters {
+            if !fields
+                .iter()
+                .any(|(field, _)| *field == filter.field.as_str())
+            {
+                return Err(EngineError::Invalid("unindexed-field"));
+            }
+        }
+
+        let mut metrics = QueueMetrics::default();
+        for rec in self.items.values() {
+            if rec.superseded {
+                continue;
+            }
+            let Some(entity) = rec.entity_document.as_ref() else {
+                continue;
+            };
+            if !matches_filters_on_entity(entity, &request.filters)? {
+                continue;
+            }
+            match rec.state {
+                ItemState::Pending => metrics.pending += 1,
+                ItemState::Leased => metrics.leased += 1,
+                ItemState::Complete => metrics.complete += 1,
+                ItemState::Failed => metrics.failed += 1,
+            }
+        }
+        metrics.resident_terminal_count = metrics.complete + metrics.failed;
+        Ok(metrics)
     }
 
     fn remove_record(&mut self, rec: ItemRecord) -> EngineResult<()> {
