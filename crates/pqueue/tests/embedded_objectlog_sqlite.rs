@@ -7,12 +7,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::executor::block_on;
 use pqueue::{
-    EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
+    Bytes, ClaimRef, CommitCapabilities, CommitEntry, CommitRequest, EligibilityPolicy,
+    EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
     EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
-    NewItem, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    PriorityValue, QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RequestId, RetryPolicy,
-    TenantId,
+    EngineError, EntryOutcome, FinalizeKind, InstanceFence, LeaseToken, NewItem, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+    QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RequestId, RetryPolicy, SideRecord,
+    TenantId, UtcTimestamp,
 };
+use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
 use pqueue_objectlog::segmented::S3BlobStore;
 use rusqlite::{Connection, params};
@@ -131,6 +134,149 @@ fn assert_delete_rehydrate(
     (expected, first, second)
 }
 
+fn assert_strict_commit_transition_round_trip(config: EmbeddedDurabilityConfig, queue_id: &str) {
+    let clock = Arc::new(ManualClock::at(1_000));
+    let pq = pqueue::open_embedded_sqlite(config, clock).unwrap();
+    let key = queue(queue_id);
+    block_on(pq.create_queue(definition(queue_id))).unwrap();
+
+    let caps = pq.commit_capabilities(&key).unwrap();
+    assert!(caps.atomic_transition_commit);
+    assert!(caps.vectorized_commit);
+    assert!(caps.lease_validation);
+    assert!(caps.retained_commit_idempotency);
+    assert!(caps.authoritative_recovery_reads);
+    assert_eq!(caps.durability_class, DurabilityClass::Atomic);
+
+    let request = RequestId::new(format!("request-{queue_id}")).unwrap();
+    let first = block_on(pq.push_with_request_id(&key, request.clone(), item(10))).unwrap();
+    let second = block_on(pq.push(&key, item(20))).unwrap();
+    let claimed = block_on(pq.claim(&key, 1, 30_000)).unwrap();
+    let claim = &claimed[0];
+    let claim_ref = ClaimRef {
+        item_id: claim.item_id,
+        lease_token: claim
+            .lease_token
+            .clone()
+            .expect("claimed item carries a lease token"),
+        lease_expires_at: claim.lease_expires_at,
+        item_version: claim.item_version,
+    };
+    let transition_request_id = RequestId::new(format!("txn-{queue_id}")).unwrap();
+    let transition = CommitRequest {
+        request_id: Some(transition_request_id.clone()),
+        entries: vec![CommitEntry {
+            claim_ref,
+            finalize: FinalizeKind::Complete,
+            side_records: vec![SideRecord {
+                key: b"state/run-1".to_vec(),
+                payload: Bytes::copy_from_slice(b"audit-bytes"),
+            }],
+            lifecycle_items: vec![item(30)],
+            instance_fence: Some(InstanceFence {
+                instance_key: b"wf-1".to_vec(),
+                expected: 0,
+                next: 1,
+            }),
+        }],
+    };
+    let outcomes = block_on(pq.commit(&key, transition)).unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let lifecycle_id = match &outcomes[0] {
+        EntryOutcome::Committed { lifecycle_item_ids } => {
+            assert_eq!(lifecycle_item_ids.len(), 1);
+            lifecycle_item_ids[0]
+        }
+        other => panic!("expected committed outcome, got {other:?}"),
+    };
+
+    let expected = block_on(pq.metrics(&key)).unwrap();
+    assert_eq!(
+        (expected.pending, expected.leased, expected.complete),
+        (2, 0, 1)
+    );
+    assert_eq!(
+        block_on(pq.peek(&key, 10))
+            .unwrap()
+            .iter()
+            .map(|view| view.item_id)
+            .collect::<Vec<_>>(),
+        vec![second, lifecycle_id]
+    );
+    assert_eq!(
+        block_on(pq.side_record(&key, b"state/run-1"))
+            .unwrap()
+            .as_deref(),
+        Some(b"audit-bytes".as_slice())
+    );
+
+    block_on(pq.delete_projection()).unwrap();
+    assert!(block_on(pq.verify_projection()).is_err());
+    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.verify_projection()).unwrap();
+
+    assert_eq!(block_on(pq.metrics(&key)).unwrap(), expected);
+    assert_eq!(
+        block_on(pq.peek(&key, 10))
+            .unwrap()
+            .iter()
+            .map(|view| view.item_id)
+            .collect::<Vec<_>>(),
+        vec![second, lifecycle_id]
+    );
+    assert_eq!(
+        block_on(pq.side_record(&key, b"state/run-1"))
+            .unwrap()
+            .as_deref(),
+        Some(b"audit-bytes".as_slice())
+    );
+    let replay = block_on(pq.commit(
+        &key,
+        CommitRequest {
+            request_id: Some(transition_request_id.clone()),
+            entries: vec![CommitEntry {
+                claim_ref: ClaimRef {
+                    item_id: claim.item_id,
+                    lease_token: claim
+                        .lease_token
+                        .clone()
+                        .expect("claimed item carries a lease token"),
+                    lease_expires_at: claim.lease_expires_at,
+                    item_version: claim.item_version,
+                },
+                finalize: FinalizeKind::Complete,
+                side_records: vec![SideRecord {
+                    key: b"state/run-1".to_vec(),
+                    payload: Bytes::copy_from_slice(b"audit-bytes"),
+                }],
+                lifecycle_items: vec![item(30)],
+                instance_fence: Some(InstanceFence {
+                    instance_key: b"wf-1".to_vec(),
+                    expected: 0,
+                    next: 1,
+                }),
+            }],
+        },
+    ))
+    .unwrap();
+    assert_eq!(replay, outcomes);
+    let recovery = block_on(pq.explain_commit(&key, transition_request_id))
+        .unwrap()
+        .expect("committed transition survives delete + rehydrate");
+    assert_eq!(recovery.entries.len(), 1);
+    assert_eq!(recovery.entries[0].consumed_input_id, claim.item_id);
+    assert_eq!(
+        recovery.entries[0].side_record_keys,
+        vec![b"state/run-1".to_vec()]
+    );
+    assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
+    assert_eq!(
+        block_on(pq.push_with_request_id(&key, request, item(10))).unwrap(),
+        first
+    );
+}
+
 #[test]
 fn public_objectlog_sqlite_delete_and_rehydrate() {
     let fixture = std::env::temp_dir().join(format!("pqueue-public-sqlite-{}", nonce()));
@@ -152,6 +298,53 @@ fn public_objectlog_sqlite_delete_and_rehydrate() {
         vec![first, second]
     );
     drop(reopened);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_strict_commit_transition_round_trip() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-strict-transition-{}", nonce()));
+    let root = fixture.join("objects");
+    let sqlite = fixture.join("projection.sqlite");
+    let config = local_config(&root, &sqlite);
+    assert_strict_commit_transition_round_trip(config, "strict-transition-queue");
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_async_projection_remains_non_authoritative() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-async-{}", nonce()));
+    let mut config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
+    config.response_barrier = EmbeddedResponseBarrier::AsyncProjection;
+    let pq = pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let key = queue("async-queue");
+    block_on(pq.create_queue(definition("async-queue"))).unwrap();
+
+    let caps = pq.commit_capabilities(&key).unwrap();
+    assert_eq!(caps, CommitCapabilities::default());
+    assert!(matches!(
+        block_on(pq.commit(
+            &key,
+            CommitRequest {
+                request_id: None,
+                entries: vec![CommitEntry {
+                    claim_ref: ClaimRef {
+                        item_id: pqueue::ItemId::new("1").unwrap(),
+                        lease_token: LeaseToken::new("lease-1").unwrap(),
+                        lease_expires_at: UtcTimestamp::new(1, 0).unwrap(),
+                        item_version: 0,
+                    },
+                    finalize: FinalizeKind::Complete,
+                    side_records: vec![],
+                    lifecycle_items: vec![],
+                    instance_fence: None,
+                }],
+            }
+        )),
+        Err(EngineError::Unavailable)
+    ));
+
+    drop(pq);
     let _ = fs::remove_dir_all(fixture);
 }
 

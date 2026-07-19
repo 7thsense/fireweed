@@ -764,22 +764,15 @@ impl AsOfProjectionStore for InMemoryProjection {
 mod async_axis_tests {
     use std::future::Future;
     use std::pin::pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     use pqueue_core::{QueueId, TenantId};
 
     use super::*;
 
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
-
     fn one_poll<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
         let mut future = pin!(future);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(output) => output,

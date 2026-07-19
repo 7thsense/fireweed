@@ -909,6 +909,7 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
 #[cfg(feature = "objectlog")]
 fn open_embedded_object_log(
     config: &EmbeddedDurabilityConfig,
+    authoritative: bool,
 ) -> EngineResult<pqueue_objectlog::ObjectLog> {
     use pqueue_objectlog::segmented::{
         BlobStore, LocalFsBlobStore, NamespacedBlobStore, S3BlobStore,
@@ -949,7 +950,14 @@ fn open_embedded_object_log(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let store: Arc<dyn BlobStore> = Arc::new(NamespacedBlobStore::new(raw, &namespace)?);
-    pqueue_objectlog::ObjectLog::open_group_commit_with_blob_store(store, segment_config)
+    if authoritative {
+        pqueue_objectlog::ObjectLog::open_group_commit_authoritative_with_blob_store(
+            store,
+            segment_config,
+        )
+    } else {
+        pqueue_objectlog::ObjectLog::open_group_commit_with_blob_store(store, segment_config)
+    }
 }
 
 /// The capabilities the library facade composes over (the worker + control-plane ports). This is an
@@ -2371,7 +2379,7 @@ pub fn open_embedded(
         }
         EmbeddedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
     };
-    let log = open_embedded_object_log(&config)?;
+    let log = open_embedded_object_log(&config, true)?;
 
     if let Err(error) = validate_objectlog_postgres_catalog(&log, &projection) {
         match config.recovery.incompatible_projection {
@@ -2455,7 +2463,10 @@ pub fn open_embedded_sqlite(
     if config.response_barrier == EmbeddedResponseBarrier::AsyncProjection {
         projection = projection.with_async_monitor(pqueue_sqlite::HybridAsyncThresholds::default());
     }
-    let log = open_embedded_object_log(&config)?;
+    let log = open_embedded_object_log(
+        &config,
+        config.response_barrier == EmbeddedResponseBarrier::Strict,
+    )?;
 
     if let Err(error) = validate_objectlog_sqlite_catalog(&log, projection.sqlite()) {
         match config.recovery.incompatible_projection {

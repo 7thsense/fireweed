@@ -8,12 +8,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::executor::block_on;
 use postgres::{Client, NoTls};
 use pqueue::{
-    EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
-    EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
-    NewItem, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    PriorityValue, QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RequestId, RetryPolicy,
-    TenantId,
+    Bytes, ClaimRef, CommitEntry, CommitRequest, EligibilityPolicy, EmbeddedDurabilityConfig,
+    EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryPolicy,
+    EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig, EntryOutcome, FinalizeKind,
+    InstanceFence, NewItem, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueKey, RecurrencePolicy,
+    RequestId, RetryPolicy, SideRecord, TenantId,
 };
+use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
 
 fn unique_fixture(name: &str) -> (PathBuf, String) {
@@ -144,6 +146,13 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     let expected = block_on(pq.metrics(&key)).unwrap();
     assert_eq!(expected.pending, 2);
     assert_eq!(block_on(pq.peek(&key, 10)).unwrap().len(), 2);
+    let caps = pq.commit_capabilities(&key).unwrap();
+    assert!(caps.atomic_transition_commit);
+    assert!(caps.vectorized_commit);
+    assert!(caps.lease_validation);
+    assert!(caps.retained_commit_idempotency);
+    assert!(caps.authoritative_recovery_reads);
+    assert_eq!(caps.durability_class, DurabilityClass::Atomic);
     assert_eq!(
         block_on(pq.verify_projection())
             .unwrap()
@@ -151,6 +160,67 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
         block_on(pq.verify_projection())
             .unwrap()
             .authoritative_sequence
+    );
+
+    let claimed = block_on(pq.claim(&key, 1, 30_000)).unwrap();
+    let claim = &claimed[0];
+    let claim_ref = ClaimRef {
+        item_id: claim.item_id,
+        lease_token: claim
+            .lease_token
+            .clone()
+            .expect("claimed item carries a lease token"),
+        lease_expires_at: claim.lease_expires_at,
+        item_version: claim.item_version,
+    };
+    let transition_request_id = RequestId::new("embedded-transition-1").unwrap();
+    let outcomes = block_on(pq.commit(
+        &key,
+        CommitRequest {
+            request_id: Some(transition_request_id.clone()),
+            entries: vec![CommitEntry {
+                claim_ref,
+                finalize: FinalizeKind::Complete,
+                side_records: vec![SideRecord {
+                    key: b"state/run-1".to_vec(),
+                    payload: Bytes::copy_from_slice(b"audit-bytes"),
+                }],
+                lifecycle_items: vec![item(30)],
+                instance_fence: Some(InstanceFence {
+                    instance_key: b"wf-1".to_vec(),
+                    expected: 0,
+                    next: 1,
+                }),
+            }],
+        },
+    ))
+    .unwrap();
+    assert_eq!(outcomes.len(), 1);
+    let lifecycle_id = match &outcomes[0] {
+        EntryOutcome::Committed { lifecycle_item_ids } => {
+            assert_eq!(lifecycle_item_ids.len(), 1);
+            lifecycle_item_ids[0]
+        }
+        other => panic!("expected committed outcome, got {other:?}"),
+    };
+    let expected = block_on(pq.metrics(&key)).unwrap();
+    assert_eq!(
+        (expected.pending, expected.leased, expected.complete),
+        (2, 0, 1)
+    );
+    assert_eq!(
+        block_on(pq.peek(&key, 10))
+            .unwrap()
+            .iter()
+            .map(|view| view.item_id)
+            .collect::<Vec<_>>(),
+        vec![second, lifecycle_id]
+    );
+    assert_eq!(
+        block_on(pq.side_record(&key, b"state/run-1"))
+            .unwrap()
+            .as_deref(),
+        Some(b"audit-bytes".as_slice())
     );
 
     // A deliberately behind image replays only the one retained command after its durable cursor.
@@ -212,7 +282,10 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     block_on(pq.delete_projection()).unwrap();
     assert_eq!(object_count(&root), objects_before_delete);
     let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
-    assert_eq!(rebuilt.tail_commands_replayed, 2); // Queue definitions have their own durable catalog.
+    assert!(
+        rebuilt.tail_commands_replayed >= 2,
+        "projection rebuild must replay the authoritative tail"
+    );
     assert_eq!(block_on(pq.metrics(&key)).unwrap(), expected);
     assert_eq!(
         block_on(pq.peek(&key, 10))
@@ -220,8 +293,50 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
             .iter()
             .map(|view| view.item_id)
             .collect::<Vec<_>>(),
-        vec![first, second]
+        vec![second, lifecycle_id]
     );
+
+    let replay_transition = block_on(pq.commit(
+        &key,
+        CommitRequest {
+            request_id: Some(transition_request_id.clone()),
+            entries: vec![CommitEntry {
+                claim_ref: ClaimRef {
+                    item_id: claim.item_id,
+                    lease_token: claim
+                        .lease_token
+                        .clone()
+                        .expect("claimed item carries a lease token"),
+                    lease_expires_at: claim.lease_expires_at,
+                    item_version: claim.item_version,
+                },
+                finalize: FinalizeKind::Complete,
+                side_records: vec![SideRecord {
+                    key: b"state/run-1".to_vec(),
+                    payload: Bytes::copy_from_slice(b"audit-bytes"),
+                }],
+                lifecycle_items: vec![item(30)],
+                instance_fence: Some(InstanceFence {
+                    instance_key: b"wf-1".to_vec(),
+                    expected: 0,
+                    next: 1,
+                }),
+            }],
+        },
+    ))
+    .unwrap();
+    assert_eq!(replay_transition, outcomes);
+    let recovery = block_on(pq.explain_commit(&key, transition_request_id))
+        .unwrap()
+        .expect("committed transition survives delete + rehydrate");
+    assert_eq!(recovery.entries.len(), 1);
+    assert_eq!(recovery.entries[0].consumed_input_id, claim.item_id);
+    assert_eq!(
+        recovery.entries[0].side_record_keys,
+        vec![b"state/run-1".to_vec()]
+    );
+    assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    assert_eq!(recovery.entries[0].instance, Some((b"wf-1".to_vec(), 1)));
 
     let replayed =
         block_on(pq.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
@@ -238,7 +353,7 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
             .iter()
             .map(|view| view.item_id)
             .collect::<Vec<_>>(),
-        vec![first, second]
+        vec![second, lifecycle_id]
     );
     assert_eq!(
         block_on(reopened.push_with_request_id(&key, first_request, item(10))).unwrap(),

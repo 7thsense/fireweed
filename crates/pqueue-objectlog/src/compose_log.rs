@@ -92,6 +92,7 @@ const APPEND_MAX_LATENCY_MS: u64 = u64::MAX;
 pub struct ObjectLog {
     log: SegmentedObjectLog<Arc<dyn BlobStore>>,
     config: SegmentConfig,
+    durability_class: DurabilityClass,
     /// Whether this axis exposes the [`LogStore`] group-commit facet (ack-after-seal co-buffering). `false`
     /// for [`ObjectLog::open`] — the synchronous force-seal-per-`append` path (every conformance/durability/
     /// reconnect test runs on it, UNCHANGED). `true` for [`ObjectLog::open_group_commit`] — the composition
@@ -109,6 +110,7 @@ impl ObjectLog {
         Ok(Self {
             log: SegmentedObjectLog::open(store, config),
             config,
+            durability_class: DurabilityClass::EventualApply,
             group_commit: false,
         })
     }
@@ -119,6 +121,7 @@ impl ObjectLog {
         Ok(Self {
             log: SegmentedObjectLog::open(store, config),
             config,
+            durability_class: DurabilityClass::EventualApply,
             group_commit: false,
         })
     }
@@ -143,8 +146,36 @@ impl ObjectLog {
         Ok(Self {
             log: SegmentedObjectLog::open(store, config),
             config,
+            durability_class: DurabilityClass::EventualApply,
             group_commit: true,
         })
+    }
+
+    /// Open the group-commit path as an authoritative embedded log axis.
+    ///
+    /// The write mechanics stay the same as [`ObjectLog::open_group_commit_with_blob_store`], but the
+    /// returned durability class is [`DurabilityClass::Atomic`] so an embedded strict composition can
+    /// truthfully advertise the atomic commit-transition surface only after recovery and replay are
+    /// exercised by the public embedded tests.
+    pub fn open_group_commit_authoritative_with_blob_store(
+        store: Arc<dyn BlobStore>,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
+        Ok(Self {
+            log: SegmentedObjectLog::open(store, config),
+            config,
+            durability_class: DurabilityClass::Atomic,
+            group_commit: true,
+        })
+    }
+
+    /// Open (or recover) the authoritative embedded group-commit path rooted at `root`.
+    pub fn open_group_commit_authoritative(
+        root: impl Into<std::path::PathBuf>,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
+        let store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::open(root)?);
+        Self::open_group_commit_authoritative_with_blob_store(store, config)
     }
 
     /// A snapshot of the substrate's measured group-commit segment counters (segments sealed, commands
@@ -372,7 +403,7 @@ impl ObjectLog {
 
 impl LogStore for ObjectLog {
     fn durability_class(&self) -> DurabilityClass {
-        DurabilityClass::EventualApply
+        self.durability_class
     }
 
     fn ensure_shard(&mut self, shard: &QueueKey) -> EngineResult<()> {
