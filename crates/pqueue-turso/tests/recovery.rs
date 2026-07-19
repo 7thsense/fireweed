@@ -62,8 +62,85 @@ async fn reopen_and_genesis_replay_converge_to_the_same_cursor_and_state() {
         AsyncProjectionStore::recovery_high_water(&replayed, shard.clone())
             .await
             .unwrap(),
-        AsyncProjectionStore::recovery_high_water(&reopened, shard)
+        AsyncProjectionStore::recovery_high_water(&reopened, shard.clone())
             .await
             .unwrap()
+    );
+
+    // An overlapping replay is idempotent and cannot advance or duplicate state.
+    AsyncProjectionStore::apply_recovery(
+        &replayed,
+        (0..4)
+            .map(|sequence| CommandPosition::new(shard.clone(), 0, sequence))
+            .collect(),
+        lifecycle(id),
+    )
+    .await
+    .unwrap();
+    assert_state(&replayed, shard.clone(), id, Some(ItemState::Complete)).await;
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&replayed, shard.clone())
+            .await
+            .unwrap(),
+        Some(CommandPosition::new(shard.clone(), 0, 3))
+    );
+
+    // A gap fails closed and leaves the cursor and rows at the last contiguous command.
+    let gap = lifecycle(ItemId::new("202").unwrap()).remove(0);
+    assert!(
+        AsyncProjectionStore::apply_recovery(
+            &replayed,
+            vec![CommandPosition::new(shard.clone(), 0, 5)],
+            vec![gap],
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&replayed, shard.clone())
+            .await
+            .unwrap(),
+        Some(CommandPosition::new(shard, 0, 3))
+    );
+}
+
+#[tokio::test]
+async fn local_file_loss_rebuilds_exactly_from_authoritative_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lost.db");
+    let definition = qdef();
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let id = ItemId::new("211").unwrap();
+    let commands = lifecycle(id);
+    let store = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition.clone())
+        .await
+        .unwrap();
+    drop(store);
+    std::fs::remove_file(&path).unwrap();
+
+    let rebuilt = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&rebuilt, definition)
+        .await
+        .unwrap();
+    AsyncProjectionStore::apply_recovery(
+        &rebuilt,
+        (0..commands.len())
+            .map(|sequence| CommandPosition::new(shard.clone(), 0, sequence as u64))
+            .collect(),
+        commands,
+    )
+    .await
+    .unwrap();
+    assert_state(&rebuilt, shard.clone(), id, Some(ItemState::Complete)).await;
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&rebuilt, shard.clone())
+            .await
+            .unwrap(),
+        Some(CommandPosition::new(shard, 0, 3))
     );
 }
