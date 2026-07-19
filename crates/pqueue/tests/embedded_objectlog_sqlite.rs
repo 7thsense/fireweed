@@ -546,6 +546,16 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
             value: TypedValue::String("transition".to_string()),
         }],
     };
+    let ordinary_before = block_on(pq.metrics(&key)).unwrap();
+    assert_eq!(
+        (
+            ordinary_before.pending,
+            ordinary_before.leased,
+            ordinary_before.complete,
+            ordinary_before.failed,
+        ),
+        (4, 4, 4, 4)
+    );
     let expected = block_on(pq.metrics_by_query(&key, request.clone())).unwrap();
     assert_eq!(
         (
@@ -556,6 +566,18 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
         ),
         (1, 1, 1, 1)
     );
+    let invalid = MetricsByQueryRequest {
+        index: Some("by_record_kind_scheduled_at".to_string()),
+        filters: vec![QueryFilter {
+            field: "private_payload".to_string(),
+            op: FilterOp::Eq,
+            value: TypedValue::String("x".to_string()),
+        }],
+    };
+    assert!(matches!(
+        block_on(pq.metrics_by_query(&key, invalid)),
+        Err(EngineError::Invalid(_))
+    ));
 
     block_on(pq.delete_projection()).unwrap();
     block_on(pq.rehydrate_projection()).unwrap();
@@ -564,7 +586,7 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
         block_on(pq.metrics_by_query(&key, request)).unwrap(),
         expected
     );
-    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 4);
+    assert_eq!(block_on(pq.metrics(&key)).unwrap(), ordinary_before);
     drop(pq);
     let _ = fs::remove_dir_all(fixture);
 }
