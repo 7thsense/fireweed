@@ -44,6 +44,8 @@ use tokio_util::sync::CancellationToken;
 
 mod change_record_sink;
 mod object_log_sqlite;
+#[cfg(feature = "turso-projection")]
+mod object_log_turso;
 mod tokio_dispatcher;
 pub use change_record_sink::{
     ChangeRecordSinkConfig, ChangeRecordSinkMode, FjordChangeRecordSink, NiflheimChangeRecordSink,
@@ -53,6 +55,8 @@ pub use object_log_sqlite::{
     DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend,
     SegmentedObjectLogSqliteBackend,
 };
+#[cfg(feature = "turso-projection")]
+pub use object_log_turso::ObjectLogTursoBackend;
 pub use pqueue_objectlog::segmented::{SegmentConfig, SegmentWriterFormat};
 pub use tokio_dispatcher::TokioTaskDispatcher;
 
@@ -319,6 +323,9 @@ pub enum ProjectionSpec {
     InMemory,
     /// Derived relational sqlite projection (`pqueue_items` is the read model) at `path`.
     Sqlite { path: PathBuf },
+    /// Native-async local Turso derived projection. Selection is accepted only by builds carrying the
+    /// `turso-projection` feature and only with an object-log authority.
+    Turso { path: PathBuf },
     /// SQLite-first durable projection image plus hot in-memory serving at `path`.
     Hybrid { path: PathBuf },
     /// The `objectlog/hybrid-strict` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
@@ -347,6 +354,7 @@ impl ProjectionSpec {
         match self {
             ProjectionSpec::InMemory => "inmemory",
             ProjectionSpec::Sqlite { .. } => "sqlite",
+            ProjectionSpec::Turso { .. } => "turso",
             ProjectionSpec::Hybrid { .. } => "hybrid",
             ProjectionSpec::HybridStrict { .. } => "hybrid-strict",
             ProjectionSpec::HybridAsync { .. } => "hybrid-async",
@@ -1927,6 +1935,29 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
+        #[cfg(feature = "turso-projection")]
+        (LogSpec::ObjectLog(spec), ProjectionSpec::Turso { path }) => {
+            let segment_config = spec.segment_config();
+            let store = spec.open_blob_store()?;
+            let backend = Arc::new(
+                ObjectLogTursoBackend::open_with_blob_store(store, &path, segment_config).await?,
+            );
+            run_owned(
+                backend,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
+        #[cfg(not(feature = "turso-projection"))]
+        (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => Err(EngineError::Invalid(
+            "PQUEUE_PROJECTION_BACKEND=turso requires a pqueue-server build with the `turso-projection` cargo feature",
+        )),
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
             let segment_config = spec.segment_config();
             let store = spec.open_blob_store()?;

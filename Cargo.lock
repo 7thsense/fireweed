@@ -2769,6 +2769,7 @@ dependencies = [
  "pqueue-release",
  "pqueue-resp",
  "pqueue-sqlite",
+ "pqueue-turso",
  "redis",
  "rskafka",
  "serde_json",

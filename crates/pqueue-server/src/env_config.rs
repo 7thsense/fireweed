@@ -469,6 +469,32 @@ fn parse_backend(
                 "/var/lib/pqueue/pqueue-projection.db",
             )),
         },
+        "turso" => {
+            #[cfg(not(feature = "turso-projection"))]
+            return Err(unsupported_storage(
+                &log,
+                &projection,
+                "the Turso derived projection is feature-gated; rebuild pqueue-server with `--features turso-projection`",
+            ));
+            #[cfg(feature = "turso-projection")]
+            {
+                let raw = env_or(
+                    env,
+                    "PQUEUE_TURSO_PROJECTION_PATH",
+                    "/var/lib/pqueue/pqueue-turso.db",
+                );
+                if raw.trim().is_empty() {
+                    return Err(unsupported_storage(
+                        &log,
+                        &projection,
+                        "PQUEUE_TURSO_PROJECTION_PATH must be a non-empty local path",
+                    ));
+                }
+                ProjectionSpec::Turso {
+                    path: PathBuf::from(raw),
+                }
+            }
+        }
         "hybrid" => ProjectionSpec::Hybrid {
             path: PathBuf::from(env_or(
                 env,
@@ -521,7 +547,7 @@ fn parse_backend(
                 &log,
                 &projection,
                 &format!(
-                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|hybrid|hybrid-strict|hybrid-async|postgres"
+                    "unknown PQUEUE_PROJECTION_BACKEND={other:?}; expected inmemory|sqlite|turso|hybrid|hybrid-strict|hybrid-async|postgres"
                 ),
             ));
         }
@@ -535,6 +561,7 @@ fn parse_backend(
         (LogSpec::Sqlite { .. }, ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::InMemory) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::Sqlite { .. }) => true,
+        (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::Hybrid { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::HybridStrict { .. }) => true,
         (LogSpec::ObjectLog(_), ProjectionSpec::HybridAsync { .. }) => true,
@@ -1024,6 +1051,49 @@ mod tests {
             }
             _ => panic!("expected objectlog log × sqlite projection"),
         }
+    }
+
+    #[cfg(feature = "turso-projection")]
+    #[test]
+    fn objectlog_turso_projection_requires_and_carries_local_path() {
+        let config = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "objectlog"),
+            ("PQUEUE_PROJECTION_BACKEND", "turso"),
+            ("PQUEUE_OBJECT_LOG_ROOT", "/data/olog"),
+            ("PQUEUE_TURSO_PROJECTION_PATH", "/data/projection.turso"),
+        ]))
+        .expect("feature-enabled Turso profile");
+        assert!(matches!(config.backend.log, LogSpec::ObjectLog(_)));
+        assert!(matches!(
+            config.backend.projection,
+            ProjectionSpec::Turso { path }
+                if path.as_path() == std::path::Path::new("/data/projection.turso")
+        ));
+
+        let Err(error) = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "objectlog"),
+            ("PQUEUE_PROJECTION_BACKEND", "turso"),
+            ("PQUEUE_TURSO_PROJECTION_PATH", ""),
+        ])) else {
+            panic!("empty Turso path must fail closed")
+        };
+        assert!(error.0.contains("non-empty local path"), "{}", error.0);
+    }
+
+    #[cfg(not(feature = "turso-projection"))]
+    #[test]
+    fn objectlog_turso_selection_explains_feature_disabled_build() {
+        let Err(error) = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "objectlog"),
+            ("PQUEUE_PROJECTION_BACKEND", "turso"),
+        ])) else {
+            panic!("default build must reject Turso selection")
+        };
+        assert!(
+            error.0.contains("--features turso-projection"),
+            "{}",
+            error.0
+        );
     }
 
     #[test]

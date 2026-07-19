@@ -22,6 +22,7 @@ pqueue-engine = { path = "../pqueue-engine" }
 pqueue-resp = { path = "../pqueue-resp" }
 pqueue-memory = { path = "../pqueue-memory" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
+pqueue-turso = { path = "../pqueue-turso", optional = true }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-projection = { path = "../pqueue-projection" }
 fjord = { git = "https://github.com/7thsense/fjord.git", tag = "v0.1.3", package = "fjord-broker" }
@@ -67,6 +68,9 @@ tls = ["postgres", "pqueue-postgres/tls"]
 # the swappable-at-the-seam external option). Default-off: the in-process embedded fjord surface is the
 # default. No C Kafka client: the external seam is pure Rust.
 external-kafka = ["dep:rskafka", "dep:chrono"]
+# Opt-in native-async Turso derived projection for the object-log profile. The dependency's local
+# feature is intentionally selected here; remote/sync/MVCC Turso modes remain out of scope.
+turso-projection = ["dep:pqueue-turso", "pqueue-turso/local"]
 
 [dev-dependencies]
 pqueue-core = { path = "../pqueue-core" }

@@ -16,9 +16,15 @@ use pqueue_engine::{
     FinalizeOutcome, FinalizePort, InMemoryControlPlane, InProcessControlPlane, LogStore,
     ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey, ReclaimDriver,
 };
+#[cfg(feature = "turso-projection")]
+use pqueue_engine::{ReassignLeasePort, RenewLeasePort};
 use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_objectlog::ObjectLog;
+#[cfg(feature = "turso-projection")]
+use pqueue_objectlog::segmented::LocalFsBlobStore;
 use pqueue_resp::{RespHooks, RouteDecision, SystemClock, serve_with_shutdown_and_hooks};
+#[cfg(feature = "turso-projection")]
+use pqueue_server::ObjectLogTursoBackend;
 use pqueue_server::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, LogSpec,
     NiflheimChangeRecordSink, ObjectLogSpec, OwnershipRuntime, ProjectionSpec, SegmentConfig,
@@ -918,6 +924,89 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
         "post-reopen push must not remint an existing item id"
     );
     server.shutdown_and_drain(Duration::from_secs(5)).await;
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+}
+
+#[cfg(feature = "turso-projection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn objectlog_turso_profile_runs_lifecycle_reads_and_reopens() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-profile");
+    let config = SegmentConfig::new(1, 5).unwrap();
+    let item_id = {
+        let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
+        let backend = ObjectLogTursoBackend::open_with_blob_store(store, &projection_path, config)
+            .await
+            .unwrap();
+        backend.create_queue(qdef()).await.unwrap();
+        let ids = backend
+            .push(&qkey(), vec![PushSpec::default()], ts(0), None)
+            .await
+            .unwrap();
+        let claimed = backend
+            .claim(ClaimRequest {
+                eligibility_time: None,
+                shard: qkey(),
+                worker_id: WorkerId::new("turso-worker").unwrap(),
+                max_items: 1,
+                lease_token: LeaseToken::new("turso-lease-1").unwrap(),
+                lease_expires_at: ts(30),
+                now: ts(1),
+                compatibility: Default::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        backend
+            .renew(&qkey(), ids.clone(), ts(40), ts(2), None)
+            .await
+            .unwrap();
+        backend
+            .reassign(
+                &qkey(),
+                ids.clone(),
+                LeaseToken::new("turso-lease-2").unwrap(),
+                ts(50),
+                ts(3),
+                None,
+            )
+            .await
+            .unwrap();
+        let pending = backend.pending(&qkey()).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].lease_token.as_str(), "turso-lease-2");
+        backend
+            .finalize(
+                &qkey(),
+                vec![FinalizeOutcome::new(ids[0], FinalizeKind::Complete)],
+                ts(4),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(backend.metrics(&qkey()).await.unwrap().complete, 1);
+        ids[0]
+    };
+
+    let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
+    let reopened = ObjectLogTursoBackend::open_with_blob_store(store, &projection_path, config)
+        .await
+        .unwrap();
+    reopened.create_queue(qdef()).await.unwrap();
+    assert_eq!(reopened.metrics(&qkey()).await.unwrap().complete, 1);
+    assert_eq!(
+        pqueue_engine::AsyncProjectionStore::item_state(
+            reopened.projection().as_ref(),
+            qkey(),
+            item_id,
+        )
+        .await
+        .unwrap(),
+        Some(pqueue_core::ItemState::Complete),
+    );
+
+    drop(reopened);
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
 }

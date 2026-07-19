@@ -13,8 +13,9 @@ use pqueue_core::{
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CohortLeaseTarget,
     CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind, FinalizeTarget,
-    IdempotencyDecision, PayloadUpdate, PushFingerprint, PushItem, QueueCommand, QueueKey,
-    RenewTarget, RequestOutcome, RichClaimSelection,
+    IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate, PushFingerprint,
+    PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget, RequestOutcome,
+    RichClaimSelection, TerminalEmissionMetrics,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -2388,6 +2389,137 @@ impl TursoRelational {
             }
         }
         Ok(present)
+    }
+
+    /// RESP/server read surface over the same native-async projection used by commit apply.
+    pub async fn server_peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
+        let limit = i64::try_from(limit).map_err(storage)?;
+        let rows = self
+            .query(
+                "SELECT item_id,client_item_key,priority,item_version FROM pqueue_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+             ORDER BY priority_sort,created_seq LIMIT ?3",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                    limit.into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ItemView {
+                    item_id: ItemId::new(text(&row.values[0])?).map_err(storage)?,
+                    client_item_key: ClientItemKey::new(text(&row.values[1])?).map_err(storage)?,
+                    priority: parse_priority(optional_text(&row.values[2])?)?,
+                    item_version: nonnegative_u64(integer(&row.values[3])?, "item_version")?,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn server_pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
+        let rows = self
+            .query(
+                "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' AND superseded=0 \
+             ORDER BY item_id",
+                vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                ],
+            )
+            .await
+            .map_err(storage)?;
+        let tokens = self.live_tokens.lock().await;
+        let mut pending = Vec::new();
+        for row in rows {
+            let item_id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+            let Some(lease_token) = tokens.get(&(shard.clone(), item_id)).cloned() else {
+                continue;
+            };
+            let Some(expires) = optional_integer(&row.values[1])? else {
+                continue;
+            };
+            pending.push(LeaseView {
+                item_id,
+                lease_token,
+                lease_expires_at: nanos_ts(expires),
+                attempt_count: nonnegative_u32(integer(&row.values[2])?, "retry_count")?,
+            });
+        }
+        Ok(pending)
+    }
+
+    pub async fn server_live_items(
+        &self,
+        shard: &QueueKey,
+        keys: &[ClientItemKey],
+    ) -> EngineResult<Vec<Option<LiveItemView>>> {
+        let mut result = Vec::with_capacity(keys.len());
+        for key in keys {
+            let rows = self.query(
+                "SELECT item_id,client_item_key,item_version,lifecycle_state,priority,group_key,not_before,retry_count,payload,fields \
+                 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
+                 AND lifecycle_state IN ('Pending','Leased') AND superseded=0 LIMIT 1",
+                vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into(), key.as_str().to_string().into()],
+            ).await.map_err(storage)?;
+            let Some(row) = rows.first() else {
+                result.push(None);
+                continue;
+            };
+            let values = &row.values;
+            result.push(Some(LiveItemView {
+                item_id: ItemId::new(text(&values[0])?).map_err(storage)?,
+                client_item_key: ClientItemKey::new(text(&values[1])?).map_err(storage)?,
+                item_version: nonnegative_u64(integer(&values[2])?, "item_version")?,
+                lifecycle_state: parse_state(&text(&values[3])?).map_err(storage)?,
+                priority: parse_priority(optional_text(&values[4])?)?,
+                group_key: optional_text(&values[5])?
+                    .map(GroupKey::new)
+                    .transpose()
+                    .map_err(storage)?,
+                not_before: optional_integer(&values[6])?.map(nanos_ts),
+                attempt_count: nonnegative_u32(integer(&values[7])?, "retry_count")?,
+                payload: optional_blob(&values[8])?.map(Bytes::from),
+                fields: fields_from_json(text(&values[9])?)?,
+            }));
+        }
+        Ok(result)
+    }
+
+    pub async fn server_metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+        let rows = self.query(
+            "SELECT lifecycle_state,COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+             AND superseded=0 GROUP BY lifecycle_state",
+            vec![shard.tenant_id.as_str().to_string().into(), shard.queue_id.as_str().to_string().into()],
+        ).await.map_err(storage)?;
+        let mut metrics = QueueMetrics::default();
+        for row in rows {
+            let count = nonnegative_u64(integer(&row.values[1])?, "lifecycle count")?;
+            match text(&row.values[0])?.as_str() {
+                "Pending" => metrics.pending = count,
+                "Leased" => metrics.leased = count,
+                "Complete" => metrics.complete = count,
+                "Failed" => metrics.failed = count,
+                _ => {}
+            }
+        }
+        metrics.resident_terminal_count = metrics.complete.saturating_add(metrics.failed);
+        Ok(metrics)
+    }
+
+    pub async fn server_terminal_emission_metrics(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<TerminalEmissionMetrics> {
+        let metrics = self.server_metrics(shard).await?;
+        Ok(TerminalEmissionMetrics {
+            resident_terminal_count: metrics.resident_terminal_count,
+            emission_lag_commands: 0,
+            emission_oldest_unemitted_age_ms: 0,
+        })
     }
 }
 
