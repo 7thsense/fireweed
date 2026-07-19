@@ -144,3 +144,51 @@ async fn local_file_loss_rebuilds_exactly_from_authoritative_history() {
         Some(CommandPosition::new(shard, 0, 3))
     );
 }
+
+#[tokio::test]
+async fn snapshot_tail_recovery_skips_overlap_and_applies_only_the_contiguous_tail() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("snapshot-tail.db");
+    let definition = qdef();
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let id = ItemId::new("221").unwrap();
+    let commands = lifecycle(id);
+
+    let store = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition)
+        .await
+        .unwrap();
+    AsyncProjectionStore::apply_live(
+        &store,
+        vec![
+            CommandPosition::new(shard.clone(), 0, 0),
+            CommandPosition::new(shard.clone(), 0, 1),
+        ],
+        commands[..2].to_vec(),
+    )
+    .await
+    .unwrap();
+    drop(store);
+
+    let reopened = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::apply_recovery(
+        &reopened,
+        (0..commands.len())
+            .map(|sequence| CommandPosition::new(shard.clone(), 0, sequence as u64))
+            .collect(),
+        commands,
+    )
+    .await
+    .unwrap();
+    assert_state(&reopened, shard.clone(), id, Some(ItemState::Complete)).await;
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&reopened, shard.clone())
+            .await
+            .unwrap(),
+        Some(CommandPosition::new(shard, 0, 3))
+    );
+}

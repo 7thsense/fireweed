@@ -85,6 +85,60 @@ impl Pair {
                 .await
                 .unwrap()
         );
+        for now in [ts(0), ts(19), ts(20), ts(30), ts(100)] {
+            assert_eq!(
+                AsyncProjectionStore::eligible_candidates(
+                    &self.turso,
+                    self.shard.clone(),
+                    now,
+                    100,
+                )
+                .await
+                .unwrap(),
+                AsyncProjectionStore::eligible_candidates(
+                    &self.sqlite,
+                    self.shard.clone(),
+                    now,
+                    100,
+                )
+                .await
+                .unwrap(),
+                "eligibility mismatch at {now:?}"
+            );
+            assert_eq!(
+                AsyncProjectionStore::expired_leases(&self.turso, self.shard.clone(), now, 100,)
+                    .await
+                    .unwrap(),
+                AsyncProjectionStore::expired_leases(&self.sqlite, self.shard.clone(), now, 100,)
+                    .await
+                    .unwrap(),
+                "expired-lease mismatch at {now:?}"
+            );
+        }
+        let turso_claimed =
+            AsyncProjectionStore::render_claimed(&self.turso, self.shard.clone(), ids.to_vec())
+                .await
+                .unwrap();
+        let sqlite_claimed =
+            AsyncProjectionStore::render_claimed(&self.sqlite, self.shard.clone(), ids.to_vec())
+                .await
+                .unwrap();
+        assert_eq!(turso_claimed.len(), sqlite_claimed.len());
+        for (turso, sqlite) in turso_claimed.iter().zip(&sqlite_claimed) {
+            assert_eq!(turso.item_id, sqlite.item_id);
+            assert_eq!(turso.client_item_key, sqlite.client_item_key);
+            assert_eq!(turso.item_version, sqlite.item_version);
+            assert_eq!(turso.priority, sqlite.priority);
+            assert_eq!(turso.group_key, sqlite.group_key);
+            assert_eq!(turso.not_before, sqlite.not_before);
+            assert_eq!(turso.lease_token, sqlite.lease_token);
+            assert_eq!(turso.lease_expires_at, sqlite.lease_expires_at);
+            assert_eq!(turso.attempt_count, sqlite.attempt_count);
+            assert_eq!(turso.payload, sqlite.payload);
+            assert_eq!(turso.fields, sqlite.fields);
+            assert_eq!(turso.metadata, sqlite.metadata);
+            assert_eq!(turso.gate_keys, sqlite.gate_keys);
+        }
     }
 }
 
