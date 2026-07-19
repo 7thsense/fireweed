@@ -9,15 +9,15 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: a0e586b8da0b19602c95fc769dabe4cfd964b9c4c013a27fc2ba9c0c790038bb
+    self_hash: 5194d0692b08378442c24a48b23aa0a78053337b87572e6e2090abd407a67709
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-      tp-scale-substantiation: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
-      tp-verification-acceptance-criteria: 8e7afb90dddf5324683ca8fb2781089bda204d71a65e62a0696ef28570e312a6
-    reviewed_at: "2026-07-18T02:36:05Z"
+      td-s3-object-log-sqlite-projection-mode: ec22ad6a2a2f16f8164253f0f8c321ae5e33f24f250daf6a7aadcc016340acbd
+      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
+      tp-scale-substantiation: f22ca60c926403fbb83ae37a54150507296929660ed8bfcea4bcae85f9f37798
+      tp-verification-acceptance-criteria: d726a7a901d02af34d992042834d1f054944ca4c5f64cb265a3c08bd601f5bdb
+    reviewed_at: "2026-07-19T23:16:56Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -52,7 +52,7 @@ executable combinations:
 | `objectlog` | `inmemory` | Live container and Helm smoke path (in the CI kind matrix). |
 | `objectlog` | `sqlite` | Wired (durable SQLite projection over the object log; in the CI kind matrix). |
 | `objectlog` | `hybrid` | Wired (TD-004 hot-memory-over-durable-SQLite; shipped v0.6.0). |
-| `objectlog` | `hybrid-strict` | Wired (SQLite durable before memory apply). Env-only: not yet chart-selectable (the chart schema's projection enum omits `hybrid-strict`). |
+| `objectlog` | `hybrid-strict` | Experimental runtime path (SQLite durable before memory apply). Env/direct-config only; intentionally not chart-selectable or production-supported. |
 | `objectlog` | `hybrid-async` | Wired (deferred async SQLite checkpoint with `PQUEUE_HYBRID_ASYNC_*` debt/backpressure thresholds). |
 | `postgres` | `inmemory` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
 | `postgres` | `sqlite` | Wired behind the `postgres` cargo feature (in the CI kind matrix). |
@@ -69,7 +69,7 @@ combinations:
 | `objectlog` | `sqlite` | Runtime wired, Helm render/lint, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite`). |
 | `objectlog` | `hybrid` | Runtime wired, Helm render/lint (`helm-gate.sh` `objectlog-hybrid`), and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid`). |
 | `objectlog` | `hybrid-async` | Runtime wired, Helm render/lint with exact debt/backpressure-variable assertions, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async`). |
-| `objectlog` | `hybrid-strict` | Runtime wired via env only; **not** chart-selectable (projection enum omits it). |
+| `objectlog` | `hybrid-strict` | Experimental env/direct-config-only runtime path; **not** chart-selectable or production-supported (projection enum omits it). |
 | `postgres` | `inmemory` | Postgres log adapter is wired (behind the `postgres` cargo feature via `PostgresNativeBackend`); live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend inmemory`). |
 | `postgres` | `sqlite` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend sqlite`). Exact-pair TP-003 AC-TXN-1/2/3/6 evidence passes in `tp003-ac-txn-{matrix,parity}-postgres-storage-pairs.jsonl`. |
 | `postgres` | `postgres` | Adapters wired; live `kind` smoke passes in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend postgres --projection-backend postgres`). Exact-pair TP-003 AC-TXN-1/2/3/6 evidence passes in `tp003-ac-txn-{matrix,parity}-postgres-storage-pairs.jsonl`; AC-TXN-3 records `commit_transition` capability-N/A because the shipped two-connection composition is eventual-apply, while proving push request-id replay at every applicable cut. |
@@ -83,6 +83,46 @@ be executable for smoke tests after it starts and preserves restart readback, bu
 it may be production-claimed only after the TP-003 external transaction-contract
 matrix and the applicable TP-002 scale/latency evidence are green for that exact
 log/projection pair.
+
+### `objectlog/hybrid-strict` public-support decision
+
+**Decision (2026-07-19): DEFER public deployment support.**
+`objectlog/hybrid-strict` remains an experimental env/direct-config-only runtime
+path. It is excluded from the Helm schema, chart templates, live-`kind` matrix,
+deployment release matrix, release/tag gates, operator support contract, and
+public support claims.
+
+Runtime wiring is authorization to exercise and improve the profile; it is not
+authorization to advertise support. Likewise, authorizing implementation work
+does not declare support. The current evidence proves only that
+`PQUEUE_LOG_BACKEND=objectlog` plus
+`PQUEUE_PROJECTION_BACKEND=hybrid-strict` selects the strict runtime with its
+SQLite path and that non-object-log pairings fail closed. The chart still omits
+`hybrid-strict` from `charts/pqueue/values.schema.json`; the PVC, ConfigMap, and
+Deployment templates do not include it; and the Helm, live-`kind`, deployment,
+and release/tag matrices do not exercise it.
+
+Revisit the support decision only after all of the following are complete and
+green on one release candidate revision:
+
+1. fresh governed TP-003 evidence covers AC-HYB-1 through AC-HYB-6, including
+   portable under-load comparative performance and exact 100k/10M recovery;
+   wall-clock results may describe a declared deployment's capacity but cannot
+   be a quiet-host or absolute host-speed support gate;
+2. the chart schema, templates, SQLite PVC/path handling, and operator controls
+   expose the exact `objectlog/hybrid-strict` profile and fail closed for invalid
+   pairings;
+3. a live-`kind` install proves create/write/read, rollout restart, and exact
+   post-restart readback for the profile;
+4. release and tag gates bind the chart, live-`kind`, TP-003, and published
+   evidence to the same source revision; and
+5. manifest fencing plus the applicable TP-002 E2/E3 correctness, progress,
+   recovery, cost, and bounded-resource prerequisites are closed.
+
+Until then, documentation and Helm tests must preserve the exclusion. A
+separate execution item owns a named negative Helm assertion for the exact
+schema enum-exclusion error and the related operator-document reconciliation;
+this decision does not implement that gate.
 
 ## Production Target
 
