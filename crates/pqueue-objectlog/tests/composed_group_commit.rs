@@ -5,6 +5,7 @@
 //! claims never pick the same candidate); and (3) reopen/recovery still rebuilds the projection from the log.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{future::Future, pin::Pin, task::Poll};
 
 use pqueue_core::{
     EligibilityPolicy, ItemId, LeaseToken, OrderingMode, PriorityDirection, PriorityModel,
@@ -21,6 +22,11 @@ use pqueue_objectlog::{
 use pqueue_sqlite::HybridProjectionStore;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn poll_pending<F: Future>(future: Pin<&mut F>) {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(matches!(future.poll(&mut context), Poll::Pending));
+}
 
 fn tmp_root(tag: &str) -> std::path::PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -111,11 +117,14 @@ async fn concurrent_pushes_cobuffer_into_one_sealed_segment() {
     const N: usize = 8;
     let now = ts(1); // ts_to_ms == 1000
 
-    // Fire N pushes: each runs its synchronous prologue (buffer + register a SealSlot) eagerly when called,
-    // then yields an ack-after-seal future. None has sealed yet (below the 1 MiB size trigger).
-    let pushes: Vec<_> = (0..N)
-        .map(|_| backend.push(&shard, vec![PushSpec::default()], now, None))
+    // Poll N pushes into the buffer. Constructing a port future is side-effect free; the first poll performs
+    // planning and registers its ack-after-seal slot.
+    let mut pushes: Vec<_> = (0..N)
+        .map(|_| Box::pin(backend.push(&shard, vec![PushSpec::default()], now, None)))
         .collect();
+    for push in &mut pushes {
+        poll_pending(push.as_mut());
+    }
 
     // BEFORE the flush nothing is acked: the substrate buffered all N but sealed no segment.
     assert_eq!(
@@ -190,9 +199,12 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
     let now = ts(1);
 
     const N: usize = 4;
-    let pushes: Vec<_> = (0..N)
-        .map(|_| backend.push(&shard, vec![PushSpec::default()], now, None))
+    let mut pushes: Vec<_> = (0..N)
+        .map(|_| Box::pin(backend.push(&shard, vec![PushSpec::default()], now, None)))
         .collect();
+    for push in &mut pushes {
+        poll_pending(push.as_mut());
+    }
     assert_eq!(
         backend.with_log(|l| l.counters()).segments_sealed,
         0,
@@ -201,7 +213,7 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
 
     // The first claim force-seals the buffered pushes so selection observes durable pushed items, but the
     // claim command itself remains unacked until a later object-log group-commit seal.
-    let claim1 = backend.claim(ClaimRequest {
+    let mut claim1 = Box::pin(backend.claim(ClaimRequest {
         eligibility_time: None,
         shard: shard.clone(),
         worker_id: WorkerId::new("w1").unwrap(),
@@ -211,7 +223,8 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
         now,
         compatibility: ClaimCompatibility::default(),
         expected_epoch: None,
-    });
+    }));
+    poll_pending(claim1.as_mut());
     for p in pushes {
         assert_eq!(p.await.unwrap().len(), 1);
     }
@@ -222,7 +235,7 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
 
     // A second normal claim starts before the first claim is durable. The in-flight claim guard excludes the
     // first claim's candidates, so both claim commands can seal together without double-leasing.
-    let claim2 = backend.claim(ClaimRequest {
+    let mut claim2 = Box::pin(backend.claim(ClaimRequest {
         eligibility_time: None,
         shard: shard.clone(),
         worker_id: WorkerId::new("w2").unwrap(),
@@ -232,7 +245,8 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
         now,
         compatibility: ClaimCompatibility::default(),
         expected_epoch: None,
-    });
+    }));
+    poll_pending(claim2.as_mut());
     assert_eq!(
         backend.with_log(|l| l.counters()).group_commit_batches,
         vec![N],
@@ -257,17 +271,20 @@ async fn claim_and_finalize_normal_traffic_batch_before_ack() {
         "both normal claim commands sealed in one durable group"
     );
 
-    let finalizes: Vec<_> = claimed_ids
+    let mut finalizes: Vec<_> = claimed_ids
         .iter()
         .map(|id| {
-            backend.finalize(
+            Box::pin(backend.finalize(
                 &shard,
                 vec![FinalizeOutcome::new(*id, FinalizeKind::Complete)],
                 now,
                 None,
-            )
+            ))
         })
         .collect();
+    for finalize in &mut finalizes {
+        poll_pending(finalize.as_mut());
+    }
     assert_eq!(
         backend.with_log(|l| l.counters()).group_commit_batches,
         vec![N, 2],
@@ -337,7 +354,7 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
         "large-segment push buffers until the ordered barrier force-seals"
     );
 
-    let claimed = backend.claim(ClaimRequest {
+    let mut claimed = Box::pin(backend.claim(ClaimRequest {
         eligibility_time: None,
         shard: shard.clone(),
         worker_id: WorkerId::new("hybrid-claimer").unwrap(),
@@ -347,7 +364,8 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
         now: ts(1),
         compatibility: ClaimCompatibility::default(),
         expected_epoch: Some(epoch),
-    });
+    }));
+    poll_pending(claimed.as_mut());
     backend.flush_tick(1000 + 21).expect("flush claim");
     let claimed = claimed.await.unwrap();
     assert_eq!(
@@ -384,9 +402,12 @@ async fn group_commit_reopen_recovers_projection_from_the_log() {
         backend.create_queue(qdef()).await.unwrap();
         let shard = shard();
         let now = ts(1);
-        let pushes: Vec<_> = (0..5)
-            .map(|_| backend.push(&shard, vec![PushSpec::default()], now, None))
+        let mut pushes: Vec<_> = (0..5)
+            .map(|_| Box::pin(backend.push(&shard, vec![PushSpec::default()], now, None)))
             .collect();
+        for push in &mut pushes {
+            poll_pending(push.as_mut());
+        }
         backend.flush_tick(1000 + 21).expect("flush");
         for p in pushes {
             p.await.unwrap();
