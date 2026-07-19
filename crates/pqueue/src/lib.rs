@@ -2707,13 +2707,17 @@ mod tests {
         let shard =
             pqueue_engine::QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap());
 
-        let mut due = NewItem::default();
-        due.priority = Some(PriorityValue::Int64(1));
-        due.entity = Some(serde_json::json!({"rank": 1}));
-        let mut later = NewItem::default();
-        later.priority = Some(PriorityValue::Int64(2));
-        later.entity = Some(serde_json::json!({"rank": 2}));
-        later.not_before = Some(ts(200));
+        let due = NewItem {
+            priority: Some(PriorityValue::Int64(1)),
+            entity: Some(serde_json::json!({"rank": 1})),
+            ..Default::default()
+        };
+        let later = NewItem {
+            priority: Some(PriorityValue::Int64(2)),
+            not_before: Some(ts(200)),
+            entity: Some(serde_json::json!({"rank": 2})),
+            ..Default::default()
+        };
         let pushed = setup.push_batch(&shard, vec![due, later]).await?;
         let pq = Pqueue::new(backend, Arc::new(PanicClock::new()));
 

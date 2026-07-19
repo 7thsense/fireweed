@@ -24,13 +24,371 @@
 //! `std::sync::MutexGuard` or borrowed blocking transaction across an `.await`, and must not offload
 //! individual statements belonging to the same transaction.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+
 use pqueue_core::{ItemId, ItemState, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp};
 
 use crate::{
     ClaimCompatibility, ClaimUnit, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeTarget,
-    IdempotencyDecision, PushFingerprint, PushItem, QueueKey, RenewTarget, RichClaimSelection,
+    ControlPlane, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeTarget,
+    IdempotencyDecision, LogStore, ProjectionSnapshot, ProjectionStore, PushFingerprint, PushItem,
+    QueueKey, RenewTarget, RichClaimSelection, SnapshotRef,
 };
+
+/// An owned blocking operation over one store instance.
+///
+/// This is the compatibility boundary for blocking substrates. Callers transfer one complete storage
+/// operation into the adapter; they do not hand out per-statement callbacks or borrowed transactions.
+pub trait BlockingStoreOperation<S>: Send + 'static {
+    type Output: Send + 'static;
+
+    fn run(self, store: &mut S) -> EngineResult<Self::Output>;
+}
+
+#[derive(Clone)]
+struct BoundedBlockingExecutor {
+    permits: Arc<BlockingPermits>,
+}
+
+impl BoundedBlockingExecutor {
+    fn new(max_in_flight: usize) -> EngineResult<Self> {
+        if max_in_flight == 0 {
+            return Err(EngineError::Invalid(
+                "blocking adapter bound must be nonzero",
+            ));
+        }
+        Ok(Self {
+            permits: Arc::new(BlockingPermits::new(max_in_flight)),
+        })
+    }
+
+    fn execute<T, F>(&self, task: F) -> BlockingTaskFuture<EngineResult<T>>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
+    {
+        BlockingTaskFuture {
+            permits: self.permits.clone(),
+            task: Some(Box::new(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).unwrap_or_else(|_| {
+                    Err(EngineError::Storage(
+                        "blocking storage operation panicked".to_string(),
+                    ))
+                })
+            })),
+            state: Arc::new(Mutex::new(BlockingTaskState {
+                started: false,
+                result: None,
+                waker: None,
+            })),
+        }
+    }
+}
+
+struct BlockingPermits {
+    inner: Mutex<BlockingPermitsInner>,
+}
+
+struct BlockingPermitsInner {
+    available: usize,
+    waiters: Vec<Waker>,
+}
+
+impl BlockingPermits {
+    fn new(available: usize) -> Self {
+        Self {
+            inner: Mutex::new(BlockingPermitsInner {
+                available,
+                waiters: Vec::new(),
+            }),
+        }
+    }
+
+    fn acquire_or_park(self: &Arc<Self>, waker: &Waker) -> Option<BlockingPermit> {
+        let mut inner = self.inner.lock().expect("blocking permit mutex poisoned");
+        if inner.available == 0 {
+            if !inner.waiters.iter().any(|queued| queued.will_wake(waker)) {
+                inner.waiters.push(waker.clone());
+            }
+            return None;
+        }
+        inner.available -= 1;
+        Some(BlockingPermit {
+            permits: self.clone(),
+        })
+    }
+
+    fn release(&self) {
+        let wake = {
+            let mut inner = self.inner.lock().expect("blocking permit mutex poisoned");
+            inner.available += 1;
+            inner.waiters.pop()
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+}
+
+struct BlockingPermit {
+    permits: Arc<BlockingPermits>,
+}
+
+impl Drop for BlockingPermit {
+    fn drop(&mut self) {
+        self.permits.release();
+    }
+}
+
+struct BlockingTaskState<T> {
+    started: bool,
+    result: Option<T>,
+    waker: Option<Waker>,
+}
+
+struct BlockingTaskFuture<T> {
+    permits: Arc<BlockingPermits>,
+    task: Option<Box<dyn FnOnce() -> T + Send + 'static>>,
+    state: Arc<Mutex<BlockingTaskState<T>>>,
+}
+
+impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        {
+            let mut state = this.state.lock().expect("blocking task mutex poisoned");
+            if let Some(result) = state.result.take() {
+                return Poll::Ready(result);
+            }
+            if state.started {
+                state.waker = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+        }
+
+        let Some(permit) = this.permits.acquire_or_park(cx.waker()) else {
+            return Poll::Pending;
+        };
+
+        let task = this
+            .task
+            .take()
+            .expect("blocking task missing before start");
+        let state = this.state.clone();
+        {
+            let mut state = state.lock().expect("blocking task mutex poisoned");
+            state.started = true;
+            state.waker = Some(cx.waker().clone());
+        }
+        std::thread::spawn(move || {
+            let result = task();
+            let wake = {
+                let mut state = state.lock().expect("blocking task mutex poisoned");
+                state.result = Some(result);
+                state.waker.take()
+            };
+            drop(permit);
+            if let Some(waker) = wake {
+                waker.wake();
+            }
+        });
+        Poll::Pending
+    }
+}
+
+/// Immediate ready-future adapter for a synchronous log store.
+pub struct ImmediateLogStore<S> {
+    store: Arc<Mutex<S>>,
+    durability_class: DurabilityClass,
+}
+
+impl<S: LogStore> ImmediateLogStore<S> {
+    pub fn new(store: S) -> Self {
+        let durability_class = store.durability_class();
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            durability_class,
+        }
+    }
+}
+
+/// Immediate ready-future adapter for a synchronous projection store.
+pub struct ImmediateProjectionStore<S> {
+    store: Arc<Mutex<S>>,
+    supports_gates: bool,
+}
+
+impl<S: ProjectionStore> ImmediateProjectionStore<S> {
+    pub fn new(store: S) -> Self {
+        let supports_gates = store.supports_gates();
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            supports_gates,
+        }
+    }
+}
+
+/// Immediate ready-future adapter for a synchronous control plane.
+pub struct ImmediateControlPlane<S> {
+    store: Arc<S>,
+}
+
+impl<S> ImmediateControlPlane<S> {
+    pub fn new(store: S) -> Self {
+        Self {
+            store: Arc::new(store),
+        }
+    }
+}
+
+/// Bounded blocking adapter for a synchronous log store.
+pub struct BlockingLogStore<S> {
+    store: Arc<Mutex<S>>,
+    executor: BoundedBlockingExecutor,
+    durability_class: DurabilityClass,
+}
+
+impl<S: LogStore> BlockingLogStore<S> {
+    pub fn new(store: S, max_in_flight: usize) -> EngineResult<Self> {
+        let durability_class = store.durability_class();
+        Ok(Self {
+            store: Arc::new(Mutex::new(store)),
+            executor: BoundedBlockingExecutor::new(max_in_flight)?,
+            durability_class,
+        })
+    }
+
+    /// Execute one caller-defined, owned transaction operation on the blocking store.
+    ///
+    /// Unlike the adapter's private single-axis compatibility calls, this public boundary accepts only a
+    /// named [`BlockingStoreOperation`]. Closures deliberately do not implement that trait, preventing a
+    /// caller from accidentally offloading individual statements of one transaction.
+    pub fn run_owned_operation<O>(
+        &self,
+        operation: O,
+    ) -> impl Future<Output = EngineResult<O::Output>> + Send
+    where
+        S: Send + 'static,
+        O: BlockingStoreOperation<S>,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store.lock().expect("blocking log store mutex poisoned");
+            operation.run(&mut *store)
+        })
+    }
+
+    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store.lock().expect("blocking log store mutex poisoned");
+            operation(&mut *store)
+        })
+    }
+}
+
+/// Bounded blocking adapter for a synchronous projection store.
+pub struct BlockingProjectionStore<S> {
+    store: Arc<Mutex<S>>,
+    executor: BoundedBlockingExecutor,
+    supports_gates: bool,
+}
+
+impl<S: ProjectionStore> BlockingProjectionStore<S> {
+    pub fn new(store: S, max_in_flight: usize) -> EngineResult<Self> {
+        let supports_gates = store.supports_gates();
+        Ok(Self {
+            store: Arc::new(Mutex::new(store)),
+            executor: BoundedBlockingExecutor::new(max_in_flight)?,
+            supports_gates,
+        })
+    }
+
+    pub fn run_owned_operation<O>(
+        &self,
+        operation: O,
+    ) -> impl Future<Output = EngineResult<O::Output>> + Send
+    where
+        S: Send + 'static,
+        O: BlockingStoreOperation<S>,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store
+                .lock()
+                .expect("blocking projection store mutex poisoned");
+            operation.run(&mut *store)
+        })
+    }
+
+    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store
+                .lock()
+                .expect("blocking projection store mutex poisoned");
+            operation(&mut *store)
+        })
+    }
+}
+
+/// Bounded blocking adapter for a synchronous control plane.
+pub struct BlockingControlPlane<S> {
+    store: Arc<Mutex<S>>,
+    executor: BoundedBlockingExecutor,
+}
+
+impl<S> BlockingControlPlane<S> {
+    pub fn new(store: S, max_in_flight: usize) -> EngineResult<Self> {
+        Ok(Self {
+            store: Arc::new(Mutex::new(store)),
+            executor: BoundedBlockingExecutor::new(max_in_flight)?,
+        })
+    }
+
+    pub fn run_owned_operation<O>(
+        &self,
+        operation: O,
+    ) -> impl Future<Output = EngineResult<O::Output>> + Send
+    where
+        S: Send + 'static,
+        O: BlockingStoreOperation<S>,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store.lock().expect("blocking control plane mutex poisoned");
+            operation.run(&mut *store)
+        })
+    }
+
+    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    where
+        S: Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&mut S) -> EngineResult<T> + Send + 'static,
+    {
+        let store = self.store.clone();
+        self.executor.execute(move || {
+            let mut store = store.lock().expect("blocking control plane mutex poisoned");
+            operation(&mut *store)
+        })
+    }
+}
 
 /// Projection-sealed retry inputs for one ordinary leased item.
 ///
@@ -93,6 +451,62 @@ pub trait AsyncLogStore: Send + Sync {
         shard: QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send;
+
+    fn write_snapshot(
+        &self,
+        shard: QueueKey,
+        position: CommandPosition,
+        snapshot: ProjectionSnapshot,
+    ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
+        async move {
+            let _ = (shard, position, snapshot);
+            Err(EngineError::Unavailable)
+        }
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        async move {
+            let _ = shard;
+            Err(EngineError::Unavailable)
+        }
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: SnapshotRef,
+    ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+        async move {
+            let _ = snapshot_ref;
+            Err(EngineError::Unavailable)
+        }
+    }
+
+    fn snapshot_at_or_before(
+        &self,
+        shard: QueueKey,
+        position: CommandPosition,
+    ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        async move {
+            let latest = self.latest_snapshot(shard).await?;
+            Ok(match latest {
+                Some(snapshot)
+                    if snapshot.position.precedes(&position) || snapshot.position == position =>
+                {
+                    Some(snapshot)
+                }
+                _ => None,
+            })
+        }
+    }
+
+    fn recover_definitions(
+        &self,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
+        std::future::ready(Ok(Vec::new()))
+    }
 }
 
 /// Native-async projection operations needed by initial append/apply, recovery, and item claim paths.
@@ -327,6 +741,594 @@ pub trait AsyncControlPlane: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send;
 }
 
+impl<S> AsyncLogStore for ImmediateLogStore<S>
+where
+    S: LogStore + Send,
+{
+    fn durability_class(&self) -> DurabilityClass {
+        self.durability_class
+    }
+
+    fn ensure_shard(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .ensure_shard(&shard);
+        std::future::ready(result)
+    }
+
+    fn current_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .current_epoch(&shard);
+        std::future::ready(result)
+    }
+
+    fn acquire_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .acquire_epoch(&shard);
+        std::future::ready(result)
+    }
+
+    fn append(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+    ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .append(&shard, &commands, expected_epoch);
+        std::future::ready(result)
+    }
+
+    fn read_from(
+        &self,
+        shard: QueueKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl Future<Output = EngineResult<CommandPage>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .read_from(&shard, from, limit);
+        std::future::ready(result)
+    }
+
+    fn high_water(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .high_water(&shard);
+        std::future::ready(result)
+    }
+
+    fn set_high_water(
+        &self,
+        shard: QueueKey,
+        position: CommandPosition,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .set_high_water(&shard, position);
+        std::future::ready(result)
+    }
+
+    fn write_snapshot(
+        &self,
+        shard: QueueKey,
+        position: CommandPosition,
+        snapshot: ProjectionSnapshot,
+    ) -> impl Future<Output = EngineResult<SnapshotRef>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .write_snapshot(&shard, position, snapshot);
+        std::future::ready(result)
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .latest_snapshot(&shard);
+        std::future::ready(result)
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: SnapshotRef,
+    ) -> impl Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .read_snapshot(&snapshot_ref);
+        std::future::ready(result)
+    }
+
+    fn recover_definitions(
+        &self,
+    ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate log store mutex poisoned")
+            .recover_definitions();
+        std::future::ready(result)
+    }
+}
+
+impl<S> AsyncProjectionStore for ImmediateProjectionStore<S>
+where
+    S: ProjectionStore + Send,
+{
+    fn supports_gates(&self) -> bool {
+        self.supports_gates
+    }
+
+    fn ensure_shard(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .ensure_shard(&definition);
+        std::future::ready(result)
+    }
+
+    fn admit_mutation(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .admit_mutation(&shard);
+        std::future::ready(result)
+    }
+
+    fn validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+        _now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .index_validate_push(&shard, &items);
+        std::future::ready(result)
+    }
+
+    fn pause_blocks_intake(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<bool>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .pause_blocks_intake(&shard);
+        std::future::ready(result)
+    }
+
+    fn apply_live(
+        &self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .apply_live_owned(positions, commands);
+        std::future::ready(result)
+    }
+
+    fn apply_recovery(
+        &self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .apply_recovery(&positions, &commands);
+        std::future::ready(result)
+    }
+
+    fn eligible_candidates(
+        &self,
+        shard: QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .eligible_candidates(&shard, now, max);
+        std::future::ready(result)
+    }
+
+    fn select_item_claim(
+        &self,
+        shard: QueueKey,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .select_item_claim(&shard, &compatibility, now, max);
+        std::future::ready(result)
+    }
+
+    fn select_rich_claim(
+        &self,
+        shard: QueueKey,
+        unit: ClaimUnit,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> impl Future<Output = EngineResult<RichClaimSelection>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .select_rich_claim(&shard, unit, &compatibility, now, max_items);
+        std::future::ready(result)
+    }
+
+    fn render_claimed(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .render_claimed(&shard, &ids);
+        std::future::ready(result)
+    }
+
+    fn item_state(
+        &self,
+        shard: QueueKey,
+        id: ItemId,
+    ) -> impl Future<Output = EngineResult<Option<ItemState>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .item_state(&shard, &id);
+        std::future::ready(result)
+    }
+
+    fn item_version(
+        &self,
+        shard: QueueKey,
+        id: ItemId,
+    ) -> impl Future<Output = EngineResult<Option<u64>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .item_version(&shard, &id);
+        std::future::ready(result)
+    }
+
+    fn recovery_high_water(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .recovery_high_water(&shard);
+        std::future::ready(result)
+    }
+
+    fn recover_definitions(
+        &self,
+    ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
+        let result = self
+            .store
+            .lock()
+            .expect("immediate projection store mutex poisoned")
+            .recover_definitions();
+        std::future::ready(result)
+    }
+}
+
+impl<S> AsyncControlPlane for ImmediateControlPlane<S>
+where
+    S: ControlPlane + Send + Sync,
+{
+    fn create_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl Future<Output = EngineResult<CreateQueueOutcome>> + Send {
+        let result = self.store.create_queue(definition);
+        std::future::ready(result)
+    }
+
+    fn queue_definition(
+        &self,
+        key: QueueKey,
+    ) -> impl Future<Output = EngineResult<QueueDefinition>> + Send {
+        let result = self.store.queue_definition(&key);
+        std::future::ready(result)
+    }
+
+    fn list_queues(
+        &self,
+        tenant: TenantId,
+    ) -> impl Future<Output = EngineResult<Vec<QueueId>>> + Send {
+        let result = self.store.list_queues(&tenant);
+        std::future::ready(result)
+    }
+}
+
+impl<S> AsyncLogStore for BlockingLogStore<S>
+where
+    S: LogStore + Send + 'static,
+{
+    fn durability_class(&self) -> DurabilityClass {
+        self.durability_class
+    }
+
+    fn ensure_shard(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.ensure_shard(&shard))
+    }
+
+    fn current_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
+        self.run_sync(move |store: &mut S| store.current_epoch(&shard))
+    }
+
+    fn acquire_epoch(&self, shard: QueueKey) -> impl Future<Output = EngineResult<u64>> + Send {
+        self.run_sync(move |store: &mut S| store.acquire_epoch(&shard))
+    }
+
+    fn append(
+        &self,
+        shard: QueueKey,
+        commands: Vec<CommandEnvelope>,
+        expected_epoch: u64,
+    ) -> impl Future<Output = EngineResult<Vec<CommandPosition>>> + Send {
+        self.run_sync(move |store: &mut S| store.append(&shard, &commands, expected_epoch))
+    }
+
+    fn read_from(
+        &self,
+        shard: QueueKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl Future<Output = EngineResult<CommandPage>> + Send {
+        self.run_sync(move |store: &mut S| store.read_from(&shard, from, limit))
+    }
+
+    fn high_water(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        self.run_sync(move |store: &mut S| store.high_water(&shard))
+    }
+
+    fn set_high_water(
+        &self,
+        shard: QueueKey,
+        position: CommandPosition,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.set_high_water(&shard, position))
+    }
+
+    fn write_snapshot(
+        &self,
+        shard: QueueKey,
+        position: CommandPosition,
+        snapshot: ProjectionSnapshot,
+    ) -> impl Future<Output = EngineResult<SnapshotRef>> + Send {
+        self.run_sync(move |store: &mut S| store.write_snapshot(&shard, position, snapshot))
+    }
+
+    fn latest_snapshot(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
+        self.run_sync(move |store: &mut S| store.latest_snapshot(&shard))
+    }
+
+    fn read_snapshot(
+        &self,
+        snapshot_ref: SnapshotRef,
+    ) -> impl Future<Output = EngineResult<ProjectionSnapshot>> + Send {
+        self.run_sync(move |store: &mut S| store.read_snapshot(&snapshot_ref))
+    }
+
+    fn recover_definitions(
+        &self,
+    ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
+        self.run_sync(move |store: &mut S| store.recover_definitions())
+    }
+}
+
+impl<S> AsyncProjectionStore for BlockingProjectionStore<S>
+where
+    S: ProjectionStore + Send + 'static,
+{
+    fn supports_gates(&self) -> bool {
+        self.supports_gates
+    }
+
+    fn ensure_shard(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.ensure_shard(&definition))
+    }
+
+    fn admit_mutation(&self, shard: QueueKey) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.admit_mutation(&shard))
+    }
+
+    fn validate_push(
+        &self,
+        shard: QueueKey,
+        items: Vec<PushItem>,
+        _now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.index_validate_push(&shard, &items))
+    }
+
+    fn pause_blocks_intake(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<bool>> + Send {
+        self.run_sync(move |store: &mut S| store.pause_blocks_intake(&shard))
+    }
+
+    fn apply_live(
+        &self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.apply_live_owned(positions, commands))
+    }
+
+    fn apply_recovery(
+        &self,
+        positions: Vec<CommandPosition>,
+        commands: Vec<CommandEnvelope>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        self.run_sync(move |store: &mut S| store.apply_recovery(&positions, &commands))
+    }
+
+    fn eligible_candidates(
+        &self,
+        shard: QueueKey,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        self.run_sync(move |store: &mut S| store.eligible_candidates(&shard, now, max))
+    }
+
+    fn select_item_claim(
+        &self,
+        shard: QueueKey,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max: usize,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        self.run_sync(move |store: &mut S| {
+            store.select_item_claim(&shard, &compatibility, now, max)
+        })
+    }
+
+    fn select_rich_claim(
+        &self,
+        shard: QueueKey,
+        unit: ClaimUnit,
+        compatibility: ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> impl Future<Output = EngineResult<RichClaimSelection>> + Send {
+        self.run_sync(move |store: &mut S| {
+            store.select_rich_claim(&shard, unit, &compatibility, now, max_items)
+        })
+    }
+
+    fn render_claimed(
+        &self,
+        shard: QueueKey,
+        ids: Vec<ItemId>,
+    ) -> impl Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
+        self.run_sync(move |store: &mut S| store.render_claimed(&shard, &ids))
+    }
+
+    fn item_state(
+        &self,
+        shard: QueueKey,
+        id: ItemId,
+    ) -> impl Future<Output = EngineResult<Option<ItemState>>> + Send {
+        self.run_sync(move |store: &mut S| store.item_state(&shard, &id))
+    }
+
+    fn item_version(
+        &self,
+        shard: QueueKey,
+        id: ItemId,
+    ) -> impl Future<Output = EngineResult<Option<u64>>> + Send {
+        self.run_sync(move |store: &mut S| store.item_version(&shard, &id))
+    }
+
+    fn recovery_high_water(
+        &self,
+        shard: QueueKey,
+    ) -> impl Future<Output = EngineResult<Option<CommandPosition>>> + Send {
+        self.run_sync(move |store: &mut S| store.recovery_high_water(&shard))
+    }
+
+    fn recover_definitions(
+        &self,
+    ) -> impl Future<Output = EngineResult<Vec<QueueDefinition>>> + Send {
+        self.run_sync(move |store: &mut S| store.recover_definitions())
+    }
+}
+
+impl<S> AsyncControlPlane for BlockingControlPlane<S>
+where
+    S: ControlPlane + Send + 'static,
+{
+    fn create_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl Future<Output = EngineResult<CreateQueueOutcome>> + Send {
+        self.run_sync(move |store: &mut S| store.create_queue(definition))
+    }
+
+    fn queue_definition(
+        &self,
+        key: QueueKey,
+    ) -> impl Future<Output = EngineResult<QueueDefinition>> + Send {
+        self.run_sync(move |store: &mut S| store.queue_definition(&key))
+    }
+
+    fn list_queues(
+        &self,
+        tenant: TenantId,
+    ) -> impl Future<Output = EngineResult<Vec<QueueId>>> + Send {
+        self.run_sync(move |store: &mut S| store.list_queues(&tenant))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // The concrete `Ready` return types make these compile-time assertions fail if a future ceases to be
@@ -334,11 +1336,14 @@ mod tests {
     #![allow(refining_impl_trait)]
 
     use std::future::{Ready, ready};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::task::Wake;
+    use std::time::Duration;
 
     use pqueue_core::{
-        BodyHash, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
-        PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy,
-        RetryPolicy, TenantId,
+        BodyHash, CohortId, EligibilityPolicy, LeaseToken, OrderingMode, PriorityDirection,
+        PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
+        RecurrencePolicy, RetryPolicy, TenantId,
     };
 
     use super::*;
@@ -523,6 +1528,19 @@ mod tests {
 
     fn assert_send<T: Send>(_: T) {}
 
+    struct OwnedWholeOperation {
+        value: String,
+    }
+
+    impl BlockingStoreOperation<Vec<String>> for OwnedWholeOperation {
+        type Output = usize;
+
+        fn run(self, store: &mut Vec<String>) -> EngineResult<Self::Output> {
+            store.push(self.value);
+            Ok(store.len())
+        }
+    }
+
     #[test]
     fn every_log_future_is_send() {
         let log = ImmediateLog;
@@ -533,6 +1551,21 @@ mod tests {
         assert_send(log.read_from(shard(), None, 1));
         assert_send(log.high_water(shard()));
         assert_send(log.set_high_water(shard(), CommandPosition::new(shard(), 0, 0)));
+        assert_send(log.write_snapshot(
+            shard(),
+            CommandPosition::new(shard(), 0, 0),
+            ProjectionSnapshot {
+                payload: Vec::new(),
+            },
+        ));
+        assert_send(log.latest_snapshot(shard()));
+        assert_send(log.read_snapshot(SnapshotRef {
+            queue: shard(),
+            position: CommandPosition::new(shard(), 0, 0),
+            ref_id: "snapshot".to_string(),
+        }));
+        assert_send(log.snapshot_at_or_before(shard(), CommandPosition::new(shard(), 0, 0)));
+        assert_send(log.recover_definitions());
     }
 
     #[test]
@@ -555,10 +1588,46 @@ mod tests {
             },
             UtcTimestamp::new(0, 0).unwrap(),
         ));
+        let now = UtcTimestamp::new(0, 0).unwrap();
+        assert_send(projection.renew_validate(
+            shard(),
+            vec![RenewTarget {
+                item_id: ItemId::new("10").unwrap(),
+                lease_token: LeaseToken::new("renew-token").unwrap(),
+            }],
+            now,
+        ));
+        assert_send(projection.finalize_validate(
+            shard(),
+            vec![FinalizeTarget {
+                item_id: ItemId::new("11").unwrap(),
+                lease_token: LeaseToken::new("finalize-token").unwrap(),
+                item_version: 1,
+                kind: crate::FinalizeKind::Complete,
+                not_before: None,
+            }],
+            now,
+            3,
+        ));
+        assert_send(projection.cohort_lease_validate(
+            shard(),
+            crate::CohortLeaseTarget {
+                cohort_id: CohortId::new("cohort").unwrap(),
+                cohort_lease_token: LeaseToken::new("cohort-token").unwrap(),
+            },
+            now,
+        ));
+        assert_send(projection.purge_validate(shard(), vec![ItemId::new("12").unwrap()], true));
         assert_send(projection.apply_live(Vec::new(), Vec::new()));
         assert_send(projection.apply_recovery(Vec::new(), Vec::new()));
         assert_send(projection.expired_leases(shard(), UtcTimestamp::new(0, 0).unwrap(), 16));
         assert_send(projection.eligible_candidates(shard(), UtcTimestamp::new(0, 0).unwrap(), 1));
+        assert_send(projection.select_item_claim(
+            shard(),
+            ClaimCompatibility::default(),
+            UtcTimestamp::new(0, 0).unwrap(),
+            1,
+        ));
         assert_send(projection.select_rich_claim(
             shard(),
             ClaimUnit::SameGroupKey,
@@ -627,5 +1696,84 @@ mod tests {
         assert_send(control.create_queue(definition()));
         assert_send(control.queue_definition(shard()));
         assert_send(control.list_queues(TenantId::new("tenant").unwrap()));
+    }
+
+    #[test]
+    fn blocking_adapter_accepts_owned_whole_operation() {
+        let adapter = BlockingControlPlane::new(Vec::<String>::new(), 1).unwrap();
+        let future = adapter.run_owned_operation(OwnedWholeOperation {
+            value: "committed transaction".to_string(),
+        });
+        assert_send(future);
+
+        let len = futures::executor::block_on(adapter.run_owned_operation(OwnedWholeOperation {
+            value: "committed transaction".to_string(),
+        }))
+        .unwrap();
+        assert_eq!(len, 1);
+    }
+
+    struct CountingWake(AtomicUsize);
+
+    impl Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn blocking_permit_registration_and_acquire_are_atomic() {
+        let permits = Arc::new(BlockingPermits::new(1));
+        let wake_count = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = Waker::from(wake_count.clone());
+
+        let held = permits
+            .acquire_or_park(&waker)
+            .expect("first permit is available");
+        assert!(permits.acquire_or_park(&waker).is_none());
+        drop(held);
+
+        assert_eq!(wake_count.0.load(AtomicOrdering::SeqCst), 1);
+        assert!(permits.acquire_or_park(&waker).is_some());
+    }
+
+    #[test]
+    fn blocking_executor_wakes_saturated_work_and_contains_panics() {
+        let executor = BoundedBlockingExecutor::new(1).unwrap();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first = executor.execute(move || {
+            release_rx.recv().expect("release first operation");
+            Ok::<_, EngineError>(1usize)
+        });
+        let second = executor.execute(|| Ok::<_, EngineError>(2usize));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            release_tx.send(()).expect("first operation is waiting");
+        });
+
+        let (first, second) = futures::executor::block_on(async { futures::join!(first, second) });
+        assert_eq!(first.unwrap(), 1);
+        assert_eq!(second.unwrap(), 2);
+
+        let panic_result = futures::executor::block_on(
+            executor.execute::<(), _>(|| panic!("injected blocking operation panic")),
+        );
+        assert!(
+            matches!(panic_result, Err(EngineError::Storage(message)) if message.contains("panicked"))
+        );
+    }
+
+    #[test]
+    fn dropping_unpolled_blocking_work_cancels_before_start() {
+        let executor = BoundedBlockingExecutor::new(1).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let ran_in_task = ran.clone();
+        let future = executor.execute(move || {
+            ran_in_task.store(true, AtomicOrdering::SeqCst);
+            Ok::<_, EngineError>(())
+        });
+        drop(future);
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!ran.load(AtomicOrdering::SeqCst));
     }
 }
