@@ -1150,6 +1150,37 @@ impl ClaimAt {
     }
 }
 
+/// Query-claim timing overrides, mirroring [`ClaimAt`] for [`Pqueue::claim_by_query_at`].
+///
+/// `eligibility_time` resolves due-ness for the declared-index selection.
+/// `lease_time` stamps the command and anchors the lease expiry.
+#[derive(Debug, Clone, Default)]
+pub struct ClaimByQueryAt {
+    /// The epoch to resolve due-ness at (`not_before <= eligibility_time`). `None` ⇒ `lease_time`.
+    pub eligibility_time: Option<UtcTimestamp>,
+    /// The epoch the lease is measured from. `None` ⇒ this handle's `Clock::now()`.
+    pub lease_time: Option<UtcTimestamp>,
+}
+
+impl ClaimByQueryAt {
+    /// Build a query claim with both timestamps defaulted.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resolve due-ness at `at` instead of the operational clock.
+    pub fn eligibility_time(mut self, at: UtcTimestamp) -> Self {
+        self.eligibility_time = Some(at);
+        self
+    }
+
+    /// Measure the lease from `at` instead of this handle's `Clock::now()`.
+    pub fn lease_time(mut self, at: UtcTimestamp) -> Self {
+        self.lease_time = Some(at);
+        self
+    }
+}
+
 /// How a `nack` returns an in-flight item: back to the queue for another attempt (`Retry`) or released
 /// to a fresh delivery without charging the failure differently (`Release`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2303,13 +2334,28 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         request: ClaimByQueryRequest,
     ) -> EngineResult<Claimed> {
+        self.claim_by_query_at(queue, request, ClaimByQueryAt::new())
+            .await
+    }
+
+    /// Claim by declared-index predicate at caller-resolved times.
+    ///
+    /// `eligibility_time` decides which scheduled records are due. `lease_time` stamps the lease and
+    /// command metadata. Leaving both unset preserves the existing single-clock behavior.
+    pub async fn claim_by_query_at(
+        &self,
+        queue: &QueueKey,
+        request: ClaimByQueryRequest,
+        at: ClaimByQueryAt,
+    ) -> EngineResult<Claimed> {
+        let lease_time = at.lease_time.unwrap_or_else(|| self.clock.now());
         self.backend
             .claim_by_query(
                 queue,
                 request,
                 pqueue_engine::ClaimByQueryContext {
-                    now: self.clock.now(),
-                    eligibility_time: None,
+                    now: lease_time,
+                    eligibility_time: at.eligibility_time,
                 },
             )
             .await
@@ -2546,4 +2592,134 @@ pub fn open_postgres_coordinated(
         pqueue_postgres::PostgresControlPlane::connect(url, control_plane_config)?,
     );
     Pqueue::with_control_plane(backend, clock, instance_id, control_plane)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use pqueue_core::{
+        ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField,
+        PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex, SortDirection, TenantId,
+        TypedValue, UtcTimestamp, WorkerId,
+    };
+
+    use super::{ClaimByQueryAt, NewItem, Pqueue, SystemClock};
+    use crate::EngineResult;
+    use pqueue_engine::Clock;
+
+    fn ts(seconds: i64) -> UtcTimestamp {
+        UtcTimestamp::new(seconds, 0).unwrap()
+    }
+
+    struct PanicClock(AtomicBool);
+
+    impl PanicClock {
+        fn new() -> Self {
+            Self(AtomicBool::new(false))
+        }
+    }
+
+    impl Clock for PanicClock {
+        fn now(&self) -> UtcTimestamp {
+            self.0.store(true, Ordering::SeqCst);
+            panic!(
+                "claim_by_query_at must not consult the handle clock when explicit times are set"
+            );
+        }
+    }
+
+    fn query_definition() -> QueueDefinition {
+        let mut definition = QueueDefinition {
+            tenant_id: TenantId::new("t1").unwrap(),
+            queue_id: QueueId::new("q1").unwrap(),
+            priority_model: pqueue_core::PriorityModel {
+                kind: pqueue_core::PriorityModelKind::Int64,
+                direction: pqueue_core::PriorityDirection::Ascending,
+                tie_breaker: pqueue_core::PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: pqueue_core::OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: pqueue_core::EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: pqueue_core::RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: pqueue_core::RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![],
+            emit_change_records: true,
+        };
+        definition.typed_indexes = vec![QueueIndex {
+            name: "by_rank".to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "rank".to_string(),
+                index_type: IndexType::Integer,
+                unique: false,
+            }),
+        }];
+        definition
+    }
+
+    fn query_request(request_id: &str) -> ClaimByQueryRequest {
+        ClaimByQueryRequest {
+            index: Some("by_rank".to_string()),
+            filters: vec![QueryFilter {
+                field: "rank".to_string(),
+                op: FilterOp::Gte,
+                value: TypedValue::Integer(0),
+            }],
+            order_by: OrderField {
+                field: "rank".to_string(),
+                direction: SortDirection::Ascending,
+            },
+            max_items: 10,
+            lease_duration_ms: 30_000,
+            worker_id: WorkerId::new("query-worker").unwrap(),
+            request_id: Some(pqueue_core::RequestId::new(request_id).unwrap()),
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_by_query_at_uses_explicit_times_and_bypasses_clock() -> EngineResult<()> {
+        let backend = Arc::new(pqueue_memory::composed_memory_backend());
+        let setup = Pqueue::new(Arc::clone(&backend), Arc::new(SystemClock));
+        setup.create_queue(query_definition()).await?;
+        let shard =
+            pqueue_engine::QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap());
+
+        let mut due = NewItem::default();
+        due.priority = Some(PriorityValue::Int64(1));
+        due.entity = Some(serde_json::json!({"rank": 1}));
+        let mut later = NewItem::default();
+        later.priority = Some(PriorityValue::Int64(2));
+        later.entity = Some(serde_json::json!({"rank": 2}));
+        later.not_before = Some(ts(200));
+        let pushed = setup.push_batch(&shard, vec![due, later]).await?;
+        let pq = Pqueue::new(backend, Arc::new(PanicClock::new()));
+
+        let claimed = pq
+            .claim_by_query_at(
+                &shard,
+                query_request("explicit-times"),
+                ClaimByQueryAt::new()
+                    .eligibility_time(ts(150))
+                    .lease_time(ts(1_000)),
+            )
+            .await?;
+
+        assert_eq!(claimed.items.len(), 1);
+        assert_eq!(claimed.items[0].lease_expires_at, ts(1_030));
+        assert_eq!(claimed.items[0].item_version, 2);
+        assert_eq!(claimed.items[0].item_id, pushed[0]);
+        Ok(())
+    }
 }
