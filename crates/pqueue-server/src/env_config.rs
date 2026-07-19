@@ -896,15 +896,15 @@ mod tests {
     #[test]
     fn runtime_resource_metrics_path_rejects_empty_and_relative_values() {
         for value in ["", "   ", "relative/resources.json"] {
-            let error = match Config::from_env(&map(&[(
-                "PQUEUE_RUNTIME_RESOURCE_METRICS_PATH",
-                value,
-            )])) {
-                Ok(_) => panic!("invalid runtime resource metrics path was accepted"),
-                Err(error) => error,
-            };
+            let error =
+                match Config::from_env(&map(&[("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH", value)])) {
+                    Ok(_) => panic!("invalid runtime resource metrics path was accepted"),
+                    Err(error) => error,
+                };
             assert!(
-                error.to_string().contains("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH"),
+                error
+                    .to_string()
+                    .contains("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH"),
                 "{error}"
             );
         }

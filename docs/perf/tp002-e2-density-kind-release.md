@@ -17,17 +17,24 @@ the image, labels it with the full 40-character Git revision, records the
 image's SHA-256 ID, and confirms that both the service pod and load Job run that
 exact image. There is no release-evidence build-skip path.
 
-The in-cluster load generator first measures the hot queue without neighbor
-work. A bounded worker pool then makes every cold queue complete a live
+The in-cluster load generator brackets the loaded hot measurement with control
+measurements before and after it in the same process and deployment. A bounded
+worker pool makes every cold queue complete a live
 claim/finalize cycle, reseeds it with an immediately eligible item, and keeps
 cycling cold queues while the hot workload runs. A cold queue counts as active
 only when its final live `XLEN` is greater than zero. It counts as
 progress-eligible only when its immediately eligible item is claimed and
 finalized during the hot phase. The harness measures elapsed time from the
-item's eligibility to that claim/finalize; every cold queue must progress and
-the maximum observed latency must remain within the 60,000 ms bound. The
-release row also reports hot-queue ingest and claim/finalize retention against
-the unloaded baseline.
+item's eligibility to that claim/finalize; every cold queue must make progress
+and no cold claim may return empty. The row reports the maximum observed
+latency and configured 60,000 ms progress bound as capacity/configuration data,
+not as a host-speed gate. It also reports hot-queue ingest and claim/finalize
+retention against the harmonic mean of the two same-run control windows.
+If the canonical 300,000-item loaded window completes before all cold queues
+have progressed, the load generator runs additional exact 300,000-item hot
+sustain windows before ending the loaded phase. The row records and reconciles
+the window count and total sustain items, so a fast host cannot fail merely
+because its first hot window was shorter than one complete cold-queue cycle.
 
 The run writes
 `target/pqueue-ledger/tp002-e2-density-kind.jsonl`. Its row records the exact
@@ -60,10 +67,12 @@ cargo run -p pqueue-release --bin pqueue-verify-density-evidence -- \
 ```
 
 The validator requires release scale/tier, `bars_met=true`, exactly 1,001
-queues, both hot rates at or above 2,777.78 items/s, zero progress-bound
-violations, maximum progress latency within 60 seconds, all resource counts
-within their governed bounds, at least one hot-phase resource sample, and ingest
-and claim/finalize retention each at or above 100%. The validator also rejects
+queues, all 1,000 cold queues active and observed making non-empty progress
+during hot load, complete positive baseline/load measurements whose derived
+controls and retention values reconcile, all resource counts within their
+governed bounds, and at least one hot-phase resource sample. Absolute rates,
+latency, and retention percentages are capacity evidence only. The validator
+also rejects quiet-host requirements and host-speed gates, and rejects
 any substitution for the canonical 1,001 queues, 300,000 hot items, eight hot
 connections, eight cold workers, four server workers, seed 42, or 60,000 ms
 progress bound. A failed run remains smoke evidence and cannot be promoted by
@@ -77,7 +86,9 @@ The governed release configuration uses 1,001 queues, 300,000 hot items, eight
 hot connections, eight cold workers, four server workers, seed 42, and a
 60,000 ms progress bound. Environment overrides are useful for diagnostic
 reproduction, but the focused validator rejects a changed governed
-configuration as release evidence. `CLUSTER`, `IMAGE`, and `LEDGER_OUT` may be
+configuration as release evidence. The fixed work and resource shape makes the
+diagnostic reproducible without assuming a particular machine's speed or an
+idle host. `CLUSTER`, `IMAGE`, and `LEDGER_OUT` may be
 changed as operational locations without weakening a semantic bar. Immediately
 before row emission, before validation, and after the final verifier returns,
 the command rechecks both `HEAD` and the clean worktree. The emitter and

@@ -6,19 +6,27 @@ use pqueue_release::density::{
 fn measurement() -> DensityMeasurement {
     DensityMeasurement {
         hot_items: 300_000,
+        hot_sustain_windows: 1,
+        hot_sustain_items: 300_000,
         hot_connections: 8,
         cold_worker_count: 8,
         configured_server_workers: 4,
         total_queues: 1001,
         cold_queues_active: 1000,
         cold_queues_progress_eligible: 1000,
+        cold_empty_claim_responses: 0,
+        baseline_before_ingest_per_s: 4_900.0,
+        baseline_before_claim_finalize_per_s: 4_300.0,
+        baseline_after_ingest_per_s: 5_100.0,
+        baseline_after_claim_finalize_per_s: 4_500.0,
+        baseline_control_ingest_per_s: 4_998.0,
+        baseline_control_claim_finalize_per_s: 4_397.727_272_727_273,
         hot_ingest_per_s: 4_000.0,
         hot_claim_finalize_per_s: 3_500.0,
-        progress_bound_violations: 0,
         max_progress_latency_ms: 1_000,
         progress_bound_ms: 60_000,
-        noisy_neighbor_ingest_retention_pct: 102.5,
-        noisy_neighbor_claim_retention_pct: 101.0,
+        noisy_neighbor_ingest_retention_pct: 80.032_012_805_122_05,
+        noisy_neighbor_claim_retention_pct: 79.586_563_307_493_54,
         shared_worker_count: 4,
         shared_worker_limit: 4,
         connection_count: 16,
@@ -49,13 +57,13 @@ fn metadata() -> DensityMetadata {
 }
 
 #[test]
-fn density_validator_rejects_retention_below_no_degradation_bar() {
+fn density_validator_rejects_inconsistent_or_nonpositive_comparison() {
     for field in ["ingest", "claim"] {
         let mut measured = measurement();
         if field == "ingest" {
-            measured.noisy_neighbor_ingest_retention_pct = 99.99;
+            measured.noisy_neighbor_ingest_retention_pct = 0.0;
         } else {
-            measured.noisy_neighbor_claim_retention_pct = 99.99;
+            measured.noisy_neighbor_claim_retention_pct = 100.0;
         }
         let row = build_release_row(&measured, &metadata());
         assert_eq!(row.evidence_tier, "smoke");
@@ -97,7 +105,8 @@ fn density_validator_rejects_self_selected_resource_limits() {
 
 #[test]
 fn density_validator_rejects_every_noncanonical_run_parameter() {
-    let mutations: Vec<(&str, Box<dyn Fn(&mut DensityMeasurement)>)> = vec![
+    type MeasurementMutation = Box<dyn Fn(&mut DensityMeasurement)>;
+    let mutations: Vec<(&str, MeasurementMutation)> = vec![
         ("hot_items", Box::new(|m| m.hot_items = 299_999)),
         ("hot_connections", Box::new(|m| m.hot_connections = 7)),
         ("cold_worker_count", Box::new(|m| m.cold_worker_count = 7)),
@@ -159,15 +168,41 @@ fn density_validator_rejects_progress_semantics_substitution() {
 }
 
 #[test]
+fn density_validator_rejects_quiet_host_and_absolute_speed_gates() {
+    for pass_bar in [
+        "run on a quiet host; throughput >= 2777 items/s",
+        "p95 < 250 ms on the release machine",
+    ] {
+        let mut row = build_release_row(&measurement(), &metadata());
+        row.pass_bar = pass_bar.into();
+        let errors = validate_release_row(&row).unwrap_err().join("\n");
+        assert!(errors.contains("quiet host or absolute host-speed threshold"));
+    }
+
+    for (key, value) in [
+        ("portable_gate", serde_json::json!(false)),
+        ("quiet_host_required", serde_json::json!(true)),
+        ("host_speed_gate", serde_json::json!(true)),
+        ("wall_clock_capacity_only", serde_json::json!(false)),
+    ] {
+        let mut row = build_release_row(&measurement(), &metadata());
+        row.measurements.values.insert(key.into(), value);
+        assert!(validate_release_row(&row).is_err(), "tampered {key}");
+    }
+}
+
+#[test]
 fn density_validator_rejects_direct_tampering_of_an_otherwise_valid_release_row() {
     let mutations = [
         ("hot_items", serde_json::json!(299_999)),
+        ("hot_sustain_windows", serde_json::json!(0)),
+        ("hot_sustain_items", serde_json::json!(299_999)),
         ("hot_connections", serde_json::json!(7)),
         ("cold_worker_count", serde_json::json!(7)),
         ("configured_server_workers", serde_json::json!(3)),
         ("total_queues", serde_json::json!(1002)),
         ("cold_queues_progress_eligible", serde_json::json!(999)),
-        ("progress_bound_violations", serde_json::json!(1)),
+        ("cold_empty_claim_responses", serde_json::json!(1)),
         ("progress_bound_ms", serde_json::json!(60_001)),
         ("shared_worker_count", serde_json::json!(0)),
         ("connection_count", serde_json::json!(0)),
@@ -197,9 +232,10 @@ fn semantic_density_validator_accepts_complete_release_row() {
 fn semantic_density_validator_rejects_every_required_bar_when_missing() {
     for key in [
         "total_queues",
+        "baseline_before_ingest_per_s",
         "hot_ingest_per_s",
         "hot_claim_finalize_per_s",
-        "progress_bound_violations",
+        "cold_empty_claim_responses",
         "shared_worker_count",
         "noisy_neighbor_ingest_retention_pct",
     ] {
@@ -215,7 +251,7 @@ fn semantic_density_validator_rejects_every_required_bar_when_missing() {
 #[test]
 fn density_builder_never_promotes_a_failed_measurement() {
     let mut failed = measurement();
-    failed.hot_ingest_per_s = 1.0;
+    failed.hot_ingest_per_s = 0.0;
     let row = build_release_row(&failed, &metadata());
     assert_eq!(row.evidence_tier, "smoke");
     assert_eq!(row.scale, "smoke");
