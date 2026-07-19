@@ -77,7 +77,6 @@ pqueue-release = { path = "../pqueue-release" }
 serde_json = "1"
 # The hybrid attribution harness frames command envelopes with the same wire codec the object-log write
 # path uses (segmented.rs), so the measured serialize phase reflects real cost.
-postcard = { version = "1", default-features = false, features = ["alloc"] }
 # Pure-Rust Kafka CONSUMER for the end-to-end contract test: it consumes change records back over the
 # embedded broker's real TCP Kafka fetch surface (verifying HeimqServer serves the in-process appends, not
 # just the stored bytes). Dev-only so it always runs under default `cargo test`; no C dependency.

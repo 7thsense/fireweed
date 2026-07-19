@@ -14,7 +14,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 9c3b4dd2e25107fee51941c98dde6875e786d5627ab2704d58b79a30679918fa
+    self_hash: a88fb07f8275de066ab5f7a65f815e2da511774a164a20b464ebabf0a6e9d369
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -27,7 +27,7 @@ ddx:
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-19T02:12:30Z"
+    reviewed_at: "2026-07-19T03:37:52Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -181,8 +181,8 @@ This realizes the 8-step ADR-001 §"S3/Object-Log Commit Model" sequence. Each s
 
 | Step | Rule |
 |------|------|
-| 1. Buffer | Commands MUST be buffered per `tenant/queue`. Before dispatch, the adapter serializes each `CommandEnvelope` exactly once, validates a conservative resident-peak charge, and acquires a non-cloneable byte permit covering the retained record and temporary seal-frame copy. Each independently admitted request reserves the fixed 25-byte frame overhead; co-batching MAY therefore overcharge the one merged frame but MUST never undercharge it. The same bytes move through coordinator and segment buffer in arrival order. Because the queue is the unit of sharding (ADR-008), every command for the queue — including every member of a `group_key` — lands in the one queue buffer on the queue's owner, so `whole_group` (G1 `compatibility.group_batching`) and `whole_cohort` (G6 `cohort_policy`) claims are owner-local by construction. |
-| 2. Seal | A segment MUST seal when EITHER the buffered byte size reaches `segment_target_bytes` OR the oldest buffered command's age reaches `segment_max_latency_ms`, whichever comes first. Sealing assigns each command a monotonic per-queue `sequence` (TD-001 `CommandPosition.sequence`) contiguous with the prior segment, and computes a per-segment `checksum` plus per-command `checksum` (TD-001 `CommandEnvelope.checksum`). |
+| 1. Buffer | Commands MUST be buffered per `tenant/queue`. Before dispatch, the adapter serializes each `CommandEnvelope` exactly once, validates the complete governed frame, and acquires a non-cloneable byte permit covering retained records plus the temporary seal-frame copy. Exact accounting is format-specific: v2 has 25 fixed bytes plus 4 framing bytes per record; v3 has 29 fixed bytes plus 8 framing bytes per record. Each independently admitted request reserves its own fixed/per-record framing, so co-batching MAY overcharge the one merged frame but MUST never undercharge it. The same bytes move through coordinator and segment buffer in arrival order. Because the queue is the unit of sharding (ADR-008), every command for the queue — including every member of a `group_key` — lands in the one queue buffer on the queue's owner, so `whole_group` (G1 `compatibility.group_batching`) and `whole_cohort` (G6 `cohort_policy`) claims are owner-local by construction. |
+| 2. Seal | A segment MUST seal when EITHER the buffered byte size reaches `segment_target_bytes` OR the oldest buffered command's age reaches `segment_max_latency_ms`, whichever comes first. Sealing assigns each command a monotonic per-queue `sequence` (TD-001 `CommandPosition.sequence`) contiguous with the prior segment. V2 computes manifest FNV-1a over the records blob. V3 computes payload CRC32C per record, full-frame CRC32C, and stored-object SHA-256. `CommandEnvelope.checksum` remains application/legacy metadata, not v3 framing authority. |
 | 3. Write segment | The sealed, immutable segment MUST be written to object storage under a deterministic key (see "Object Layout") before any manifest commit references it. The write SHOULD use an idempotent PUT keyed by `(queue, first_sequence)` so retried writes do not create divergent objects. |
 | 4. Commit manifest | A manifest entry naming the segment, its `[first_sequence, last_sequence]` range, its checksum, and the writer's `assignment_epoch` MUST be appended via a conditional write that succeeds only if (a) the manifest's tail still equals the writer's expected tail AND (b) the writer's `assignment_epoch` is the **current** epoch for the queue (see "Manifest Commit and Epoch Fencing"). A failed CAS MUST abort the commit, roll back the in-flight reservation, and the writer MUST treat itself as raced or fenced. |
 | 5. Ack-eligibility | Only after the manifest entry is durably committed MAY the commands in that segment become eligible for acknowledgement. Manifest commit alone is not permission to return success before the operation's own visibility barrier is satisfied. |
@@ -266,9 +266,49 @@ snapshots and monotonic deltas are the request/response byte and request-count s
 
 | Object | Key shape (logical) | Contents |
 |--------|---------------------|----------|
-| Segment | `t/{tenant}/q/{queue}/seg/{first_sequence:020}.seg` | Immutable framed `CommandEnvelope`s, per-command checksums, segment trailer checksum, `assignment_epoch`. |
-| Manifest | `t/{tenant}/q/{queue}/manifest` | Ordered, append-only list of `{segment_key, first_sequence, last_sequence, segment_checksum, assignment_epoch, committed_at}`. Conditionally written (CAS). |
+| Segment | `t/{tenant}/q/{queue}/seg_candidates/e{segment_epoch}/i{manifest_index}/s{first_sequence}-{content_sha256}.seg` | Immutable framed canonical-JSON `CommandEnvelope`s. Digest-bearing v3 keys, manifest identity, and complete stored bytes MUST agree. |
+| Manifest | `t/{tenant}/q/{queue}/manifest` | Ordered, append-only data/fence/floor/watermark entries. Data entries are the sole format-dispatch authority; control entries are explicitly non-data. Conditionally written (CAS). |
 | Snapshot | `t/{tenant}/q/{queue}/snap/{snapshot_sequence:020}.sqlite` | SQLite projection image at `snapshot_sequence`, plus snapshot metadata `{snapshot_sequence, segment_range_covered, projection_schema_version, checksum}`. |
+
+### Segment format compatibility and integrity
+
+The segment header is `PQSG`, one version byte, `segment_epoch` (`u64` little-endian), and
+`first_sequence` (`u64` little-endian). V2 then stores `count` followed by repeated `length + canonical JSON`
+records. Its manifest `checksum` is FNV-1a over `count + records`. V3 stores `count`, repeated
+`length + payload_crc32c + canonical JSON`, and a final CRC32C over every preceding byte. Length fields are
+covered by the frame CRC; record CRCs cover payload bytes. V3 manifests add `segment_format: 3`,
+`entry_kind: "data"`, `segment_epoch`, `frame_crc32c`, `content_sha256`, and algorithm IDs
+`crc32c-castagnoli`/`sha256`. Missing `segment_format` on a data entry means v2; partial or unknown metadata
+fails closed. Serde defaults permit additive JSON evolution but MUST NOT select the frame decoder.
+
+`entry_kind` has stable snake-case values `data`, `fence`, `retention_floor`, `deletion_watermark`, and
+`reclaimed`. New entries always write it and v3 data requires `data`. A reclaimed entry retains its immutable
+segment identity/integrity fields but sets `entry_kind: "reclaimed"` and the exact reclamation watermark;
+readers skip its object only after validating that shape and its same-queue canonical key. Legacy v2 entries
+may omit `entry_kind` and are inferred only from one exact, non-mixed historical field shape. Any explicit
+kind/field disagreement, mixed controls, invalid range, or cross-queue/coordinate key fails at manifest
+validation before a segment GET.
+
+`ManifestEntry.epoch` is logical manifest authority. `segment_epoch` is the physical immutable header epoch.
+Branch copies preserve the source `segment_epoch` while assigning their own logical epoch. Historical v2
+branch manifests created before this field exist: only a committed branch with absent `segment_epoch` may use
+the decoded header epoch. Ordinary v2 data entries infer `segment_epoch = epoch`; every new data entry writes
+it explicitly. Fence, retention-floor, and deletion-watermark entries carry no segment integrity metadata.
+
+Readers validate object-size, record-count, and record-length bounds with checked arithmetic, preflight the
+complete frame before allocating the decoded-command vector, then validate CRC/identity, JSON payloads,
+epoch (where applicable), first sequence, count-derived last sequence, and manifest metadata. Errors are
+typed by validation stage and include only manifest index plus an opaque locator. Physical GET accounting is
+unchanged; logical segment validation emits one success/corrupt observation without object keys or error text.
+New writes are capped at 64 MiB per complete stored frame, 16 MiB per canonical record, and 1,000,000
+records; configuration above the frame cap is rejected. These are also the governed historical decode caps:
+operators must retain/upgrade or explicitly migrate any pre-release v2 object exceeding them before rollout.
+The two-pass decoder prevents attacker-controlled length/count fields from causing secondary allocations.
+
+Release N reads v2/v3 and defaults `PQUEUE_SEGMENT_WRITER_FORMAT=v2`; `v3` is an opt-in soak setting. Runtime
+rollback may emit v2 after v3, so replay, branch, retention, and recovery MUST accept arbitrary interleaving.
+Release N+1 may default to v3 only after mixed-history and performance evidence passes. Downgrading binaries
+below release N is unsupported while any v3 object remains retained. Committed objects are never rewritten.
 
 Object naming is implementation-refinable but MUST keep `tenant`, `queue` as the leading key
 components (tenant isolation, TD-001 §Security) and MUST keep segment keys monotonically orderable by
@@ -306,7 +346,7 @@ disabled while pending, and every `E` commit attempt after the storage head adva
 | — (b) epoch fence published to manifest before serving handoff | CP first enters non-serving `PendingFence(E+1)`, stopping new old-owner admission. Storage then publishes `E+1` into the manifest head before the new owner hydrates or serves. An already-admitted `E` operation may linearize before that storage CAS; every `E` attempt after it loses to the higher head. Recovery MUST publish/confirm the storage fence before hydration and CP `Assigned(E+1)`. |
 | Manifest tail CAS | In addition to the epoch validation, manifest commit MUST be conditional on the manifest tail still matching the writer's expected tail, so two writers at the same epoch (transient split-brain) cannot both extend the log from the same point. |
 | Fenced writer | A writer whose commit fails because the current epoch has advanced (or a fence record now records a higher epoch) MUST treat itself as fenced: it MUST discard its in-flight buffer and roll back its in-flight claim reservations (see "Claim Reservation") without ack, and MUST NOT retry the commit under the old epoch. Unacked commands are re-driven by the new epoch holder on the normal replay path (caller retries by `request_id`). |
-| Recovery read | A newly assigned epoch holder MUST (1) under implementation (b), publish its epoch fence to the manifest as its first write; (2) read the latest committed snapshot; (3) replay manifest segments with `sequence > snapshot_sequence`, validating per-segment and per-command checksums; before sealing any new data segment. This reproduces acknowledged state (TD-001 conformance: snapshot recovery). |
+| Recovery read | A newly assigned epoch holder MUST (1) under implementation (b), publish its epoch fence to the manifest as its first write; (2) read the latest committed snapshot; (3) replay manifest segments with `sequence > snapshot_sequence`, dispatching each from manifest-authoritative v2/v3 metadata and validating frame/record integrity and identity; before sealing any new data segment. This reproduces acknowledged state (TD-001 conformance: snapshot recovery). |
 | No consensus | This mechanism MUST NOT introduce node discovery, leader election, or embedded consensus (ADR-001 / D4(c)). The object store's conditional write plus the Postgres-backed TD-003 lease/epoch are the only coordination primitives. |
 
 ## Claim Reservation (in-flight reservations before durable commit) (normative)

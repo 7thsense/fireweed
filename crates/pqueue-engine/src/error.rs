@@ -1,6 +1,59 @@
 //! Engine error model. The RESP adapter maps these to the canonical `-ERR pqueue ...` replies
 //! (TD-006 section 7; asserted verbatim by conformance).
 
+/// Stable stage of a durable-object integrity failure. Adapters carry this
+/// enum without parsing display text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurableIntegrityStage {
+    Manifest,
+    Header,
+    Bounds,
+    LegacyFnv1a,
+    RecordCrc32c,
+    FrameCrc32c,
+    Sha256,
+    Payload,
+    Position,
+}
+
+impl DurableIntegrityStage {
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Header => "header",
+            Self::Bounds => "bounds",
+            Self::LegacyFnv1a => "legacy_fnv1a",
+            Self::RecordCrc32c => "record_crc32c",
+            Self::FrameCrc32c => "frame_crc32c",
+            Self::Sha256 => "sha256",
+            Self::Payload => "payload",
+            Self::Position => "position",
+        }
+    }
+
+    pub fn parse(token: &str) -> Option<Self> {
+        Some(match token {
+            "manifest" => Self::Manifest,
+            "header" => Self::Header,
+            "bounds" => Self::Bounds,
+            "legacy_fnv1a" => Self::LegacyFnv1a,
+            "record_crc32c" => Self::RecordCrc32c,
+            "frame_crc32c" => Self::FrameCrc32c,
+            "sha256" => Self::Sha256,
+            "payload" => Self::Payload,
+            "position" => Self::Position,
+            _ => return None,
+        })
+    }
+}
+
+impl std::fmt::Display for DurableIntegrityStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.token())
+    }
+}
+
 /// Errors a port may return. The variant set is the engine's; adapters translate to their wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
@@ -51,6 +104,13 @@ pub enum EngineError {
     Backpressure { resource: &'static str },
     /// Underlying storage failure (adapter-level).
     Storage(String),
+    /// A durable object failed a structured integrity check. The locator is an
+    /// opaque queue-scoped token and must never contain an object-store key.
+    DurableDataCorrupt {
+        stage: DurableIntegrityStage,
+        manifest_index: u64,
+        locator: String,
+    },
 }
 
 impl EngineError {
@@ -76,7 +136,8 @@ impl EngineError {
             EngineError::NotFound
             | EngineError::QueueDefinitionConflict
             | EngineError::Forbidden(_)
-            | EngineError::Storage(_) => None,
+            | EngineError::Storage(_)
+            | EngineError::DurableDataCorrupt { .. } => None,
         }
     }
 }
@@ -108,6 +169,14 @@ impl std::fmt::Display for EngineError {
             EngineError::Backpressure { resource } => write!(f, "backpressure: {resource}"),
             EngineError::Forbidden(why) => write!(f, "forbidden: {why}"),
             EngineError::Storage(msg) => write!(f, "storage: {msg}"),
+            EngineError::DurableDataCorrupt {
+                stage,
+                manifest_index,
+                locator,
+            } => write!(
+                f,
+                "durable data corrupt: stage={stage} manifest_index={manifest_index} locator={locator}"
+            ),
         }
     }
 }
@@ -139,14 +208,24 @@ pub enum CommitRejection {
     Conflict,
     BatchTooLarge,
     RequestIdConflict,
-    Paused { drain_intake: bool },
+    Paused {
+        drain_intake: bool,
+    },
     RequestExpired,
     EpochFenced,
     Forbidden(String),
     EntitySchemaViolation(String),
-    RequestTooLarge { requested: usize, limit: usize },
+    RequestTooLarge {
+        requested: usize,
+        limit: usize,
+    },
     Backpressure(String),
     Storage(String),
+    DurableDataCorrupt {
+        stage: DurableIntegrityStage,
+        manifest_index: u64,
+        locator: String,
+    },
 }
 
 impl CommitRejection {
@@ -180,6 +259,15 @@ impl CommitRejection {
                 CommitRejection::Backpressure((*resource).to_string())
             }
             EngineError::Storage(msg) => CommitRejection::Storage(msg.clone()),
+            EngineError::DurableDataCorrupt {
+                stage,
+                manifest_index,
+                locator,
+            } => CommitRejection::DurableDataCorrupt {
+                stage: *stage,
+                manifest_index: *manifest_index,
+                locator: locator.clone(),
+            },
         }
     }
 
@@ -219,6 +307,15 @@ impl CommitRejection {
                 },
             },
             CommitRejection::Storage(msg) => EngineError::Storage(msg),
+            CommitRejection::DurableDataCorrupt {
+                stage,
+                manifest_index,
+                locator,
+            } => EngineError::DurableDataCorrupt {
+                stage,
+                manifest_index,
+                locator,
+            },
         }
     }
 }
@@ -249,6 +346,11 @@ mod commit_rejection_tests {
             },
             EngineError::Backpressure {
                 resource: "buffered bytes",
+            },
+            EngineError::DurableDataCorrupt {
+                stage: DurableIntegrityStage::FrameCrc32c,
+                manifest_index: 42,
+                locator: "0123456789abcdef".to_owned(),
             },
         ];
         for e in cases {

@@ -1476,7 +1476,9 @@ fn err_reply(e: &EngineError) -> Resp {
         // A client-caused incompatible re-create, not an internal fault (queue-create is library-only
         // over RESP today, so this is latent — but the token must be honest).
         EngineError::QueueDefinitionConflict => Resp::Error("ERR pqueue queue_conflict".into()),
-        EngineError::Storage(_) => Resp::Error("ERR pqueue internal".into()),
+        EngineError::Storage(_) | EngineError::DurableDataCorrupt { .. } => {
+            Resp::Error("ERR pqueue internal".into())
+        }
         // Every other variant carries a `-ERR pqueue …` token via `resp_token()` above; this arm is
         // unreachable, but stays total.
         _ => Resp::Error("ERR pqueue internal".into()),

@@ -53,7 +53,7 @@ pub use object_log_sqlite::{
     DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend,
     SegmentedObjectLogSqliteBackend,
 };
-pub use pqueue_objectlog::segmented::SegmentConfig;
+pub use pqueue_objectlog::segmented::{SegmentConfig, SegmentWriterFormat};
 pub use tokio_dispatcher::TokioTaskDispatcher;
 
 /// The single optional env-var populator for [`Config`] (`Config::from_env`) plus its [`ConfigError`]. Pure

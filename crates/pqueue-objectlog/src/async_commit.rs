@@ -323,6 +323,7 @@ struct GroupCommitCoordinator<P> {
     byte_budget: BufferedByteBudget,
     max_queue_waiting_bytes: usize,
     wait_policy: ByteAdmissionWaitPolicy,
+    writer_format: crate::SegmentWriterFormat,
     state: Mutex<CoordinatorState>,
     #[cfg(test)]
     phase_hook: Mutex<Option<PhaseHook>>,
@@ -401,6 +402,7 @@ where
         max_queued_commits: usize,
         admission: ObjectLogByteAdmissionConfig,
     ) -> EngineResult<Self> {
+        let writer_format = log.segment_writer_format();
         let ObjectLogByteAdmissionConfig {
             budget: byte_budget,
             max_queue_waiting_bytes,
@@ -433,6 +435,7 @@ where
                 byte_budget,
                 max_queue_waiting_bytes,
                 wait_policy,
+                writer_format,
                 state: Mutex::new(CoordinatorState {
                     closed: false,
                     next_request_id: 0,
@@ -501,6 +504,7 @@ where
         let (shard, expected_epoch, fault, serialized, charged_bytes) = prepare_serialized_request(
             request,
             self.coordinator.byte_budget.config().global_limit(),
+            self.coordinator.writer_format,
         )?;
         let permit = self
             .coordinator
@@ -1062,6 +1066,7 @@ where
                 prepare_serialized_request(
                     request,
                     coordinator.byte_budget.config().global_limit(),
+                    coordinator.writer_format,
                 )?;
             // Dispatcher acceptance has already happened when this owned future runs. It must therefore be
             // finite: an ordinary trait caller can never park a dispatcher slot waiting for byte capacity.
@@ -1089,8 +1094,11 @@ async fn prepare_with_configured_policy<P>(
     coordinator: Arc<GroupCommitCoordinator<P>>,
     request: RawCommitRequest,
 ) -> EngineResult<PreparedObjectLogCommit> {
-    let (shard, expected_epoch, fault, serialized, charged_bytes) =
-        prepare_serialized_request(request, coordinator.byte_budget.config().global_limit())?;
+    let (shard, expected_epoch, fault, serialized, charged_bytes) = prepare_serialized_request(
+        request,
+        coordinator.byte_budget.config().global_limit(),
+        coordinator.writer_format,
+    )?;
     let tenant = shard.tenant_id.clone();
     let permit = match coordinator.wait_policy {
         ByteAdmissionWaitPolicy::Reject => {
@@ -1114,6 +1122,7 @@ async fn prepare_with_configured_policy<P>(
 fn prepare_serialized_request(
     request: RawCommitRequest,
     global_limit: usize,
+    writer_format: crate::SegmentWriterFormat,
 ) -> EngineResult<(
     QueueKey,
     u64,
@@ -1125,7 +1134,12 @@ fn prepare_serialized_request(
         return Err(EngineError::Invalid("fault-injection: kill before append"));
     }
     let (shard, commands, expected_epoch, fault) = request.into_parts();
-    let (serialized, charged_bytes) = prepare_serialized_commands(commands, global_limit)?;
+    let serialized = commands
+        .into_iter()
+        .map(SerializedCommandEnvelope::new)
+        .collect::<EngineResult<Vec<_>>>()?;
+    let charged_bytes =
+        serialized_peak_charge_for_format(&serialized, global_limit, writer_format)?;
     Ok((shard, expected_epoch, fault, serialized, charged_bytes))
 }
 
@@ -1203,11 +1217,25 @@ pub fn prepare_serialized_commands(
     commands: Vec<pqueue_engine::CommandEnvelope>,
     limit: usize,
 ) -> EngineResult<(Vec<SerializedCommandEnvelope>, usize)> {
+    prepare_serialized_commands_for_format(commands, limit, crate::SegmentWriterFormat::V2)
+}
+
+/// Canonically encode a batch and charge the exact retained-record plus
+/// temporary-frame peak for the selected durable segment writer.
+pub fn prepare_serialized_commands_for_format(
+    commands: Vec<pqueue_engine::CommandEnvelope>,
+    limit: usize,
+    writer_format: crate::SegmentWriterFormat,
+) -> EngineResult<(Vec<SerializedCommandEnvelope>, usize)> {
     let serialized = commands
         .into_iter()
         .map(SerializedCommandEnvelope::new)
         .collect::<EngineResult<Vec<_>>>()?;
-    let charged = serialized_peak_charge(&serialized, limit)?;
+    crate::segment_integrity::validate_write_lengths(
+        writer_format,
+        serialized.iter().map(|record| record.record_len()),
+    )?;
+    let charged = serialized_peak_charge_for_format(&serialized, limit, writer_format)?;
     Ok((serialized, charged))
 }
 
@@ -1215,18 +1243,35 @@ pub fn serialized_peak_charge(
     records: &[SerializedCommandEnvelope],
     limit: usize,
 ) -> EngineResult<usize> {
-    serialized_peak_charge_for_lengths(records.iter().map(|record| record.record.len()), limit)
+    serialized_peak_charge_for_format(records, limit, crate::SegmentWriterFormat::V2)
+}
+
+fn serialized_peak_charge_for_format(
+    records: &[SerializedCommandEnvelope],
+    limit: usize,
+    writer_format: crate::SegmentWriterFormat,
+) -> EngineResult<usize> {
+    serialized_peak_charge_for_lengths(
+        records.iter().map(|record| record.record.len()),
+        limit,
+        writer_format,
+    )
 }
 
 fn serialized_peak_charge_for_lengths(
     lengths: impl IntoIterator<Item = usize>,
     limit: usize,
+    writer_format: crate::SegmentWriterFormat,
 ) -> EngineResult<usize> {
     let overflow = || EngineError::RequestTooLarge {
         requested: usize::MAX,
         limit,
     };
-    retained_records_plus_frame_bytes(lengths, 25, 4).ok_or_else(overflow)
+    let (fixed, per_record) = match writer_format {
+        crate::SegmentWriterFormat::V2 => (25, 4),
+        crate::SegmentWriterFormat::V3 => (29, 8),
+    };
+    retained_records_plus_frame_bytes(lengths, fixed, per_record).ok_or_else(overflow)
 }
 
 fn validate_page_size(page_size: usize) -> EngineResult<()> {
@@ -2192,15 +2237,43 @@ mod tests {
             .iter()
             .map(|bundled| bundled.record.clone())
             .collect::<Vec<_>>();
-        let (frame, _) = crate::segmented::build_segment_object(7, 11, &records);
+        let frame = crate::segment_integrity::encode(
+            crate::segment_integrity::WriterFormat::V3,
+            7,
+            11,
+            &records,
+        )
+        .unwrap()
+        .bytes;
         let resident_records = records.iter().map(Vec::len).sum::<usize>();
         assert_eq!(
-            serialized_peak_charge(&serialized, usize::MAX).unwrap(),
+            serialized_peak_charge_for_format(
+                &serialized,
+                usize::MAX,
+                crate::SegmentWriterFormat::V3,
+            )
+            .unwrap(),
             resident_records + frame.len()
+        );
+        let v2_frame = crate::segment_integrity::encode(
+            crate::segment_integrity::WriterFormat::V2,
+            7,
+            11,
+            &records,
+        )
+        .unwrap()
+        .bytes;
+        assert_eq!(
+            serialized_peak_charge(&serialized, usize::MAX).unwrap(),
+            resident_records + v2_frame.len()
         );
         assert_eq!(
             frame.len(),
-            crate::segmented::segment_object_len(&records).unwrap()
+            crate::segment_integrity::encoded_len(
+                crate::segment_integrity::WriterFormat::V3,
+                records.iter().map(Vec::len),
+            )
+            .unwrap()
         );
     }
 
@@ -2508,8 +2581,12 @@ mod tests {
                 .map(|command| serde_json::to_vec(command).unwrap())
                 .collect::<Vec<_>>();
             admitted_bytes += black_box(
-                serialized_peak_charge_for_lengths(records.iter().map(Vec::len), usize::MAX)
-                    .unwrap(),
+                serialized_peak_charge_for_lengths(
+                    records.iter().map(Vec::len),
+                    usize::MAX,
+                    crate::SegmentWriterFormat::V3,
+                )
+                .unwrap(),
             );
             black_box(records);
         }

@@ -27,6 +27,7 @@ pub enum BlobOperation {
     AcquireEpoch,
     FenceEpoch,
     Branch,
+    ValidateSegment,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -177,12 +178,15 @@ impl BlobStoreFault {
                 Self::new(BlobResultClass::PreconditionLost, true, false, false)
             }
             EngineError::Storage(_) => Self::new(BlobResultClass::OtherError, false, false, false),
+            EngineError::DurableDataCorrupt { .. } => {
+                Self::new(BlobResultClass::Corrupt, false, false, false)
+            }
             _ => Self::new(BlobResultClass::OtherError, false, false, false),
         }
     }
 }
 
-const OP_COUNT: usize = 12;
+const OP_COUNT: usize = 13;
 const OBJECT_COUNT: usize = 8;
 const RESULT_COUNT: usize = 8;
 const BACKEND_COUNT: usize = 4;
@@ -281,7 +285,8 @@ impl BlobMetricsSnapshot {
                 | BlobOperation::UpdateManifestHead
                 | BlobOperation::AcquireEpoch
                 | BlobOperation::FenceEpoch
-                | BlobOperation::Branch => continue,
+                | BlobOperation::Branch
+                | BlobOperation::ValidateSegment => continue,
             }
             totals.request_bytes += row.values.request_bytes;
             totals.response_bytes += row.values.response_bytes;
@@ -519,6 +524,46 @@ impl BlobMetricsRecorder {
             timeout,
         });
     }
+
+    /// Record logical segment validation without inventing another physical
+    /// object-store attempt or duplicating GET byte accounting.
+    pub(crate) fn record_segment_validation<T>(
+        &self,
+        backend: BlobBackendKind,
+        result: &EngineResult<T>,
+    ) {
+        if !self.is_enabled() {
+            return;
+        }
+        let (result_class, retryable, throttled, timeout, error) = match result {
+            Ok(_) => (BlobResultClass::Success, false, false, false, false),
+            Err(error) => {
+                let fault = BlobStoreFault::from_engine_error(error);
+                (
+                    fault.result,
+                    fault.retryable,
+                    fault.throttled,
+                    fault.timeout,
+                    true,
+                )
+            }
+        };
+        self.record(Event {
+            operation: BlobOperation::ValidateSegment,
+            object: BlobObjectClass::Segment,
+            result: result_class,
+            retryable,
+            backend,
+            attempts: 0,
+            retries: 0,
+            request_bytes: 0,
+            response_bytes: 0,
+            latency_ns: 0,
+            error,
+            throttled,
+            timeout,
+        });
+    }
 }
 
 const ALL_OPERATIONS: [BlobOperation; OP_COUNT] = [
@@ -534,6 +579,7 @@ const ALL_OPERATIONS: [BlobOperation; OP_COUNT] = [
     BlobOperation::AcquireEpoch,
     BlobOperation::FenceEpoch,
     BlobOperation::Branch,
+    BlobOperation::ValidateSegment,
 ];
 const ALL_OBJECT_CLASSES: [BlobObjectClass; OBJECT_COUNT] = [
     BlobObjectClass::Segment,
@@ -1330,6 +1376,33 @@ mod tests {
         assert!(!fault.retryable);
         assert!(!fault.throttled);
         assert!(!fault.timeout);
+    }
+
+    #[test]
+    fn typed_segment_corruption_is_one_logical_zero_attempt_observation() {
+        let recorder = BlobMetricsRecorder::new();
+        let error: EngineResult<()> = Err(EngineError::DurableDataCorrupt {
+            stage: pqueue_engine::DurableIntegrityStage::FrameCrc32c,
+            manifest_index: 7,
+            locator: "0123456789abcdef".to_owned(),
+        });
+        recorder.record_segment_validation(BlobBackendKind::Memory, &error);
+        let row = values(
+            &recorder,
+            BlobOperation::ValidateSegment,
+            BlobObjectClass::Segment,
+            BlobResultClass::Corrupt,
+            false,
+        );
+        assert_eq!(
+            (
+                row.completions,
+                row.attempts,
+                row.request_bytes,
+                row.response_bytes
+            ),
+            (1, 0, 0, 0)
+        );
     }
 
     #[test]

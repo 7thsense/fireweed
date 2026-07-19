@@ -83,7 +83,7 @@ fn ts_to_ms(ts: pqueue_core::UtcTimestamp) -> i64 {
 
 /// A large segment target so [`SegmentedObjectLog::enqueue`] never auto-seals mid-`append`; the append path
 /// force-seals exactly one segment per call, so the whole batch is one group commit.
-const APPEND_TARGET_BYTES: usize = 1 << 30;
+const APPEND_TARGET_BYTES: usize = crate::segment_integrity::MAX_SEGMENT_BYTES;
 /// A large latency budget — the append path force-seals synchronously, so the time trigger never fires.
 const APPEND_MAX_LATENCY_MS: u64 = u64::MAX;
 
@@ -221,6 +221,10 @@ impl ObjectLog {
 
     pub(crate) fn shared_segment_target_bytes(&self) -> usize {
         self.config.target_bytes
+    }
+
+    pub(crate) fn shared_segment_writer_format(&self) -> crate::SegmentWriterFormat {
+        self.config.writer_format()
     }
 
     pub(crate) fn shared_pending(&self, shard: &QueueKey) -> usize {

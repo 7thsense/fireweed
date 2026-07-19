@@ -22,7 +22,7 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: 499b3c2c4300fa311a7189c64fc1321903ad8b2f67045f9bd95c993d690158d5
+    self_hash: 6d3ebd44a41784009a425580189619661bdb5620ba831c5f1952ca2b61bcc888
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
@@ -38,12 +38,12 @@ ddx:
       td-object-log-turso-projection: 0626539eb10dced9b304c0fc48cb292d4ed25dd49e5c474b87829caec9384488
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
-      td-s3-object-log-sqlite-projection-mode: 3765364468e6c3355df70b89cf4a3d59c6cebae935c75ff9eb13fbbc95af210c
-      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+      td-s3-object-log-sqlite-projection-mode: a88fb07f8275de066ab5f7a65f815e2da511774a164a20b464ebabf0a6e9d369
+      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
-      tp-scale-substantiation: ff74b55a3869b335aa80e2e52abae5cea979d028c1c41559ab027e477a26c253
-    reviewed_at: "2026-07-19T01:26:09Z"
+      tp-scale-substantiation: 8d4b9a39799bd01ceb6007fd17832590e7af854bae5092894579b3bcb660d842
+    reviewed_at: "2026-07-19T03:37:52Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -475,6 +475,7 @@ but not sufficient.
 | Coverage — `pqueue-service` | ≥ 80% line | per-PR |
 | Property tests | ≥ `props` (PR tier); 0 falsifications | per-PR |
 | Fuzz targets (command decode, selector, priority decode) | ≥ `fuzz` (PR tier); 0 new crashes | per-PR |
+| Segment format v2/v3 (golden, bounds, corruption, mixed history) | Literal v2/v3 bytes; CRC32C/SHA-256 standards; all single-bit v3 mutations; truncated/oversized/malicious lengths; manifest/key/header mismatch; deterministic arbitrary v2/v3/control-entry interleavings; legacy branch exemption | per-PR |
 | Product E2E smoke (`PQUEUE_E2E_SCALE=smoke`) | P0/core AC-E2E-1..6 and AC-E2E-8..9 pass at smoke shape for each implemented suite and required backend profile; include AC-E2E-7 once the P1/operator surface is implemented | per-PR once the suite exists |
 | **Every `AC-*` in §3 executes and passes at its stated bar** | 100% of claimed `AC-*` green | per-PR for unit/integration ACs and product smoke; release for soak, scale, and release-shape product E2E ACs |
 | Latency micro-bars `AC-LAT-1..4` | meet stated p95/p99 | release |

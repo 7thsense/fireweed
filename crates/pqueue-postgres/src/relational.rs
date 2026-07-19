@@ -451,6 +451,14 @@ fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
         ),
         EngineError::Forbidden(why) => ("forbidden", Some((*why).to_string())),
         EngineError::Storage(msg) => ("storage", Some(msg.clone())),
+        EngineError::DurableDataCorrupt {
+            stage,
+            manifest_index,
+            locator,
+        } => (
+            "durable_data_corrupt",
+            Some(format!("{stage}:{manifest_index}:{locator}")),
+        ),
         EngineError::EntitySchemaViolation(msg) => ("entity_schema_violation", Some(msg.clone())),
         EngineError::RequestTooLarge { requested, limit } => {
             ("request_too_large", Some(format!("{requested}:{limit}")))
@@ -461,6 +469,7 @@ fn encode_engine_error(e: &EngineError) -> (&'static str, Option<String>) {
 
 fn decode_engine_error(code: &str, detail: Option<String>) -> EngineError {
     match code {
+        "durable_data_corrupt" => decode_durable_data_corrupt(detail),
         "not_found" => EngineError::NotFound,
         "queue_definition_conflict" => EngineError::QueueDefinitionConflict,
         "invalid" => EngineError::Invalid(match detail.as_deref() {
@@ -489,6 +498,18 @@ fn decode_engine_error(code: &str, detail: Option<String>) -> EngineError {
             resource: "bounded resource",
         },
         _ => EngineError::Storage(detail.unwrap_or_else(|| code.to_string())),
+    }
+}
+
+fn decode_durable_data_corrupt(detail: Option<String>) -> EngineError {
+    let detail = detail.unwrap_or_default();
+    let mut fields = detail.splitn(3, ':');
+    let stage = pqueue_engine::DurableIntegrityStage::parse(fields.next().unwrap_or_default())
+        .unwrap_or(pqueue_engine::DurableIntegrityStage::Manifest);
+    EngineError::DurableDataCorrupt {
+        stage,
+        manifest_index: fields.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+        locator: fields.next().unwrap_or("unknown").to_owned(),
     }
 }
 

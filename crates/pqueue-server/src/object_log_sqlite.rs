@@ -32,7 +32,7 @@ use pqueue_objectlog::segmented::{
     BlobStore, FaultHook, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use pqueue_objectlog::{
-    LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands,
+    LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands_for_format,
 };
 use pqueue_projection::ProjectionData;
 use pqueue_sqlite::SqliteProjectionStore;
@@ -838,6 +838,7 @@ pub struct SegmentedObjectLogSqliteBackend {
     idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
+    writer_format: pqueue_objectlog::SegmentWriterFormat,
 }
 
 fn ts_to_ms(now: UtcTimestamp) -> i64 {
@@ -901,6 +902,7 @@ impl SegmentedObjectLogSqliteBackend {
             idempotency: Mutex::new(HashMap::new()),
             byte_budget: default_objectlog_byte_budget(),
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
+            writer_format: config.writer_format(),
         })
     }
 
@@ -1105,9 +1107,10 @@ impl SegmentedObjectLogSqliteBackend {
             // Same-queue callers waiting for this lock own only their request envelope, never a global byte
             // permit or an extra serialized copy. Canonical encoding, queue reservation, and non-waiting
             // global admission linearize together under the coordinator lock.
-            let (serialized, charged_bytes) = prepare_serialized_commands(
+            let (serialized, charged_bytes) = prepare_serialized_commands_for_format(
                 vec![envelope],
                 self.byte_budget.config().global_limit(),
+                self.writer_format,
             )?;
             let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
             if !state.pending.is_empty()
@@ -1778,6 +1781,7 @@ pub struct SegmentedObjectLogInMemoryBackend {
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
     debug_segments: bool,
+    writer_format: pqueue_objectlog::SegmentWriterFormat,
 }
 
 impl SegmentedObjectLogInMemoryBackend {
@@ -1812,6 +1816,7 @@ impl SegmentedObjectLogInMemoryBackend {
             byte_budget: default_objectlog_byte_budget(),
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
             debug_segments: false,
+            writer_format: config.writer_format(),
         })
     }
 
@@ -2016,9 +2021,10 @@ impl SegmentedObjectLogInMemoryBackend {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = coord.state.lock().await;
-            let (serialized, charged_bytes) = prepare_serialized_commands(
+            let (serialized, charged_bytes) = prepare_serialized_commands_for_format(
                 vec![envelope],
                 self.byte_budget.config().global_limit(),
+                self.writer_format,
             )?;
             let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
             if !state.pending.is_empty()
@@ -3149,6 +3155,86 @@ mod recovery_tests {
             (COMMITTED + EXTRA) as u64,
             "state unchanged by the idempotent second recovery"
         );
+    }
+
+    #[tokio::test]
+    async fn sqlite_snapshot_tail_recovers_interleaved_v3_then_v2_once() {
+        let tmp = TmpDir::new("seg-mixed-tail");
+        let def = queue_def("t", "q");
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        const APPLIED: usize = 3;
+        let (v3_envelope, v2_envelope) = {
+            let backend = SegmentedObjectLogSqliteBackend::open(
+                tmp.object_root(),
+                &tmp.projection(),
+                seal_each_config(),
+            )
+            .unwrap();
+            backend.create_queue(def.clone()).await.unwrap();
+            for index in 0..APPLIED {
+                backend
+                    .push(&shard, vec![spec(&format!("applied-{index}"))], ts(), None)
+                    .await
+                    .unwrap();
+            }
+            let epoch = backend.cached_epoch(&shard);
+            let envelope = |payload: &str, sequence: u32| {
+                let (items, ids) = build_push_items(
+                    vec![spec(payload)],
+                    epoch,
+                    0,
+                    sequence,
+                    def.retry_policy.max_attempts,
+                );
+                backend.next_envelope(QueueCommand::Push(PushCommand { items }), ids, ts())
+            };
+            (envelope("tail-v3", 10_001), envelope("tail-v2", 10_002))
+        };
+
+        let append_only = |format, envelope: &CommandEnvelope| {
+            let store: Arc<dyn BlobStore> =
+                Arc::new(LocalFsBlobStore::open(tmp.object_root()).unwrap());
+            let log = SegmentedObjectLog::open(
+                store,
+                SegmentConfig::new(1, 1_000)
+                    .unwrap()
+                    .with_writer_format(format),
+            );
+            log.create_queue(&def).unwrap();
+            log.enqueue(&shard, std::slice::from_ref(envelope), 0, system_now_ms())
+                .unwrap();
+            log.seal(&shard, 0, system_now_ms()).unwrap();
+        };
+        append_only(pqueue_objectlog::SegmentWriterFormat::V3, &v3_envelope);
+        append_only(pqueue_objectlog::SegmentWriterFormat::V2, &v2_envelope);
+
+        let recovered = SegmentedObjectLogSqliteBackend::open(
+            tmp.object_root(),
+            &tmp.projection(),
+            seal_each_config(),
+        )
+        .unwrap();
+        recovered.create_queue(def.clone()).await.unwrap();
+        assert_eq!(
+            recovered.recovery_stats(&shard),
+            Some(RecoveryStats {
+                start_seq: APPLIED as u64,
+                tail_replayed: 2,
+                snapshot_used: true,
+            })
+        );
+        assert_eq!(recovered.metrics(&shard).await.unwrap().pending, 5);
+        drop(recovered);
+
+        let clean = SegmentedObjectLogSqliteBackend::open(
+            tmp.object_root(),
+            &tmp.projection(),
+            seal_each_config(),
+        )
+        .unwrap();
+        clean.create_queue(def).await.unwrap();
+        assert_eq!(clean.recovery_stats(&shard).unwrap().tail_replayed, 0);
+        assert_eq!(clean.metrics(&shard).await.unwrap().pending, 5);
     }
 
     /// AC: the file `ObjectLogSqliteBackend` reopen also resumes at the persisted high-water rather than

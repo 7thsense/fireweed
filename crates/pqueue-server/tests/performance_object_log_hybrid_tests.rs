@@ -1133,7 +1133,7 @@ async fn run_sqlite(
 // phases and reconciles their sum with the measured end-to-end wall time. Each phase exercises the real
 // cost source the hybrid write path pays:
 //
-//   * serialize    — `postcard` framing of the command envelopes (segmented.rs:683 serializes once here);
+//   * serialize    — canonical-JSON framing of command envelopes (the segmented writer serializes once);
 //   * lock_wait    — acquiring the coordinator/unit-of-work lock under real contention from a background
 //                    holder (the composed backend seals + distributes under one `Mutex`);
 //   * fsync        — a durable segment-object write (`File::sync_all`), the composed flush's ack boundary
@@ -1273,11 +1273,11 @@ async fn measure_hybrid_attribution(commands: u64, batch: u64) -> HybridAttribut
             })
             .collect();
 
-        // 1. serialize — frame each envelope once (postcard), exactly as the segmented buffer does.
+        // 1. serialize — frame each envelope once as canonical JSON, exactly as the segmented buffer does.
         let t = Instant::now();
         let mut seg_bytes: Vec<u8> = Vec::new();
         for env in &envelopes {
-            let bytes = postcard::to_allocvec(env).expect("serialize envelope");
+            let bytes = serde_json::to_vec(env).expect("serialize envelope");
             seg_bytes.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
             seg_bytes.extend_from_slice(&bytes);
         }

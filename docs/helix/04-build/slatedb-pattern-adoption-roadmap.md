@@ -14,14 +14,14 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 2795c75a109b566663002b98334a23a3a38d328918835ee10b33d0744eebc519
+    self_hash: 6dec7a945b45c870541c7a5493e274c1579a2ad4e4d940cf48ea32d758a09785
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      td-s3-object-log-sqlite-projection-mode: 9c3b4dd2e25107fee51941c98dde6875e786d5627ab2704d58b79a30679918fa
+      td-s3-object-log-sqlite-projection-mode: a88fb07f8275de066ab5f7a65f815e2da511774a164a20b464ebabf0a6e9d369
       td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
       tp-scale-substantiation: 8d4b9a39799bd01ceb6007fd17832590e7af854bae5092894579b3bcb660d842
-      tp-verification-acceptance-criteria: 499b3c2c4300fa311a7189c64fc1321903ad8b2f67045f9bd95c993d690158d5
-    reviewed_at: "2026-07-19T02:12:30Z"
+      tp-verification-acceptance-criteria: 6d3ebd44a41784009a425580189619661bdb5620ba831c5f1952ca2b61bcc888
+    reviewed_at: "2026-07-19T03:37:52Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption
@@ -64,7 +64,7 @@ explicit cost ceiling.
 | 4 | SP-04 object-store telemetry | Implement | Supplies evidence for maintenance and warmup policy | Metrics below retry layer with stable low-cardinality labels |
 | 5 | SP-05 maintenance separation | Implemented locally; hybrid-async frontier negative spike | Uses typed metadata and telemetry to bound execution | Pure planner plus bounded resumable dry-run executor; async object reclamation conservatively retained pending complete authority API |
 | 6 | SP-06 targeted handoff warmup | Negative spike complete; no cache | Avoidable manifest candidates pass identification, but projected p95 gain is only 8.97%–11.69%; each unapplied segment is fetched once | Retain cold authoritative recovery; separately design constant-time head access and async bounded-parallel tail replay |
-| 7 | SP-07 segment integrity v3 | Implement | Highest migration risk; benefits from simulation and maintenance tooling | CRC32C corruption check, content identity, legacy v2 decode |
+| 7 | SP-07 segment integrity v3 | Implementing release-N compatibility | Highest migration risk; benefits from simulation and maintenance tooling | v2+v3 reads, opt-in v3 writes, CRC32C + SHA-256 identity, arbitrary mixed history, v2 default until soak |
 
 The order is dependency-driven, not priority-driven. SP-01 and SP-02 are P0. SP-03 and SP-04 are P1.
 SP-05 through SP-07 are P2 and may stop at a documented negative spike where their individual gates say so.

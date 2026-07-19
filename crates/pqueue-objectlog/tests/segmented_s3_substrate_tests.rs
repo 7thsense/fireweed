@@ -19,10 +19,11 @@
 //! `PQUEUE_S3_TEST_ACCESS_KEY` / `PQUEUE_S3_TEST_SECRET_KEY` (default `minioadmin`). Absent the endpoint env,
 //! the test prints a LOUD skip and returns green (mirroring the postgres `PQUEUE_PG_TEST_URL` gate).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 use pqueue_conformance::{envelope, item, qdef, shard};
@@ -38,7 +39,7 @@ use pqueue_objectlog::object_store_observability::{
 };
 use pqueue_objectlog::segmented::{
     BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
-    PartialExpireVisibility, S3BlobStore, SegmentConfig, SegmentedObjectLog,
+    PartialExpireVisibility, S3BlobStore, SegmentConfig, SegmentWriterFormat, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -4138,8 +4139,8 @@ fn segmented_stale_append_prepared_before_fence_cannot_advance_authoritative_tai
             .list("")
             .unwrap()
             .iter()
-            .all(|key| !key.contains("/seg_candidates/e00000000000000000000/")),
-        "the resumed stale preparer must delete the segment it wrote after GC removed its candidate"
+            .any(|key| key.contains("/seg_candidates/e00000000000000000000/")),
+        "a CAS loser leaves a content-addressed orphan for bounded maintenance; deleting here could remove an identical winner's object"
     );
 
     owner_next.enqueue(&shard, &pushes(1), 1, 4).unwrap();
@@ -8835,4 +8836,561 @@ fn TestObjectlogPqueueC33c367eInteractionRecorded() {
     TestObjectlogDeletedManifestFailClosedSignal();
     // Verify the test that asserts retained floor/head replay still succeeds.
     TestObjectlogRetainedFloorHeadReplayStillSucceeds();
+}
+
+fn integrity_config(format: SegmentWriterFormat) -> SegmentConfig {
+    SegmentConfig::new(10_000_000, 100)
+        .unwrap()
+        .with_writer_format(format)
+}
+
+#[test]
+fn segment_configuration_rejects_targets_above_the_writable_frame_cap() {
+    assert!(SegmentConfig::new(64 * 1024 * 1024, 1).is_ok());
+    assert!(matches!(
+        SegmentConfig::new(64 * 1024 * 1024 + 1, 1),
+        Err(EngineError::Invalid(_))
+    ));
+}
+
+#[test]
+fn segment_v2_v3_arbitrary_interleavings_replay_and_branch() {
+    // Exhaust every non-empty binary writer-format sequence through length six.
+    // Reopening at each seal proves dispatch follows each manifest entry rather
+    // than a process-wide reader setting.
+    for width in 1..=6_u32 {
+        for bits in 0..(1_u32 << width) {
+            let store = Arc::new(InMemoryBlobStore::new());
+            let definition = unique_qdef(&format!("mixed-{width}-{bits}"));
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            for offset in 0..width {
+                let format = if bits & (1 << offset) == 0 {
+                    SegmentWriterFormat::V2
+                } else {
+                    SegmentWriterFormat::V3
+                };
+                let log = SegmentedObjectLog::open(store.clone(), integrity_config(format));
+                log.create_queue(&definition).unwrap();
+                log.enqueue(&key, &pushes(1), 0, i64::from(offset)).unwrap();
+                log.seal(&key, 0, i64::from(offset) + 1).unwrap();
+            }
+            let reader =
+                SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V2));
+            reader.create_queue(&definition).unwrap();
+            let replay = reader.read_all(&key).unwrap();
+            assert_eq!(replay.len(), width as usize, "bits={bits:b}");
+            assert_eq!(
+                replay
+                    .iter()
+                    .map(|(position, _)| position.sequence)
+                    .collect::<Vec<_>>(),
+                (0..u64::from(width)).collect::<Vec<_>>()
+            );
+
+            let mut branch_definition = definition.clone();
+            branch_definition.queue_id =
+                QueueId::new(format!("branch-mixed-{width}-{bits}")).unwrap();
+            let cut = replay.last().unwrap().0.clone();
+            reader
+                .branch(&key, &branch_definition, &cut, 10_000, 100)
+                .unwrap();
+            let branch_key = QueueKey::new(
+                branch_definition.tenant_id.clone(),
+                branch_definition.queue_id.clone(),
+            );
+            assert_eq!(reader.read_all(&branch_key).unwrap().len(), width as usize);
+        }
+    }
+}
+
+#[test]
+fn mixed_v2_v3_retention_expiry_and_reopen_preserve_the_live_tail() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("mixed-retention-reopen");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    for format in [
+        SegmentWriterFormat::V2,
+        SegmentWriterFormat::V3,
+        SegmentWriterFormat::V2,
+    ] {
+        let log = SegmentedObjectLog::open(store.clone(), integrity_config(format));
+        log.create_queue(&definition).unwrap();
+        log.enqueue(&key, &pushes(1), 0, 1).unwrap();
+        log.seal(&key, 0, 2).unwrap();
+    }
+    let maintenance =
+        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    maintenance.create_queue(&definition).unwrap();
+    let epoch = advance_floor_as_local_owner(&maintenance, &key, 0, 10).unwrap();
+    assert_eq!(maintenance.maintenance_owner_epoch(&key), Some(epoch));
+    maintenance.expire_segments_through(&key, 0, 20).unwrap();
+
+    let reopened = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V2));
+    reopened.create_queue(&definition).unwrap();
+    let tail = reopened.read_from_limited(&key, 1, 10).unwrap();
+    assert_eq!(
+        tail.iter()
+            .map(|(position, _)| position.sequence)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn shared_authority_fences_data_floor_watermark_reopen_keeps_index_and_sequence_domains_separate() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("watermark-domain-separation");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let log = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    log.create_queue(&definition).unwrap();
+    for epoch in 1..=5 {
+        log.fence_epoch(&key, epoch, epoch as i64).unwrap();
+    }
+    log.enqueue(&key, &pushes(1), 5, 10).unwrap();
+    log.seal(&key, 5, 11).unwrap();
+    let epoch = log.acquire_epoch(&key, 12).unwrap();
+    log.advance_retention_floor(&key, CommandPosition::new(key.clone(), epoch, 0), epoch)
+        .unwrap();
+    log.expire_segments_through(&key, 0, 13).unwrap();
+    assert!(
+        log.read_manifest_deletion_watermark(&key)
+            .unwrap()
+            .is_some()
+    );
+
+    let reopened = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V2));
+    reopened.create_queue(&definition).unwrap();
+    assert_eq!(
+        reopened
+            .read_retention_floor(&key)
+            .unwrap()
+            .unwrap()
+            .sequence,
+        0
+    );
+    assert!(
+        reopened
+            .read_manifest_deletion_watermark(&key)
+            .unwrap()
+            .is_some()
+    );
+    assert!(reopened.read_from_limited(&key, 1, 10).unwrap().is_empty());
+}
+
+#[test]
+fn every_single_bit_v3_mutation_fails_with_typed_redacted_error() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("v3-bitflip");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let log = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    log.create_queue(&definition).unwrap();
+    log.enqueue(&key, &pushes(1), 0, 1).unwrap();
+    log.seal(&key, 0, 2).unwrap();
+
+    let segment_key = store
+        .list("t/")
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.ends_with(".seg"))
+        .unwrap();
+    let original = store.get(&segment_key).unwrap().unwrap();
+    for bit in 0..original.len() * 8 {
+        let mut corrupt = original.clone();
+        corrupt[bit / 8] ^= 1 << (bit % 8);
+        store.put(&segment_key, &corrupt).unwrap();
+        let error = log.read_all(&key).unwrap_err();
+        let EngineError::DurableDataCorrupt { ref locator, .. } = error else {
+            panic!("bit {bit} returned an untyped error: {error:?}");
+        };
+        assert!(!locator.contains('/') && !error.to_string().contains(&segment_key));
+    }
+    store.put(&segment_key, &original).unwrap();
+    assert_eq!(log.read_all(&key).unwrap().len(), 1);
+}
+
+#[test]
+fn v3_manifest_key_identity_mismatch_fails_closed() {
+    let recorder = Arc::new(BlobMetricsRecorder::new());
+    let raw = Arc::new(InMemoryBlobStore::new());
+    let store = InstrumentedBlobStore::new(raw.clone(), recorder.clone(), BlobBackendKind::Memory);
+    let definition = unique_qdef("v3-key-identity");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let log = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V3));
+    log.create_queue(&definition).unwrap();
+    log.enqueue(&key, &pushes(1), 0, 1).unwrap();
+    log.seal(&key, 0, 2).unwrap();
+
+    let manifest_key = raw
+        .list("t/")
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.contains("/manifest_head/") && candidate.ends_with(".json"))
+        .unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&raw.get(&manifest_key).unwrap().unwrap()).unwrap();
+    let original_manifest = manifest.clone();
+    manifest.as_object_mut().unwrap().remove("segment_epoch");
+    raw.put(&manifest_key, &serde_json::to_vec(&manifest).unwrap())
+        .unwrap();
+    assert!(matches!(
+        log.read_all(&key),
+        Err(EngineError::DurableDataCorrupt {
+            stage: pqueue_engine::DurableIntegrityStage::Manifest,
+            ..
+        })
+    ));
+    manifest = original_manifest.clone();
+    manifest["content_sha256"] = serde_json::Value::String("00".repeat(32));
+    raw.put(&manifest_key, &serde_json::to_vec(&manifest).unwrap())
+        .unwrap();
+    assert!(matches!(
+        log.read_all(&key),
+        Err(EngineError::DurableDataCorrupt {
+            stage: pqueue_engine::DurableIntegrityStage::Manifest,
+            ..
+        })
+    ));
+
+    // The digest alone is insufficient: the manifest pointer must also agree
+    // with its tenant/queue, physical epoch, manifest index, and first sequence.
+    let original_segment_key = original_manifest["segment_key"].as_str().unwrap();
+    let body = raw.get(original_segment_key).unwrap().unwrap();
+    let wrong_keys = [
+        format!("{original_segment_key}.wrong"),
+        original_segment_key.replacen("t/", "t/00/", 1),
+        original_segment_key.replace("/e00000000000000000000/", "/e00000000000000000001/"),
+        original_segment_key.replace("/i00000000000000000000/", "/i00000000000000000001/"),
+        original_segment_key.replace("/s00000000000000000000-", "/s00000000000000000001-"),
+    ];
+    for wrong_key in wrong_keys {
+        raw.put(&wrong_key, &body).unwrap();
+        let mut wrong_manifest = original_manifest.clone();
+        wrong_manifest["segment_key"] = serde_json::Value::String(wrong_key.clone());
+        raw.put(&manifest_key, &serde_json::to_vec(&wrong_manifest).unwrap())
+            .unwrap();
+        let before = recorder.snapshot();
+        let error = log.read_all(&key).unwrap_err();
+        let delta = recorder.snapshot().delta(&before);
+        assert!(matches!(
+            error,
+            EngineError::DurableDataCorrupt {
+                stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                ..
+            }
+        ));
+        assert!(!error.to_string().contains(&wrong_key));
+        let validation = delta.row(
+            BlobOperation::ValidateSegment,
+            BlobObjectClass::Segment,
+            BlobResultClass::Corrupt,
+            false,
+            BlobBackendKind::Memory,
+        );
+        assert_eq!(validation.completions, 1);
+        assert_eq!(validation.attempts, 0);
+        assert_eq!(validation.request_bytes + validation.response_bytes, 0);
+        assert!(
+            delta
+                .rows
+                .iter()
+                .filter(|row| {
+                    row.operation == BlobOperation::Get
+                        && row.object_class == BlobObjectClass::Segment
+                })
+                .all(|row| row.values.attempts == 0 && row.values.response_bytes == 0)
+        );
+    }
+
+    // Each independent data/control classifier mutation fails closed. A
+    // reclaimed entry is produced only by the retention transition that sets
+    // both its explicit kind and exact watermark shape together.
+    for (field, value) in [
+        ("entry_kind", serde_json::json!("fence")),
+        ("fence", serde_json::json!(true)),
+        ("retention_floor_through", serde_json::json!(0)),
+        ("compacted_through_index", serde_json::json!(0)),
+    ] {
+        let mut wrong_manifest = original_manifest.clone();
+        wrong_manifest[field] = value;
+        raw.put(&manifest_key, &serde_json::to_vec(&wrong_manifest).unwrap())
+            .unwrap();
+        assert!(matches!(
+            log.read_all(&key),
+            Err(EngineError::DurableDataCorrupt {
+                stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn malformed_authority_candidate_reports_exact_index_and_one_logical_corrupt_event() {
+    let recorder = Arc::new(BlobMetricsRecorder::new());
+    let raw = Arc::new(InMemoryBlobStore::new());
+    let store = InstrumentedBlobStore::new(raw.clone(), recorder.clone(), BlobBackendKind::Memory);
+    let definition = unique_qdef("malformed-candidate");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let log = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V3));
+    log.create_queue(&definition).unwrap();
+    log.fence_epoch(&key, 1, 0).unwrap();
+    log.enqueue(&key, &pushes(1), 1, 1).unwrap();
+    log.seal(&key, 1, 2).unwrap();
+    let candidate_key = raw
+        .list("t/")
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.contains("/manifest_candidates/"))
+        .unwrap();
+    let expected_index = candidate_key
+        .split('/')
+        .find_map(|component| component.strip_prefix('i'))
+        .unwrap()
+        .parse::<u64>()
+        .unwrap();
+    raw.put(&candidate_key, b"{").unwrap();
+    let before = recorder.snapshot();
+    let error = log.read_all(&key).unwrap_err();
+    let delta = recorder.snapshot().delta(&before);
+    assert!(matches!(
+        error,
+        EngineError::DurableDataCorrupt {
+            stage: pqueue_engine::DurableIntegrityStage::Manifest,
+            manifest_index,
+            ..
+        } if manifest_index == expected_index
+    ));
+    let validation = delta.row(
+        BlobOperation::ValidateSegment,
+        BlobObjectClass::Segment,
+        BlobResultClass::Corrupt,
+        false,
+        BlobBackendKind::Memory,
+    );
+    assert_eq!(validation.completions, 1);
+    assert_eq!(validation.attempts, 0);
+    assert_eq!(validation.request_bytes + validation.response_bytes, 0);
+}
+
+#[test]
+fn historical_v2_branch_without_segment_epoch_remains_readable() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("legacy-branch-epoch");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let log = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V2));
+    log.create_queue(&definition).unwrap();
+    log.enqueue(&key, &pushes(2), 0, 1).unwrap();
+    let positions = log.seal(&key, 0, 2).unwrap();
+
+    let before = store
+        .list("t/")
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut branch_definition = definition.clone();
+    branch_definition.queue_id = QueueId::new("legacy-branch-epoch-copy").unwrap();
+    log.branch(
+        &key,
+        &branch_definition,
+        positions.last().unwrap(),
+        10_000,
+        10,
+    )
+    .unwrap();
+    let branch_manifest_key = store
+        .list("t/")
+        .unwrap()
+        .into_iter()
+        .filter(|candidate| !before.contains(candidate))
+        .find(|candidate| {
+            candidate.contains("/manifest_head/")
+                && store.get(candidate).unwrap().is_some_and(|body| {
+                    serde_json::from_slice::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|value| value.get("segment_key").cloned())
+                        .is_some_and(|value| !value.is_null())
+                })
+        })
+        .unwrap();
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&store.get(&branch_manifest_key).unwrap().unwrap()).unwrap();
+    legacy.as_object_mut().unwrap().remove("segment_epoch");
+    legacy.as_object_mut().unwrap().remove("entry_kind");
+    store
+        .put(&branch_manifest_key, &serde_json::to_vec(&legacy).unwrap())
+        .unwrap();
+
+    let branch_key = QueueKey::new(
+        branch_definition.tenant_id.clone(),
+        branch_definition.queue_id.clone(),
+    );
+    assert_eq!(log.read_all(&branch_key).unwrap().len(), 2);
+}
+
+#[test]
+fn shared_identical_cas_loser_never_deletes_winning_v3_object() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("v3-identical-cas");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let initializer =
+        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    initializer.create_queue(&definition).unwrap();
+    initializer.fence_epoch(&key, 1, 0).unwrap();
+
+    let winner = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let loser = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    winner.create_queue(&definition).unwrap();
+    loser.create_queue(&definition).unwrap();
+    let commands = pushes(1);
+    winner.enqueue(&key, &commands, 1, 1).unwrap();
+    loser.enqueue(&key, &commands, 1, 1).unwrap();
+    winner.seal(&key, 1, 2).unwrap();
+    assert!(matches!(loser.seal(&key, 1, 2), Err(EngineError::Conflict)));
+    assert_eq!(winner.read_all(&key).unwrap().len(), 1);
+}
+
+#[test]
+fn losing_distinct_candidate_gc_preserves_shared_content_addressed_segment() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("v3-shared-segment-gc");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let initializer =
+        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    initializer.create_queue(&definition).unwrap();
+    initializer.fence_epoch(&key, 1, 0).unwrap();
+
+    let loser = Arc::new(SegmentedObjectLog::open(
+        store.clone(),
+        integrity_config(SegmentWriterFormat::V3),
+    ));
+    let winner = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    loser.create_queue(&definition).unwrap();
+    winner.create_queue(&definition).unwrap();
+    let commands = pushes(1);
+    loser.enqueue(&key, &commands, 1, 1).unwrap();
+    winner.enqueue(&key, &commands, 1, 1).unwrap();
+
+    let entered = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    loser.set_fault_hook(Some(Arc::new(PauseAtCut {
+        cut: FaultCutPoint::AfterManifestCandidateBeforeHead,
+        entered: entered.clone(),
+        resume: resume.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let losing_seal = {
+        let loser = loser.clone();
+        let key = key.clone();
+        thread::spawn(move || loser.seal(&key, 1, 2))
+    };
+    entered.wait();
+    // Different committed_at produces a distinct manifest-candidate body/key,
+    // while segment bytes and their digest-addressed key remain identical.
+    winner.seal(&key, 1, 3).unwrap();
+    resume.wait();
+    assert_eq!(losing_seal.join().unwrap(), Err(EngineError::Conflict));
+    assert_eq!(winner.read_all(&key).unwrap().len(), 1);
+    assert_eq!(winner.gc_unreferenced_candidates(&key, 8).unwrap(), 1);
+    assert_eq!(winner.read_all(&key).unwrap().len(), 1);
+}
+
+#[test]
+fn losing_distinct_content_candidate_gc_reclaims_only_the_loser_segment() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("v3-distinct-segment-gc");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let initializer =
+        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    initializer.create_queue(&definition).unwrap();
+    initializer.fence_epoch(&key, 1, 0).unwrap();
+
+    let loser = Arc::new(SegmentedObjectLog::open(
+        store.clone(),
+        integrity_config(SegmentWriterFormat::V3),
+    ));
+    let winner = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    loser.create_queue(&definition).unwrap();
+    winner.create_queue(&definition).unwrap();
+    loser.enqueue(&key, &pushes(1), 1, 1).unwrap();
+    winner.enqueue(&key, &pushes(2), 1, 1).unwrap();
+    let entered = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    loser.set_fault_hook(Some(Arc::new(PauseAtCut {
+        cut: FaultCutPoint::AfterSegmentWriteBeforeManifest,
+        entered: entered.clone(),
+        resume: resume.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let losing_seal = {
+        let loser = loser.clone();
+        let key = key.clone();
+        thread::spawn(move || loser.seal(&key, 1, 2))
+    };
+    entered.wait();
+    let loser_segment = store
+        .list("t/")
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.ends_with(".seg"))
+        .unwrap();
+    winner.seal(&key, 1, 3).unwrap();
+    let winner_segment = store
+        .list("t/")
+        .unwrap()
+        .into_iter()
+        .find(|candidate| candidate.ends_with(".seg") && candidate != &loser_segment)
+        .unwrap();
+    resume.wait();
+    assert_eq!(losing_seal.join().unwrap(), Err(EngineError::Conflict));
+    assert_eq!(winner.gc_unreferenced_candidates(&key, 8).unwrap(), 1);
+    assert!(store.get(&loser_segment).unwrap().is_none());
+    assert!(store.get(&winner_segment).unwrap().is_some());
+    assert_eq!(winner.read_all(&key).unwrap().len(), 2);
+}
+
+#[test]
+fn shared_authority_mixed_history_with_fences_pages_exactly() {
+    let store = Arc::new(InMemoryBlobStore::new());
+    let definition = unique_qdef("shared-mixed");
+    let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let bootstrap =
+        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V2));
+    bootstrap.create_queue(&definition).unwrap();
+    bootstrap.fence_epoch(&key, 1, 0).unwrap();
+
+    let mut epoch = 1;
+    for (index, format) in [
+        SegmentWriterFormat::V2,
+        SegmentWriterFormat::V3,
+        SegmentWriterFormat::V2,
+        SegmentWriterFormat::V3,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index == 2 {
+            let fence = SegmentedObjectLog::open(store.clone(), integrity_config(format));
+            fence.create_queue(&definition).unwrap();
+            epoch = fence.fence_epoch(&key, 2, 20).unwrap();
+        }
+        let writer = SegmentedObjectLog::open(store.clone(), integrity_config(format));
+        writer.create_queue(&definition).unwrap();
+        writer
+            .enqueue(&key, &pushes(1), epoch, index as i64 + 1)
+            .unwrap();
+        writer.seal(&key, epoch, index as i64 + 2).unwrap();
+    }
+
+    let reader = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V2));
+    reader.create_queue(&definition).unwrap();
+    let all = reader.read_all(&key).unwrap();
+    assert_eq!(
+        all.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    let page = reader.read_from_limited(&key, 1, 2).unwrap();
+    assert_eq!(
+        page.iter().map(|(p, _)| p.sequence).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }

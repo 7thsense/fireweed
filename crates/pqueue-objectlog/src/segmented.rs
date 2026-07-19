@@ -42,6 +42,10 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::object_store_observability::ObservedBlobCall;
+pub use crate::segment_integrity::WriterFormat as SegmentWriterFormat;
+use crate::segment_integrity::{
+    CRC32C_ALGORITHM, ManifestIntegrity, SHA256_ALGORITHM, object_locator,
+};
 use pqueue_core::QueueDefinition;
 use pqueue_engine::{
     CommandEnvelope, CommandPosition, EngineError, EngineResult, QueueCommand, QueueKey,
@@ -378,7 +382,12 @@ pub(crate) fn read_manifest_head_via<S: BlobStore + ?Sized>(
         let Some(bytes) = store.get(&key)? else {
             return Err(EngineError::Conflict);
         };
-        let value: ManifestHeadBlob = serde_json::from_slice(&bytes).map_err(store_err)?;
+        let value: ManifestHeadBlob =
+            serde_json::from_slice(&bytes).map_err(|_| EngineError::DurableDataCorrupt {
+                stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                manifest_index: version,
+                locator: object_locator(&key),
+            })?;
         versions.push(VersionedHead { version, value });
     }
     versions.sort_by_key(|head| head.version);
@@ -1019,6 +1028,9 @@ pub struct SegmentConfig {
     /// Dev/test escape hatch that allows sealing one command per segment. MUST be false in production
     /// (TD-004 "Reject 1-object-per-command"); a production config seals many commands per segment.
     pub dev_unsafe_one_command_segments: bool,
+    /// Durable format emitted by new seals. Readers always accept v2 and v3.
+    /// Release N defaults to v2; operators may opt into v3 for soak testing.
+    writer_format: SegmentWriterFormat,
 }
 
 impl SegmentConfig {
@@ -1030,11 +1042,26 @@ impl SegmentConfig {
         if target_bytes == 0 {
             return Err(EngineError::Invalid("segment_target_bytes must be > 0"));
         }
+        if target_bytes > crate::segment_integrity::MAX_SEGMENT_BYTES {
+            return Err(EngineError::Invalid(
+                "segment_target_bytes exceeds maximum writable segment size",
+            ));
+        }
         Ok(Self {
             target_bytes,
             max_latency_ms,
             dev_unsafe_one_command_segments: false,
+            writer_format: SegmentWriterFormat::V2,
         })
+    }
+
+    pub const fn writer_format(&self) -> SegmentWriterFormat {
+        self.writer_format
+    }
+
+    pub const fn with_writer_format(mut self, writer_format: SegmentWriterFormat) -> Self {
+        self.writer_format = writer_format;
+        self
     }
 }
 
@@ -1124,11 +1151,10 @@ impl SegmentCounters {
 // Sealed-segment binary frame (Fix A)
 // ---------------------------------------------------------------------------
 //
-// A sealed segment object is a small fixed header followed by a length-prefixed concatenation of the
-// per-command records that were buffered for it. Each record's bytes are the `postcard` encoding of one
-// `CommandEnvelope`, produced ONCE when the command was buffered (`enqueue`) and stored verbatim — the seal
-// never re-serializes. This replaces the prior format, which JSON-serialized every envelope a second time on
-// seal (and a THIRD throwaway time per command just to measure its buffered size). The on-store layout is:
+// A sealed segment object is a small fixed header followed by a length-prefixed concatenation of canonical
+// JSON `CommandEnvelope` bytes produced once when buffered. V2 stores `len + JSON` and protects the records
+// blob with manifest FNV-1a. V3 stores `len + record CRC32C + JSON`, then a full-frame CRC32C trailer; its
+// manifest also carries SHA-256 over the complete stored bytes.
 //
 //   magic   : b"PQSG"          (4 bytes)
 //   version : u8  = SEG_VERSION (segment-format marker; bumped from the JSON form)
@@ -1141,105 +1167,38 @@ impl SegmentCounters {
 
 /// Segment object magic + version. The version is bumped from the previous JSON segment form (pre-release,
 /// so no on-disk back-compat is owed — a stale object simply fails to parse rather than mis-decoding).
-const SEG_MAGIC: [u8; 4] = *b"PQSG";
-const SEG_VERSION: u8 = 2;
-const SEG_HEADER_LEN: usize = 4 + 1 + 8 + 8;
-
-/// Build a sealed-segment object from already-encoded per-command record bytes (no re-serialize). Returns
-/// `(object_bytes, checksum)` where `checksum` is the FNV-1a over the records-blob region only.
-pub(crate) fn segment_object_len(records: &[Vec<u8>]) -> Option<usize> {
-    segment_object_len_for_record_lengths(records.iter().map(Vec::len))
-}
-
-pub(crate) fn segment_object_len_for_record_lengths(
-    lengths: impl IntoIterator<Item = usize>,
-) -> Option<usize> {
-    lengths
-        .into_iter()
-        .try_fold(SEG_HEADER_LEN + 4, |size, len| {
-            size.checked_add(4)?.checked_add(len)
-        })
-}
-
-pub(crate) fn build_segment_object(
-    epoch: u64,
-    first_seq: u64,
-    records: &[Vec<u8>],
-) -> (Vec<u8>, u64) {
-    let object_len =
-        segment_object_len(records).expect("validated segment frame length overflowed");
-    let mut object = Vec::with_capacity(object_len);
-    object.extend_from_slice(&SEG_MAGIC);
-    object.push(SEG_VERSION);
-    object.extend_from_slice(&epoch.to_le_bytes());
-    object.extend_from_slice(&first_seq.to_le_bytes());
-    let records_start = object.len();
-    object.extend_from_slice(&(records.len() as u32).to_le_bytes());
-    for r in records {
-        object.extend_from_slice(&(r.len() as u32).to_le_bytes());
-        object.extend_from_slice(r);
-    }
-    debug_assert_eq!(object.len(), object_len);
-    let checksum = checksum(&object[records_start..]);
-    (object, checksum)
-}
-
-/// Parse a sealed-segment object: validate the header, verify the records-blob checksum against the
-/// manifest entry, then `postcard`-decode each framed record. Returns `(epoch, first_seq, commands)`.
+/// Parse a sealed-segment object under manifest-authoritative version and integrity metadata, then decode
+/// each framed canonical-JSON record. Returns `(epoch, first_seq, commands)`.
 fn parse_segment_object(
     bytes: &[u8],
-    seg_key: &str,
-    expected_checksum: u64,
+    entry: &ManifestEntry,
+    locator: &str,
 ) -> EngineResult<(u64, u64, Vec<CommandEnvelope>)> {
-    if bytes.len() < SEG_HEADER_LEN || bytes[..4] != SEG_MAGIC {
-        return Err(EngineError::Storage(format!(
-            "segment {seg_key} has a bad header"
-        )));
-    }
-    if bytes[4] != SEG_VERSION {
-        return Err(EngineError::Storage(format!(
-            "segment {seg_key} has unsupported format version {}",
-            bytes[4]
-        )));
-    }
-    let epoch = u64::from_le_bytes(bytes[5..13].try_into().expect("8 bytes"));
-    let first_seq = u64::from_le_bytes(bytes[13..21].try_into().expect("8 bytes"));
-    let blob = &bytes[SEG_HEADER_LEN..];
-    if checksum(blob) != expected_checksum {
-        return Err(EngineError::Storage(format!(
-            "segment checksum mismatch at {seg_key}"
-        )));
-    }
-    let mut cursor = 0usize;
-    let read_u32 = |buf: &[u8], cur: &mut usize| -> EngineResult<u32> {
-        if *cur + 4 > buf.len() {
-            return Err(EngineError::Storage(format!("segment {seg_key} truncated")));
-        }
-        let v = u32::from_le_bytes(buf[*cur..*cur + 4].try_into().expect("4 bytes"));
-        *cur += 4;
-        Ok(v)
-    };
-    let count = read_u32(blob, &mut cursor)? as usize;
-    let mut commands = Vec::with_capacity(count);
-    for _ in 0..count {
-        let len = read_u32(blob, &mut cursor)? as usize;
-        if cursor + len > blob.len() {
-            return Err(EngineError::Storage(format!("segment {seg_key} truncated")));
-        }
-        let env: CommandEnvelope =
-            serde_json::from_slice(&blob[cursor..cursor + len]).map_err(store_err)?;
-        commands.push(env);
-        cursor += len;
-    }
-    Ok((epoch, first_seq, commands))
+    let integrity = entry.manifest_integrity()?;
+    crate::segment_integrity::decode(bytes, entry.index, locator, &integrity)
 }
 
 /// One append-only manifest entry. A data entry names a segment; a `fence` entry records an epoch handoff
 /// and names no segment (TD-004 implementation (b): epoch fence published to the manifest before handoff).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ManifestEntryKind {
+    Data,
+    Fence,
+    RetentionFloor,
+    DeletionWatermark,
+    Reclaimed,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct ManifestEntry {
     index: u64,
     epoch: u64,
+    /// Additive discriminator for entries written by current releases. Legacy
+    /// v2 entries may omit it and are accepted only when their fields form one
+    /// of the exact historical shapes below. V3 data always requires it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    entry_kind: Option<ManifestEntryKind>,
     #[serde(default)]
     fence: bool,
     segment_key: Option<String>,
@@ -1251,6 +1210,23 @@ struct ManifestEntry {
     visible_last_seq: Option<u64>,
     /// Per-segment checksum over the serialized commands (TD-004 step 2 segment checksum), validated on read.
     checksum: u64,
+    /// Physical segment epoch. Branch manifests retain the source value even
+    /// when their logical authority `epoch` is rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    segment_epoch: Option<u64>,
+    /// Explicit only for v3 data entries; absence on data means v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    segment_format: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frame_crc32c: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    record_checksum_algorithm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frame_checksum_algorithm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_hash_algorithm: Option<String>,
     committed_at_ms: i64,
     /// A RETENTION-FLOOR-ADVANCE entry (bead pqueue-b5cc2bc7 bug 3): names no segment (`segment_key: None`,
     /// `fence: false`) and records the highest command sequence whose segment objects are reclaimed, at this
@@ -1266,6 +1242,192 @@ struct ManifestEntry {
     /// bootstrap from the compatibility `read_horizon.json` cache.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compacted_through_index: Option<u64>,
+}
+
+impl ManifestEntry {
+    fn validate_kind(&self) -> EngineResult<()> {
+        let has_integrity = self.checksum != 0
+            || self.segment_epoch.is_some()
+            || self.segment_format.is_some()
+            || self.frame_crc32c.is_some()
+            || self.content_sha256.is_some()
+            || self.record_checksum_algorithm.is_some()
+            || self.frame_checksum_algorithm.is_some()
+            || self.content_hash_algorithm.is_some();
+        let kind = match self.entry_kind {
+            Some(kind) => kind,
+            None if self.segment_format.is_some() => {
+                return Err(self.corrupt_manifest("v3-entry-kind-required"));
+            }
+            None if self.segment_key.is_some()
+                && !self.fence
+                && self.retention_floor_through.is_none()
+                && self.compacted_through_index.is_none() =>
+            {
+                ManifestEntryKind::Data
+            }
+            None if self.segment_key.is_some()
+                && !self.fence
+                && self.retention_floor_through.is_none()
+                && self.compacted_through_index == Some(self.index) =>
+            {
+                ManifestEntryKind::Reclaimed
+            }
+            None if self.segment_key.is_none()
+                && self.fence
+                && self.retention_floor_through.is_none()
+                && self.compacted_through_index.is_none() =>
+            {
+                ManifestEntryKind::Fence
+            }
+            None if self.segment_key.is_none()
+                && !self.fence
+                && self.retention_floor_through.is_some()
+                && self.compacted_through_index.is_none() =>
+            {
+                ManifestEntryKind::RetentionFloor
+            }
+            None if self.segment_key.is_none()
+                && !self.fence
+                && self.retention_floor_through.is_none()
+                && self.compacted_through_index.is_some() =>
+            {
+                ManifestEntryKind::DeletionWatermark
+            }
+            None => return Err(self.corrupt_manifest("invalid-legacy-entry-shape")),
+        };
+        match kind {
+            ManifestEntryKind::Data
+                if self.segment_key.is_some()
+                    && !self.fence
+                    && self.retention_floor_through.is_none()
+                    && self.compacted_through_index.is_none()
+                    && self.first_seq <= self.last_seq
+                    && self.visible_last_seq.is_none_or(|visible| {
+                        (self.first_seq..=self.last_seq).contains(&visible)
+                    }) =>
+            {
+                self.manifest_integrity().map(|_| ())
+            }
+            ManifestEntryKind::Reclaimed
+                if self.segment_key.is_some()
+                    && !self.fence
+                    && self.retention_floor_through.is_none()
+                    && self.compacted_through_index == Some(self.index)
+                    && self.first_seq <= self.last_seq
+                    && self.visible_last_seq.is_none_or(|visible| {
+                        (self.first_seq..=self.last_seq).contains(&visible)
+                    }) =>
+            {
+                self.manifest_integrity().map(|_| ())
+            }
+            ManifestEntryKind::Fence
+                if self.segment_key.is_none()
+                    && self.fence
+                    && self.retention_floor_through.is_none()
+                    && self.compacted_through_index.is_none()
+                    && self.visible_last_seq.is_none()
+                    && self.last_seq == self.first_seq.saturating_sub(1)
+                    && !has_integrity =>
+            {
+                Ok(())
+            }
+            ManifestEntryKind::RetentionFloor
+                if self.segment_key.is_none()
+                    && !self.fence
+                    && self.retention_floor_through.is_some()
+                    && self.compacted_through_index.is_none()
+                    && self.visible_last_seq.is_none()
+                    && self.first_seq == self.last_seq
+                    && self
+                        .retention_floor_through
+                        .is_some_and(|floor| floor <= self.first_seq)
+                    && !has_integrity =>
+            {
+                Ok(())
+            }
+            ManifestEntryKind::DeletionWatermark
+                if self.segment_key.is_none()
+                    && !self.fence
+                    && self.retention_floor_through.is_none()
+                    && self.compacted_through_index.is_some()
+                    && self.visible_last_seq.is_none()
+                    && self.first_seq == self.last_seq
+                    && !has_integrity =>
+            {
+                Ok(())
+            }
+            _ => Err(self.corrupt_manifest("entry-kind-field-mismatch")),
+        }
+    }
+
+    fn manifest_integrity(&self) -> EngineResult<ManifestIntegrity> {
+        if self.segment_key.is_none() {
+            if self.segment_format.is_some()
+                || self.frame_crc32c.is_some()
+                || self.content_sha256.is_some()
+                || self.record_checksum_algorithm.is_some()
+                || self.frame_checksum_algorithm.is_some()
+                || self.content_hash_algorithm.is_some()
+            {
+                return Err(EngineError::DurableDataCorrupt {
+                    stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                    manifest_index: self.index,
+                    locator: "non-data".to_owned(),
+                });
+            }
+            return Err(EngineError::DurableDataCorrupt {
+                stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                manifest_index: self.index,
+                locator: "non-data".to_owned(),
+            });
+        }
+        match self.segment_format {
+            None => {
+                if self.frame_crc32c.is_some()
+                    || self.content_sha256.is_some()
+                    || self.record_checksum_algorithm.is_some()
+                    || self.frame_checksum_algorithm.is_some()
+                    || self.content_hash_algorithm.is_some()
+                {
+                    return Err(self.corrupt_manifest("partial-v2-metadata"));
+                }
+                Ok(ManifestIntegrity::V2 {
+                    checksum_fnv1a: self.checksum,
+                })
+            }
+            Some(3)
+                if self.record_checksum_algorithm.as_deref() == Some(CRC32C_ALGORITHM)
+                    && self.frame_checksum_algorithm.as_deref() == Some(CRC32C_ALGORITHM)
+                    && self.content_hash_algorithm.as_deref() == Some(SHA256_ALGORITHM)
+                    && self.segment_epoch.is_some()
+                    && self.checksum == 0 =>
+            {
+                Ok(ManifestIntegrity::V3 {
+                    frame_crc32c: self
+                        .frame_crc32c
+                        .ok_or_else(|| self.corrupt_manifest("missing-frame-crc32c"))?,
+                    content_sha256: self
+                        .content_sha256
+                        .clone()
+                        .ok_or_else(|| self.corrupt_manifest("missing-content-sha256"))?,
+                })
+            }
+            _ => Err(self.corrupt_manifest("unsupported-or-incomplete-format")),
+        }
+    }
+
+    fn corrupt_manifest(&self, _detail: &'static str) -> EngineError {
+        EngineError::DurableDataCorrupt {
+            stage: pqueue_engine::DurableIntegrityStage::Manifest,
+            manifest_index: self.index,
+            locator: self
+                .segment_key
+                .as_deref()
+                .map(object_locator)
+                .unwrap_or_else(|| "non-data".to_owned()),
+        }
+    }
 }
 
 /// Immutable prepared manifest record. It becomes authoritative only when the queue's versioned authority
@@ -1335,18 +1497,22 @@ struct BranchMetadata {
     object_sizes: BTreeMap<String, u64>,
 }
 
-/// FNV-1a 64-bit checksum (small, dependency-free) over a segment's serialized bytes.
-fn checksum(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in bytes {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
+fn manifest_index_from_key(key: &str) -> Option<u64> {
+    let name = key.rsplit('/').next()?;
+    let base = name.strip_suffix(".json")?;
+    let digits = base.strip_suffix("~watermark").unwrap_or(base);
+    digits.parse().ok()
 }
 
-fn manifest_index_from_key(key: &str) -> Option<u64> {
-    key.rsplit('/').next()?.strip_suffix(".json")?.parse().ok()
+fn manifest_index_from_any_key(key: &str) -> Option<u64> {
+    manifest_index_from_key(key).or_else(|| {
+        key.split('/').find_map(|component| {
+            let digits = component.strip_prefix('i')?;
+            (digits.len() == 20 && digits.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| digits.parse().ok())
+                .flatten()
+        })
+    })
 }
 
 fn store_err<E: std::fmt::Display>(e: E) -> EngineError {
@@ -1420,9 +1586,15 @@ fn branch_registry_branch_key(key: &str) -> Option<String> {
     Some(format!("t/{tenant_hex}/q/{queue_hex}/branch.json"))
 }
 
-fn branch_segment_key(branch: &QueueKey, index: u64, first_seq: u64) -> String {
+fn branch_segment_key(
+    branch: &QueueKey,
+    index: u64,
+    first_seq: u64,
+    content_sha256: Option<&str>,
+) -> String {
+    let identity = content_sha256.map_or_else(String::new, |digest| format!("-{digest}"));
     format!(
-        "{}branch-seg/e{index:020}/s{first_seq:020}.seg",
+        "{}branch-seg/e{index:020}/s{first_seq:020}{identity}.seg",
         shard_prefix(branch)
     )
 }
@@ -1531,7 +1703,7 @@ pub trait FaultHook: Send + Sync {
 // ---------------------------------------------------------------------------
 
 struct ShardBuf {
-    /// Per-command `postcard` record bytes in arrival order (serialized ONCE here at buffer time). On seal
+    /// Per-command canonical-JSON record bytes in arrival order (serialized once here at buffer time). On seal
     /// these are concatenated into the segment frame with no re-serialize (Fix A).
     /// Per-command `(serialized record bytes, created_at ms)` in arrival order (bead pqueue-b5cc2bc7 bug 1).
     /// Carrying each envelope's OWN `created_at` here — rather than a resettable running max — makes the seal's
@@ -1598,6 +1770,12 @@ pub struct SerializedCommandEnvelope {
 impl SerializedCommandEnvelope {
     pub fn new(envelope: CommandEnvelope) -> EngineResult<Self> {
         let record = serde_json::to_vec(&envelope).map_err(store_err)?;
+        if record.len() > crate::segment_integrity::MAX_RECORD_BYTES {
+            return Err(EngineError::RequestTooLarge {
+                requested: record.len(),
+                limit: crate::segment_integrity::MAX_RECORD_BYTES,
+            });
+        }
         Ok(Self { envelope, record })
     }
 
@@ -1639,6 +1817,85 @@ pub struct SegmentedObjectLog<S: BlobStore> {
 }
 
 impl<S: BlobStore> SegmentedObjectLog<S> {
+    fn decode_manifest_json<T: serde::de::DeserializeOwned>(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        index_hint: Option<u64>,
+    ) -> EngineResult<T> {
+        serde_json::from_slice(bytes).map_err(|_| {
+            let error = EngineError::DurableDataCorrupt {
+                stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                manifest_index: index_hint
+                    .or_else(|| manifest_index_from_any_key(key))
+                    .unwrap_or(0),
+                locator: object_locator(key),
+            };
+            if self.store.effective_recorder().is_enabled() {
+                let result: EngineResult<()> = Err(error.clone());
+                self.store
+                    .effective_recorder()
+                    .record_segment_validation(self.store.backend_kind(), &result);
+            }
+            error
+        })
+    }
+
+    fn canonical_v3_segment_keys(
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+    ) -> Option<(String, String)> {
+        let digest = entry.content_sha256.as_deref()?;
+        let prefix = shard_prefix(shard);
+        let segment_epoch = entry.segment_epoch?;
+        Some((
+            format!(
+                "{prefix}seg_candidates/e{segment_epoch:020}/i{:020}/s{:020}-{digest}.seg",
+                entry.index, entry.first_seq
+            ),
+            format!(
+                "{prefix}branch-seg/e{:020}/s{:020}-{digest}.seg",
+                entry.index, entry.first_seq
+            ),
+        ))
+    }
+
+    fn validate_manifest_entries(
+        &self,
+        shard: &QueueKey,
+        entries: &[ManifestEntry],
+    ) -> EngineResult<()> {
+        for entry in entries {
+            let result = entry.validate_kind().and_then(|()| {
+                if let Some((candidate, branch)) = Self::canonical_v3_segment_keys(shard, entry)
+                    && entry.segment_key.as_deref() != Some(candidate.as_str())
+                    && entry.segment_key.as_deref() != Some(branch.as_str())
+                {
+                    return Err(EngineError::DurableDataCorrupt {
+                        stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                        manifest_index: entry.index,
+                        locator: object_locator(
+                            entry
+                                .segment_key
+                                .as_deref()
+                                .unwrap_or("missing-segment-key"),
+                        ),
+                    });
+                }
+                Ok(())
+            });
+            if result.is_err() {
+                if self.store.effective_recorder().is_enabled() {
+                    self.store
+                        .effective_recorder()
+                        .record_segment_validation(self.store.backend_kind(), &result);
+                }
+                return result;
+            }
+        }
+        Ok(())
+    }
+
     /// Open a segmented object log over `store` with `config`.
     pub fn open(store: S, config: SegmentConfig) -> Self {
         let backend = store.backend_kind();
@@ -2028,12 +2285,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let marker = ManifestEntry {
             index: entry.index,
             epoch: entry.epoch,
+            entry_kind: Some(ManifestEntryKind::Reclaimed),
             fence: false,
             segment_key: entry.segment_key.clone(),
             first_seq: entry.first_seq,
             last_seq: entry.last_seq,
             visible_last_seq: None,
             checksum: entry.checksum,
+            segment_epoch: entry.segment_epoch,
+            segment_format: entry.segment_format,
+            frame_crc32c: entry.frame_crc32c,
+            content_sha256: entry.content_sha256.clone(),
+            record_checksum_algorithm: entry.record_checksum_algorithm.clone(),
+            frame_checksum_algorithm: entry.frame_checksum_algorithm.clone(),
+            content_hash_algorithm: entry.content_hash_algorithm.clone(),
             committed_at_ms: entry.committed_at_ms,
             retention_floor_through: None,
             compacted_through_index: Some(entry.index),
@@ -2342,7 +2607,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let Some(bytes) = self.store_get(&tail_key)? else {
                 return Err(EngineError::Conflict);
             };
-            let tail: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let tail: ManifestEntry = self.decode_manifest_json(
+                &tail_key,
+                &bytes,
+                parse_manifest_index_from_key(&tail_key),
+            )?;
             if Self::is_reclaimed_manifest_marker(&tail) {
                 continue;
             }
@@ -2451,7 +2720,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 let Some(bytes) = self.store_get(&key)? else {
                     return Err(EngineError::Conflict);
                 };
-                let entry: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+                let entry: ManifestEntry =
+                    self.decode_manifest_json(&key, &bytes, parse_manifest_index_from_key(&key))?;
                 if entry.index < head.value.legacy_next_manifest_index {
                     entries.push(entry);
                 }
@@ -2474,7 +2744,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     return Err(EngineError::Conflict);
                 };
                 let candidate: ManifestCandidate =
-                    serde_json::from_slice(&bytes).map_err(store_err)?;
+                    self.decode_manifest_json(&key, &bytes, manifest_index_from_any_key(&key))?;
                 cursor = candidate.previous_candidate_key.clone();
                 chain.push(candidate.entry);
                 remaining -= 1;
@@ -2490,6 +2760,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             {
                 return Err(EngineError::Conflict);
             }
+            self.validate_manifest_entries(shard, &entries)?;
             return Ok((entries, true));
         }
         let mut entries = Vec::new();
@@ -2497,10 +2768,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let Some(bytes) = self.store_get(&key)? else {
                 return Err(EngineError::Conflict);
             };
-            let entry: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let entry: ManifestEntry =
+                self.decode_manifest_json(&key, &bytes, parse_manifest_index_from_key(&key))?;
             entries.push(entry);
         }
         entries.sort_by_key(|e| e.index);
+        self.validate_manifest_entries(shard, &entries)?;
         Ok((entries, false))
     }
 
@@ -2747,12 +3020,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let entry = ManifestEntry {
                 index: next_index,
                 epoch: new_epoch,
+                entry_kind: Some(ManifestEntryKind::Fence),
                 fence: true,
                 segment_key: None,
                 first_seq: next_seq,
                 last_seq: next_seq.saturating_sub(1),
                 visible_last_seq: None,
                 checksum: 0,
+                segment_epoch: None,
+                segment_format: None,
+                frame_crc32c: None,
+                content_sha256: None,
+                record_checksum_algorithm: None,
+                frame_checksum_algorithm: None,
+                content_hash_algorithm: None,
                 committed_at_ms: now_ms,
                 retention_floor_through: None,
                 compacted_through_index: None,
@@ -2947,13 +3228,75 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // Class ban + gate validation BEFORE buffering (parity with the file reference write path).
         for command in &commands {
             validate_gate_command(false, &command.envelope.command)?;
+            if command.record.len() > crate::segment_integrity::MAX_RECORD_BYTES {
+                return Err(EngineError::RequestTooLarge {
+                    requested: command.record.len(),
+                    limit: crate::segment_integrity::MAX_RECORD_BYTES,
+                });
+            }
             if matches!(command.envelope.command, QueueCommand::ReplacePending(_)) {
                 return Err(EngineError::Unavailable);
             }
         }
+        let incoming_frame_len = crate::segment_integrity::encoded_len(
+            self.config.writer_format(),
+            commands.iter().map(|command| command.record.len()),
+        )
+        .ok_or(EngineError::RequestTooLarge {
+            requested: usize::MAX,
+            limit: crate::segment_integrity::MAX_SEGMENT_BYTES,
+        })?;
+        if incoming_frame_len > crate::segment_integrity::MAX_SEGMENT_BYTES
+            || commands.len() > crate::segment_integrity::MAX_RECORDS
+        {
+            return Err(EngineError::RequestTooLarge {
+                requested: incoming_frame_len,
+                limit: crate::segment_integrity::MAX_SEGMENT_BYTES,
+            });
+        }
+        // A valid request must not become permanently "too large" merely
+        // because a prior batch is buffered. Seal that prefix first, keeping
+        // its positions ordered ahead of any positions produced below.
+        let should_preseal = {
+            let g = self.inner.lock().expect("segmented log poisoned");
+            let buf = g.shards.get(shard).ok_or(EngineError::NotFound)?;
+            !buf.buffered.is_empty()
+                && crate::segment_integrity::encoded_len(
+                    self.config.writer_format(),
+                    buf.buffered
+                        .iter()
+                        .map(|(record, _)| record.len())
+                        .chain(commands.iter().map(|command| command.record.len())),
+                )
+                .is_none_or(|len| len > crate::segment_integrity::MAX_SEGMENT_BYTES)
+        };
+        let mut presealed = if should_preseal {
+            self.seal(shard, expected_epoch, now_ms)?
+        } else {
+            Vec::new()
+        };
         let (should_seal, envelopes) = {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
+            let frame_len = crate::segment_integrity::encoded_len(
+                self.config.writer_format(),
+                buf.buffered
+                    .iter()
+                    .map(|(record, _)| record.len())
+                    .chain(commands.iter().map(|command| command.record.len())),
+            )
+            .ok_or(EngineError::RequestTooLarge {
+                requested: usize::MAX,
+                limit: crate::segment_integrity::MAX_SEGMENT_BYTES,
+            })?;
+            if frame_len > crate::segment_integrity::MAX_SEGMENT_BYTES
+                || buf.buffered.len().saturating_add(commands.len())
+                    > crate::segment_integrity::MAX_RECORDS
+            {
+                return Err(EngineError::Backpressure {
+                    resource: "segment frame rollover",
+                });
+            }
             let mut envelopes = Vec::with_capacity(commands.len());
             for command in commands {
                 let (env, bytes) = command.into_parts();
@@ -2971,13 +3314,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 envelopes,
             )
         };
-        let committed = if should_seal {
+        let mut committed = if should_seal {
             self.seal(shard, expected_epoch, now_ms)?
         } else {
             Vec::new()
         };
+        presealed.append(&mut committed);
         let pending = self.pending(shard);
-        Ok((EnqueueOutcome { committed, pending }, envelopes))
+        Ok((
+            EnqueueOutcome {
+                committed: presealed,
+                pending,
+            },
+            envelopes,
+        ))
     }
 
     /// Seal the buffered commands for `shard` if the oldest has aged past `max_latency_ms` (TD-004 step 2
@@ -3077,10 +3427,23 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         //    re-serialize on seal (Fix A). The checksum covers the records-blob region.
         let first_seq = cur_seq;
         let last_seq = first_seq + n as u64 - 1;
-        let (seg_bytes, seg_checksum) = build_segment_object(cur_epoch, first_seq, &drained_bytes);
+        let encoded = crate::segment_integrity::encode(
+            self.config.writer_format(),
+            cur_epoch,
+            first_seq,
+            &drained_bytes,
+        )?;
+        let seg_bytes = encoded.bytes;
+        let seg_checksum = encoded.legacy_checksum;
         let shared_authority = self.read_authoritative_head(shard)?.is_some();
-        let seg_key = if shared_authority {
-            let digest = hex_lower(&Sha256::digest(&seg_bytes));
+        let content_sha256 = encoded
+            .content_sha256
+            .or_else(|| shared_authority.then(|| hex_lower(&Sha256::digest(&seg_bytes))));
+        let seg_key = if shared_authority || self.config.writer_format() == SegmentWriterFormat::V3
+        {
+            let digest = content_sha256
+                .as_deref()
+                .expect("shared and v3 segments have content identity");
             format!(
                 "{prefix}seg_candidates/e{cur_epoch:020}/i{cur_index:020}/s{first_seq:020}-{digest}.seg"
             )
@@ -3100,12 +3463,24 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let entry = ManifestEntry {
             index: cur_index,
             epoch: cur_epoch,
+            entry_kind: Some(ManifestEntryKind::Data),
             fence: false,
             segment_key: Some(seg_key.clone()),
             first_seq,
             last_seq,
             visible_last_seq: None,
             checksum: seg_checksum,
+            segment_epoch: Some(cur_epoch),
+            segment_format: (self.config.writer_format() == SegmentWriterFormat::V3).then_some(3),
+            frame_crc32c: encoded.frame_crc32c,
+            content_sha256: (self.config.writer_format() == SegmentWriterFormat::V3)
+                .then(|| content_sha256.expect("v3 content identity")),
+            record_checksum_algorithm: (self.config.writer_format() == SegmentWriterFormat::V3)
+                .then(|| CRC32C_ALGORITHM.to_owned()),
+            frame_checksum_algorithm: (self.config.writer_format() == SegmentWriterFormat::V3)
+                .then(|| CRC32C_ALGORITHM.to_owned()),
+            content_hash_algorithm: (self.config.writer_format() == SegmentWriterFormat::V3)
+                .then(|| SHA256_ALGORITHM.to_owned()),
             committed_at_ms,
             retention_floor_through: None,
             compacted_through_index: None,
@@ -3129,11 +3504,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             )?
         };
         if !won {
-            if shared_authority {
-                // A fenced/CAS-losing prepared append owns no durable state; remove its content-addressed
-                // segment even if concurrent GC already removed the manifest candidate.
-                let _ = self.store_delete(&seg_key)?;
-            }
+            // Content-addressed candidates can be shared by an identical winning
+            // append. A CAS loser must not delete the key; bounded orphan GC
+            // reclaims only candidates proven unreachable from authority.
             // CAS lost: a peer extended the manifest from the same tail. Re-read to learn the new epoch.
             let observed_epoch = self.recover_manifest(shard)?.2;
             let mut g = self.inner.lock().expect("segmented log poisoned");
@@ -3252,7 +3625,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 last_resolved = Some(key);
                 continue;
             };
-            let candidate: ManifestCandidate = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let candidate: ManifestCandidate =
+                self.decode_manifest_json(&key, &bytes, manifest_index_from_any_key(&key))?;
             let decision_key = versioned_manifest_head_key(
                 &Self::authoritative_head_prefix(shard),
                 candidate.expected_head_version + 1,
@@ -3262,8 +3636,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 stopped_unresolved = true;
                 break;
             };
-            let decision: ManifestHeadBlob =
-                serde_json::from_slice(&decision_bytes).map_err(store_err)?;
+            let decision: ManifestHeadBlob = self.decode_manifest_json(
+                &decision_key,
+                &decision_bytes,
+                Some(candidate.entry.index),
+            )?;
             if decision.tail_candidate_key.as_deref() == Some(&key) {
                 // A winning candidate remains authoritative, but a durable horizon makes every winner
                 // strictly below it unreachable. Preserve the candidate AT the horizon as the live chain's
@@ -3303,33 +3680,29 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 stopped_unresolved = true;
                 break;
             }
-            if let Some(segment_key) = candidate.entry.segment_key.clone() {
-                let segment_attempt = pqueue_engine::MaintenanceCandidate {
-                    queue: shard.clone(),
-                    stable_id: segment_key.clone(),
-                    class: pqueue_engine::MaintenanceObjectClass::OrphanSegmentAttempt,
-                    first_sequence: Some(candidate.entry.first_seq),
-                    last_sequence: Some(Self::visible_last_seq(&candidate.entry)),
-                    manifest_index: Some(candidate.entry.index),
-                    bytes: None,
-                    created_at_ms: candidate.entry.committed_at_ms,
-                    unreferenced_proven: true,
-                    loser_proven: true,
+            // Compare against the winner at the exact CAS decision. Identical
+            // bodies share a digest key and must be preserved; a distinct key
+            // is proven unreachable at these epoch/index/sequence coordinates
+            // and can be reclaimed before its only candidate proof is removed.
+            let winner_segment_key =
+                if let Some(winner_key) = decision.tail_candidate_key.as_deref() {
+                    let Some(winner_bytes) = self.store_get(winner_key)? else {
+                        stopped_unresolved = true;
+                        break;
+                    };
+                    let winner: ManifestCandidate = self.decode_manifest_json(
+                        winner_key,
+                        &winner_bytes,
+                        manifest_index_from_any_key(winner_key),
+                    )?;
+                    winner.entry.segment_key
+                } else {
+                    None
                 };
-                let segment_planned = pqueue_engine::MaintenancePolicy::new(0)
-                    .plan(
-                        &authority,
-                        &[segment_attempt],
-                        &pqueue_engine::MaintenanceFilter::default(),
-                    )
-                    .into_iter()
-                    .next()
-                    .expect("one losing segment attempt");
-                if segment_planned.disposition != pqueue_engine::MaintenanceDisposition::Delete {
-                    stopped_unresolved = true;
-                    break;
-                }
-                let _ = self.store_delete(&segment_key)?;
+            if candidate.entry.segment_key != winner_segment_key
+                && let Some(segment_key) = candidate.entry.segment_key.as_deref()
+            {
+                let _ = self.store_delete(segment_key)?;
             }
             if self.store_delete(&key)? {
                 reclaimed += 1;
@@ -3406,6 +3779,82 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(())
     }
 
+    fn decode_manifest_segment(
+        &self,
+        entry: &ManifestEntry,
+        segment_key: &str,
+        bytes: &[u8],
+        is_committed_branch: bool,
+    ) -> EngineResult<(u64, u64, Vec<CommandEnvelope>)> {
+        let locator = object_locator(segment_key);
+        let decoded = parse_segment_object(bytes, entry, &locator);
+        let result = decoded.and_then(|(epoch, first_seq, commands)| {
+            // Pre-field v2 branch manifests rewrote the logical epoch and cannot
+            // be repaired in place. Only that narrow compatibility case may use
+            // the physical header epoch without an explicit segment_epoch.
+            let expected_epoch = entry.segment_epoch.or_else(|| {
+                (!is_committed_branch || entry.segment_format.is_some()).then_some(entry.epoch)
+            });
+            let count =
+                u64::try_from(commands.len()).map_err(|_| EngineError::DurableDataCorrupt {
+                    stage: pqueue_engine::DurableIntegrityStage::Position,
+                    manifest_index: entry.index,
+                    locator: locator.clone(),
+                })?;
+            let decoded_last = first_seq.checked_add(count.saturating_sub(1));
+            if expected_epoch.is_some_and(|expected| epoch != expected)
+                || first_seq != entry.first_seq
+                || count == 0
+                || decoded_last != Some(entry.last_seq)
+            {
+                return Err(EngineError::DurableDataCorrupt {
+                    stage: pqueue_engine::DurableIntegrityStage::Position,
+                    manifest_index: entry.index,
+                    locator: locator.clone(),
+                });
+            }
+            Ok((epoch, first_seq, commands))
+        });
+        if self.store.effective_recorder().is_enabled() {
+            self.store
+                .effective_recorder()
+                .record_segment_validation(self.store.backend_kind(), &result);
+        }
+        result
+    }
+
+    fn validate_live_segment_locator(
+        &self,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+        segment_key: &str,
+        is_committed_branch: bool,
+    ) -> EngineResult<()> {
+        let Some((candidate, branch)) = Self::canonical_v3_segment_keys(shard, entry) else {
+            return Ok(());
+        };
+        let expected = if is_committed_branch {
+            branch
+        } else {
+            candidate
+        };
+        let result = if segment_key == expected {
+            Ok(())
+        } else {
+            Err(EngineError::DurableDataCorrupt {
+                stage: pqueue_engine::DurableIntegrityStage::Manifest,
+                manifest_index: entry.index,
+                locator: object_locator(segment_key),
+            })
+        };
+        if result.is_err() && self.store.effective_recorder().is_enabled() {
+            self.store
+                .effective_recorder()
+                .record_segment_validation(self.store.backend_kind(), &result);
+        }
+        result
+    }
+
     pub fn read_all(
         &self,
         shard: &QueueKey,
@@ -3421,8 +3870,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // Genesis read: from_seq == 0 dips to/below any floor, so this fails closed on a trimmed queue with a
         // read-horizon (equivalent to today's organic missing-segment error over the reclaimed prefix).
         self.fail_closed_below_floor(shard, 0, horizon)?;
+        let entries = self.read_manifest_at(shard, horizon)?;
+        let is_committed_branch = self.store_get(&branch_metadata_key(shard))?.is_some();
         let mut out = Vec::new();
-        for entry in self.read_manifest_at(shard, horizon)? {
+        for entry in entries {
             if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
                 continue;
             }
@@ -3430,11 +3881,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 continue;
             };
             let visible_last_seq = Self::visible_last_seq(&entry);
+            self.validate_live_segment_locator(shard, &entry, seg_key, is_committed_branch)?;
             let bytes = self
                 .store_get(seg_key)?
                 .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
             let (epoch, first_seq, commands) =
-                parse_segment_object(&bytes, seg_key, entry.checksum)?;
+                self.decode_manifest_segment(&entry, seg_key, &bytes, is_committed_branch)?;
             for (i, env) in commands.into_iter().enumerate() {
                 let seq = first_seq + i as u64;
                 if seq > visible_last_seq {
@@ -3486,8 +3938,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // queue — the below-floor tombstones are no longer enumerated, so return the same missing-segment
         // Storage error today's full-list read produces rather than a silently-truncated prefix.
         self.fail_closed_below_floor(shard, from_seq, horizon)?;
+        let entries = self.read_manifest_at(shard, horizon)?;
+        let is_committed_branch = self.store_get(&branch_metadata_key(shard))?.is_some();
         let mut out = Vec::new();
-        for entry in self.read_manifest_at(shard, horizon)? {
+        for entry in entries {
             if entry.fence || Self::is_reclaimed_manifest_marker(&entry) {
                 continue;
             }
@@ -3499,11 +3953,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let Some(seg_key) = entry.segment_key.as_ref() else {
                 continue;
             };
+            self.validate_live_segment_locator(shard, &entry, seg_key, is_committed_branch)?;
             let bytes = self
                 .store_get(seg_key)?
                 .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
             let (epoch, first_seq, commands) =
-                parse_segment_object(&bytes, seg_key, entry.checksum)?;
+                self.decode_manifest_segment(&entry, seg_key, &bytes, is_committed_branch)?;
             for (i, env) in commands.into_iter().enumerate() {
                 let seq = first_seq + i as u64;
                 if seq < from_seq || seq > visible_last_seq {
@@ -3815,12 +4270,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 let floor_entry = ManifestEntry {
                     index: next_index,
                     epoch: 0,
+                    entry_kind: Some(ManifestEntryKind::RetentionFloor),
                     fence: false,
                     segment_key: None,
                     first_seq: f,
                     last_seq: f,
                     visible_last_seq: None,
                     checksum: 0,
+                    segment_epoch: None,
+                    segment_format: None,
+                    frame_crc32c: None,
+                    content_sha256: None,
+                    record_checksum_algorithm: None,
+                    frame_checksum_algorithm: None,
+                    content_hash_algorithm: None,
                     committed_at_ms: 0,
                     retention_floor_through: Some(f),
                     compacted_through_index: None,
@@ -3890,8 +4353,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     copied.visible_last_seq = Some(position.sequence);
                 }
                 if let Some(seg_key) = entry.segment_key.as_ref() {
-                    let branch_seg_key =
-                        branch_segment_key(&branch, copied.index, copied.first_seq);
+                    let branch_seg_key = branch_segment_key(
+                        &branch,
+                        copied.index,
+                        copied.first_seq,
+                        copied.content_sha256.as_deref(),
+                    );
                     let bytes = self
                         .store_get(seg_key)?
                         .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
@@ -5047,10 +5514,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
 
         let head = if token.authority_key.contains("/authority_head/") {
-            Some(partial_try!(
-                serde_json::from_slice::<ManifestHeadBlob>(&token.authority_body)
-                    .map_err(store_err)
-            ))
+            Some(partial_try!(self.decode_manifest_json::<ManifestHeadBlob>(
+                &token.authority_key,
+                &token.authority_body,
+                None,
+            )))
         } else {
             None
         };
@@ -5116,9 +5584,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 };
                 let resume = Some(format!("legacy:{key}"));
                 entries.push((
-                    partial_try!(
-                        serde_json::from_slice::<ManifestEntry>(&bytes).map_err(store_err)
-                    ),
+                    partial_try!(self.decode_manifest_json::<ManifestEntry>(
+                        key,
+                        &bytes,
+                        parse_manifest_index_from_key(key),
+                    )),
                     resume.clone(),
                 ));
                 next_cursor = resume;
@@ -5145,8 +5615,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 let Some(bytes) = partial_blob_try!(self.store.observed_get(&key)) else {
                     return Err(EngineError::Conflict);
                 };
-                let candidate: ManifestCandidate =
-                    partial_try!(serde_json::from_slice(&bytes).map_err(store_err));
+                let candidate: ManifestCandidate = partial_try!(self.decode_manifest_json(
+                    &key,
+                    &bytes,
+                    manifest_index_from_any_key(&key),
+                ));
                 let entry = candidate.entry;
                 match candidate.previous_candidate_key {
                     Some(previous) => {
@@ -5662,7 +6135,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let Some(bytes) = self.store_get(&key)? else {
                 continue;
             };
-            let marker: ManifestEntry = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let marker: ManifestEntry =
+                self.decode_manifest_json(&key, &bytes, manifest_index_from_any_key(&key))?;
             if let Some(index) = marker.compacted_through_index {
                 saw_marker = true;
                 durable = Some(durable.map_or(index, |cur| cur.max(index)));
@@ -5741,12 +6215,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let entry = ManifestEntry {
             index: cur_index.0,
             epoch: cur_epoch.0,
+            entry_kind: Some(ManifestEntryKind::RetentionFloor),
             fence: false,
             segment_key: None,
             first_seq: cur_seq.0,
             last_seq: cur_seq.0,
             visible_last_seq: None,
             checksum: 0,
+            segment_epoch: None,
+            segment_format: None,
+            frame_crc32c: None,
+            content_sha256: None,
+            record_checksum_algorithm: None,
+            frame_checksum_algorithm: None,
+            content_hash_algorithm: None,
             committed_at_ms: 0, // audit-only; floor entries are skipped by every age/segment scanner
             retention_floor_through: Some(position.sequence),
             compacted_through_index: None,
@@ -6004,12 +6486,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let marker = ManifestEntry {
             index: cur_index.saturating_sub(1),
             epoch: cur_epoch,
+            entry_kind: Some(ManifestEntryKind::DeletionWatermark),
             fence: false,
             segment_key: None,
             first_seq: cur_seq.saturating_sub(1),
             last_seq: cur_seq.saturating_sub(1),
             visible_last_seq: None,
             checksum: 0,
+            segment_epoch: None,
+            segment_format: None,
+            frame_crc32c: None,
+            content_sha256: None,
+            record_checksum_algorithm: None,
+            frame_checksum_algorithm: None,
+            content_hash_algorithm: None,
             committed_at_ms: now_ms,
             retention_floor_through: None,
             compacted_through_index: Some(reclaimed_through),
@@ -6040,12 +6530,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let marker = ManifestEntry {
             index,
             epoch,
+            entry_kind: Some(ManifestEntryKind::DeletionWatermark),
             fence: false,
             segment_key: None,
             first_seq: reclaimed_through,
             last_seq: reclaimed_through,
             visible_last_seq: None,
             checksum: 0,
+            segment_epoch: None,
+            segment_format: None,
+            frame_crc32c: None,
+            content_sha256: None,
+            record_checksum_algorithm: None,
+            frame_checksum_algorithm: None,
+            content_hash_algorithm: None,
             committed_at_ms: now_ms,
             retention_floor_through: None,
             compacted_through_index: Some(index),
@@ -7424,6 +7922,32 @@ mod manifest_deletion_watermark_tests {
         AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering, Ordering,
     };
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn manifest_json_v3_golden_and_legacy_v2_inference_are_pinned() {
+        const V3: &str = "{\"index\":4,\"epoch\":7,\"entry_kind\":\"data\",\"fence\":false,\"segment_key\":\"opaque\",\"first_seq\":11,\"last_seq\":11,\"visible_last_seq\":null,\"checksum\":0,\"segment_epoch\":7,\"segment_format\":3,\"frame_crc32c\":123,\"content_sha256\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"record_checksum_algorithm\":\"crc32c-castagnoli\",\"frame_checksum_algorithm\":\"crc32c-castagnoli\",\"content_hash_algorithm\":\"sha256\",\"committed_at_ms\":9,\"retention_floor_through\":null}";
+        let v3: ManifestEntry = serde_json::from_str(V3).unwrap();
+        v3.validate_kind().unwrap();
+        assert_eq!(serde_json::to_string(&v3).unwrap(), V3);
+
+        const LEGACY_V2: &str = "{\"index\":1,\"epoch\":2,\"fence\":false,\"segment_key\":\"legacy.seg\",\"first_seq\":3,\"last_seq\":3,\"visible_last_seq\":null,\"checksum\":5,\"committed_at_ms\":6,\"retention_floor_through\":null}";
+        let legacy: ManifestEntry = serde_json::from_str(LEGACY_V2).unwrap();
+        assert_eq!(legacy.entry_kind, None);
+        assert_eq!(legacy.segment_format, None);
+        legacy.validate_kind().unwrap();
+        assert_eq!(
+            manifest_index_from_any_key(
+                "t/aa/q/bb/manifest_candidates/e00000000000000000007/i00000000000000000042/digest.json"
+            ),
+            Some(42)
+        );
+        assert_eq!(
+            manifest_index_from_any_key(
+                "t/aa/q/bb/manifest_head/00000000000000000041~watermark.json"
+            ),
+            Some(41)
+        );
+    }
 
     fn pushes(n: u64) -> Vec<CommandEnvelope> {
         (0..n)

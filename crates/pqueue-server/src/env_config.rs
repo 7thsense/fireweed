@@ -22,7 +22,8 @@ use pqueue_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
     EmbeddedFjordConfig, LogSpec, ObjectLogByteLimits, ObjectLogSpec, ProjectionSpec,
-    S3CredentialSource, SegmentConfig, resolve_node_id, validated_owner_endpoint,
+    S3CredentialSource, SegmentConfig, SegmentWriterFormat, resolve_node_id,
+    validated_owner_endpoint,
 };
 
 /// A rejected runtime configuration: the populator could not build a valid [`Config`] from the supplied env
@@ -198,11 +199,22 @@ fn parse_control_plane(
 }
 
 /// The group-commit segment configuration for the segmented object-log families (byte-size + latency seal
-/// triggers), from `PQUEUE_SEGMENT_TARGET_BYTES` / `PQUEUE_SEGMENT_MAX_LATENCY_MS`.
+/// triggers), plus the rollout-safe writer format. Readers always accept both
+/// durable formats; release N defaults new writes to v2.
 fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, ConfigError> {
     let target_bytes = parse_usize(env, "PQUEUE_SEGMENT_TARGET_BYTES", 262_144);
     let max_latency_ms = parse_u64(env, "PQUEUE_SEGMENT_MAX_LATENCY_MS", 20);
+    let writer_format = match env_or(env, "PQUEUE_SEGMENT_WRITER_FORMAT", "v2").as_str() {
+        "v2" => SegmentWriterFormat::V2,
+        "v3" => SegmentWriterFormat::V3,
+        other => {
+            return Err(ConfigError::new(format!(
+                "unknown PQUEUE_SEGMENT_WRITER_FORMAT={other:?}; expected v2|v3"
+            )));
+        }
+    };
     SegmentConfig::new(target_bytes, max_latency_ms)
+        .map(|config| config.with_writer_format(writer_format))
         .map_err(|e| ConfigError::new(format!("invalid segment configuration: {e}")))
 }
 
@@ -941,6 +953,49 @@ mod tests {
     }
 
     #[test]
+    fn segment_writer_format_is_strict_and_rollout_defaults_to_v2() {
+        assert_eq!(
+            segment_config(&map(&[])).unwrap().writer_format(),
+            SegmentWriterFormat::V2
+        );
+        assert_eq!(
+            segment_config(&map(&[("PQUEUE_SEGMENT_WRITER_FORMAT", "v2")]))
+                .unwrap()
+                .writer_format(),
+            SegmentWriterFormat::V2
+        );
+        assert_eq!(
+            segment_config(&map(&[("PQUEUE_SEGMENT_WRITER_FORMAT", "v3")]))
+                .unwrap()
+                .writer_format(),
+            SegmentWriterFormat::V3
+        );
+        for value in ["", "V2", "V3", "3", "future"] {
+            assert!(
+                segment_config(&map(&[("PQUEUE_SEGMENT_WRITER_FORMAT", value)])).is_err(),
+                "accepted non-canonical writer format {value:?}"
+            );
+        }
+
+        let s3 = Config::from_env(&map(&[
+            ("PQUEUE_LOG_BACKEND", "objectlog"),
+            ("PQUEUE_OBJECT_LOG_STORE", "s3"),
+            ("PQUEUE_OBJECT_LOG_S3_ENDPOINT", "https://object.example"),
+            ("PQUEUE_OBJECT_LOG_S3_BUCKET", "bucket"),
+            ("PQUEUE_OBJECT_LOG_S3_REGION", "us-east-1"),
+            ("PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE", "static"),
+            ("PQUEUE_OBJECT_LOG_S3_ACCESS_KEY_ID", "test"),
+            ("PQUEUE_OBJECT_LOG_S3_SECRET_ACCESS_KEY", "test"),
+            ("PQUEUE_SEGMENT_WRITER_FORMAT", "v3"),
+        ]))
+        .unwrap();
+        let LogSpec::ObjectLog(ObjectLogSpec::S3 { segment_config, .. }) = s3.backend.log else {
+            panic!("expected S3 object-log profile");
+        };
+        assert_eq!(segment_config.writer_format(), SegmentWriterFormat::V3);
+    }
+
+    #[test]
     fn objectlog_sqlite_projection_carries_paths_and_segment_config() {
         // The object log's only production form is the segmented group-commit substrate; the retired
         // `PQUEUE_OBJECT_LOG_MODE` knob is ignored, and the projection axis is the derived sqlite store.
@@ -965,6 +1020,7 @@ mod tests {
                 assert_eq!(path, PathBuf::from("/data/proj.db"));
                 assert_eq!(segment_config.target_bytes, 131_072);
                 assert_eq!(segment_config.max_latency_ms, 5);
+                assert_eq!(segment_config.writer_format(), SegmentWriterFormat::V2);
             }
             _ => panic!("expected objectlog log × sqlite projection"),
         }
