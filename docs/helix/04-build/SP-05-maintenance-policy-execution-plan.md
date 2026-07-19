@@ -8,11 +8,11 @@ ddx:
     - {kind: informed_by, to: api-operator-repair-contract}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: ebc977e1755ccf228635818ae7c76061ba0817ad6b473180e42fb194fea1b3a3
+    self_hash: 19aa494aeeef8822839e5dc70dee309c87a9ad5d3d9d094adb26e4e4a03f64c8
     deps:
-      build-sp03-sequenced-metadata-boundary: c212bb092c036690b331e446a3b53ee8d5d5ae47eb6237524d038b6e7fdb53db
-      build-sp04-object-store-observability: 8b8a380a443ed798b0fb8fe0a5fa9884e0ead76418df42af8ba99f910773b4ca
-    reviewed_at: "2026-07-18T16:20:32Z"
+      build-sp03-sequenced-metadata-boundary: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
+      build-sp04-object-store-observability: 7fc689fb0f1334fee08304160a66d3215372c754dddf679ae4411c4c0d625926
+    reviewed_at: "2026-07-19T01:26:09Z"
 ---
 
 # Implementation Plan: SP-05 Maintenance Policy and Execution Separation
@@ -95,3 +95,39 @@ cursors require no durable schema change.
 
 Maintenance is policy-driven, bounded, resumable, dry-runnable, observable, and deduplicated; existing safety
 tests and deterministic GC/handoff schedules remain green.
+
+## Implementation Status — 2026-07-18
+
+Implemented locally: the engine-owned pure policy and typed reasons; immutable authority assembly; actual
+segment-prefix, manifest-entry, losing-manifest, orphan-segment, and orphan-branch adapters; owner fencing;
+bounded paged branch cleanup with pin-last partial replay, dry-run, filters, and reports; and removal of the
+duplicate emission-side reclaim loop. Lease reclaim and public operator APIs remain excluded as planned.
+
+Focused policy and single-scheduler tests are green. Bounded-GC tests cover `page_size = 1` convergence,
+hard reported request caps, partial-effect reports for retryable errors and epoch fencing, corrupt redirect
+metadata, and restart completion from persisted object-size inventory. Stores must declare a one-attempt
+primitive-call bound; unknown or larger hidden-retry bounds fail closed. Legacy partial branches may use one
+reported, budgeted GET per unknown object size. The local owner token captures the exact authority-object key
+and body digest; every destructive check budgets an exact GET plus successor LIST and fences on missing,
+changed, corrupt, or superseded authority. Observed provider faults retain their structured result and
+retryability in partial-effect reports. Soft live cursors resume the first unresolved branch; a dry
+run that exhausts its limits safely rescans on its next invocation rather than persisting state.
+
+Segment expiry is also bounded in the production composition path. The engine receives a typed maintenance
+summary from each bounded page and merges it with orphan cleanup instead of reporting only deleted segments.
+Large-prefix tests enforce object/request/page caps and convergence, while a reopen test proves that loss of
+the soft traversal cursor causes reconciliation from durable reclaimed markers and delays read-horizon
+publication until the traversal completes. The legacy unbounded helper remains for compatibility tests only;
+the composed scheduler has no call site to it.
+Soft expiry progress is keyed by queue and target sequence. Target changes restart discovery; live pins retain
+the first unresolved candidate and force an incomplete report; and branch-registry discovery resumes from a
+separate cursor across request-bounded passes. Regression tests cover target growth, pin-TTL release, and a
+registry larger than one pass. Watermark admission reserves the ambiguity ceiling but reports the actual
+observed create-only and horizon-write attempts.
+
+The global exit criterion is not met. Full hybrid-async frontier assembly stopped as a negative spike:
+current adapters cannot atomically prove committed object-snapshot recovery coverage and every five-way
+durable replay minimum. Async maintenance therefore retains affected segment/manifest objects and reports
+missing authority. Consequence: storage growth until an owner-fenced complete-frontier API, recovery tests,
+and a retained-work/storage-growth alert land. Rollback is conservative retention or disabling that profile.
+SP-04's quiet-host measurement remains deferred; no Niflheim or quiet-host test was run or changed here.

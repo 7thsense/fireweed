@@ -231,9 +231,10 @@ fn seg_trim_cycle<S: BlobStore>(
     log: &SegmentedObjectLog<S>,
     shard: &pqueue_engine::QueueKey,
     through_seq: u64,
-    epoch: u64,
+    _epoch: u64,
     now_ms: i64,
 ) {
+    let epoch = log.acquire_epoch(shard, now_ms).unwrap();
     log.advance_retention_floor(
         shard,
         pqueue_engine::CommandPosition::new(shard.clone(), epoch, through_seq),
@@ -839,8 +840,13 @@ fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
     log.enqueue(&shard, &segmented_pushes(2), 0, 20).unwrap();
     log.seal(&shard, 0, 21).unwrap();
 
-    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
-        .unwrap();
+    let owner_epoch = log.acquire_epoch(&shard, 1_000).unwrap();
+    log.advance_retention_floor(
+        &shard,
+        CommandPosition::new(shard.clone(), owner_epoch, 1),
+        owner_epoch,
+    )
+    .unwrap();
     log.expire_segments_through(&shard, 1, 1_000).unwrap();
 
     let persisted = log
@@ -853,7 +859,7 @@ fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
     );
     assert_eq!(
         log.current_epoch(&shard).unwrap(),
-        0,
+        owner_epoch,
         "persisting the deletion watermark does not change the permanent-head fence"
     );
 
@@ -866,7 +872,7 @@ fn TestManifestDeletionWatermarkPersistsAndRecoversMetadata() {
     );
     assert_eq!(
         reopened.current_epoch(&shard).unwrap(),
-        0,
+        owner_epoch,
         "reopening preserves the permanent-head stale-writer fence"
     );
 }
@@ -1026,8 +1032,13 @@ fn TestPartialExpireRecoveryKeepsVisibleUndeletedSegments() {
         log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
-        .unwrap();
+    let owner_epoch = log.acquire_epoch(&shard, 1_000).unwrap();
+    log.advance_retention_floor(
+        &shard,
+        CommandPosition::new(shard.clone(), owner_epoch, 7),
+        owner_epoch,
+    )
+    .unwrap();
     store.arm_delete(".seg");
 
     let err = log.expire_segments_through(&shard, 7, 1_000).unwrap_err();

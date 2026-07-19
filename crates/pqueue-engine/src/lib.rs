@@ -25,6 +25,7 @@ mod density;
 mod error;
 mod finalize_validation;
 mod idempotency;
+mod maintenance;
 mod operator;
 mod ownership;
 mod port;
@@ -88,6 +89,11 @@ pub use control_plane::{
 };
 pub use density::{RenewSweep, ResidentQueues, renew_all_resident};
 pub use idempotency::{IdempotencyDecision, QueueIdempotencyCache};
+pub use maintenance::{
+    FrontierRequirement, MaintenanceAuthoritySnapshot, MaintenanceCandidate, MaintenanceDecision,
+    MaintenanceDisposition, MaintenanceFilter, MaintenanceObjectClass, MaintenancePolicy,
+    MaintenanceReason,
+};
 pub use operator::{OperationHandle, OperationId, OperatorOperationState, OperatorOperationStore};
 pub use ownership::{OwnedSession, OwnershipOutcome, acquire_and_fence, owner_liveness_violation};
 
@@ -117,10 +123,10 @@ pub use port::{
     CommitRecovery, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
     ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery, FinalizePort,
     HistoricalProjectionRead, HotProjectionQueryPort, IdGen, IndexHit, IndexQueryPort,
-    InstanceFence, ItemView, LeaseView, LiveItemView, LogRead, LogWriter, ProjectionRead,
-    ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    RequestIdReplayProbe, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
+    InstanceFence, ItemView, LeaseView, LiveItemView, LogRead, LogWriter, MaintenanceStopReason,
+    MaintenanceSummary, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort,
+    PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
+    RenewLeasePort, RequestIdReplayProbe, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
     TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
     generate_query_lease_token, is_api001_reserved_write_field,
     validate_api001_reserved_write_fields, validate_instance_fence,

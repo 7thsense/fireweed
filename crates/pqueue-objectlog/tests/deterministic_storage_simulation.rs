@@ -504,6 +504,12 @@ impl ProductionRunner {
         self.log = SegmentedObjectLog::open(self.store.clone(), cfg());
         self.log.create_queue(&qdef())
     }
+    fn ensure_maintenance_owner(&mut self) -> EngineResult<()> {
+        if self.log.maintenance_owner_epoch(&shard()).is_none() {
+            self.epoch = self.log.acquire_epoch(&shard(), 0)?;
+        }
+        Ok(())
+    }
     fn visible(&self) -> EngineResult<Vec<u64>> {
         let from = self
             .log
@@ -790,6 +796,10 @@ impl ProductionRunner {
                 }
             }
             Operation::AdvanceHorizon { through_sequence } => {
+                if self.ensure_maintenance_owner().is_err() {
+                    self.disposition = Disposition::Rejected;
+                    return;
+                }
                 self.store.set_head_phase(BlobPhase::Floor);
                 let position = self
                     .log
@@ -822,6 +832,10 @@ impl ProductionRunner {
                     }
                     self.disposition = Disposition::Success;
                 } else {
+                    if self.ensure_maintenance_owner().is_err() {
+                        self.disposition = Disposition::Rejected;
+                        return;
+                    }
                     let allowed = self
                         .log
                         .read_retention_floor(&shard())
@@ -862,6 +876,7 @@ impl ProductionRunner {
                 let _ = self.log.acquire_epoch(&shard(), 0);
             }
             DurableCut::DuringSegmentExpiry => {
+                let _ = self.ensure_maintenance_owner();
                 if let Some(floor) = self.log.read_retention_floor(&shard()).ok().flatten() {
                     let _ = self
                         .log
@@ -1056,6 +1071,22 @@ fn run(seed: u64, operations: &[Operation], mutant: SutMutant) -> Result<(), Run
     let mut model = Model::default();
     let mut sut = ProductionRunner::new(mutant);
     for (index, operation) in operations.iter().enumerate() {
+        if matches!(
+            operation,
+            Operation::AdvanceHorizon { .. }
+                | Operation::DeleteThrough { .. }
+                | Operation::Crash(DurableCut::DuringSegmentExpiry)
+        ) {
+            let acquire = Operation::Fence {
+                epoch: model.snapshot().epoch + 1,
+                result: StoreResult::Success,
+            };
+            model.apply(&acquire);
+            sut.apply(&acquire);
+            sut.log
+                .fence_epoch(&shard(), sut.epoch, 0)
+                .expect("adopt deterministic maintenance owner token");
+        }
         model.apply(operation);
         sut.apply(operation);
         if matches!(

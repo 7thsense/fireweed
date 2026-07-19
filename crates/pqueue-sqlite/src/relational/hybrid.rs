@@ -931,6 +931,18 @@ impl ProjectionStore for HybridProjectionStore {
             .is_none_or(HybridAsyncMonitor::retention_may_advance)
     }
 
+    fn requires_complete_retention_frontier(&self) -> bool {
+        self.async_thresholds.is_some()
+    }
+
+    fn complete_retention_frontier_is_proven(&self, _shard: &QueueKey) -> bool {
+        // The current projection exposes ordered SQLite health/high-water, but the LogStore seam does not yet
+        // supply committed object-snapshot recovery-window time plus durable item-key/request replay minima as
+        // one immutable snapshot. Fail closed until that authority adapter lands; never promote local SQLite
+        // state into object-log deletion authority.
+        self.async_thresholds.is_none()
+    }
+
     /// `objectlog/hybrid-async` (TD-004 "Retention advancement"): reclaim terminal-item retention from the
     /// DURABLE, checkpointed SQLite image. The composition gates this on [`Self::retention_may_advance`], so a
     /// reap tick under Hard async-apply debt (or a poisoned worker) is WITHHELD entirely (this override is not

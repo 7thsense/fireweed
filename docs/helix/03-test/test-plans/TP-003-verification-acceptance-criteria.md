@@ -22,7 +22,7 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: e4cdf81601d5246355ffc3ac09c4ac92ea0370f8fa9ce4cea801ec784e3717cb
+    self_hash: 499b3c2c4300fa311a7189c64fc1321903ad8b2f67045f9bd95c993d690158d5
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
@@ -38,12 +38,12 @@ ddx:
       td-object-log-turso-projection: 0626539eb10dced9b304c0fc48cb292d4ed25dd49e5c474b87829caec9384488
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
-      td-s3-object-log-sqlite-projection-mode: 8bacf6c79d2e3b82ee35cf5be4528818f720eed51bf9cfcbe200de48fc373caa
+      td-s3-object-log-sqlite-projection-mode: 3765364468e6c3355df70b89cf4a3d59c6cebae935c75ff9eb13fbbc95af210c
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
-      tp-scale-substantiation: 6ea31f7e002127ffc5bb82fb1e4c3711085f0e96f8c4960393e77877c3fa67cd
-    reviewed_at: "2026-07-18T21:09:02Z"
+      tp-scale-substantiation: ff74b55a3869b335aa80e2e52abae5cea979d028c1c41559ab027e477a26c253
+    reviewed_at: "2026-07-19T01:26:09Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -431,6 +431,32 @@ replay remain release evidence and were not claimed or run here. The suite has a
 but is not wired into broad GitHub Actions; no quiet-host test is part of this suite.
 
 ## 5. CI Quality Gates (the green set)
+
+### SP-05 maintenance evidence
+
+The focused SP-05 gate requires table tests for every typed frontier axis, filter exclusion, and fail-closed
+orphan proof; bounded orphan-GC tests for dry-run/live parity, partial replay, pin-last ordering, stale-owner
+fencing, `page_size = 1` segment/sentinel convergence, and request-cap enforcement; and a scheduler
+regression proving terminal projection rows are reaped by the single reclaim driver only after emission
+advances its cursor. Partial-effect reports cover retryable delete failure and epoch loss after deletion.
+Restart tests prove completion from persisted object-size inventory; the bounded legacy fallback reports and
+budgets each size GET. Providers without an exact one-attempt primitive-call guarantee fail closed.
+
+Bounded segment-expiry acceptance additionally requires a large manifest prefix to converge across multiple
+passes without exceeding per-pass object, byte, request, elapsed-time, or page-size limits. A restart between
+passes must discard only the soft cursor, rescan durable reclaimed markers, delete every remaining eligible
+segment exactly once, and publish the read horizon only after the complete unblocked traversal. A call-site
+gate verifies that the composed production scheduler invokes the bounded expiry seam and merges its summary;
+the unbounded compatibility helper is not a scheduler dependency.
+Regression cases increase `through_seq` between passes, expire a live pin between passes, and scan a branch
+registry larger than the per-pass request cap. They assert that skipped entries are reconsidered, a pinned
+pass is never reported complete, registry paging converges, and the report charges actual watermark calls
+while admission reserves the maximum ambiguous-publication cost.
+
+Hybrid-async segment/manifest deletion has a negative acceptance result until a single owner-fenced API can
+prove the complete TD-004 authority snapshot. Its required assertion is conservative retention plus a
+missing-frontier/storage-growth signal; recovery-success and bounded-growth claims remain unverified. The
+SP-04 quiet-host overhead measurement remains deferred and is not part of this functional gate.
 
 Gates run at two cadences. **Per-PR (fast)** gates MUST pass to merge.
 **Release (full)** gates MUST pass to call a build "verified" for v1; they include

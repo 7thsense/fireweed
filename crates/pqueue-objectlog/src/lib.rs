@@ -19,6 +19,7 @@
 mod async_commit;
 mod async_log;
 pub mod compose_log;
+pub mod maintenance;
 pub mod object_store_observability;
 pub mod segmented;
 #[doc(hidden)]

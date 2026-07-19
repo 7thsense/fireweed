@@ -14,7 +14,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 94855c909aac4f1a362bce18f1720e58d524945eba5a4dda495e46ed9a0c1116
+    self_hash: 3765364468e6c3355df70b89cf4a3d59c6cebae935c75ff9eb13fbbc95af210c
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -27,7 +27,7 @@ ddx:
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-18T22:13:08Z"
+    reviewed_at: "2026-07-19T01:26:08Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -931,6 +931,53 @@ The following cases define the required evidence surface:
   TD-004 uses them, it does not mint new evidence IDs.)
 
 ## Migration & Rollback
+
+### Maintenance authority and execution
+
+Maintenance selection is a pure, deterministic policy over one immutable authority snapshot. The snapshot
+contains the current owner epoch, retention permission, committed snapshot and recovery coverage, durable
+floor, complete live branch-pin registry, and typed frontier requirements for manifest tail, request-id,
+item-key, async-projection, and in-memory claim replay. `Unknown`, `NotRequired`, and `RequiredFrom(n)` are
+distinct: absence of authority is never interpreted as an empty frontier. Decisions are ordered by object
+class and stable key and carry a typed retain/delete reason.
+
+The implemented classes are segment prefixes, manifest entries, exact losing-manifest candidates, exact
+orphan segment attempts, and orphan branches. A losing manifest or segment attempt is deletable only when
+both unreferenced status and loser status are proven. An orphan branch additionally requires absent live
+registry membership, valid inheritance metadata, a current owner epoch, and expiry of the in-flight-writer
+grace window. Corrupt or incomplete evidence retains the object.
+
+Effects use class-specific authority. Segment floor publication is advance-then-delete; a completed deletion
+watermark advances only across contiguous successful deletes. Branch creation publishes a pin and then
+rechecks the authoritative floor, rolling back on conflict. Branch GC holds the create/GC exclusion guard
+across classification and object deletion, rechecks the epoch, deletes branch objects before the sentinel,
+and releases the registry pin last. Revalidation may downgrade a planned delete to retain; it cannot upgrade
+a retain decision. Lease expiry remains outside this maintenance policy.
+
+Each run validates nonzero object, byte, request, elapsed-time, and page bounds. Soft cursors may be lost and
+cause an idempotent rescan; a partial run never advances past its first unresolved candidate. Dry-run follows
+the same paged discovery and policy path but performs no mutation. Reports separate scanned and retained
+work, physical objects/bytes/requests, retryable and permanent failures, fencing, cursor, and stop reason.
+Permanent failure blocks a contiguous frontier rather than authorizing a skip.
+
+Segment expiry follows the same contract. The object-log adapter exposes a bounded page executor, and the
+engine scheduler invokes only that bounded seam. A soft traversal cursor and in-memory contiguous-progress
+accumulator resume large manifest prefixes; losing either causes a safe rescan of immutable manifest evidence.
+Progress is bound to the requested `through_seq`; increasing that target resets traversal so previously
+out-of-range entries cannot be skipped. A live branch pin leaves the first protected entry as the unresolved
+cursor and makes the pass incomplete; after the pin expires, the next pass rescans that entry. Branch-pin
+registry discovery has its own resumable page cursor and accumulated conservative cut, so a registry larger
+than one request budget cannot starve segment work. The durable deletion watermark is published only after a complete, unblocked traversal. Segment deletion,
+reclaimed-entry publication, manifest deletion, owner proofs, branch-pin discovery, and final watermark
+publication all consume the same physical-request budget. The composed tick merges segment-expiry and orphan
+cleanup counts, bytes, requests, failures, fencing, cursor state, and stop reason into one maintenance summary.
+
+The `objectlog/hybrid-async` full-frontier adapter is a negative spike in this iteration. Existing seams do
+not prove, in one snapshot, committed object-snapshot recovery coverage plus all five durable replay minima.
+That profile therefore retains segment/manifest objects and reports missing-frontier authority. This can
+increase storage indefinitely and requires an operational retained-work/storage-growth alert. Unblocking
+requires a single owner-fenced snapshot API exposing those values and restart recovery tests; rollback is to
+keep conservative retention or disable the async profile, never to infer missing values.
 
 - Backend profile is per-queue configuration (TD-001). A queue may be created on
   `object_log_sqlite_projection` after this backend passes the TD-001 conformance suite.

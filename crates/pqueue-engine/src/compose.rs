@@ -51,16 +51,21 @@ use crate::command::{
 use crate::error::{CommitRejection, EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
 use crate::idempotency::{IdempotencyDecision, QueueIdempotencyCache};
+use crate::maintenance::{
+    MaintenanceAuthoritySnapshot, MaintenanceCandidate, MaintenanceDisposition, MaintenanceFilter,
+    MaintenanceObjectClass, MaintenancePolicy,
+};
 use crate::port::{
     AsOfProjectionStore, Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem,
     CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery,
     CommitTransition, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery,
     FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView, LeaseView,
-    LiveItemView, LogRead, LogWriter, ProjectionRead, ProjectionSnapshot, ProjectionWriter,
-    PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    generate_query_lease_token, validate_api001_reserved_write_fields, validate_instance_fence,
+    LiveItemView, LogRead, LogWriter, MaintenanceStopReason, MaintenanceSummary, ProjectionRead,
+    ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    ReschedulePort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    validate_api001_reserved_write_fields, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::sequenced_metadata::{AdvanceThenDelete, RetainedAddress, RetentionFloorClass};
@@ -95,6 +100,16 @@ pub trait LogStore: Send {
     /// The current `assignment_epoch` for `shard` (the `backend_epoch` new positions carry). `NotFound`
     /// if the shard's log does not exist.
     fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64>;
+
+    /// Epoch this process has positively acquired for serving, if any. Reading durable `current_epoch` is not
+    /// ownership proof and therefore cannot authorize background deletion by itself.
+    fn maintenance_owner_epoch(&self, _shard: &QueueKey) -> Option<u64> {
+        None
+    }
+
+    fn supports_objectlog_maintenance(&self) -> bool {
+        false
+    }
 
     /// Acquire a strictly-greater, durably-recorded `assignment_epoch` (TD-003 acquire). Returns the new
     /// epoch. `NotFound` if the shard's log does not exist.
@@ -151,7 +166,7 @@ pub trait LogStore: Send {
     }
 
     /// Monotonically advance the durable retention floor to `position` (rejecting a regression). Written
-    /// BEFORE `expire_segments_through` deletes the corresponding segment objects. `expected_epoch` is the
+    /// BEFORE bounded segment expiry deletes the corresponding segment objects. `expected_epoch` is the
     /// writing owner's currently-held assignment epoch; the impl re-reads the authoritative current epoch and
     /// rejects a SUPERSEDED writer with [`EngineError::EpochFenced`] (bug 2b — a stale owner must not lower a
     /// newer owner's floor). Default: no-op.
@@ -176,19 +191,19 @@ pub trait LogStore: Send {
         Ok(None)
     }
 
-    /// Delete the segment OBJECTS at or before `through_seq` (keeping their manifest entries as tombstones the
-    /// read path skips, and skipping branch-pinned segments). Returns the number of objects deleted. Default:
-    /// no-op (0 deleted).
-    fn expire_segments_through(
+    /// Run one bounded deletion pass over segment objects at or before `through_seq`, keeping their manifest
+    /// entries as tombstones and skipping branch-pinned segments. The summary preserves partial progress,
+    /// resource accounting, cursor state, and typed stop reasons. Default: completed no-op.
+    fn expire_segments_through_bounded(
         &mut self,
         _shard: &QueueKey,
         _through_seq: u64,
         _now_ms: i64,
-    ) -> EngineResult<u64> {
-        Ok(0)
+    ) -> EngineResult<MaintenanceSummary> {
+        Ok(MaintenanceSummary::default())
     }
 
-    /// The lowest segment sequence at or below `through_seq` that `expire_segments_through` SKIPS only because
+    /// The lowest segment sequence at or below `through_seq` that bounded expiry SKIPS only because
     /// a live branch pins it (a transient condition). The composed trim caller uses this to keep its
     /// completed-deletion watermark BELOW a branch-pinned segment so a released pin is re-scanned later (bug
     /// 2b). Default: `None` (no branch-pin concept).
@@ -199,6 +214,17 @@ pub trait LogStore: Send {
         _now_ms: i64,
     ) -> EngineResult<Option<u64>> {
         Ok(None)
+    }
+
+    /// Run one owner-fenced, bounded orphan-branch maintenance page. Object-log implementations reclassify
+    /// and delete under their create/GC exclusion guard; other log families have no branch objects.
+    fn gc_orphaned_branches_bounded(
+        &mut self,
+        _shard: &QueueKey,
+        _expected_epoch: u64,
+        _now_ms: i64,
+    ) -> EngineResult<MaintenanceSummary> {
+        Ok(MaintenanceSummary::default())
     }
 
     /// The current durable command position for `shard` (thin wrapper over `high_water`).
@@ -664,6 +690,18 @@ pub trait ProjectionStore: Send {
         true
     }
 
+    /// Hybrid-async profiles require the complete TD-004 five-way frontier rather than the legacy
+    /// checkpoint/time horizon. Default profiles keep their established safe reclamation behavior.
+    fn requires_complete_retention_frontier(&self) -> bool {
+        false
+    }
+
+    /// Whether all async-only frontier evidence has been assembled from authority. `false` is a conservative
+    /// retain, never permission to synthesize missing snapshot/item-key/lineage inputs.
+    fn complete_retention_frontier_is_proven(&self, _shard: &QueueKey) -> bool {
+        !self.requires_complete_retention_frontier()
+    }
+
     /// Drain any deferred durable projection work. Default is a no-op for synchronous projections.
     fn flush_deferred(&mut self) -> EngineResult<()> {
         Ok(())
@@ -1094,7 +1132,7 @@ struct Inner<L, P> {
     known_shards: HashSet<QueueKey>,
     /// Per-queue IN-MEMORY watermark of the highest sequence whose below-floor segment objects this process
     /// has already fully deleted (bead pqueue-b5cc2bc7). Empty on process start, so the FIRST trim tick after
-    /// a (re)open re-runs `expire_segments_through` up to the durable floor to FINISH any deletion a crash
+    /// a (re)open re-runs bounded expiry up to the durable floor to FINISH any deletion a crash
     /// interrupted BETWEEN the floor write and the segment delete — the deletion is idempotent, and this
     /// watermark keeps subsequent idle ticks from re-scanning the manifest once the durable floor is fully
     /// reclaimed. NOT durable: a restart re-verifies against the durable floor.
@@ -1447,11 +1485,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// ORDER (crash-safe, MANDATORY): (b) advance the durable floor FIRST, THEN (c) delete the segment objects.
     /// A crash between them leaves floor=F with some below-F segments still present — recovery reads from F+1
     /// and skips them, no "missing segment" error. The reverse order would leave the floor pointing past a
-    /// deleted segment. Returns the number of segment objects deleted.
+    /// deleted segment. Returns the aggregate bounded-maintenance report.
     ///
     /// FINISH-INTERRUPTED-DELETION (bug 2a): a crash BETWEEN (b) and (c) — or a partial (c) — leaves segment
     /// objects at/below the durable floor undeleted. The in-memory `trim_completed_through` watermark is empty
-    /// on process start, so the FIRST trim tick after a (re)open re-runs `expire_segments_through` up to the
+    /// on process start, so the FIRST trim tick after a (re)open re-runs bounded expiry up to the
     /// durable floor to finish that deletion (idempotent), even when the newly-computed horizon does not
     /// advance. Once completed, the watermark suppresses re-scanning on idle ticks.
     ///
@@ -1466,14 +1504,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         shard: &QueueKey,
         request_id_retention_ms: u64,
         now: UtcTimestamp,
-    ) -> EngineResult<u64> {
+    ) -> EngineResult<MaintenanceSummary> {
         // (gate) Retention advancement must be permitted — mirrors the reap short-circuit at
         // `reap_terminal_items_locked`. No-op unless a hybrid-async projection reports Clear.
         if !inner.projection.retention_may_advance(shard) {
-            return Ok(0);
+            return Ok(MaintenanceSummary::default());
+        }
+        let Some(expected_epoch) = inner.log.maintenance_owner_epoch(shard) else {
+            return Ok(MaintenanceSummary::default());
+        };
+        if inner.log.current_epoch(shard)? != expected_epoch {
+            return Ok(MaintenanceSummary::default());
         }
         let now_ms = ts_to_ms(now);
-        let mut deleted = 0u64;
+        let mut summary = MaintenanceSummary::default();
 
         // (bug 2a) FINISH any crash-interrupted deletion up to the DURABLE floor before considering new
         // reclamation. `trim_completed_through` is `None` (absent) on process start, so this runs once after
@@ -1484,9 +1528,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         if let Some(floor) = &durable_floor {
             let completed = inner.trim_completed_through.get(shard).copied();
             if completed.is_none_or(|c| c < floor.sequence) {
-                deleted += inner
-                    .log
-                    .expire_segments_through(shard, floor.sequence, now_ms)?;
+                let pass =
+                    inner
+                        .log
+                        .expire_segments_through_bounded(shard, floor.sequence, now_ms)?;
+                let complete = pass.deletion_pass_complete();
+                summary.merge(pass);
+                if !complete {
+                    return Ok(summary);
+                }
                 Self::record_trim_watermark_locked(inner, shard, floor.sequence, now_ms)?;
             }
         }
@@ -1495,43 +1545,95 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         // shorter. Keep its originating command durable for the same interval; otherwise a restart after
         // segment reclamation would retain the leased projection row but lose the request outcome needed to
         // replay the claim.
-        if inner
+        let in_memory_claim_replay_pinned = inner
             .claim_by_query_idempotency
             .get(shard)
             .is_some_and(|cache| {
                 cache.has_unexpired_matching(now, |(item_ids, _)| !item_ids.is_empty())
-            })
-        {
-            return Ok(deleted);
-        }
+            });
 
         // (a1) The durable checkpoint high-water — the highest seq the durable projection image has absorbed.
         // Under the Clear gate the hybrid-async monitor returns the REAL (un-withheld) value. `None` means
         // nothing is durably applied, so nothing is safe to trim.
-        let Some(checkpoint) = inner.projection.recovery_high_water(shard)? else {
-            return Ok(deleted);
-        };
+        let checkpoint = inner.projection.recovery_high_water(shard)?;
         // (a2) The request-id-retention horizon: newest data segment whose commands are all past retention.
         let cutoff_ms = now_ms
             .saturating_sub(request_id_retention_ms as i64)
             .saturating_sub(RETENTION_TRIM_SKEW_MARGIN_MS);
-        let Some(time_expired_seq) = inner.log.max_trimmable_seq_before(shard, cutoff_ms)? else {
-            return Ok(deleted);
+        let time_expired_seq = inner.log.max_trimmable_seq_before(shard, cutoff_ms)?;
+        let checkpoint_through = checkpoint.as_ref().map(|position| position.sequence);
+        let proposed_through = checkpoint_through
+            .zip(time_expired_seq)
+            .map(|(checkpoint, time)| checkpoint.min(time))
+            .unwrap_or(0);
+        let complete_required = inner.projection.requires_complete_retention_frontier();
+        let complete_proven = inner
+            .projection
+            .complete_retention_frontier_is_proven(shard);
+        let authority = MaintenanceAuthoritySnapshot {
+            queue: shard.clone(),
+            current_epoch: expected_epoch,
+            observed_at_ms: now_ms,
+            retention_may_advance: inner.projection.retention_may_advance(shard),
+            complete_frontier_required: complete_required,
+            lineage_validated: !complete_required || complete_proven,
+            committed_snapshot_through: checkpoint_through,
+            recovery_window_through: time_expired_seq,
+            manifest_tail: if complete_required {
+                crate::FrontierRequirement::Unknown
+            } else {
+                crate::FrontierRequirement::NotRequired
+            },
+            request_ids: if complete_required {
+                crate::FrontierRequirement::Unknown
+            } else {
+                crate::FrontierRequirement::NotRequired
+            },
+            item_keys: if complete_required {
+                crate::FrontierRequirement::Unknown
+            } else {
+                crate::FrontierRequirement::NotRequired
+            },
+            async_projection_through: None,
+            in_memory_claim_replay: if in_memory_claim_replay_pinned {
+                crate::FrontierRequirement::RequiredFrom(0)
+            } else {
+                crate::FrontierRequirement::NotRequired
+            },
+            durable_floor: durable_floor.as_ref().map(|position| position.sequence),
+            branch_pins: BTreeSet::new(),
         };
-        // (a3) The trim horizon is the min of the two terms.
-        let trim_through_seq = checkpoint.sequence.min(time_expired_seq);
-        // No NEW reclamation beyond the durable floor (both terms are monotone; the finish-deletion pass above
-        // already handled the existing floor).
-        if let Some(floor) = &durable_floor
-            && trim_through_seq <= floor.sequence
-        {
-            return Ok(deleted);
+        let candidate = MaintenanceCandidate {
+            queue: shard.clone(),
+            stable_id: format!("segment-prefix-through-{proposed_through}"),
+            class: MaintenanceObjectClass::SegmentPrefix,
+            first_sequence: durable_floor
+                .as_ref()
+                .map_or(Some(0), |floor| floor.sequence.checked_add(1)),
+            last_sequence: Some(proposed_through),
+            manifest_index: None,
+            bytes: None,
+            created_at_ms: cutoff_ms,
+            unreferenced_proven: true,
+            loser_proven: false,
+        };
+        let decision = MaintenancePolicy::new(0)
+            .plan(&authority, &[candidate], &MaintenanceFilter::default())
+            .into_iter()
+            .next()
+            .expect("one retention candidate");
+        if decision.disposition != MaintenanceDisposition::Delete {
+            return Ok(summary);
         }
+        let trim_through_seq = decision
+            .candidate
+            .last_sequence
+            .expect("segment prefix carries a sequence");
+        let checkpoint = checkpoint.expect("eligible retention requires a checkpoint");
         // The owner's currently-held epoch — re-read authoritatively inside `advance_retention_floor` against
         // the manifest tail, so a superseded owner is fenced (bug 3). Stamp the floor position with the
         // checkpoint epoch (<= held epoch), which keeps the recovery-start `max_position` compare well-defined
         // (`trim_through_seq <= checkpoint.sequence`, so the floor never exceeds the checkpoint position).
-        let expected_epoch = inner.log.current_epoch(shard)?;
         let floor_pos =
             CommandPosition::new(shard.clone(), checkpoint.backend_epoch, trim_through_seq);
         // (b) Durable floor FIRST via the epoch-fenced manifest CAS. A fenced/raced advance means another owner
@@ -1548,21 +1650,27 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 |inner| {
                     inner
                         .log
-                        .expire_segments_through(shard, trim_through_seq, now_ms)
+                        .expire_segments_through_bounded(shard, trim_through_seq, now_ms)
                 },
             );
         match newly_deleted {
-            Ok(count) => deleted += count,
-            Err(EngineError::EpochFenced) | Err(EngineError::Conflict) => return Ok(deleted),
+            Ok(pass) => {
+                let complete = pass.deletion_pass_complete();
+                summary.merge(pass);
+                if !complete {
+                    return Ok(summary);
+                }
+            }
+            Err(EngineError::EpochFenced) | Err(EngineError::Conflict) => return Ok(summary),
             Err(error) => return Err(error),
         }
         // (c) The typed boundary has now deleted the segment objects after the floor publication. Record the
         // completed watermark below any branch pin.
         Self::record_trim_watermark_locked(inner, shard, trim_through_seq, now_ms)?;
-        Ok(deleted)
+        Ok(summary)
     }
 
-    /// Record the completed-deletion watermark after an `expire_segments_through(target)` (bug 2b). If nothing
+    /// Record the completed-deletion watermark after bounded expiry through `target` (bug 2b). If nothing
     /// at/below `target` is branch-pinned, record `target` (idle ticks then skip the re-scan). If ANY segment
     /// at/below `target` was skipped ONLY because a live branch pins it — a TRANSIENT condition — CLEAR the
     /// watermark instead, so every subsequent tick re-scans up to the floor and reclaims the segment the
@@ -1593,7 +1701,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         shard: &QueueKey,
         request_id_retention_ms: u64,
         now: UtcTimestamp,
-    ) -> EngineResult<u64> {
+    ) -> EngineResult<MaintenanceSummary> {
         let mut g = self.inner.lock().expect("composed backend poisoned");
         Self::trim_reclaimable_segments_locked(&mut g, shard, request_id_retention_ms, now)
     }
@@ -4006,12 +4114,37 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                 // the durable checkpoint high-water, so it is a no-op for every non-hybrid-async backend (no
                 // durable checkpoint => nothing trimmed) and withheld under Hard debt. Runs for ALL queues
                 // (not just emit-enabled ones) because segment reclamation is independent of change records.
-                Self::trim_reclaimable_segments_locked(
-                    &mut g,
-                    &shard,
-                    def.request_id_retention_ms,
-                    now,
-                )?;
+                if g.projection.requires_complete_retention_frontier()
+                    && !g.projection.complete_retention_frontier_is_proven(&shard)
+                {
+                    report.maintenance.retained += 1;
+                    report.maintenance.stopped_by =
+                        Some(MaintenanceStopReason::FrontierProofMissing);
+                } else {
+                    let maintenance = Self::trim_reclaimable_segments_locked(
+                        &mut g,
+                        &shard,
+                        def.request_id_retention_ms
+                            .max(def.client_item_key_retention_ms),
+                        now,
+                    )?;
+                    report.maintenance.merge(maintenance);
+                }
+                // Orphan branches join the same maintenance driver rather than relying on an unwired manual
+                // loop. The log adapter enforces nonzero object/byte/request/time/page bounds and rechecks this
+                // owner epoch while holding its create/GC exclusion guard.
+                if !g.log.supports_objectlog_maintenance() {
+                    continue;
+                }
+                let Some(expected_epoch) = g.log.maintenance_owner_epoch(&shard) else {
+                    report.maintenance.retained += 1;
+                    report.maintenance.stopped_by = Some(MaintenanceStopReason::OwnershipUnproven);
+                    continue;
+                };
+                let maintenance =
+                    g.log
+                        .gc_orphaned_branches_bounded(&shard, expected_epoch, ts_to_ms(now))?;
+                report.maintenance.merge(maintenance);
             }
             Ok(report)
         })();

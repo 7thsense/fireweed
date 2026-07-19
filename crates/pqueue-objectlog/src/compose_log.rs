@@ -29,6 +29,49 @@ use crate::segmented::{
     BlobStore, LocalFsBlobStore, SegmentConfig, SegmentedObjectLog, SerializedCommandEnvelope,
 };
 
+fn maintenance_summary(
+    report: crate::maintenance::MaintenanceReport,
+    count_completed_as_orphan_branches: bool,
+) -> pqueue_engine::MaintenanceSummary {
+    let stopped_by = match report.stopped_by {
+        Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted) => {
+            Some(pqueue_engine::MaintenanceStopReason::BudgetExhausted)
+        }
+        Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged) => {
+            Some(pqueue_engine::MaintenanceStopReason::EpochFenced)
+        }
+        Some(crate::maintenance::MaintenanceExecutionReason::RetryableFailure) => {
+            Some(pqueue_engine::MaintenanceStopReason::RetryableFailure)
+        }
+        Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure) => {
+            Some(pqueue_engine::MaintenanceStopReason::PermanentFailure)
+        }
+        Some(
+            crate::maintenance::MaintenanceExecutionReason::CommittedBranch
+            | crate::maintenance::MaintenanceExecutionReason::Filtered
+            | crate::maintenance::MaintenanceExecutionReason::InFlightWriterGrace,
+        )
+        | None => None,
+    };
+    pqueue_engine::MaintenanceSummary {
+        scanned: report.scanned as u64,
+        retained: report.retained as u64,
+        objects_deleted: report.deleted as u64,
+        bytes_deleted: report.bytes_deleted,
+        object_requests: report.requests as u64,
+        retryable_failures: report.retryable_failures as u64,
+        permanent_failures: report.permanent_failures as u64,
+        fenced: report.fenced,
+        cursor_pending: report.cursor.is_some(),
+        stopped_by,
+        orphan_branches_reclaimed: if count_completed_as_orphan_branches {
+            report.completed_candidates as u64
+        } else {
+            0
+        },
+    }
+}
+
 /// Convert a command envelope's `created_at` to epoch-milliseconds (bead pqueue-b5cc2bc7 bug 1): the raw
 /// append path stamps a segment's `committed_at_ms` from the max of these so `created_at <= committed_at_ms`
 /// holds for the retention-floor trim. Mirrors `pqueue_engine`'s internal `ts_to_ms`.
@@ -336,6 +379,14 @@ impl LogStore for ObjectLog {
         self.log.current_epoch(shard)
     }
 
+    fn maintenance_owner_epoch(&self, shard: &QueueKey) -> Option<u64> {
+        self.log.maintenance_owner_epoch(shard)
+    }
+
+    fn supports_objectlog_maintenance(&self) -> bool {
+        true
+    }
+
     fn acquire_epoch(&mut self, shard: &QueueKey) -> EngineResult<u64> {
         // The fence entry's `committed_at_ms` is audit-only; pass 0 (the composition supplies no wall clock).
         self.shared_acquire_epoch(shard)
@@ -446,13 +497,16 @@ impl LogStore for ObjectLog {
         self.log.max_trimmable_seq_before(shard, cutoff_ms)
     }
 
-    fn expire_segments_through(
+    fn expire_segments_through_bounded(
         &mut self,
         shard: &QueueKey,
         through_seq: u64,
         now_ms: i64,
-    ) -> EngineResult<u64> {
-        self.log.expire_segments_through(shard, through_seq, now_ms)
+    ) -> EngineResult<pqueue_engine::MaintenanceSummary> {
+        let report =
+            self.log
+                .expire_segments_through_bounded_default(shard, through_seq, now_ms)?;
+        Ok(maintenance_summary(report, false))
     }
 
     fn lowest_branch_pinned_below(
@@ -463,6 +517,30 @@ impl LogStore for ObjectLog {
     ) -> EngineResult<Option<u64>> {
         self.log
             .lowest_branch_pinned_below(shard, through_seq, now_ms)
+    }
+
+    fn gc_orphaned_branches_bounded(
+        &mut self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<pqueue_engine::MaintenanceSummary> {
+        let limits = crate::maintenance::MaintenanceLimits::new(
+            256,
+            64 * 1024 * 1024,
+            2_048,
+            std::time::Duration::from_millis(50),
+            64,
+        )?;
+        let report = self.log.gc_orphaned_branches_bounded(
+            shard,
+            expected_epoch,
+            now_ms,
+            60_000,
+            limits,
+            false,
+        )?;
+        Ok(maintenance_summary(report, true))
     }
 
     fn write_snapshot(

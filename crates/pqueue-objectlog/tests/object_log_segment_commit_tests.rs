@@ -8,7 +8,10 @@ use pqueue_core::{
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_engine::LogStore;
-use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushCommand, QueueCommand};
+use pqueue_engine::{
+    ControlPlaneStore, EngineError, MaintenanceStopReason, ProjectionRead, PushCommand,
+    QueueCommand,
+};
 use pqueue_objectlog::{
     FaultCutPoint, FaultHook, LocalObjectLog, ObjectLog, ObjectLogBackend, ObjectLogSegmentConfig,
 };
@@ -487,16 +490,22 @@ fn replay_across_restart_with_head_and_deletion() {
         let _tail = log
             .append(&shard, &[push_env("64")], 0)
             .expect("append live tail");
+        let owner_epoch = log.acquire_epoch(&shard).expect("acquire trim owner");
         log.advance_retention_floor(
             &shard,
-            pqueue_engine::CommandPosition::new(shard.clone(), 0, 3),
-            0,
+            pqueue_engine::CommandPosition::new(shard.clone(), owner_epoch, 3),
+            owner_epoch,
         )
         .expect("advance floor");
         log.set_fault_hook(Some(Arc::new(CrashAt(FaultCutPoint::DuringSegmentExpiry))));
-        assert!(
-            log.expire_segments_through(&shard, 3, 1_000).is_err(),
-            "the deletion fault must abort the trim"
+        let interrupted = log
+            .expire_segments_through_bounded(&shard, 3, 1_000)
+            .expect("bounded trim returns partial evidence");
+        assert_eq!(interrupted.permanent_failures, 1);
+        assert_eq!(
+            interrupted.stopped_by,
+            Some(MaintenanceStopReason::PermanentFailure),
+            "the deletion fault must stop the trim with typed partial evidence"
         );
         drop(log);
 
@@ -518,7 +527,10 @@ fn replay_across_restart_with_head_and_deletion() {
         );
         let deletes_before = reopened.counters().delete_count;
         reopened
-            .expire_segments_through(&shard, 3, 1_000)
+            .acquire_epoch(&shard)
+            .expect("reacquire trim owner after restart");
+        reopened
+            .expire_segments_through_bounded(&shard, 3, 1_000)
             .expect("retry trim after restart");
         assert!(
             reopened.counters().delete_count > deletes_before,

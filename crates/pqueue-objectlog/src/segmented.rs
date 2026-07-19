@@ -31,7 +31,7 @@
 //! unit tests with no network; [`S3BlobStore`] is a minimal hand-rolled SigV4 S3 client (PUT/GET/LIST +
 //! create-only conditional PUT) that runs the SAME substrate against MinIO / any S3-compatible store.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};
@@ -62,6 +62,19 @@ use pqueue_engine::sequenced_metadata::{
 /// The minimal S3-compatible object surface the segmented substrate drives. Implemented in-memory (unit
 /// tests, no network) and over a real S3 endpoint ([`S3BlobStore`], tested against MinIO).
 pub trait BlobStore: Send + Sync {
+    /// Declared hard upper bound on hidden physical attempts for each primitive call. Bounded maintenance
+    /// fails closed when a provider cannot declare a bound; shipped providers perform exactly one attempt.
+    fn max_physical_attempts_per_primitive(&self) -> Option<std::num::NonZeroUsize> {
+        match self.backend_kind() {
+            crate::object_store_observability::BlobBackendKind::Memory
+            | crate::object_store_observability::BlobBackendKind::LocalFs
+            | crate::object_store_observability::BlobBackendKind::S3 => {
+                std::num::NonZeroUsize::new(1)
+            }
+            crate::object_store_observability::BlobBackendKind::Other => None,
+        }
+    }
+
     fn observed_put(
         &self,
         key: &str,
@@ -1317,6 +1330,9 @@ struct BranchMetadata {
     created_at_ms: i64,
     expires_at_ms: i64,
     emit_change_records: bool,
+    /// Size-bearing cleanup inventory for restart-safe bounded orphan reclamation.
+    #[serde(default)]
+    object_sizes: BTreeMap<String, u64>,
 }
 
 /// FNV-1a 64-bit checksum (small, dependency-free) over a segment's serialized bytes.
@@ -1327,6 +1343,10 @@ fn checksum(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+fn manifest_index_from_key(key: &str) -> Option<u64> {
+    key.rsplit('/').next()?.strip_suffix(".json")?.parse().ok()
 }
 
 fn store_err<E: std::fmt::Display>(e: E) -> EngineError {
@@ -1488,12 +1508,15 @@ pub enum FaultCutPoint {
     /// interleave a concurrent peer trim (advance the source floor + reclaim), exercising the pin-first +
     /// validate-after-copy cross-owner guard.
     DuringBranchCopy,
-    /// Struck INSIDE [`SegmentedObjectLog::gc_orphaned_branches`] AFTER a branch has been classified as an
+    /// Struck INSIDE [`SegmentedObjectLog::gc_orphaned_branches_bounded`] AFTER a branch has been classified as an
     /// orphan (its `branch.json` commit marker was observed ABSENT) but BEFORE its objects are deleted — the
     /// exact instant a concurrent branch creation could commit the marker. A test uses this to deterministically
     /// prove the create/GC guard excludes a concurrent creation (without the guard, GC struck here would go on
     /// to delete a branch that committed during the block).
     GcAfterOrphanClassified,
+    /// Struck after one orphan object delete but before sentinel/pin release; used to prove a remote owner
+    /// fence preserves both remaining authorities while retaining the partial-effect report.
+    GcAfterOrphanObjectDeleted,
 }
 
 /// A test-only fault hook: called at each [`FaultCutPoint`] the pipeline passes through. Returning `Err`
@@ -1534,6 +1557,25 @@ struct Inner {
     shards: BTreeMap<QueueKey, ShardBuf>,
     counters: SegmentCounters,
     object_sizes: BTreeMap<String, u64>,
+}
+
+#[derive(Clone)]
+struct MaintenanceOwnerToken {
+    epoch: u64,
+    authority_key: String,
+    authority_digest: [u8; 32],
+    authority_body: Vec<u8>,
+    successor_prefix: String,
+}
+
+#[derive(Clone, Default)]
+struct SegmentGcProgress {
+    target_through: Option<u64>,
+    candidate_index: Option<u64>,
+    reclaimed_through: Option<u64>,
+    branch_cursor: Option<String>,
+    max_live_branch_cut: Option<u64>,
+    branch_scan_complete: bool,
 }
 
 /// The outcome of an [`SegmentedObjectLog::enqueue`]: any positions that were acked because a size-triggered
@@ -1581,13 +1623,19 @@ pub struct SegmentedObjectLog<S: BlobStore> {
     fault_hook: Mutex<Option<Arc<dyn FaultHook>>>,
     /// CREATE-vs-GC mutual exclusion (bead pqueue-74f03d0e). Branch creation ([`Self::branch_with_emission`])
     /// holds this for its WHOLE duration — every attempt, the commit-marker write, and any rollback — and
-    /// orphan GC ([`Self::gc_orphaned_branches`]) holds it across its WHOLE classify+delete critical section.
+    /// orphan GC ([`Self::gc_orphaned_branches_bounded`]) holds it across its WHOLE classify+delete critical section.
     /// So on one log instance (one owner) GC can NEVER observe a branch whose creation is concurrently in
     /// flight: a marker-absent branch seen under this guard is DEFINITIVELY a failed/abandoned creation. This is
     /// a real exclusion (not a timing heuristic) that closes the classify-then-delete TOCTOU vs a marker write.
     /// It is ALWAYS the OUTERMOST lock (taken before `inner`), so it introduces no lock-order inversion.
     create_gc_guard: Mutex<()>,
     candidate_gc_cursors: Mutex<BTreeMap<QueueKey, String>>,
+    branch_gc_cursors: Mutex<BTreeMap<QueueKey, String>>,
+    segment_gc_cursors: Mutex<BTreeMap<QueueKey, String>>,
+    segment_gc_progress: Mutex<BTreeMap<QueueKey, SegmentGcProgress>>,
+    /// Epochs this instance completed `acquire_epoch` for. Durable current epoch alone is not proof that this
+    /// process is the serving owner, so background maintenance requires this explicit local claim.
+    maintenance_owned_epochs: Mutex<BTreeMap<QueueKey, MaintenanceOwnerToken>>,
 }
 
 impl<S: BlobStore> SegmentedObjectLog<S> {
@@ -1607,6 +1655,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             fault_hook: Mutex::new(None),
             create_gc_guard: Mutex::new(()),
             candidate_gc_cursors: Mutex::new(BTreeMap::new()),
+            branch_gc_cursors: Mutex::new(BTreeMap::new()),
+            segment_gc_cursors: Mutex::new(BTreeMap::new()),
+            segment_gc_progress: Mutex::new(BTreeMap::new()),
+            maintenance_owned_epochs: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1641,6 +1693,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
         }
         g.counters.max_object_bytes = g.counters.max_object_bytes.max(len);
+    }
+
+    fn known_object_size(&self, key: &str) -> Option<u64> {
+        self.inner
+            .lock()
+            .expect("segmented log poisoned")
+            .object_sizes
+            .get(key)
+            .copied()
     }
 
     fn store_put(&self, key: &str, body: &[u8], count_object_put: bool) -> EngineResult<()> {
@@ -1895,18 +1956,63 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         shard: &QueueKey,
         entry: &ManifestEntry,
     ) -> EngineResult<bool> {
-        let body = to_json(entry)?;
+        self.commit_manifest_watermark_marker_counted(shard, entry)
+            .map(|(applied, _)| applied)
+            .map_err(|failure| failure.error)
+    }
+
+    fn commit_manifest_watermark_marker_counted(
+        &self,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+    ) -> Result<(bool, usize), crate::maintenance::MaintenanceExecutionFailure> {
+        let attempts = std::cell::Cell::new(0usize);
+        let body =
+            to_json(entry).map_err(|error| crate::maintenance::MaintenanceExecutionFailure {
+                effect: crate::maintenance::MaintenanceEffect {
+                    objects: 0,
+                    bytes: 0,
+                    requests: 0,
+                },
+                fault: None,
+                error,
+            })?;
         let marker_index = entry.compacted_through_index.unwrap_or(entry.index);
         let head_key = Self::manifest_watermark_head_key(shard, marker_index);
         let resolution = CreateOnlyPublication::<DeletionWatermarkClass, RetainedAddress>::publish(
             &body,
-            || self.store_put_if_absent(&head_key, &body, true),
-            || self.store_get(&head_key),
-        )?;
+            || {
+                attempts.set(attempts.get() + 1);
+                self.store_put_if_absent(&head_key, &body, true)
+            },
+            || {
+                attempts.set(attempts.get() + 1);
+                self.store_get(&head_key)
+            },
+        )
+        .map_err(|error| crate::maintenance::MaintenanceExecutionFailure {
+            effect: crate::maintenance::MaintenanceEffect {
+                objects: 0,
+                bytes: 0,
+                requests: attempts.get(),
+            },
+            fault: Some(self.store.classify_fault(&error)),
+            error,
+        })?;
         match resolution {
-            resolution if resolution.applied() => Ok(true),
-            CreateOnlyResolution::PreconditionLost => Ok(false),
-            CreateOnlyResolution::Ambiguous(source) => Err(source),
+            resolution if resolution.applied() => Ok((true, attempts.get())),
+            CreateOnlyResolution::PreconditionLost => Ok((false, attempts.get())),
+            CreateOnlyResolution::Ambiguous(error) => {
+                Err(crate::maintenance::MaintenanceExecutionFailure {
+                    effect: crate::maintenance::MaintenanceEffect {
+                        objects: 0,
+                        bytes: 0,
+                        requests: attempts.get(),
+                    },
+                    fault: Some(self.store.classify_fault(&error)),
+                    error,
+                })
+            }
             _ => unreachable!("all applied resolutions handled by the guard"),
         }
     }
@@ -2125,6 +2231,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let Some(floor) = self.read_retention_floor(shard)? else {
             return Ok(None); // no durable floor => no read-horizon
         };
+        // Capture the complete live-pin registry once for this watermark proof. Re-reading it for every
+        // manifest entry multiplies remote registry I/O by the manifest length and also makes one logical
+        // proof observe several different pin states.
+        let max_live_branch_cut = self.max_live_branch_cut_snapshot(shard, now_ms)?;
         let mut new_w: Option<u64> = None;
         for entry in entries {
             if entry.compacted_through_index.is_some() {
@@ -2157,7 +2267,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             // skipped its delete): a future trim after the pin releases must still enumerate it, so do NOT
             // hide it behind the horizon. Stop here (keeps W strictly below the pinned index).
             if entry.segment_key.is_some()
-                && self.branch_pins_segment(shard, entry.first_seq, now_ms)?
+                && max_live_branch_cut.is_some_and(|cut| entry.first_seq <= cut)
             {
                 break;
             }
@@ -2434,6 +2544,122 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .ok_or(EngineError::NotFound)
     }
 
+    /// Bounded proof that the locally acquired owner token still names the latest durable authority head.
+    fn maintenance_authority_is_current(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+    ) -> EngineResult<bool> {
+        if self.maintenance_owner_epoch(shard) != Some(expected_epoch) {
+            return Ok(false);
+        }
+        self.maintenance_authority_check_counted(shard, expected_epoch)
+            .map(|(current, _)| current)
+            .map_err(|(error, _, _)| error)
+    }
+
+    fn maintenance_authority_check_counted(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+    ) -> Result<
+        (bool, usize),
+        (
+            EngineError,
+            crate::object_store_observability::BlobStoreFault,
+            usize,
+        ),
+    > {
+        let token = self
+            .maintenance_owned_epochs
+            .lock()
+            .expect("maintenance owner epochs poisoned")
+            .get(shard)
+            .filter(|token| token.epoch == expected_epoch)
+            .cloned()
+            .ok_or_else(|| {
+                let error = EngineError::EpochFenced;
+                (
+                    error,
+                    self.store.classify_fault(&EngineError::EpochFenced),
+                    0,
+                )
+            })?;
+        let (body, get_attempts) = match self.store.observed_get(&token.authority_key) {
+            Ok(call) => match call.value {
+                Some(body) => (body, call.attempts as usize),
+                None => return Ok((false, call.attempts as usize)),
+            },
+            Err(error) => {
+                return Err((error.outward, error.fault, error.attempts as usize));
+            }
+        };
+        if Sha256::digest(&body).as_slice() != token.authority_digest {
+            return Ok((false, get_attempts));
+        }
+        match self
+            .store
+            .observed_list_page(&token.successor_prefix, Some(&token.authority_key), 1)
+        {
+            Ok(call) => Ok((call.value.is_empty(), get_attempts + call.attempts as usize)),
+            Err(error) => Err((
+                error.outward,
+                error.fault,
+                get_attempts + error.attempts as usize,
+            )),
+        }
+    }
+
+    pub fn maintenance_owner_epoch(&self, shard: &QueueKey) -> Option<u64> {
+        self.maintenance_owned_epochs
+            .lock()
+            .expect("maintenance owner epochs poisoned")
+            .get(shard)
+            .map(|token| token.epoch)
+    }
+
+    fn refresh_maintenance_authority_token(
+        &self,
+        shard: &QueueKey,
+        epoch: u64,
+    ) -> EngineResult<()> {
+        let authority_head = self.read_authoritative_head(shard)?;
+        let (authority_key, successor_prefix) = if let Some(head) = authority_head {
+            let prefix = Self::authoritative_head_prefix(shard);
+            (versioned_manifest_head_key(&prefix, head.version), prefix)
+        } else {
+            let version = self
+                .inner
+                .lock()
+                .expect("segmented log poisoned")
+                .shards
+                .get(shard)
+                .ok_or(EngineError::NotFound)?
+                .next_manifest_index
+                .saturating_sub(1);
+            let prefix = Self::manifest_head_prefix(shard);
+            (versioned_manifest_head_key(&prefix, version), prefix)
+        };
+        let body = self
+            .store_get(&authority_key)?
+            .ok_or_else(|| EngineError::Storage("acquired authority token is missing".into()))?;
+        let authority_digest: [u8; 32] = Sha256::digest(&body).into();
+        self.maintenance_owned_epochs
+            .lock()
+            .expect("maintenance owner epochs poisoned")
+            .insert(
+                shard.clone(),
+                MaintenanceOwnerToken {
+                    epoch,
+                    authority_key,
+                    authority_digest,
+                    authority_body: body,
+                    successor_prefix,
+                },
+            );
+        Ok(())
+    }
+
     fn load_shard_buf(&self, shard: &QueueKey) -> EngineResult<ShardBuf> {
         let (next_seq, next_index, epoch, _) = self.recover_manifest(shard)?;
         // Only append-only marker history is durable fencing authority. The legacy read_horizon blob may be
@@ -2475,7 +2701,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// establishes the bounded-window invariant there.
     pub fn acquire_epoch(&self, shard: &QueueKey, now_ms: i64) -> EngineResult<u64> {
         if !self.store.effective_recorder().is_enabled() {
-            return self.acquire_epoch_inner(shard, now_ms, &mut 0);
+            let result = self.acquire_epoch_inner(shard, now_ms, &mut 0);
+            if let Ok(epoch) = &result {
+                self.refresh_maintenance_authority_token(shard, *epoch)?;
+            }
+            return result;
         }
         let started = std::time::Instant::now();
         let mut attempts = 0;
@@ -2488,6 +2718,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             started.elapsed(),
             &result,
         );
+        if let Ok(epoch) = &result {
+            self.refresh_maintenance_authority_token(shard, *epoch)?;
+        }
         result
     }
 
@@ -2557,7 +2790,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         _now_ms: i64,
     ) -> EngineResult<u64> {
         if !self.store.effective_recorder().is_enabled() {
-            return self.fence_epoch_inner(shard, target_epoch, &mut 0);
+            let result = self.fence_epoch_inner(shard, target_epoch, &mut 0);
+            if let Ok(epoch) = result {
+                self.refresh_maintenance_authority_token(shard, epoch)?;
+            }
+            return result;
         }
         let started = std::time::Instant::now();
         let mut attempts = 0;
@@ -2570,6 +2807,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             started.elapsed(),
             &result,
         );
+        if let Ok(epoch) = result {
+            self.refresh_maintenance_authority_token(shard, epoch)?;
+        }
         result
     }
 
@@ -2934,6 +3174,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buf.buffered_bytes = 0;
             buf.oldest_buffered_ms = None;
         }
+        if self.maintenance_owner_epoch(shard) == Some(expected_epoch) {
+            self.refresh_maintenance_authority_token(shard, expected_epoch)?;
+        }
         Ok(positions)
     }
 
@@ -2980,13 +3223,33 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         if keys.is_empty() && cursor.is_some() {
             keys = self.store.list_page(&prefix, None, scan_limit)?;
         }
-        let next_cursor = keys.last().cloned();
         let page_full = keys.len() == scan_limit;
+        let mut last_resolved = cursor.clone();
+        let mut stopped_unresolved = false;
+        let authority = pqueue_engine::MaintenanceAuthoritySnapshot {
+            queue: shard.clone(),
+            current_epoch: self.current_epoch(shard)?,
+            observed_at_ms: i64::MAX,
+            retention_may_advance: true,
+            complete_frontier_required: false,
+            lineage_validated: true,
+            committed_snapshot_through: None,
+            recovery_window_through: None,
+            manifest_tail: pqueue_engine::FrontierRequirement::NotRequired,
+            request_ids: pqueue_engine::FrontierRequirement::NotRequired,
+            item_keys: pqueue_engine::FrontierRequirement::NotRequired,
+            async_projection_through: None,
+            in_memory_claim_replay: pqueue_engine::FrontierRequirement::NotRequired,
+            durable_floor: None,
+            branch_pins: BTreeSet::new(),
+        };
         for key in keys {
             if reclaimed == limit {
-                continue;
+                stopped_unresolved = true;
+                break;
             }
             let Some(bytes) = self.store_get(&key)? else {
+                last_resolved = Some(key);
                 continue;
             };
             let candidate: ManifestCandidate = serde_json::from_slice(&bytes).map_err(store_err)?;
@@ -2996,7 +3259,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             );
             let Some(decision_bytes) = self.store_get(&decision_key)? else {
                 // Its expected successor version does not exist yet: the candidate may still be in flight.
-                continue;
+                stopped_unresolved = true;
+                break;
             };
             let decision: ManifestHeadBlob =
                 serde_json::from_slice(&decision_bytes).map_err(store_err)?;
@@ -3005,26 +3269,79 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 // strictly below it unreachable. Preserve the candidate AT the horizon as the live chain's
                 // physical root; its now-dangling parent is intentionally never followed.
                 if horizon.is_none_or(|horizon| candidate.entry.index >= horizon) {
+                    last_resolved = Some(key);
                     continue;
                 }
                 if self.store_delete(&key)? {
                     reclaimed += 1;
                 }
+                last_resolved = Some(key);
                 continue;
             }
-            if let Some(segment_key) = candidate.entry.segment_key {
+            let orphan = pqueue_engine::MaintenanceCandidate {
+                queue: shard.clone(),
+                stable_id: key.clone(),
+                class: pqueue_engine::MaintenanceObjectClass::OrphanManifestCandidate,
+                first_sequence: Some(candidate.entry.first_seq),
+                last_sequence: Some(Self::visible_last_seq(&candidate.entry)),
+                manifest_index: Some(candidate.entry.index),
+                bytes: Some(bytes.len() as u64),
+                created_at_ms: candidate.entry.committed_at_ms,
+                unreferenced_proven: true,
+                loser_proven: true,
+            };
+            let planned = pqueue_engine::MaintenancePolicy::new(0)
+                .plan(
+                    &authority,
+                    &[orphan],
+                    &pqueue_engine::MaintenanceFilter::default(),
+                )
+                .into_iter()
+                .next()
+                .expect("one losing candidate");
+            if planned.disposition != pqueue_engine::MaintenanceDisposition::Delete {
+                stopped_unresolved = true;
+                break;
+            }
+            if let Some(segment_key) = candidate.entry.segment_key.clone() {
+                let segment_attempt = pqueue_engine::MaintenanceCandidate {
+                    queue: shard.clone(),
+                    stable_id: segment_key.clone(),
+                    class: pqueue_engine::MaintenanceObjectClass::OrphanSegmentAttempt,
+                    first_sequence: Some(candidate.entry.first_seq),
+                    last_sequence: Some(Self::visible_last_seq(&candidate.entry)),
+                    manifest_index: Some(candidate.entry.index),
+                    bytes: None,
+                    created_at_ms: candidate.entry.committed_at_ms,
+                    unreferenced_proven: true,
+                    loser_proven: true,
+                };
+                let segment_planned = pqueue_engine::MaintenancePolicy::new(0)
+                    .plan(
+                        &authority,
+                        &[segment_attempt],
+                        &pqueue_engine::MaintenanceFilter::default(),
+                    )
+                    .into_iter()
+                    .next()
+                    .expect("one losing segment attempt");
+                if segment_planned.disposition != pqueue_engine::MaintenanceDisposition::Delete {
+                    stopped_unresolved = true;
+                    break;
+                }
                 let _ = self.store_delete(&segment_key)?;
             }
             if self.store_delete(&key)? {
                 reclaimed += 1;
             }
+            last_resolved = Some(key);
         }
         let mut cursors = self
             .candidate_gc_cursors
             .lock()
             .expect("candidate gc cursors poisoned");
-        if page_full {
-            if let Some(cursor) = next_cursor {
+        if page_full || stopped_unresolved {
+            if let Some(cursor) = last_resolved {
                 cursors.insert(shard.clone(), cursor);
             }
         } else {
@@ -3216,9 +3533,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(out)
     }
 
-    /// Read every registered source pin (bead pqueue-635500fb). This is the ONLY input
-    /// [`Self::branch_pins_segment`] uses to decide whether a below-floor source object may be deleted, so a
-    /// listed-but-unfetchable entry MUST fail closed the same way [`Self::gc_orphaned_branches`] already does
+    /// Read every registered source pin (bead pqueue-635500fb). This is the ONLY input the reclamation pin
+    /// snapshots use to decide whether a below-floor source object may be deleted, so a
+    /// listed-but-unfetchable entry MUST fail closed the same way [`Self::gc_orphaned_branches_bounded`] already does
     /// for its own registry read — silently skipping it here would let `expire_segments_through` and
     /// [`Self::contiguous_manifest_deletion_watermark_from_entries`] treat a still-registered (and possibly
     /// still-readable) branch as unpinned and reclaim an object it may need, on nothing more than a transient
@@ -3249,16 +3566,19 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .collect())
     }
 
-    fn branch_pins_segment(
+    /// Capture the broadest live branch cut in one registry read. A segment is pinned exactly when its first
+    /// sequence is at or below this cut, so callers can fold an arbitrary manifest without further registry
+    /// I/O while retaining the fail-closed behavior of [`Self::read_branch_registry`].
+    fn max_live_branch_cut_snapshot(
         &self,
         source: &QueueKey,
-        first_seq: u64,
         now_ms: i64,
-    ) -> EngineResult<bool> {
+    ) -> EngineResult<Option<u64>> {
         Ok(self
             .live_branch_registry(source, now_ms)?
             .into_iter()
-            .any(|meta| first_seq <= meta.cut_sequence))
+            .map(|meta| meta.cut_sequence)
+            .max())
     }
 
     fn delete_prefix(&self, prefix: &str) -> EngineResult<u64> {
@@ -3418,7 +3738,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // CROSS-OWNER SAFETY (bead pqueue-b5cc2bc7 HOLE B): a peer owner may CONCURRENTLY advance the source
         // retention floor + reclaim segments while this branch is being created. Guard with (1) PIN-FIRST:
         // publish the branch's source pin BEFORE reading the floor / copying manifests, so a concurrent trim
-        // whose `branch_pins_segment` check runs after the pin is published SKIPS the branched range; and
+        // whose live-pin snapshot runs after the pin is published SKIPS the branched range; and
         // (2) VALIDATE-AFTER-COPY: re-read the AUTHORITATIVE (epoch-fenced manifest) floor after copying and, if
         // it MOVED, roll back and fail cleanly (`Conflict`) so a retry re-reads the advanced floor — NEVER
         // leaving a branch that GETs a reclaimed object.
@@ -3427,7 +3747,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // owner has taken the source in the meantime, the branch commit must fail cleanly (`Conflict`) and
         // roll back the partial branch rather than publishing a branch on a source it no longer owns.
         let (_, _, source_epoch, _) = self.recover_manifest(source)?;
-        let metadata = BranchMetadata {
+        let mut metadata = BranchMetadata {
             source: source.clone(),
             branch: branch.clone(),
             source_epoch,
@@ -3436,8 +3756,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             created_at_ms: now_ms,
             expires_at_ms: now_ms.saturating_add(ttl_ms as i64),
             emit_change_records,
+            object_sizes: BTreeMap::new(),
         };
-        // (1) Publish the source PIN first (the registry entry `branch_pins_segment` consults). If THIS fails,
+        // (1) Publish the source PIN first (the registry entry reclamation snapshots consult). If THIS fails,
         // no pin was published, so there is nothing to roll back — just surface the error.
         self.store_put(
             &branch_registry_key(source, &branch),
@@ -3450,7 +3771,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // LAST. If branch-object cleanup FAILS, the pin is RETAINED (a safe, TTL-bounded, retryable LEAK that
         // keeps the source segments protected) and the cleanup error is surfaced — NEVER an unpinned partial
         // branch that would let reclamation delete a still-referenced segment ("missing segment"). The exact
-        // same routine is what `gc_orphaned_branches` reuses so the two stay consistent.
+        // same routine is what bounded orphan GC reuses so the two stay consistent.
         let rollback =
             |this: &Self| -> EngineResult<()> { this.cleanup_uncommitted_branch(source, &branch) };
 
@@ -3619,6 +3940,21 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 return Err(EngineError::Conflict);
             }
 
+            metadata.object_sizes = self
+                .inner
+                .lock()
+                .expect("segmented log poisoned")
+                .object_sizes
+                .iter()
+                .filter(|(key, _)| key.starts_with(&shard_prefix(&branch)))
+                .map(|(key, size)| (key.clone(), *size))
+                .collect();
+            self.store_put(
+                &branch_registry_key(source, &branch),
+                &to_json(&metadata)?,
+                false,
+            )?;
+
             // COMMIT MARKER — the LAST durable write (bead pqueue-b5cc2bc7 atomic branch existence). Only now,
             // after the pin, floor seed, ALL manifest copies + objects, validate-after-copy, and acquire_epoch,
             // does `branch.json` land — the atomic boundary that makes the branch READABLE (mirrors the
@@ -3674,7 +4010,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     /// Delete ALL durable objects of an UNCOMMITTED/partial `branch` and drop its in-memory shard, then release
     /// the source PIN (its `branch_registry_key` entry) LAST. This is the single cleanup routine shared by the
-    /// branch-creation rollback ([`Self::branch_attempt`]) and orphan GC ([`Self::gc_orphaned_branches`]) so the
+    /// branch-creation rollback ([`Self::branch_attempt`]) and orphan GC
+    /// ([`Self::gc_orphaned_branches_bounded`]) so the
     /// two stay consistent.
     ///
     /// ORDER IS SAFETY-CRITICAL. Delete every branch object EXCEPT the `branch.pending` sentinel FIRST: while ANY
@@ -3701,6 +4038,266 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.store_delete(&pending)?;
         self.store_delete(&branch_registry_key(source, branch))?;
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cleanup_uncommitted_branch_bounded(
+        &self,
+        source: &QueueKey,
+        branch: &QueueKey,
+        expected_epoch: u64,
+        persisted_sizes: &BTreeMap<String, u64>,
+        pin_bytes: u64,
+        object_budget: usize,
+        byte_budget: u64,
+        request_budget: usize,
+        page_size: usize,
+        deadline: std::time::Instant,
+        dry_run: bool,
+    ) -> Result<
+        (crate::maintenance::MaintenanceEffect, bool),
+        crate::maintenance::MaintenanceExecutionFailure,
+    > {
+        let mut effect = crate::maintenance::MaintenanceEffect {
+            objects: 0,
+            bytes: 0,
+            requests: 0,
+        };
+        macro_rules! effect_try {
+            ($expression:expr) => {{
+                if std::time::Instant::now() >= deadline {
+                    return Ok((effect, false));
+                }
+                match $expression {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Err(crate::maintenance::MaintenanceExecutionFailure {
+                            effect,
+                            error,
+                            fault: None,
+                        });
+                    }
+                }
+            }};
+        }
+        macro_rules! effect_blob_try {
+            ($expression:expr) => {{
+                if std::time::Instant::now() >= deadline {
+                    return Ok((effect, false));
+                }
+                match $expression {
+                    Ok(call) => call.value,
+                    Err(error) => {
+                        return Err(crate::maintenance::MaintenanceExecutionFailure {
+                            effect,
+                            error: error.outward,
+                            fault: Some(error.fault),
+                        });
+                    }
+                }
+            }};
+        }
+        macro_rules! object_size {
+            ($key:expr) => {{
+                if let Some(size) = persisted_sizes
+                    .get($key)
+                    .copied()
+                    .or_else(|| self.known_object_size($key))
+                {
+                    size
+                } else {
+                    if effect.requests >= request_budget {
+                        return Ok((effect, false));
+                    }
+                    effect.requests += 1;
+                    let Some(body) = effect_blob_try!(self.store.observed_get($key)) else {
+                        return Ok((effect, false));
+                    };
+                    body.len() as u64
+                }
+            }};
+        }
+        macro_rules! authority_current {
+            () => {{
+                if request_budget.saturating_sub(effect.requests) < 2 {
+                    return Ok((effect, false));
+                }
+                match self.maintenance_authority_check_counted(source, expected_epoch) {
+                    Ok((current, attempts)) => {
+                        effect.requests += attempts;
+                        current
+                    }
+                    Err((error, fault, attempts)) => {
+                        effect.requests += attempts;
+                        return Err(crate::maintenance::MaintenanceExecutionFailure {
+                            effect,
+                            error,
+                            fault: Some(fault),
+                        });
+                    }
+                }
+            }};
+        }
+        if object_budget == 0 || request_budget == 0 {
+            return Ok((effect, false));
+        }
+        let pending = branch_pending_key(branch);
+        if dry_run {
+            let prefix = shard_prefix(branch);
+            let mut cursor: Option<String> = None;
+            loop {
+                if effect.requests >= request_budget {
+                    return Ok((effect, false));
+                }
+                effect.requests += 1;
+                let keys = effect_blob_try!(self.store.observed_list_page(
+                    &prefix,
+                    cursor.as_deref(),
+                    page_size,
+                ));
+                let page_full = keys.len() == page_size;
+                let next = keys.last().cloned();
+                for key in keys {
+                    if key == pending {
+                        continue;
+                    }
+                    if effect.objects >= object_budget {
+                        return Ok((effect, false));
+                    }
+                    let bytes = object_size!(&key);
+                    if effect.bytes.saturating_add(bytes) > byte_budget {
+                        return Ok((effect, false));
+                    }
+                    effect.objects += 1;
+                    effect.bytes = effect.bytes.saturating_add(bytes);
+                }
+                if !page_full {
+                    break;
+                }
+                cursor = next;
+            }
+            for key in [&pending, &branch_registry_key(source, branch)] {
+                if effect.objects >= object_budget {
+                    return Ok((effect, false));
+                }
+                let bytes = object_size!(key);
+                if effect.bytes.saturating_add(bytes) > byte_budget {
+                    return Ok((effect, false));
+                }
+                effect.objects += 1;
+                effect.bytes = effect.bytes.saturating_add(bytes);
+            }
+            return Ok((effect, true));
+        }
+        let prefix = shard_prefix(branch);
+        effect.requests += 1;
+        let mut keys = effect_blob_try!(self.store.observed_list_page(&prefix, None, page_size));
+        if keys.len() == page_size && keys.iter().all(|key| key == &pending) {
+            if effect.requests >= request_budget {
+                return Ok((effect, false));
+            }
+            effect.requests += 1;
+            keys = effect_blob_try!(self.store.observed_list_page(
+                &prefix,
+                Some(&pending),
+                page_size,
+            ));
+        }
+        let page_full = keys.len() == page_size;
+        let mut had_non_pending = false;
+        for key in keys {
+            if key == pending {
+                continue;
+            }
+            had_non_pending = true;
+            if effect.objects >= object_budget {
+                return Ok((effect, false));
+            }
+            let bytes = object_size!(&key);
+            if effect.bytes.saturating_add(bytes) > byte_budget {
+                return Ok((effect, false));
+            }
+            if !authority_current!() {
+                return Err(crate::maintenance::MaintenanceExecutionFailure {
+                    effect,
+                    error: EngineError::EpochFenced,
+                    fault: None,
+                });
+            }
+            if effect.requests >= request_budget {
+                return Ok((effect, false));
+            }
+            effect.requests += 1;
+            if effect_blob_try!(self.store.observed_delete(&key)) {
+                effect.objects += 1;
+                effect.bytes = effect.bytes.saturating_add(bytes);
+                effect_try!(self.fault(FaultCutPoint::GcAfterOrphanObjectDeleted));
+            }
+        }
+        if page_full && had_non_pending {
+            return Ok((effect, false));
+        }
+        // Prove no non-sentinel branch object remains. This extra bounded page avoids releasing the source pin
+        // after a short provider page or after deleting only the first page.
+        if effect.requests >= request_budget {
+            return Ok((effect, false));
+        }
+        effect.requests += 1;
+        let remaining = effect_blob_try!(self.store.observed_list_page(
+            &shard_prefix(branch),
+            None,
+            2,
+        ));
+        if remaining.iter().any(|key| key != &pending) {
+            return Ok((effect, false));
+        }
+        // Sentinel first, source pin last. If the budget cannot cover both, leave both in place and resume.
+        if object_budget.saturating_sub(effect.objects) < 2 {
+            return Ok((effect, false));
+        }
+        let sentinel_bytes = object_size!(&pending);
+        if request_budget.saturating_sub(effect.requests) < 6 {
+            return Ok((effect, false));
+        }
+        let pin_key = branch_registry_key(source, branch);
+        if effect
+            .bytes
+            .saturating_add(sentinel_bytes)
+            .saturating_add(pin_bytes)
+            > byte_budget
+        {
+            return Ok((effect, false));
+        }
+        self.inner
+            .lock()
+            .expect("segmented log poisoned")
+            .shards
+            .remove(branch);
+        if !authority_current!() {
+            return Err(crate::maintenance::MaintenanceExecutionFailure {
+                effect,
+                error: EngineError::EpochFenced,
+                fault: None,
+            });
+        }
+        effect.requests += 1;
+        if effect_blob_try!(self.store.observed_delete(&pending)) {
+            effect.objects += 1;
+            effect.bytes = effect.bytes.saturating_add(sentinel_bytes);
+        }
+        if !authority_current!() {
+            return Err(crate::maintenance::MaintenanceExecutionFailure {
+                effect,
+                error: EngineError::EpochFenced,
+                fault: None,
+            });
+        }
+        effect.requests += 1;
+        if effect_blob_try!(self.store.observed_delete(&pin_key)) {
+            effect.objects += 1;
+            effect.bytes = effect.bytes.saturating_add(pin_bytes);
+        }
+        Ok((effect, true))
     }
 
     /// Reclaim the durable objects of ORPHANED uncommitted branches of `source` — the space leak a failed branch
@@ -3740,7 +4337,129 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// and a re-run over an already-cleaned orphan is a clean no-op). Branches own their copied segment OBJECTS,
     /// so cleanup deletes only branch-local manifest/sentinel/queue/segment objects and the source pin — never
     /// the source's segment prefix. Returns the number of orphans reclaimed.
-    pub fn gc_orphaned_branches(&self, source: &QueueKey) -> EngineResult<u64> {
+    /// Bounded, resumable orphan-branch maintenance. Discovery uses a soft in-memory cursor; cursor loss or
+    /// version mismatch simply rescans. Classification and every delete stay under `create_gc_guard`, and the
+    /// authoritative source epoch is checked before discovery and immediately before cleanup. A partially
+    /// cleaned branch remains the first unresolved candidate: its sentinel and pin are retained, and the next
+    /// pass idempotently resumes it rather than advancing the cursor past it.
+    pub fn gc_orphaned_branches_bounded(
+        &self,
+        source: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+        grace_ms: u64,
+        limits: crate::maintenance::MaintenanceLimits,
+        dry_run: bool,
+    ) -> EngineResult<crate::maintenance::MaintenanceReport> {
+        self.gc_orphaned_branches_bounded_filtered(
+            source,
+            expected_epoch,
+            now_ms,
+            grace_ms,
+            limits,
+            &pqueue_engine::MaintenanceFilter::default(),
+            dry_run,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gc_orphaned_branches_bounded_filtered(
+        &self,
+        source: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+        grace_ms: u64,
+        limits: crate::maintenance::MaintenanceLimits,
+        filter: &pqueue_engine::MaintenanceFilter,
+        dry_run: bool,
+    ) -> EngineResult<crate::maintenance::MaintenanceReport> {
+        let started = std::time::Instant::now();
+        let mut report = crate::maintenance::MaintenanceReport::new(dry_run);
+        macro_rules! report_try {
+            ($operation:expr) => {
+                match $operation {
+                    Ok(value) => value,
+                    Err(error) => {
+                        match error {
+                            EngineError::EpochFenced => {
+                                report.fenced = true;
+                                report.stopped_by = Some(
+                                    crate::maintenance::MaintenanceExecutionReason::EpochChanged,
+                                );
+                            }
+                            EngineError::Storage(_) | EngineError::Backpressure { .. } => {
+                                let fault = self.store.classify_fault(&error);
+                                report.failure_cause = Some(
+                                    crate::maintenance::MaintenanceFailureCause::Provider(
+                                        fault.result,
+                                    ),
+                                );
+                                if fault.retryable {
+                                    report.retryable_failures += 1;
+                                    report.stopped_by = Some(
+                                        crate::maintenance::MaintenanceExecutionReason::RetryableFailure,
+                                    );
+                                } else {
+                                    report.permanent_failures += 1;
+                                    report.stopped_by = Some(
+                                        crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                                    );
+                                }
+                            }
+                            _ => {
+                                report.permanent_failures += 1;
+                                report.failure_cause =
+                                    Some(crate::maintenance::MaintenanceFailureCause::Internal);
+                                report.stopped_by = Some(
+                                    crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                                );
+                            }
+                        }
+                        return Ok(report);
+                    }
+                }
+            };
+        }
+        macro_rules! report_blob_try {
+            ($operation:expr) => {
+                match $operation {
+                    Ok(call) => call.value,
+                    Err(error) => {
+                        report.failure_cause =
+                            Some(crate::maintenance::MaintenanceFailureCause::Provider(
+                                error.fault.result,
+                            ));
+                        if error.fault.retryable {
+                            report.retryable_failures += 1;
+                            report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::RetryableFailure,
+                            );
+                        } else {
+                            report.permanent_failures += 1;
+                            report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                            );
+                        }
+                        return Ok(report);
+                    }
+                }
+            };
+        }
+        if self
+            .store
+            .max_physical_attempts_per_primitive()
+            .is_none_or(|attempts| attempts.get() != 1)
+        {
+            report.permanent_failures = 1;
+            report.stopped_by =
+                Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+            return Ok(report);
+        }
+        if self.maintenance_owner_epoch(source) != Some(expected_epoch) {
+            report.fenced = true;
+            report.stopped_by = Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+            return Ok(report);
+        }
         // Exclude concurrent branch creation for the WHOLE classify+delete (see the doc comment + the guard's
         // definition). Outermost lock: taken before any `inner` acquisition, so no lock-order inversion.
         // POISON-TOLERANT: this mutex guards CREATE-vs-GC coordination, not an in-memory invariant, so a panic
@@ -3750,35 +4469,305 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .create_gc_guard
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let mut reclaimed = 0u64;
-        let prefix = format!("{}branches/", shard_prefix(source));
-        for key in self.store_list(&prefix)? {
-            let Some(branch_metadata_key) = branch_registry_branch_key(&key) else {
-                return Err(EngineError::Storage(format!(
-                    "invalid branch registry key {key}"
-                )));
+        if limits.requests.get().saturating_sub(report.requests) < 2 {
+            report.stopped_by =
+                Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+            return Ok(report);
+        }
+        let authority_current =
+            match self.maintenance_authority_check_counted(source, expected_epoch) {
+                Ok((current, attempts)) => {
+                    report.requests += attempts;
+                    current
+                }
+                Err((error, fault, attempts)) => {
+                    report.requests += attempts;
+                    report.failure_cause = Some(
+                        crate::maintenance::MaintenanceFailureCause::Provider(fault.result),
+                    );
+                    if fault.retryable {
+                        report.retryable_failures += 1;
+                        report.stopped_by =
+                            Some(crate::maintenance::MaintenanceExecutionReason::RetryableFailure);
+                    } else {
+                        report.permanent_failures += 1;
+                        report.stopped_by =
+                            Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                    }
+                    let _ = error;
+                    return Ok(report);
+                }
             };
-            // COMMITTED (marker present) => a live, readable branch protected by its own TTL/pin. NEVER GC.
-            if self.store_get(&branch_metadata_key)?.is_some() {
+        if !authority_current {
+            report.fenced = true;
+            report.stopped_by = Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+            return Ok(report);
+        }
+        let prefix = format!("{}branches/", shard_prefix(source));
+        let cursor = self
+            .branch_gc_cursors
+            .lock()
+            .expect("branch gc cursors poisoned")
+            .get(source)
+            .cloned();
+        if report.requests >= limits.requests.get() {
+            report.stopped_by =
+                Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+            return Ok(report);
+        }
+        report.requests += 1;
+        let keys = report_blob_try!(self.store.observed_list_page(
+            &prefix,
+            cursor.as_deref(),
+            limits.page_size.get()
+        ));
+        let mut last_resolved = cursor;
+        for key in keys {
+            if report.deleted >= limits.objects.get()
+                || report.requests.saturating_add(4) > limits.requests.get()
+                || started.elapsed() >= limits.elapsed
+            {
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                break;
+            }
+            report.scanned += 1;
+            let Some(expected_marker_key) = branch_registry_branch_key(&key) else {
+                report.permanent_failures += 1;
+                report.failure_cause =
+                    Some(crate::maintenance::MaintenanceFailureCause::InvalidInheritanceMetadata);
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                break;
+            };
+            report.requests += 1;
+            let Some(bytes) = report_blob_try!(self.store.observed_get(&key)) else {
+                report.permanent_failures += 1;
+                report.failure_cause =
+                    Some(crate::maintenance::MaintenanceFailureCause::MissingInheritanceMetadata);
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                break;
+            };
+            let meta: BranchMetadata = match serde_json::from_slice(&bytes) {
+                Ok(meta) => meta,
+                Err(_) => {
+                    report.permanent_failures += 1;
+                    report.failure_cause = Some(
+                        crate::maintenance::MaintenanceFailureCause::InvalidInheritanceMetadata,
+                    );
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                    break;
+                }
+            };
+            if &meta.source != source || branch_metadata_key(&meta.branch) != expected_marker_key {
+                report.permanent_failures += 1;
+                report.failure_cause =
+                    Some(crate::maintenance::MaintenanceFailureCause::InvalidInheritanceMetadata);
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                break;
+            }
+            let branch = &meta.branch;
+            report.requests += 1;
+            if report_blob_try!(self.store.observed_get(&expected_marker_key)).is_some() {
+                report.retained += 1;
+                *report
+                    .retained_by_reason
+                    .entry(crate::maintenance::MaintenanceExecutionReason::CommittedBranch)
+                    .or_default() += 1;
+                last_resolved = Some(key);
                 continue;
             }
-            let Some(bytes) = self.store_get(&key)? else {
-                return Err(EngineError::Storage(format!(
-                    "missing branch registry entry {key}"
-                )));
+            let authority = pqueue_engine::MaintenanceAuthoritySnapshot {
+                queue: source.clone(),
+                current_epoch: expected_epoch,
+                observed_at_ms: now_ms,
+                retention_may_advance: true,
+                complete_frontier_required: false,
+                lineage_validated: true,
+                committed_snapshot_through: None,
+                recovery_window_through: None,
+                manifest_tail: pqueue_engine::FrontierRequirement::NotRequired,
+                request_ids: pqueue_engine::FrontierRequirement::NotRequired,
+                item_keys: pqueue_engine::FrontierRequirement::NotRequired,
+                async_projection_through: None,
+                in_memory_claim_replay: pqueue_engine::FrontierRequirement::NotRequired,
+                durable_floor: None,
+                branch_pins: BTreeSet::new(),
             };
-            let meta: BranchMetadata = serde_json::from_slice(&bytes).map_err(store_err)?;
-            let branch = &meta.branch;
+            let candidate = pqueue_engine::MaintenanceCandidate {
+                queue: source.clone(),
+                stable_id: key.clone(),
+                class: pqueue_engine::MaintenanceObjectClass::OrphanBranch,
+                first_sequence: Some(meta.cut_sequence),
+                last_sequence: Some(meta.cut_sequence),
+                manifest_index: None,
+                bytes: Some(bytes.len() as u64),
+                created_at_ms: meta.created_at_ms,
+                unreferenced_proven: true,
+                loser_proven: false,
+            };
+            let decision = pqueue_engine::MaintenancePolicy::new(grace_ms)
+                .plan(&authority, &[candidate], filter)
+                .into_iter()
+                .next()
+                .expect("one orphan candidate");
+            if decision.disposition != pqueue_engine::MaintenanceDisposition::Delete {
+                report.retained += 1;
+                let reason =
+                    if decision.reason == pqueue_engine::MaintenanceReason::InFlightWriterGrace {
+                        crate::maintenance::MaintenanceExecutionReason::InFlightWriterGrace
+                    } else {
+                        crate::maintenance::MaintenanceExecutionReason::Filtered
+                    };
+                *report.retained_by_reason.entry(reason).or_default() += 1;
+                last_resolved = Some(key);
+                continue;
+            }
+            if !dry_run {
+                if limits.requests.get().saturating_sub(report.requests) < 2 {
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                    break;
+                }
+                let authority_current =
+                    match self.maintenance_authority_check_counted(source, expected_epoch) {
+                        Ok((current, attempts)) => {
+                            report.requests += attempts;
+                            current
+                        }
+                        Err((error, fault, attempts)) => {
+                            report.requests += attempts;
+                            report.failure_cause = Some(
+                                crate::maintenance::MaintenanceFailureCause::Provider(fault.result),
+                            );
+                            if fault.retryable {
+                                report.retryable_failures += 1;
+                                report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::RetryableFailure,
+                            );
+                            } else {
+                                report.permanent_failures += 1;
+                                report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                            );
+                            }
+                            let _ = error;
+                            break;
+                        }
+                    };
+                if !authority_current {
+                    report.fenced = true;
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+                    break;
+                }
+            }
             // Test seam (never armed in production): strike the classify→delete window a concurrent creation's
             // marker write could race, so the create/GC exclusion can be proven deterministically.
-            self.fault(FaultCutPoint::GcAfterOrphanClassified)?;
+            report_try!(self.fault(FaultCutPoint::GcAfterOrphanClassified));
             // ORPHAN: marker absent AND — under the create/GC guard — provably not an in-flight creation, so it
             // is a failed/abandoned attempt. Reclaim ALL its objects and release the source pin. A failing
             // delete surfaces here (`?`) and leaves the remainder for the next pass.
-            self.cleanup_uncommitted_branch(source, branch)?;
-            reclaimed += 1;
+            let remaining_objects = limits.objects.get().saturating_sub(report.deleted);
+            let remaining_requests = limits.requests.get().saturating_sub(report.requests);
+            let cleanup = self.cleanup_uncommitted_branch_bounded(
+                source,
+                branch,
+                expected_epoch,
+                &meta.object_sizes,
+                bytes.len() as u64,
+                remaining_objects,
+                limits.bytes.get().saturating_sub(report.bytes_deleted),
+                remaining_requests,
+                limits.page_size.get(),
+                started + limits.elapsed,
+                dry_run,
+            );
+            let (effect, complete, failure) = match cleanup {
+                Ok((effect, complete)) => (effect, complete, None),
+                Err(failure) => (failure.effect, false, Some((failure.error, failure.fault))),
+            };
+            if dry_run {
+                report.would_delete += effect.objects;
+                report.would_delete_bytes = report.would_delete_bytes.saturating_add(effect.bytes);
+            } else {
+                report.deleted += effect.objects;
+                report.bytes_deleted = report.bytes_deleted.saturating_add(effect.bytes);
+            }
+            report.requests = report.requests.saturating_add(effect.requests);
+            if let Some((error, structured_fault)) = failure {
+                match error {
+                    EngineError::EpochFenced => {
+                        report.fenced = true;
+                        report.stopped_by =
+                            Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+                    }
+                    EngineError::Storage(_) | EngineError::Backpressure { .. } => {
+                        let fault =
+                            structured_fault.unwrap_or_else(|| self.store.classify_fault(&error));
+                        report.failure_cause = Some(
+                            crate::maintenance::MaintenanceFailureCause::Provider(fault.result),
+                        );
+                        if fault.retryable {
+                            report.retryable_failures += 1;
+                            report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::RetryableFailure,
+                            );
+                        } else {
+                            report.permanent_failures += 1;
+                            report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                            );
+                        }
+                    }
+                    _ => {
+                        report.permanent_failures += 1;
+                        report.stopped_by =
+                            Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                    }
+                }
+                break;
+            }
+            if !complete {
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                break;
+            }
+            if !dry_run {
+                report.completed_candidates += 1;
+            }
+            last_resolved = Some(key);
         }
-        Ok(reclaimed)
+        if dry_run {
+            return Ok(report);
+        }
+        let mut cursors = self
+            .branch_gc_cursors
+            .lock()
+            .expect("branch gc cursors poisoned");
+        if report.stopped_by.is_some() {
+            if let Some(cursor) = last_resolved.clone() {
+                cursors.insert(source.clone(), cursor.clone());
+                report.cursor = Some(crate::maintenance::MaintenanceCursor {
+                    version: crate::maintenance::MAINTENANCE_CURSOR_VERSION,
+                    resume_after: Some(cursor),
+                });
+            }
+        } else if report.scanned == limits.page_size.get() {
+            if let Some(cursor) = last_resolved {
+                cursors.insert(source.clone(), cursor.clone());
+                report.cursor = Some(crate::maintenance::MaintenanceCursor {
+                    version: crate::maintenance::MAINTENANCE_CURSOR_VERSION,
+                    resume_after: Some(cursor),
+                });
+            }
+        } else {
+            cursors.remove(source);
+        }
+        Ok(report)
     }
 
     /// Expire parent segments at or before `through_seq`, skipping any segment pinned by a live branch.
@@ -3794,9 +4783,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         through_seq: u64,
         now_ms: i64,
     ) -> EngineResult<u64> {
+        let Some(owner_epoch) = self.maintenance_owner_epoch(source) else {
+            return Err(EngineError::EpochFenced);
+        };
+        if !self.maintenance_authority_is_current(source, owner_epoch)?
+            || self.recover_manifest(source)?.2 != owner_epoch
+        {
+            return Err(EngineError::EpochFenced);
+        }
         let horizon_snapshot = self.visible_manifest_deletion_watermark(source)?;
         let (entries, authority_mode) =
             self.read_manifest_at_with_authority(source, horizon_snapshot)?;
+        let max_live_branch_cut = self.max_live_branch_cut_snapshot(source, now_ms)?;
         let mut deleted = 0u64;
         let mut reclaimed_through: Option<u64> = None;
         let mut reclaimed_indices = Vec::new();
@@ -3808,10 +4806,17 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if Self::visible_last_seq(entry) > through_seq {
                 continue;
             }
-            if self.branch_pins_segment(source, entry.first_seq, now_ms)? {
+            if max_live_branch_cut.is_some_and(|cut| entry.first_seq <= cut) {
                 continue;
             }
             if let Some(seg_key) = entry.segment_key.as_ref() {
+                if self.maintenance_owner_epoch(source) != Some(owner_epoch)
+                    || !self.maintenance_authority_is_current(source, owner_epoch)?
+                    || self.recover_manifest(source)?.2 != owner_epoch
+                {
+                    error = Some(EngineError::EpochFenced);
+                    break;
+                }
                 // Test-only crash seam (never armed in production): a fault here models a process death mid-
                 // reclamation, after the durable floor advanced but before this object is deleted.
                 if let Err(err) = self.fault(FaultCutPoint::DuringSegmentExpiry) {
@@ -3828,10 +4833,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 if deleted_now {
                     deleted += 1;
                 }
+                if !self.maintenance_authority_is_current(source, owner_epoch)? {
+                    error = Some(EngineError::EpochFenced);
+                    break;
+                }
                 // Record reclaimed progress only after the object delete succeeds, so a fault can never
                 // advance the watermark past an undeleted below-floor entry.
                 if let Err(err) = self.mark_manifest_entry_reclaimed(source, entry) {
                     error = Some(err);
+                    break;
+                }
+                if !self.maintenance_authority_is_current(source, owner_epoch)? {
+                    error = Some(EngineError::EpochFenced);
                     break;
                 }
                 if let Err(err) = self.delete_manifest_entry(source, entry.index) {
@@ -3878,6 +4891,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 &advance_entries,
             )?;
             if let Some(w) = new_w {
+                if !self.maintenance_authority_is_current(source, owner_epoch)? {
+                    return Err(EngineError::EpochFenced);
+                }
                 let completed = self.prove_completed_manifest_deletion_prefix(
                     source,
                     ManifestIndex(w),
@@ -3889,6 +4905,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 // Fold their reclamation into the same bounded, rotating candidate collector. Cleanup is
                 // deliberately after watermark persistence: before that point a reader may still traverse
                 // the historical parent chain.
+                if !self.maintenance_authority_is_current(source, owner_epoch)? {
+                    return Err(EngineError::EpochFenced);
+                }
                 let _ = self.gc_unreferenced_candidates(source, reclaimed_indices.len().max(1))?;
             }
         }
@@ -3896,6 +4915,562 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             Some(err) => Err(err),
             None => Ok(deleted),
         }
+    }
+
+    /// Run one bounded, resumable segment-expiry page. Discovery cursors are soft: loss rescans immutable
+    /// entries and idempotent deletes. Every candidate is admitted only when the remaining budget can cover
+    /// its exact owner proofs and all destructive calls.
+    pub fn expire_segments_through_bounded(
+        &self,
+        source: &QueueKey,
+        through_seq: u64,
+        now_ms: i64,
+        limits: crate::maintenance::MaintenanceLimits,
+        dry_run: bool,
+    ) -> EngineResult<crate::maintenance::MaintenanceReport> {
+        let started = std::time::Instant::now();
+        let mut report = crate::maintenance::MaintenanceReport::new(dry_run);
+        macro_rules! partial_try {
+            ($operation:expr) => {
+                match $operation {
+                    Ok(value) => value,
+                    Err(error) => {
+                        match error {
+                            EngineError::EpochFenced => {
+                                report.fenced = true;
+                                report.stopped_by = Some(
+                                    crate::maintenance::MaintenanceExecutionReason::EpochChanged,
+                                );
+                            }
+                            EngineError::Storage(_) | EngineError::Backpressure { .. } => {
+                                let fault = self.store.classify_fault(&error);
+                                report.failure_cause = Some(
+                                    crate::maintenance::MaintenanceFailureCause::Provider(
+                                        fault.result,
+                                    ),
+                                );
+                                if fault.retryable {
+                                    report.retryable_failures += 1;
+                                    report.stopped_by = Some(
+                                        crate::maintenance::MaintenanceExecutionReason::RetryableFailure,
+                                    );
+                                } else {
+                                    report.permanent_failures += 1;
+                                    report.stopped_by = Some(
+                                        crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                                    );
+                                }
+                            }
+                            _ => {
+                                report.permanent_failures += 1;
+                                report.failure_cause =
+                                    Some(crate::maintenance::MaintenanceFailureCause::Internal);
+                                report.stopped_by = Some(
+                                    crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                                );
+                            }
+                        }
+                        return Ok(report);
+                    }
+                }
+            };
+        }
+        macro_rules! partial_blob_try {
+            ($operation:expr) => {
+                match $operation {
+                    Ok(call) => call.value,
+                    Err(error) => {
+                        report.failure_cause =
+                            Some(crate::maintenance::MaintenanceFailureCause::Provider(
+                                error.fault.result,
+                            ));
+                        if error.fault.retryable {
+                            report.retryable_failures += 1;
+                            report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::RetryableFailure,
+                            );
+                        } else {
+                            report.permanent_failures += 1;
+                            report.stopped_by = Some(
+                                crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                            );
+                        }
+                        return Ok(report);
+                    }
+                }
+            };
+        }
+        let Some(owner_epoch) = self.maintenance_owner_epoch(source) else {
+            report.fenced = true;
+            report.stopped_by = Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+            return Ok(report);
+        };
+        if self
+            .store
+            .max_physical_attempts_per_primitive()
+            .is_none_or(|attempts| attempts.get() != 1)
+        {
+            report.permanent_failures = 1;
+            report.stopped_by =
+                Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+            return Ok(report);
+        }
+        let token = self
+            .maintenance_owned_epochs
+            .lock()
+            .expect("maintenance owner epochs poisoned")
+            .get(source)
+            .filter(|token| token.epoch == owner_epoch)
+            .cloned()
+            .ok_or(EngineError::EpochFenced)?;
+        if limits.requests.get() < 3 {
+            report.stopped_by =
+                Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+            return Ok(report);
+        }
+        let (current, attempts) =
+            match self.maintenance_authority_check_counted(source, owner_epoch) {
+                Ok(value) => value,
+                Err((error, fault, attempts)) => {
+                    report.requests += attempts;
+                    report.failure_cause = Some(
+                        crate::maintenance::MaintenanceFailureCause::Provider(fault.result),
+                    );
+                    partial_try!(Err::<(bool, usize), _>(error))
+                }
+            };
+        report.requests += attempts;
+        if !current {
+            report.fenced = true;
+            report.stopped_by = Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+            return Ok(report);
+        }
+
+        let head = if token.authority_key.contains("/authority_head/") {
+            Some(partial_try!(
+                serde_json::from_slice::<ManifestHeadBlob>(&token.authority_body)
+                    .map_err(store_err)
+            ))
+        } else {
+            None
+        };
+        let mut cursor = self
+            .segment_gc_cursors
+            .lock()
+            .expect("segment gc cursors poisoned")
+            .get(source)
+            .cloned()
+            .unwrap_or_else(|| "legacy:".to_owned());
+        let mut progress = self
+            .segment_gc_progress
+            .lock()
+            .expect("segment gc progress poisoned")
+            .get(source)
+            .cloned()
+            .unwrap_or_default();
+        if progress.target_through != Some(through_seq) {
+            cursor = "legacy:".to_owned();
+            progress = SegmentGcProgress {
+                target_through: Some(through_seq),
+                ..SegmentGcProgress::default()
+            };
+        }
+        let page_start_cursor = cursor.clone();
+        let mut entries: Vec<(ManifestEntry, Option<String>)> = Vec::new();
+        let mut next_cursor = None;
+        if let Some(start) = cursor.strip_prefix("legacy:") {
+            if report.requests >= limits.requests.get() {
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                return Ok(report);
+            }
+            report.requests += 1;
+            let prefix = Self::manifest_head_prefix(source);
+            let start_after = if start.is_empty() { None } else { Some(start) };
+            let keys = partial_blob_try!(self.store.observed_list_page(
+                &prefix,
+                start_after,
+                limits.page_size.get()
+            ));
+            let legacy_limit = head
+                .as_ref()
+                .map(|head| head.legacy_next_manifest_index)
+                .unwrap_or(u64::MAX);
+            for key in &keys {
+                let Some(index) = manifest_index_from_key(key) else {
+                    continue;
+                };
+                if index >= legacy_limit {
+                    break;
+                }
+                if report.requests >= limits.requests.get() {
+                    next_cursor = Some(cursor.clone());
+                    break;
+                }
+                report.requests += 1;
+                let Some(bytes) = partial_blob_try!(self.store.observed_get(key)) else {
+                    report.permanent_failures += 1;
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                    break;
+                };
+                let resume = Some(format!("legacy:{key}"));
+                entries.push((
+                    partial_try!(
+                        serde_json::from_slice::<ManifestEntry>(&bytes).map_err(store_err)
+                    ),
+                    resume.clone(),
+                ));
+                next_cursor = resume;
+            }
+            let legacy_done = keys.len() < limits.page_size.get()
+                || keys
+                    .last()
+                    .and_then(|key| manifest_index_from_key(key))
+                    .is_some_and(|index| index.saturating_add(1) >= legacy_limit);
+            if legacy_done {
+                cursor = head
+                    .as_ref()
+                    .and_then(|head| head.tail_candidate_key.clone())
+                    .map_or_else(|| "done".to_owned(), |key| format!("authority:{key}"));
+                next_cursor = (cursor != "done").then_some(cursor.clone());
+            }
+        } else if let Some(mut key) = cursor.strip_prefix("authority:").map(str::to_owned) {
+            for _ in 0..limits.page_size.get() {
+                if report.requests >= limits.requests.get() {
+                    next_cursor = Some(format!("authority:{key}"));
+                    break;
+                }
+                report.requests += 1;
+                let Some(bytes) = partial_blob_try!(self.store.observed_get(&key)) else {
+                    return Err(EngineError::Conflict);
+                };
+                let candidate: ManifestCandidate =
+                    partial_try!(serde_json::from_slice(&bytes).map_err(store_err));
+                let entry = candidate.entry;
+                match candidate.previous_candidate_key {
+                    Some(previous) => {
+                        key = previous;
+                        let resume = Some(format!("authority:{key}"));
+                        entries.push((entry, resume.clone()));
+                        next_cursor = resume;
+                    }
+                    None => {
+                        entries.push((entry, None));
+                        next_cursor = None;
+                        break;
+                    }
+                }
+            }
+        }
+
+        let branch_prefix = format!("{}branches/", shard_prefix(source));
+        while !progress.branch_scan_complete {
+            if started.elapsed() >= limits.elapsed || report.requests >= limits.requests.get() {
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                break;
+            }
+            report.requests += 1;
+            let page = partial_blob_try!(self.store.observed_list_page(
+                &branch_prefix,
+                progress.branch_cursor.as_deref(),
+                limits.page_size.get(),
+            ));
+            for key in &page {
+                if report.requests >= limits.requests.get() {
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                    break;
+                }
+                report.requests += 1;
+                let Some(bytes) = partial_blob_try!(self.store.observed_get(key)) else {
+                    report.permanent_failures += 1;
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::PermanentFailure);
+                    break;
+                };
+                let meta: BranchMetadata =
+                    partial_try!(serde_json::from_slice(&bytes).map_err(store_err));
+                if now_ms < meta.expires_at_ms {
+                    progress.max_live_branch_cut = Some(
+                        progress
+                            .max_live_branch_cut
+                            .map_or(meta.cut_sequence, |cut| cut.max(meta.cut_sequence)),
+                    );
+                }
+                progress.branch_cursor = Some(key.clone());
+            }
+            if report.stopped_by.is_some() {
+                break;
+            }
+            if page.len() < limits.page_size.get() {
+                progress.branch_scan_complete = true;
+            }
+        }
+        if report.stopped_by.is_some() {
+            let mut cursors = self
+                .segment_gc_cursors
+                .lock()
+                .expect("segment gc cursors poisoned");
+            cursors.insert(source.clone(), page_start_cursor.clone());
+            report.cursor = Some(crate::maintenance::MaintenanceCursor {
+                version: crate::maintenance::MAINTENANCE_CURSOR_VERSION,
+                resume_after: Some(page_start_cursor),
+            });
+            self.segment_gc_progress
+                .lock()
+                .expect("segment gc progress poisoned")
+                .insert(source.clone(), progress);
+            return Ok(report);
+        }
+        let mut committed_cursor = Some(page_start_cursor.clone());
+        let mut refresh_branch_scan = false;
+        for (entry, resume_after_entry) in entries {
+            if started.elapsed() >= limits.elapsed {
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                break;
+            }
+            report.scanned += 1;
+            if Self::visible_last_seq(&entry) > through_seq {
+                report.retained += 1;
+                committed_cursor = resume_after_entry;
+                refresh_branch_scan = true;
+                continue;
+            }
+            if progress
+                .max_live_branch_cut
+                .is_some_and(|cut| entry.first_seq <= cut)
+            {
+                report.retained += 1;
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                refresh_branch_scan = true;
+                break;
+            }
+            if entry.segment_key.is_none() {
+                if entry.retention_floor_through.is_none() {
+                    progress.candidate_index = Some(
+                        progress
+                            .candidate_index
+                            .map_or(entry.index, |index| index.max(entry.index)),
+                    );
+                    progress.reclaimed_through = Some(
+                        progress
+                            .reclaimed_through
+                            .map_or(Self::visible_last_seq(&entry), |through| {
+                                through.max(Self::visible_last_seq(&entry))
+                            }),
+                    );
+                }
+                report.retained += 1;
+                committed_cursor = resume_after_entry;
+                refresh_branch_scan = true;
+                continue;
+            }
+            let seg_key = entry.segment_key.as_ref().expect("checked segment key");
+            let bytes = if let Some(bytes) = self.known_object_size(seg_key) {
+                bytes
+            } else {
+                if limits.requests.get().saturating_sub(report.requests) < 10 {
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                    break;
+                }
+                report.requests += 1;
+                partial_blob_try!(self.store.observed_get(seg_key))
+                    .map_or(0, |body| body.len() as u64)
+            };
+            if report.deleted >= limits.objects.get()
+                || report.bytes_deleted.saturating_add(bytes) > limits.bytes.get()
+                || limits.requests.get().saturating_sub(report.requests) < 9
+            {
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                break;
+            }
+            if dry_run {
+                report.would_delete += 1;
+                report.would_delete_bytes = report.would_delete_bytes.saturating_add(bytes);
+                committed_cursor = resume_after_entry;
+                refresh_branch_scan = true;
+                continue;
+            }
+            for phase in 0..3 {
+                let (current, attempts) =
+                    match self.maintenance_authority_check_counted(source, owner_epoch) {
+                        Ok(value) => value,
+                        Err((error, fault, attempts)) => {
+                            report.requests += attempts;
+                            report.failure_cause = Some(
+                                crate::maintenance::MaintenanceFailureCause::Provider(fault.result),
+                            );
+                            partial_try!(Err::<(bool, usize), _>(error))
+                        }
+                    };
+                report.requests += attempts;
+                if !current {
+                    report.fenced = true;
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+                    break;
+                }
+                report.requests += 1;
+                match phase {
+                    0 => {
+                        partial_try!(self.fault(FaultCutPoint::DuringSegmentExpiry));
+                        if partial_blob_try!(self.store.observed_delete(seg_key)) {
+                            report.deleted += 1;
+                            report.bytes_deleted = report.bytes_deleted.saturating_add(bytes);
+                        }
+                    }
+                    1 => partial_try!(self.mark_manifest_entry_reclaimed(source, &entry)),
+                    _ => partial_try!(self.delete_manifest_entry(source, entry.index)),
+                }
+            }
+            if report.fenced {
+                break;
+            }
+            report.completed_candidates += 1;
+            progress.candidate_index = Some(
+                progress
+                    .candidate_index
+                    .map_or(entry.index, |index| index.max(entry.index)),
+            );
+            progress.reclaimed_through = Some(
+                progress
+                    .reclaimed_through
+                    .map_or(Self::visible_last_seq(&entry), |through| {
+                        through.max(Self::visible_last_seq(&entry))
+                    }),
+            );
+            committed_cursor = resume_after_entry;
+            refresh_branch_scan = true;
+        }
+        if report.stopped_by.is_none() && next_cursor.is_some() {
+            report.stopped_by =
+                Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+        }
+        if report.stopped_by
+            == Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted)
+        {
+            next_cursor = committed_cursor;
+        }
+        if report.stopped_by.is_none() && next_cursor.is_none() {
+            cursor = "finalize".to_owned();
+        }
+        if report.stopped_by.is_none()
+            && (cursor == "finalize" || page_start_cursor == "finalize")
+            && let (Some(index), Some(reclaimed_through)) =
+                (progress.candidate_index, progress.reclaimed_through)
+        {
+            if limits.requests.get().saturating_sub(report.requests) < 5 {
+                report.stopped_by =
+                    Some(crate::maintenance::MaintenanceExecutionReason::BudgetExhausted);
+                next_cursor = Some("finalize".to_owned());
+            } else {
+                let (current, attempts) =
+                    match self.maintenance_authority_check_counted(source, owner_epoch) {
+                        Ok(value) => value,
+                        Err((error, fault, attempts)) => {
+                            report.requests += attempts;
+                            report.failure_cause = Some(
+                                crate::maintenance::MaintenanceFailureCause::Provider(fault.result),
+                            );
+                            partial_try!(Err::<(bool, usize), _>(error))
+                        }
+                    };
+                report.requests += attempts;
+                if !current {
+                    report.fenced = true;
+                    report.stopped_by =
+                        Some(crate::maintenance::MaintenanceExecutionReason::EpochChanged);
+                } else {
+                    match self.persist_bounded_manifest_deletion_watermark(
+                        source,
+                        index,
+                        reclaimed_through,
+                        owner_epoch,
+                        now_ms,
+                    ) {
+                        Ok(watermark_requests) => report.requests += watermark_requests,
+                        Err(failure) => {
+                            report.requests += failure.effect.requests;
+                            report.failure_cause = failure.fault.map(|fault| {
+                                crate::maintenance::MaintenanceFailureCause::Provider(fault.result)
+                            });
+                            if failure.fault.is_some_and(|fault| fault.retryable) {
+                                report.retryable_failures += 1;
+                                report.stopped_by = Some(
+                                    crate::maintenance::MaintenanceExecutionReason::RetryableFailure,
+                                );
+                            } else {
+                                report.permanent_failures += 1;
+                                report.failure_cause.get_or_insert(
+                                    crate::maintenance::MaintenanceFailureCause::Internal,
+                                );
+                                report.stopped_by = Some(
+                                    crate::maintenance::MaintenanceExecutionReason::PermanentFailure,
+                                );
+                            }
+                            next_cursor = Some("finalize".to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        let mut cursors = self
+            .segment_gc_cursors
+            .lock()
+            .expect("segment gc cursors poisoned");
+        if let Some(cursor) = next_cursor {
+            if cursor != "finalize" && refresh_branch_scan {
+                progress.branch_cursor = None;
+                progress.max_live_branch_cut = None;
+                progress.branch_scan_complete = false;
+            }
+            cursors.insert(source.clone(), cursor.clone());
+            report.cursor = Some(crate::maintenance::MaintenanceCursor {
+                version: crate::maintenance::MAINTENANCE_CURSOR_VERSION,
+                resume_after: Some(cursor),
+            });
+        } else {
+            cursors.remove(source);
+            self.segment_gc_progress
+                .lock()
+                .expect("segment gc progress poisoned")
+                .remove(source);
+        }
+        if report.cursor.is_some() {
+            self.segment_gc_progress
+                .lock()
+                .expect("segment gc progress poisoned")
+                .insert(source.clone(), progress);
+        }
+        Ok(report)
+    }
+
+    /// Production scheduler defaults for one segment-expiry page.
+    pub fn expire_segments_through_bounded_default(
+        &self,
+        source: &QueueKey,
+        through_seq: u64,
+        now_ms: i64,
+    ) -> EngineResult<crate::maintenance::MaintenanceReport> {
+        self.expire_segments_through_bounded(
+            source,
+            through_seq,
+            now_ms,
+            crate::maintenance::MaintenanceLimits::new(
+                64,
+                64 * 1024 * 1024,
+                1_024,
+                std::time::Duration::from_millis(50),
+                64,
+            )?,
+            false,
+        )
     }
 
     /// Enumerate the manifest entries that are currently eligible for below-floor reclamation bookkeeping.
@@ -3932,6 +5507,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         through_seq: u64,
         now_ms: i64,
     ) -> EngineResult<Option<u64>> {
+        // Keep the entire fold on one immutable pin view and one remote registry read.
+        let max_live_branch_cut = self.max_live_branch_cut_snapshot(source, now_ms)?;
         let mut lowest: Option<u64> = None;
         for entry in self.read_manifest(source)? {
             if entry.fence
@@ -3943,7 +5520,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if Self::visible_last_seq(&entry) > through_seq {
                 continue;
             }
-            if self.branch_pins_segment(source, entry.first_seq, now_ms)? {
+            if max_live_branch_cut.is_some_and(|cut| entry.first_seq <= cut) {
                 lowest = Some(lowest.map_or(entry.first_seq, |l| l.min(entry.first_seq)));
             }
         }
@@ -4131,6 +5708,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         position: CommandPosition,
         expected_epoch: u64,
     ) -> EngineResult<()> {
+        if self.maintenance_owner_epoch(shard) != Some(expected_epoch)
+            || !self.maintenance_authority_is_current(shard, expected_epoch)?
+        {
+            return Err(EngineError::EpochFenced);
+        }
         // Floor advancement is not allowed to treat the deletion watermark as an authority. It still prefers
         // the ranged recovery path for the current tail, but if that range is unexpectedly empty it falls
         // back to a full manifest scan so a stale/corrupt read-horizon cannot block progress.
@@ -4184,6 +5766,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         if let Some(buf) = g.shards.get_mut(shard) {
             buf.next_manifest_index = buf.next_manifest_index.max(cur_index.0 + 1);
         }
+        drop(g);
+        if self.maintenance_owner_epoch(shard) == Some(expected_epoch) {
+            self.refresh_maintenance_authority_token(shard, expected_epoch)?;
+        }
         Ok(())
     }
 
@@ -4230,6 +5816,41 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     ) -> EngineResult<(Vec<ManifestReclamationCandidate>, Option<u64>)> {
         let floor = self.read_retention_floor(shard)?;
         let floor_seq = floor.as_ref().map(|f| f.sequence);
+        let max_live_branch_cut = self.max_live_branch_cut_snapshot(shard, now_ms)?;
+        let authority = pqueue_engine::MaintenanceAuthoritySnapshot {
+            queue: shard.clone(),
+            current_epoch: self.current_epoch(shard)?,
+            observed_at_ms: now_ms,
+            retention_may_advance: true,
+            complete_frontier_required: false,
+            lineage_validated: true,
+            committed_snapshot_through: Some(reclaimed_through),
+            recovery_window_through: Some(reclaimed_through),
+            manifest_tail: pqueue_engine::FrontierRequirement::NotRequired,
+            request_ids: pqueue_engine::FrontierRequirement::NotRequired,
+            item_keys: pqueue_engine::FrontierRequirement::NotRequired,
+            async_projection_through: None,
+            in_memory_claim_replay: pqueue_engine::FrontierRequirement::NotRequired,
+            durable_floor: floor_seq,
+            branch_pins: BTreeSet::new(),
+        };
+        Ok(Self::plan_manifest_reclamation_candidates_from_entries(
+            reclaimed_through,
+            entries,
+            floor_seq,
+            max_live_branch_cut,
+            &authority,
+        ))
+    }
+
+    /// Pure ordered selector; its caller assembles floor, epoch, and the complete live pin registry once.
+    fn plan_manifest_reclamation_candidates_from_entries(
+        reclaimed_through: u64,
+        entries: &[ManifestEntry],
+        floor_seq: Option<u64>,
+        max_live_branch_cut: Option<u64>,
+        authority: &pqueue_engine::MaintenanceAuthoritySnapshot,
+    ) -> (Vec<ManifestReclamationCandidate>, Option<u64>) {
         let mut new_w: Option<u64> = None;
         let mut pinned_prefix = false;
         let mut candidates = Vec::new();
@@ -4257,10 +5878,33 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             // include it in the candidate set. The pinned entry blocks the watermark, but later reclaimed
             // entries remain eligible for deletion within the same pass.
             if entry.segment_key.is_some()
-                && self.branch_pins_segment(shard, entry.first_seq, now_ms)?
+                && max_live_branch_cut.is_some_and(|cut| entry.first_seq <= cut)
             {
                 pinned_prefix = true;
                 continue;
+            }
+            let planned = pqueue_engine::MaintenancePolicy::new(0)
+                .plan(
+                    authority,
+                    &[pqueue_engine::MaintenanceCandidate {
+                        queue: authority.queue.clone(),
+                        stable_id: format!("manifest-entry-{}", entry.index),
+                        class: pqueue_engine::MaintenanceObjectClass::ManifestEntry,
+                        first_sequence: Some(entry.first_seq),
+                        last_sequence: Some(Self::visible_last_seq(entry)),
+                        manifest_index: Some(entry.index),
+                        bytes: None,
+                        created_at_ms: entry.committed_at_ms,
+                        unreferenced_proven: false,
+                        loser_proven: false,
+                    }],
+                    &pqueue_engine::MaintenanceFilter::default(),
+                )
+                .into_iter()
+                .next()
+                .expect("one manifest candidate");
+            if planned.disposition != pqueue_engine::MaintenanceDisposition::Delete {
+                break;
             }
             if floor_seq.is_some() && !pinned_prefix {
                 new_w = Some(entry.index);
@@ -4274,7 +5918,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 });
             }
         }
-        Ok((candidates, new_w))
+        (candidates, new_w)
     }
 
     fn advance_read_horizon_from_entries(
@@ -4383,6 +6027,65 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             );
         }
         Ok(())
+    }
+
+    fn persist_bounded_manifest_deletion_watermark(
+        &self,
+        shard: &QueueKey,
+        index: u64,
+        reclaimed_through: u64,
+        epoch: u64,
+        now_ms: i64,
+    ) -> Result<usize, crate::maintenance::MaintenanceExecutionFailure> {
+        let marker = ManifestEntry {
+            index,
+            epoch,
+            fence: false,
+            segment_key: None,
+            first_seq: reclaimed_through,
+            last_seq: reclaimed_through,
+            visible_last_seq: None,
+            checksum: 0,
+            committed_at_ms: now_ms,
+            retention_floor_through: None,
+            compacted_through_index: Some(index),
+        };
+        let (_, marker_attempts) = self.commit_manifest_watermark_marker_counted(shard, &marker)?;
+        let horizon_body = to_json(&ReadHorizonBlob { index }).map_err(|error| {
+            crate::maintenance::MaintenanceExecutionFailure {
+                effect: crate::maintenance::MaintenanceEffect {
+                    objects: 0,
+                    bytes: 0,
+                    requests: marker_attempts,
+                },
+                fault: None,
+                error,
+            }
+        })?;
+        let requests = marker_attempts + 1;
+        self.store_put(&Self::read_horizon_key(shard), &horizon_body, false)
+            .map_err(|error| crate::maintenance::MaintenanceExecutionFailure {
+                effect: crate::maintenance::MaintenanceEffect {
+                    objects: 0,
+                    bytes: 0,
+                    requests,
+                },
+                fault: Some(self.store.classify_fault(&error)),
+                error,
+            })?;
+        if let Some(buf) = self
+            .inner
+            .lock()
+            .expect("segmented log poisoned")
+            .shards
+            .get_mut(shard)
+        {
+            buf.manifest_deletion_watermark = Some(
+                buf.manifest_deletion_watermark
+                    .map_or(index, |current| current.max(index)),
+            );
+        }
+        Ok(requests)
     }
 
     /// The highest `visible_last_seq` over the CONTIGUOUS PREFIX of DATA manifest segments whose
@@ -5735,6 +7438,35 @@ mod manifest_deletion_watermark_tests {
             .collect()
     }
 
+    fn expire_as_owner<S: BlobStore>(
+        log: &SegmentedObjectLog<S>,
+        shard: &QueueKey,
+        through: u64,
+        now_ms: i64,
+    ) -> EngineResult<u64> {
+        if log.maintenance_owner_epoch(shard).is_none() {
+            log.acquire_epoch(shard, now_ms)?;
+        }
+        log.expire_segments_through(shard, through, now_ms)
+    }
+
+    fn advance_floor_as_owner<S: BlobStore>(
+        log: &SegmentedObjectLog<S>,
+        shard: &QueueKey,
+        through: u64,
+        now_ms: i64,
+    ) -> EngineResult<()> {
+        let epoch = match log.maintenance_owner_epoch(shard) {
+            Some(epoch) => epoch,
+            None => log.acquire_epoch(shard, now_ms)?,
+        };
+        log.advance_retention_floor(
+            shard,
+            CommandPosition::new(shard.clone(), epoch, through),
+            epoch,
+        )
+    }
+
     fn strip_manifest_head_namespace(store: &std::sync::Arc<InMemoryBlobStore>, shard: &QueueKey) {
         for key in store
             .list(&SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_prefix(shard))
@@ -5909,8 +7641,7 @@ mod manifest_deletion_watermark_tests {
             log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
         }
 
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 3, 0).unwrap();
         let candidates = log.manifest_reclamation_candidates(&shard, 1, 31).unwrap();
         assert_eq!(
             candidates.iter().map(|c| c.first_seq).collect::<Vec<_>>(),
@@ -5923,7 +7654,7 @@ mod manifest_deletion_watermark_tests {
             "the authoritative floor entry and the live tail at or above it are not eligible"
         );
         assert_eq!(
-            log.expire_segments_through(&shard, 1, 31).unwrap(),
+            expire_as_owner(&log, &shard, 1, 31).unwrap(),
             1,
             "only the reclaimed below-floor prefix is deleted on the partial pass"
         );
@@ -5957,8 +7688,7 @@ mod manifest_deletion_watermark_tests {
         )
         .unwrap();
 
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 1, 0).unwrap();
         assert!(
             log.manifest_reclamation_candidates(&shard, 1, 31)
                 .unwrap()
@@ -5974,7 +7704,7 @@ mod manifest_deletion_watermark_tests {
             "once the branch pin is released, the same below-floor segment becomes enumerable again"
         );
         assert_eq!(
-            log.expire_segments_through(&shard, 1, 32).unwrap(),
+            expire_as_owner(&log, &shard, 1, 32).unwrap(),
             1,
             "the later expiry pass can reclaim the formerly pinned segment"
         );
@@ -6000,11 +7730,10 @@ mod manifest_deletion_watermark_tests {
             .into_iter()
             .filter_map(|entry| entry.segment_key)
             .collect();
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 5, 0).unwrap();
 
         store.fail_delete_once(&segment_keys[0]);
-        let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+        let err = expire_as_owner(&log, &shard, 5, 1_000).unwrap_err();
         assert!(
             matches!(err, EngineError::Conflict),
             "a failed first eligible delete must abort before any watermark persistence occurs"
@@ -6042,9 +7771,8 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
         }
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
-            .unwrap();
-        assert_eq!(log.expire_segments_through(&shard, 7, 1_000).unwrap(), 4);
+        advance_floor_as_owner(&log, &shard, 7, 0).unwrap();
+        assert_eq!(expire_as_owner(&log, &shard, 7, 1_000).unwrap(), 4);
         let first = log
             .read_read_horizon(&shard)
             .unwrap()
@@ -6079,10 +7807,8 @@ mod manifest_deletion_watermark_tests {
             writer.seal(&shard, 0, 101 + i as i64 * 10).unwrap();
         }
 
-        writer
-            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
-            .unwrap();
-        assert_eq!(writer.expire_segments_through(&shard, 1, 1_000).unwrap(), 2);
+        advance_floor_as_owner(&writer, &shard, 1, 0).unwrap();
+        assert_eq!(expire_as_owner(&writer, &shard, 1, 1_000).unwrap(), 2);
 
         let reopened = SegmentedObjectLog::open(store.clone(), cfg);
         reopened.create_queue(&conformance_qdef()).unwrap();
@@ -6127,10 +7853,8 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             writer_a.seal(&shard, 0, 201 + i as i64 * 10).unwrap();
         }
-        writer_a
-            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 7), 0)
-            .unwrap();
-        writer_a.expire_segments_through(&shard, 7, 1_000).unwrap();
+        advance_floor_as_owner(&writer_a, &shard, 7, 0).unwrap();
+        expire_as_owner(&writer_a, &shard, 7, 1_000).unwrap();
 
         let writer_b = SegmentedObjectLog::open(store.clone(), cfg);
         writer_b.create_queue(&conformance_qdef()).unwrap();
@@ -6177,8 +7901,7 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, 301 + i as i64 * 10).unwrap();
         }
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 5, 0).unwrap();
 
         log.persist_manifest_deletion_watermark(&shard, 4, 1_000)
             .unwrap();
@@ -6196,7 +7919,7 @@ mod manifest_deletion_watermark_tests {
             "no durable watermark marker is published before physical deletion completes"
         );
 
-        assert_eq!(log.expire_segments_through(&shard, 4, 1_001).unwrap(), 2);
+        assert_eq!(expire_as_owner(&log, &shard, 4, 1_001).unwrap(), 2);
         assert_eq!(
             log.read_manifest_deletion_watermark(&shard).unwrap(),
             Some(1)
@@ -6217,10 +7940,9 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, 401 + i as i64 * 10).unwrap();
         }
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 5, 0).unwrap();
 
-        assert_eq!(log.expire_segments_through(&shard, 4, 1_000).unwrap(), 2);
+        assert_eq!(expire_as_owner(&log, &shard, 4, 1_000).unwrap(), 2);
         log.persist_manifest_deletion_watermark(&shard, 4, 1_001)
             .unwrap();
         assert_eq!(log.read_read_horizon(&shard).unwrap(), Some(1));
@@ -6246,15 +7968,14 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, 501 + i as i64 * 10).unwrap();
         }
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 3, 0).unwrap();
         let before = log.counters();
-        assert_eq!(log.expire_segments_through(&shard, 3, 1_000).unwrap(), 2);
+        assert_eq!(expire_as_owner(&log, &shard, 3, 1_000).unwrap(), 2);
         let after = log.counters();
         let reclaimed = 2;
         assert!(after.get_count - before.get_count <= 8 * reclaimed + 8);
         assert!(after.delete_count - before.delete_count <= 4 * reclaimed + 4);
-        assert!(after.list_count - before.list_count <= 4 * reclaimed + 8);
+        assert!(after.list_count - before.list_count <= 8 * reclaimed + 16);
         assert!(after.put_count - before.put_count <= 2 * reclaimed + 4);
     }
 
@@ -6270,8 +7991,7 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, 701 + i as i64 * 10).unwrap();
         }
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 3, 0).unwrap();
         for entry in log
             .read_manifest(&shard)
             .unwrap()
@@ -6411,7 +8131,7 @@ mod manifest_deletion_watermark_tests {
         owner_b
             .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 1, 5), 1)
             .unwrap();
-        owner_b.expire_segments_through(&shard, 5, 1_000).unwrap();
+        expire_as_owner(&owner_b, &shard, 5, 1_000).unwrap();
 
         let horizon = owner_b
             .read_read_horizon(&shard)
@@ -6467,11 +8187,9 @@ mod manifest_deletion_watermark_tests {
         writer.seal(&shard, 0, 11).unwrap();
         writer.enqueue(&shard, &pushes(1), 0, 20).unwrap();
         writer.seal(&shard, 0, 21).unwrap();
-        writer
-            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 0), 0)
-            .unwrap();
+        advance_floor_as_owner(&writer, &shard, 0, 0).unwrap();
         assert_eq!(
-            writer.expire_segments_through(&shard, 0, 1_000).unwrap(),
+            expire_as_owner(&writer, &shard, 0, 1_000).unwrap(),
             1,
             "the first manifest index is reclaimed and the live tail remains available"
         );
@@ -6523,10 +8241,8 @@ mod manifest_deletion_watermark_tests {
         writer.seal(&shard, 0, 11).unwrap();
         writer.enqueue(&shard, &pushes(1), 0, 20).unwrap();
         writer.seal(&shard, 0, 21).unwrap();
-        writer
-            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 0), 0)
-            .unwrap();
-        writer.expire_segments_through(&shard, 0, 1_000).unwrap();
+        advance_floor_as_owner(&writer, &shard, 0, 0).unwrap();
+        expire_as_owner(&writer, &shard, 0, 1_000).unwrap();
 
         let reopened = SegmentedObjectLog::open(store.clone(), cfg);
         reopened.create_queue(&conformance_qdef()).unwrap();
@@ -6579,11 +8295,10 @@ mod manifest_deletion_watermark_tests {
         let seg0_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 0);
         let seg1_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 1);
         let seg2_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 2);
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 5, 0).unwrap();
 
         log.set_fault_hook(Some(std::sync::Arc::new(PartialExpireFault::new())));
-        let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+        let err = expire_as_owner(&log, &shard, 5, 1_000).unwrap_err();
         assert_eq!(err, EngineError::Conflict);
 
         assert!(
@@ -6593,7 +8308,7 @@ mod manifest_deletion_watermark_tests {
 
         log.set_fault_hook(None);
         assert_eq!(
-            log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+            expire_as_owner(&log, &shard, 5, 2_000).unwrap(),
             2,
             "a later full expiry still finds the remaining below-floor entries"
         );
@@ -6626,11 +8341,10 @@ mod manifest_deletion_watermark_tests {
             log.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
         }
         let seg2_legacy_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 2);
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 5, 0).unwrap();
 
         assert_eq!(
-            log.expire_segments_through(&shard, 4, 1_000).unwrap(),
+            expire_as_owner(&log, &shard, 4, 1_000).unwrap(),
             2,
             "a partial below-floor pass only reclaims the entries at or below the requested through_seq"
         );
@@ -6645,7 +8359,7 @@ mod manifest_deletion_watermark_tests {
         );
 
         assert_eq!(
-            log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+            expire_as_owner(&log, &shard, 5, 2_000).unwrap(),
             1,
             "a later full pass still finds and reclaims the undeleted below-floor entry"
         );
@@ -6675,10 +8389,9 @@ mod manifest_deletion_watermark_tests {
             .into_iter()
             .filter_map(|entry| entry.segment_key)
             .collect();
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 5, 0).unwrap();
 
-        assert_eq!(log.expire_segments_through(&shard, 5, 1_000).unwrap(), 3);
+        assert_eq!(expire_as_owner(&log, &shard, 5, 1_000).unwrap(), 3);
 
         let events = store.delete_events();
         for (index, segment_key) in segment_keys.iter().enumerate() {
@@ -6720,10 +8433,8 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             writer.seal(&shard, 0, 101 + i as i64 * 10).unwrap();
         }
-        writer
-            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
-            .unwrap();
-        assert_eq!(writer.expire_segments_through(&shard, 3, 1_000).unwrap(), 2);
+        advance_floor_as_owner(&writer, &shard, 3, 0).unwrap();
+        assert_eq!(expire_as_owner(&writer, &shard, 3, 1_000).unwrap(), 2);
 
         let head_key = SegmentedObjectLog::<InMemoryBlobStore>::manifest_head_key(&shard, 1);
         let head_bytes = store
@@ -6768,12 +8479,11 @@ mod manifest_deletion_watermark_tests {
                 .unwrap();
             log.seal(&shard, 0, 201 + i as i64 * 10).unwrap();
         }
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 5, 0).unwrap();
 
         let failing_legacy = SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 1);
         store.fail_delete_once(&failing_legacy);
-        let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+        let err = expire_as_owner(&log, &shard, 5, 1_000).unwrap_err();
         assert!(
             matches!(err, EngineError::Conflict),
             "a legacy manifest delete failure should surface so the pass can be retried"
@@ -6795,7 +8505,7 @@ mod manifest_deletion_watermark_tests {
 
         store.clear_delete_failure();
         assert_eq!(
-            log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+            expire_as_owner(&log, &shard, 5, 2_000).unwrap(),
             1,
             "the retry resumes from the undeleted prefix and finishes reclaiming the remaining segment"
         );
@@ -6830,10 +8540,8 @@ mod manifest_deletion_watermark_tests {
             writer.seal(&shard, 0, 11 + i as i64 * 10).unwrap();
         }
 
-        writer
-            .advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
-            .unwrap();
-        assert_eq!(writer.expire_segments_through(&shard, 1, 1_000).unwrap(), 1);
+        advance_floor_as_owner(&writer, &shard, 1, 0).unwrap();
+        assert_eq!(expire_as_owner(&writer, &shard, 1, 1_000).unwrap(), 1);
 
         strip_manifest_head_namespace(&store, &shard);
 
@@ -6849,6 +8557,7 @@ mod manifest_deletion_watermark_tests {
                 SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 1),
                 SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 2),
                 SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 3),
+                SegmentedObjectLog::<InMemoryBlobStore>::manifest_key(&shard, 4),
             ],
             "only the legacy manifest namespace remains"
         );
@@ -6922,8 +8631,7 @@ mod manifest_deletion_watermark_tests {
         }
 
         // Advance floor to seq 15, then delete the first 2 segment objects and persist watermark.
-        log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 15), 0)
-            .unwrap();
+        advance_floor_as_owner(&log, &shard, 15, 0).unwrap();
         let entries = log.read_manifest(&shard).unwrap();
         let seg_keys: Vec<String> = entries
             .iter()

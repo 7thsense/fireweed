@@ -1178,12 +1178,64 @@ pub trait IdGen: Send + Sync {
 }
 
 /// What a `tick` fired (TD-007 §3). Empty when nothing was due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceStopReason {
+    BudgetExhausted,
+    EpochFenced,
+    OwnershipUnproven,
+    FrontierProofMissing,
+    RetryableFailure,
+    PermanentFailure,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceSummary {
+    pub scanned: u64,
+    pub retained: u64,
+    pub objects_deleted: u64,
+    pub bytes_deleted: u64,
+    pub object_requests: u64,
+    pub retryable_failures: u64,
+    pub permanent_failures: u64,
+    pub fenced: bool,
+    pub cursor_pending: bool,
+    pub stopped_by: Option<MaintenanceStopReason>,
+    pub orphan_branches_reclaimed: u64,
+}
+
+impl MaintenanceSummary {
+    /// Merge another bounded maintenance operation into this tick's aggregate report.
+    pub fn merge(&mut self, other: Self) {
+        self.scanned += other.scanned;
+        self.retained += other.retained;
+        self.objects_deleted += other.objects_deleted;
+        self.bytes_deleted += other.bytes_deleted;
+        self.object_requests += other.object_requests;
+        self.retryable_failures += other.retryable_failures;
+        self.permanent_failures += other.permanent_failures;
+        self.fenced |= other.fenced;
+        self.cursor_pending |= other.cursor_pending;
+        self.stopped_by = other.stopped_by.or(self.stopped_by);
+        self.orphan_branches_reclaimed += other.orphan_branches_reclaimed;
+    }
+
+    /// Whether a bounded deletion pass proved that its entire target was processed.
+    pub fn deletion_pass_complete(&self) -> bool {
+        !self.cursor_pending
+            && self.retryable_failures == 0
+            && self.permanent_failures == 0
+            && !self.fenced
+            && self.stopped_by.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TickReport {
     pub leases_reclaimed: u64,
     pub cohorts_expired: u64,
     pub items_promoted: u64,
     pub progress_bound_breaches: u64,
+    pub maintenance: MaintenanceSummary,
 }
 
 impl TickReport {
@@ -1406,4 +1458,77 @@ pub trait HistoricalProjectionRead: Send + Sync {
     where
         T: Send,
         F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send;
+}
+
+#[cfg(test)]
+mod maintenance_summary_tests {
+    use super::{MaintenanceStopReason, MaintenanceSummary};
+
+    #[test]
+    fn merge_preserves_bounded_progress_and_failure_state() {
+        let mut aggregate = MaintenanceSummary {
+            scanned: 2,
+            objects_deleted: 1,
+            bytes_deleted: 11,
+            object_requests: 3,
+            ..MaintenanceSummary::default()
+        };
+        aggregate.merge(MaintenanceSummary {
+            scanned: 5,
+            retained: 1,
+            objects_deleted: 2,
+            bytes_deleted: 17,
+            object_requests: 4,
+            retryable_failures: 1,
+            fenced: true,
+            cursor_pending: true,
+            stopped_by: Some(MaintenanceStopReason::RetryableFailure),
+            orphan_branches_reclaimed: 1,
+            ..MaintenanceSummary::default()
+        });
+
+        assert_eq!(aggregate.scanned, 7);
+        assert_eq!(aggregate.retained, 1);
+        assert_eq!(aggregate.objects_deleted, 3);
+        assert_eq!(aggregate.bytes_deleted, 28);
+        assert_eq!(aggregate.object_requests, 7);
+        assert_eq!(aggregate.retryable_failures, 1);
+        assert!(aggregate.fenced);
+        assert!(aggregate.cursor_pending);
+        assert_eq!(
+            aggregate.stopped_by,
+            Some(MaintenanceStopReason::RetryableFailure)
+        );
+        assert_eq!(aggregate.orphan_branches_reclaimed, 1);
+    }
+
+    #[test]
+    fn only_a_fully_completed_deletion_pass_allows_a_watermark() {
+        assert!(MaintenanceSummary::default().deletion_pass_complete());
+
+        for incomplete in [
+            MaintenanceSummary {
+                cursor_pending: true,
+                ..MaintenanceSummary::default()
+            },
+            MaintenanceSummary {
+                retryable_failures: 1,
+                ..MaintenanceSummary::default()
+            },
+            MaintenanceSummary {
+                permanent_failures: 1,
+                ..MaintenanceSummary::default()
+            },
+            MaintenanceSummary {
+                fenced: true,
+                ..MaintenanceSummary::default()
+            },
+            MaintenanceSummary {
+                stopped_by: Some(MaintenanceStopReason::BudgetExhausted),
+                ..MaintenanceSummary::default()
+            },
+        ] {
+            assert!(!incomplete.deletion_pass_complete());
+        }
+    }
 }

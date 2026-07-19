@@ -14,14 +14,14 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 8510cb604aacf3f0e222c7a0452e9c064465a5bd909586d688b8e1134a85ed9c
+    self_hash: 047bbc7eaf05041dd143371043747295b9157fa520bcde7e249e51b255c189b5
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      td-s3-object-log-sqlite-projection-mode: 94855c909aac4f1a362bce18f1720e58d524945eba5a4dda495e46ed9a0c1116
+      td-s3-object-log-sqlite-projection-mode: 3765364468e6c3355df70b89cf4a3d59c6cebae935c75ff9eb13fbbc95af210c
       td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
       tp-scale-substantiation: ff74b55a3869b335aa80e2e52abae5cea979d028c1c41559ab027e477a26c253
-      tp-verification-acceptance-criteria: e4cdf81601d5246355ffc3ac09c4ac92ea0370f8fa9ce4cea801ec784e3717cb
-    reviewed_at: "2026-07-18T22:13:10Z"
+      tp-verification-acceptance-criteria: 499b3c2c4300fa311a7189c64fc1321903ad8b2f67045f9bd95c993d690158d5
+    reviewed_at: "2026-07-19T01:26:10Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption
@@ -62,7 +62,7 @@ explicit cost ceiling.
 | 2 | SP-02 deterministic simulation | Local GO with conditions: independent model + real segmented-log trace runner | Makes later metadata/GC migrations testable under durable schedule faults | Stable replay, real cuts, typed corpus, <=32-op identity shrink; cross-host/clean-CI/untargeted gates pending |
 | 3 | SP-03 sequenced metadata | Implemented locally; release gates pending | Shared eligibility classification removes repeated race logic before maintenance refactor | Typed retained create-only publication, real advance→delete and delete→advance paths, ambiguity reread, HCAS-F1/F2 crash evidence; full release perf matrix pending |
 | 4 | SP-04 object-store telemetry | Implement | Supplies evidence for maintenance and warmup policy | Metrics below retry layer with stable low-cardinality labels |
-| 5 | SP-05 maintenance separation | Implement | Uses typed metadata and telemetry to bound execution | Pure planner plus resumable, dry-run executor |
+| 5 | SP-05 maintenance separation | Implemented locally; hybrid-async frontier negative spike | Uses typed metadata and telemetry to bound execution | Pure planner plus bounded resumable dry-run executor; async object reclamation conservatively retained pending complete authority API |
 | 6 | SP-06 targeted handoff warmup | Evidence-gated spike | Avoids speculative cache complexity | Adopt only if failover/recovery bars improve within memory budget |
 | 7 | SP-07 segment integrity v3 | Implement | Highest migration risk; benefits from simulation and maintenance tooling | CRC32C corruption check, content identity, legacy v2 decode |
 

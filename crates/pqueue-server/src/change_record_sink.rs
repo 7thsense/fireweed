@@ -98,28 +98,6 @@ pub trait ChangeRecordEmissionBackend {
         source_owner_id: Option<pqueue_core::OwnerId>,
     ) -> EngineResult<usize>;
 
-    fn reap_terminal_items(
-        &self,
-        _shard: &QueueKey,
-        _now: UtcTimestamp,
-        _terminal_retention_ms: u64,
-        _emit_change_records: bool,
-    ) -> EngineResult<usize> {
-        Ok(0)
-    }
-
-    /// Reclaim object-log SEGMENT OBJECTS past request-id retention + already checkpointed (bead
-    /// pqueue-b5cc2bc7). Driven by the background sink loop right after its reap, mirroring the reap tick.
-    /// Default no-op — only the composed object-log/hybrid-async backend reclaims segments.
-    fn trim_reclaimable_segments(
-        &self,
-        _shard: &QueueKey,
-        _request_id_retention_ms: u64,
-        _now: UtcTimestamp,
-    ) -> EngineResult<u64> {
-        Ok(0)
-    }
-
     fn supports_change_record_emission_cursor(&self) -> bool {
         false
     }
@@ -147,31 +125,6 @@ where
             emitted_at,
             source_owner_id,
         )
-    }
-
-    fn reap_terminal_items(
-        &self,
-        shard: &QueueKey,
-        now: UtcTimestamp,
-        terminal_retention_ms: u64,
-        emit_change_records: bool,
-    ) -> EngineResult<usize> {
-        ComposedBackend::reap_terminal_items(
-            self,
-            shard,
-            now,
-            terminal_retention_ms,
-            emit_change_records,
-        )
-    }
-
-    fn trim_reclaimable_segments(
-        &self,
-        shard: &QueueKey,
-        request_id_retention_ms: u64,
-        now: UtcTimestamp,
-    ) -> EngineResult<u64> {
-        ComposedBackend::trim_reclaimable_segments(self, shard, request_id_retention_ms, now)
     }
 
     fn supports_change_record_emission_cursor(&self) -> bool {
@@ -803,30 +756,6 @@ where
         match backend.emit_change_record_tail(&shard, sink, batch_size, emitted_at, None) {
             Ok(emitted) => {
                 total += emitted;
-                if let Err(e) = backend.reap_terminal_items(
-                    &shard,
-                    emitted_at,
-                    definition.terminal_retention_ms,
-                    definition.emit_change_records,
-                ) {
-                    eprintln!(
-                        "[change-record] terminal reap failed for {}:{}: {e}",
-                        definition.tenant_id, definition.queue_id
-                    );
-                }
-                // Reclaim object-log segment objects past request-id retention (bead pqueue-b5cc2bc7). Gated
-                // internally on retention_may_advance + the durable checkpoint, so a no-op unless this is a
-                // hybrid-async composed object-log backend with cleared debt.
-                if let Err(e) = backend.trim_reclaimable_segments(
-                    &shard,
-                    definition.request_id_retention_ms,
-                    emitted_at,
-                ) {
-                    eprintln!(
-                        "[change-record] segment trim failed for {}:{}: {e}",
-                        definition.tenant_id, definition.queue_id
-                    );
-                }
             }
             Err(e) => eprintln!(
                 "[change-record] emit failed for {}:{}: {e}",

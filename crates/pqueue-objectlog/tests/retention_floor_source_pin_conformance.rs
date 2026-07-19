@@ -73,9 +73,12 @@ fn trim_through(
     log: &SegmentedObjectLog<Arc<InMemoryBlobStore>>,
     shard: &pqueue_engine::QueueKey,
     through_seq: u64,
-    epoch: u64,
+    _epoch: u64,
     now_ms: i64,
 ) {
+    let epoch = log
+        .acquire_epoch(shard, now_ms)
+        .expect("acquire trim owner");
     log.advance_retention_floor(
         shard,
         CommandPosition::new(shard.clone(), epoch, through_seq),

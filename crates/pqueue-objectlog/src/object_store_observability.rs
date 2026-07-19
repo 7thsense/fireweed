@@ -658,6 +658,54 @@ impl<S> InstrumentedBlobStore<S> {
 }
 
 impl<S: BlobStore> InstrumentedBlobStore<S> {
+    fn observe_classified<T>(
+        &self,
+        operation: BlobOperation,
+        object: BlobObjectClass,
+        call: impl FnOnce(&S) -> ClassifiedBlobResult<ObservedBlobCall<T>>,
+    ) -> ClassifiedBlobResult<ObservedBlobCall<T>> {
+        if !self.recorder.is_enabled() {
+            return call(&self.inner);
+        }
+        let _in_flight = self.recorder.begin();
+        let started = Instant::now();
+        let result = call(&self.inner);
+        let latency_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        match &result {
+            Ok(observed) => self.recorder.record(Event {
+                operation,
+                object,
+                result: BlobResultClass::Success,
+                retryable: false,
+                backend: self.backend,
+                attempts: observed.attempts,
+                retries: 0,
+                request_bytes: observed.request_bytes,
+                response_bytes: observed.response_bytes,
+                latency_ns,
+                error: false,
+                throttled: false,
+                timeout: false,
+            }),
+            Err(error) => self.recorder.record(Event {
+                operation,
+                object,
+                result: error.fault.result,
+                retryable: error.fault.retryable,
+                backend: self.backend,
+                attempts: error.attempts.max(1),
+                retries: 0,
+                request_bytes: error.request_bytes,
+                response_bytes: error.response_bytes,
+                latency_ns,
+                error: true,
+                throttled: error.fault.throttled,
+                timeout: error.fault.timeout,
+            }),
+        }
+        result
+    }
+
     fn observe<T>(
         &self,
         operation: BlobOperation,
@@ -778,6 +826,35 @@ impl<S: BlobStore> BlobStore for InstrumentedBlobStore<S> {
 
     fn instrumentation_recorder(&self) -> Option<Arc<BlobMetricsRecorder>> {
         Some(Arc::clone(&self.reported_recorder))
+    }
+
+    fn observed_get(&self, key: &str) -> ClassifiedBlobResult<ObservedBlobCall<Option<Vec<u8>>>> {
+        self.observe_classified(
+            BlobOperation::Get,
+            BlobObjectClass::from_key(key),
+            |inner| inner.observed_get(key),
+        )
+    }
+
+    fn observed_delete(&self, key: &str) -> ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        self.observe_classified(
+            BlobOperation::Delete,
+            BlobObjectClass::from_key(key),
+            |inner| inner.observed_delete(key),
+        )
+    }
+
+    fn observed_list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> ClassifiedBlobResult<ObservedBlobCall<Vec<String>>> {
+        self.observe_classified(
+            BlobOperation::ListPage,
+            BlobObjectClass::from_key(prefix),
+            |inner| inner.observed_list_page(prefix, start_after, limit),
+        )
     }
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         self.observe(

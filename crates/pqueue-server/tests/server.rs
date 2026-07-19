@@ -14,7 +14,7 @@ use pqueue_engine::{
     ChangeRecord, ChangeRecordKind, ChangeRecordSink, ClaimPort, ClaimRequest, Clock,
     ComposedBackend, ControlPlaneConfig, ControlPlaneStore, EngineError, FinalizeKind,
     FinalizeOutcome, FinalizePort, InMemoryControlPlane, InProcessControlPlane, LogStore,
-    ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey,
+    ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueKey, ReclaimDriver,
 };
 use pqueue_memory::{ManualClock, composed_memory_backend};
 use pqueue_objectlog::ObjectLog;
@@ -1990,7 +1990,7 @@ impl ChangeRecordSink for RecordingChangeRecordSink {
 }
 
 #[tokio::test]
-async fn emit_enabled_queues_reap_terminal_items_only_after_cursor_reaches_terminal_record() {
+async fn reclaim_driver_reaps_only_after_emitter_advances_terminal_cursor() {
     let backend = Arc::new(composed_sqlite_backend_in_memory().unwrap());
     let shard = qkey();
     backend.create_queue(qdef()).await.unwrap();
@@ -2046,6 +2046,12 @@ async fn emit_enabled_queues_reap_terminal_items_only_after_cursor_reaches_termi
         backend.with_log(|log| log.emission_cursor(&shard).unwrap()),
         Some(pqueue_engine::CommandPosition::new(shard.clone(), 0, 2))
     );
+    assert_eq!(
+        backend.metrics(&shard).await.unwrap().complete,
+        1,
+        "the emitter owns only emission; it does not run a duplicate maintenance loop"
+    );
+    backend.tick(ts(100_000)).await.unwrap();
     assert_eq!(backend.metrics(&shard).await.unwrap().complete, 0);
     assert_eq!(
         sink.batches(),

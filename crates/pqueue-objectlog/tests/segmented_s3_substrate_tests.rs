@@ -28,9 +28,13 @@ use std::thread;
 use pqueue_conformance::{envelope, item, qdef, shard};
 use pqueue_core::QueueId;
 use pqueue_engine::{CommandPosition, EngineError, EngineResult, PushCommand, QueueCommand};
+use pqueue_objectlog::maintenance::{
+    MaintenanceExecutionReason, MaintenanceFailureCause, MaintenanceLimits,
+};
 use pqueue_objectlog::object_store_observability::{
     BlobBackendKind, BlobMetricsRecorder, BlobObjectClass, BlobOperation, BlobResultClass,
-    InstrumentedBlobStore,
+    BlobStoreFault, ClassifiedBlobError, ClassifiedBlobResult, InstrumentedBlobStore,
+    ObservedBlobCall,
 };
 use pqueue_objectlog::segmented::{
     BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
@@ -49,6 +53,70 @@ fn pushes(n: u64) -> Vec<pqueue_engine::CommandEnvelope> {
             )
         })
         .collect()
+}
+
+/// Establishes real local ownership before driving maintenance from a fixture.
+///
+/// Production maintenance is only valid on an instance that acquired the serving epoch; merely observing
+/// the durable epoch is not ownership proof. Tests that intentionally exercise a stale-owner fence call
+/// `expire_segments_through` directly instead.
+fn expire_segments_as_local_owner<S: BlobStore>(
+    log: &SegmentedObjectLog<S>,
+    shard: &pqueue_engine::QueueKey,
+    through_seq: u64,
+    now_ms: i64,
+) -> EngineResult<u64> {
+    if log.maintenance_owner_epoch(shard).is_none() {
+        log.acquire_epoch(shard, now_ms)?;
+    }
+    log.expire_segments_through(shard, through_seq, now_ms)
+}
+
+fn advance_floor_as_local_owner<S: BlobStore>(
+    log: &SegmentedObjectLog<S>,
+    shard: &pqueue_engine::QueueKey,
+    through_seq: u64,
+    now_ms: i64,
+) -> EngineResult<u64> {
+    let epoch = match log.maintenance_owner_epoch(shard) {
+        Some(epoch) => epoch,
+        None => log.acquire_epoch(shard, now_ms)?,
+    };
+    log.advance_retention_floor(
+        shard,
+        CommandPosition::new(shard.clone(), epoch, through_seq),
+        epoch,
+    )?;
+    Ok(epoch)
+}
+
+fn gc_orphans_as_local_owner<S: BlobStore>(
+    log: &SegmentedObjectLog<S>,
+    source: &pqueue_engine::QueueKey,
+) -> EngineResult<u64> {
+    let epoch = match log.maintenance_owner_epoch(source) {
+        Some(epoch) => epoch,
+        None => log.acquire_epoch(source, 0)?,
+    };
+    let limits =
+        MaintenanceLimits::new(256, u64::MAX, 4096, std::time::Duration::from_secs(1), 256)?;
+    let mut completed = 0;
+    loop {
+        let report = log.gc_orphaned_branches_bounded(source, epoch, i64::MAX, 0, limits, false)?;
+        completed += report.completed_candidates as u64;
+        match report.stopped_by {
+            Some(MaintenanceExecutionReason::EpochChanged) => return Err(EngineError::EpochFenced),
+            Some(MaintenanceExecutionReason::RetryableFailure) => {
+                return Err(EngineError::Storage("retryable maintenance failure".into()));
+            }
+            Some(MaintenanceExecutionReason::PermanentFailure) => {
+                return Err(EngineError::Storage("permanent maintenance failure".into()));
+            }
+            Some(MaintenanceExecutionReason::BudgetExhausted) | None
+                if report.cursor.is_some() || report.deleted > 0 => {}
+            _ => return Ok(completed),
+        }
+    }
 }
 
 struct CasLossStore {
@@ -274,6 +342,7 @@ struct CountingBlobStore {
     segment_gets: AtomicU64,
     manifest_gets: AtomicU64,
     list_count: AtomicU64,
+    branch_list_count: AtomicU64,
     get_keys: Mutex<Vec<String>>,
 }
 
@@ -286,11 +355,16 @@ impl CountingBlobStore {
         self.segment_gets.store(0, Ordering::Relaxed);
         self.manifest_gets.store(0, Ordering::Relaxed);
         self.list_count.store(0, Ordering::Relaxed);
+        self.branch_list_count.store(0, Ordering::Relaxed);
         self.get_keys.lock().unwrap().clear();
     }
 
     fn get_keys(&self) -> Vec<String> {
         self.get_keys.lock().unwrap().clone()
+    }
+
+    fn branch_list_count(&self) -> u64 {
+        self.branch_list_count.load(Ordering::Relaxed)
     }
 }
 
@@ -320,6 +394,9 @@ impl BlobStore for CountingBlobStore {
 
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         self.list_count.fetch_add(1, Ordering::Relaxed);
+        if prefix.ends_with("branches/") {
+            self.branch_list_count.fetch_add(1, Ordering::Relaxed);
+        }
         self.inner.list(prefix)
     }
 
@@ -762,17 +839,9 @@ fn branch_reads_survive_source_prefix_deletion_and_stay_on_branch_owned_keys() {
         parent.enqueue(&parent_shard, &pushes(1), 0, 10).unwrap();
         parent.seal(&parent_shard, 0, 11).unwrap();
     }
-    parent
-        .advance_retention_floor(
-            &parent_shard,
-            CommandPosition::new(parent_shard.clone(), 0, 3),
-            0,
-        )
-        .unwrap();
+    advance_floor_as_local_owner(&parent, &parent_shard, 3, 20).unwrap();
     assert_eq!(
-        parent
-            .expire_segments_through(&parent_shard, 3, 20)
-            .unwrap(),
+        expire_segments_as_local_owner(&parent, &parent_shard, 3, 20).unwrap(),
         4
     );
 
@@ -923,7 +992,7 @@ fn branch_pins_parent_segments_against_expiry() {
     let parent_manifest_head_key = manifest_head_key_s(&parent_shard, 0);
     let parent_manifest_legacy_key = manifest_key_s(&parent_shard, 0);
 
-    let deleted = log.expire_segments_through(&parent_shard, 3, 21).unwrap();
+    let deleted = expire_segments_as_local_owner(&log, &parent_shard, 3, 21).unwrap();
     assert_eq!(
         deleted, 0,
         "live branch pins parent segments against expiry"
@@ -943,7 +1012,7 @@ fn branch_pins_parent_segments_against_expiry() {
     );
 
     log.discard_branch(&parent_shard, &branch_shard).unwrap();
-    let deleted_after = log.expire_segments_through(&parent_shard, 3, 22).unwrap();
+    let deleted_after = expire_segments_as_local_owner(&log, &parent_shard, 3, 22).unwrap();
     assert_eq!(deleted_after, 1, "discarding the branch releases the pin");
     assert!(
         store.get(&parent_seg_key).unwrap().is_none(),
@@ -987,7 +1056,7 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
     let manifest_legacy_key = manifest_key_s(&parent_shard, 0);
 
     assert_eq!(
-        log.expire_segments_through(&parent_shard, 3, 20).unwrap(),
+        expire_segments_as_local_owner(&log, &parent_shard, 3, 20).unwrap(),
         0,
         "the live branch pin still blocks reclamation before TTL expiry"
     );
@@ -996,7 +1065,7 @@ fn branch_pin_ttl_expiry_releases_manifest_reclamation() {
     assert!(store.get(&manifest_legacy_key).unwrap().is_some());
 
     assert_eq!(
-        log.expire_segments_through(&parent_shard, 3, 22).unwrap(),
+        expire_segments_as_local_owner(&log, &parent_shard, 3, 22).unwrap(),
         1,
         "after TTL expiry the branch pin no longer protects the source segment"
     );
@@ -1016,7 +1085,6 @@ fn TestManifestReclamationWatermarkStopsAtPinnedBranches() {
     let log = SegmentedObjectLog::open(store.clone(), cfg);
     let source = shard();
     log.create_queue(&qdef()).unwrap();
-
     log.enqueue(&source, &pushes(2), 0, 10).unwrap();
     log.seal(&source, 0, 11).unwrap();
     log.enqueue(&source, &pushes(2), 0, 20).unwrap();
@@ -1032,10 +1100,9 @@ fn TestManifestReclamationWatermarkStopsAtPinnedBranches() {
     )
     .unwrap();
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 1), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 1, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 1, 31).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 1, 31).unwrap(),
         0,
         "the live branch pin keeps the below-floor segment from being reclaimed"
     );
@@ -1097,9 +1164,11 @@ fn TestBranchPinReleaseEnablesManifestReclaim() {
     let manifest_head_key = manifest_head_key_s(&source, 0);
     let manifest_legacy_key = manifest_key_s(&source, 0);
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 1), 0)
-        .unwrap();
-    assert_eq!(log.expire_segments_through(&source, 1, 31).unwrap(), 0);
+    advance_floor_as_local_owner(&log, &source, 1, 0).unwrap();
+    assert_eq!(
+        expire_segments_as_local_owner(&log, &source, 1, 31).unwrap(),
+        0
+    );
     log.discard_branch(&source, &branch).unwrap();
     assert_eq!(
         log.manifest_reclamation_candidates(&source, 1, 32)
@@ -1110,7 +1179,7 @@ fn TestBranchPinReleaseEnablesManifestReclaim() {
     );
 
     assert_eq!(
-        log.expire_segments_through(&source, 1, 32).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 1, 32).unwrap(),
         1,
         "once the branch pin is released, the formerly pinned segment can be reclaimed"
     );
@@ -1206,10 +1275,9 @@ fn TestDeletionWatermarkStopsBeforePinnedManifest() {
     )
     .unwrap();
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 1), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 1, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 1, 31).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 1, 31).unwrap(),
         0,
         "the pinned below-floor entry is skipped on the first pass"
     );
@@ -1221,7 +1289,7 @@ fn TestDeletionWatermarkStopsBeforePinnedManifest() {
 
     log.discard_branch(&source, &branch).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 1, 32).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 1, 32).unwrap(),
         1,
         "after the pin releases, the same entry is reclaimed"
     );
@@ -1234,11 +1302,11 @@ fn TestDeletionWatermarkStopsBeforePinnedManifest() {
 
 /// Test 7 (bead pqueue-b5cc2bc7 — branch-pin safety of segment reclamation): a live branch pinning a
 /// below-floor segment keeps that segment object alive through a trim (`expire_segments_through` skips it via
-/// `branch_pins_segment`), while an unpinned below-floor segment IS reclaimed. Separately, a NEW branch cut at
+/// its live-pin snapshot), while an unpinned below-floor segment IS reclaimed. Separately, a NEW branch cut at
 /// or below the durable retention floor is rejected CLEANLY (a fast `Invalid`, not a later "missing segment").
 #[test]
 fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
-    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let store = std::sync::Arc::new(CountingBlobStore::default());
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let log = SegmentedObjectLog::open(store.clone(), cfg);
     let parent = shard();
@@ -1281,19 +1349,30 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
     assert_eq!(horizon, Some(3), "the expired-segment prefix ends at seq 3");
 
     // Crash-safe order: advance the floor FIRST (epoch-fenced at the current epoch 0), then delete.
-    log.advance_retention_floor(&parent, CommandPosition::new(parent.clone(), 0, 3), 0)
-        .unwrap();
-    let deleted = log.expire_segments_through(&parent, 3, 30).unwrap();
+    advance_floor_as_local_owner(&log, &parent, 3, 0).unwrap();
+    store.reset_reads();
+    let deleted = expire_segments_as_local_owner(&log, &parent, 3, 30).unwrap();
     assert_eq!(
         deleted, 1,
         "only the UNPINNED below-floor segment (seg1) is reclaimed; the branch-pinned seg0 is skipped"
     );
+    assert_eq!(
+        store.branch_list_count(),
+        2,
+        "expiry and its contiguous-watermark proof each capture one pin snapshot, independent of manifest length"
+    );
     // The pinned seg0 is reported so the composed trim caller holds its completed-deletion watermark BELOW it
     // (a released pin must be re-scanned, not skipped forever — bug 2b).
+    store.reset_reads();
     assert_eq!(
         log.lowest_branch_pinned_below(&parent, 3, 30).unwrap(),
         Some(0),
         "the branch-pinned below-floor segment (first_seq 0) is reported while the pin is live"
+    );
+    assert_eq!(
+        store.branch_list_count(),
+        1,
+        "the lowest-pinned fold reads the branch registry once, independent of manifest length"
     );
 
     assert!(
@@ -1364,7 +1443,7 @@ fn retention_floor_trim_respects_branch_pins_and_rejects_below_floor_cuts() {
         None,
         "after the pin releases nothing below the floor is pinned (the watermark can settle at the floor)"
     );
-    let deleted_after = log.expire_segments_through(&parent, 3, 41).unwrap();
+    let deleted_after = expire_segments_as_local_owner(&log, &parent, 3, 41).unwrap();
     assert_eq!(
         deleted_after, 1,
         "discarding the branch releases seg0 to be reclaimed"
@@ -1402,8 +1481,7 @@ fn retention_floor_advance_is_epoch_fenced_manifest_cas_against_a_superseded_own
     log.seal(&shard, 0, 11).unwrap();
 
     // Owner at epoch 0 advances the floor to seq 1 (a floor MANIFEST ENTRY committed via CAS).
-    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 1), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard, 1, 0).unwrap();
 
     // A NEW owner takes over: acquire a strictly-greater epoch (a fence entry committed to the manifest).
     let new_epoch = log.acquire_epoch(&shard, 20).unwrap();
@@ -1423,7 +1501,7 @@ fn retention_floor_advance_is_epoch_fenced_manifest_cas_against_a_superseded_own
         Some(3),
         "the AUTHORITATIVE floor is the max retention-floor manifest entry (seq 3)"
     );
-    log.expire_segments_through(&shard, 3, 21).unwrap();
+    expire_segments_as_local_owner(&log, &shard, 3, 21).unwrap();
 
     // The SUPERSEDED owner (still believing it holds epoch 0) tries to LOWER the floor to seq 2 -> rejected by
     // the epoch-fenced CAS; the floor stays at the newer owner's seq 3.
@@ -1460,6 +1538,30 @@ fn retention_floor_advance_is_epoch_fenced_manifest_cas_against_a_superseded_own
         1,
         "recovery reads the tail with no missing segment"
     );
+}
+
+#[test]
+fn retention_floor_advance_rejects_observer_with_only_durable_epoch_knowledge() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let owner = SegmentedObjectLog::open(store.clone(), cfg);
+    owner.create_queue(&qdef()).unwrap();
+    owner.enqueue(&shard, &pushes(2), 0, 10).unwrap();
+    owner.seal(&shard, 0, 11).unwrap();
+
+    let observer = SegmentedObjectLog::open(store, cfg);
+    observer.create_queue(&qdef()).unwrap();
+    let durable_epoch = observer.current_epoch(&shard).unwrap();
+    let error = observer
+        .advance_retention_floor(
+            &shard,
+            CommandPosition::new(shard.clone(), durable_epoch, 1),
+            durable_epoch,
+        )
+        .unwrap_err();
+    assert_eq!(error, EngineError::EpochFenced);
+    assert!(observer.read_retention_floor(&shard).unwrap().is_none());
 }
 
 /// Test (bead pqueue-b5cc2bc7 bug 1 — GROUP-COMMIT batch-max seal timestamp): when several pushes co-buffer
@@ -1591,13 +1693,8 @@ impl FaultHook for PeerTrimDuringBranch {
         {
             // Peer trim: advance the source floor (epoch-fenced manifest CAS) then reclaim. The branch's pin is
             // already published, so `expire_segments_through` SKIPS the pinned segments — nothing is deleted.
-            log.advance_retention_floor(
-                &self.source,
-                CommandPosition::new(self.source.clone(), 0, self.new_floor),
-                0,
-            )
-            .unwrap();
-            log.expire_segments_through(&self.source, self.new_floor, self.now_ms)
+            advance_floor_as_local_owner(&log, &self.source, self.new_floor, self.now_ms).unwrap();
+            expire_segments_as_local_owner(&log, &self.source, self.new_floor, self.now_ms)
                 .unwrap();
         }
         Ok(())
@@ -1661,7 +1758,7 @@ fn branch_over_a_concurrently_trimming_source_fails_cleanly_with_no_missing_segm
     // The partial branch is fully rolled back, leaving NO lingering source pin: a subsequent trim (the floor is
     // now 5) reclaims all six segments, proving the rollback released the pin.
     assert_eq!(
-        log.expire_segments_through(&source, 5, 200).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, 200).unwrap(),
         6,
         "the rolled-back branch left no lingering pin — the source is fully reclaimable afterward"
     );
@@ -1707,14 +1804,8 @@ impl<S: BlobStore + 'static> FaultHook for PeerTrimBoundedAdvances<S> {
             let floor = self.next_floor.fetch_add(1, Ordering::SeqCst);
             // Advance the source floor (epoch-fenced manifest CAS) then reclaim. The branch's pin is already
             // published, so `expire_segments_through` SKIPS the pinned segments — nothing is deleted.
-            log.advance_retention_floor(
-                &self.source,
-                CommandPosition::new(self.source.clone(), 0, floor),
-                0,
-            )
-            .unwrap();
-            log.expire_segments_through(&self.source, floor, self.now_ms)
-                .unwrap();
+            advance_floor_as_local_owner(&log, &self.source, floor, self.now_ms).unwrap();
+            expire_segments_as_local_owner(&log, &self.source, floor, self.now_ms).unwrap();
         }
         Ok(())
     }
@@ -1738,10 +1829,11 @@ fn branch_retries_a_bounded_concurrent_floor_advance_and_succeeds() {
     ));
     let source = shard();
     log.create_queue(&qdef()).unwrap();
+    let owner_epoch = log.acquire_epoch(&source, 0).unwrap();
     // Six single-command segments, seq 0..5.
     for _ in 0..6 {
-        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
-        log.seal(&source, 0, 10).unwrap();
+        log.enqueue(&source, &pushes(1), owner_epoch, 10).unwrap();
+        log.seal(&source, owner_epoch, 10).unwrap();
     }
 
     // Peer advances the floor to 1 then 2 (two attempts race), then STOPS — a later retry sees a stable floor=2.
@@ -1826,10 +1918,11 @@ fn branch_gives_up_cleanly_under_continuous_trimming() {
     ));
     let source = shard();
     log.create_queue(&qdef()).unwrap();
+    let owner_epoch = log.acquire_epoch(&source, 0).unwrap();
     // Eight single-command segments, seq 0..7 — headroom so the cut stays above the floor for every attempt.
     for _ in 0..8 {
-        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
-        log.seal(&source, 0, 10).unwrap();
+        log.enqueue(&source, &pushes(1), owner_epoch, 10).unwrap();
+        log.seal(&source, owner_epoch, 10).unwrap();
     }
 
     // Peer advances the floor on EVERY attempt (budget far exceeds the retry cap) — continuous trimming.
@@ -1860,9 +1953,9 @@ fn branch_gives_up_cleanly_under_continuous_trimming() {
     );
     // No leaked pin: the final attempt rolled back, so the source is FULLY reclaimable afterward.
     assert_eq!(
-        log.expire_segments_through(&source, 7, 200).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 7, 200).unwrap(),
         8,
-        "the given-up branch left no lingering pin — all eight source segments are reclaimable"
+        "cut-range pins retain every source segment during the races; rollback releases the pin and all eight become reclaimable"
     );
     assert!(
         log.read_retention_floor(&branch).unwrap().is_none(),
@@ -1881,9 +1974,10 @@ fn branch_cut_below_advanced_floor_is_rejected_invalid_not_retried() {
     ));
     let source = shard();
     log.create_queue(&qdef()).unwrap();
+    let owner_epoch = log.acquire_epoch(&source, 0).unwrap();
     for _ in 0..6 {
-        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
-        log.seal(&source, 0, 10).unwrap();
+        log.enqueue(&source, &pushes(1), owner_epoch, 10).unwrap();
+        log.seal(&source, owner_epoch, 10).unwrap();
     }
 
     // Peer advances the floor to 1, then 2, then 3, then stops.
@@ -1975,9 +2069,10 @@ fn branch_does_not_retry_a_rollback_cleanup_conflict() {
     ));
     let source = shard();
     log.create_queue(&qdef()).unwrap();
+    let owner_epoch = log.acquire_epoch(&source, 0).unwrap();
     for _ in 0..6 {
-        log.enqueue(&source, &pushes(1), 0, 10).unwrap();
-        log.seal(&source, 0, 10).unwrap();
+        log.enqueue(&source, &pushes(1), owner_epoch, 10).unwrap();
+        log.seal(&source, owner_epoch, 10).unwrap();
     }
 
     // Race a SINGLE concurrent floor advance (to 1) so the first attempt takes the floor-moved rollback path.
@@ -2016,7 +2111,7 @@ fn branch_does_not_retry_a_rollback_cleanup_conflict() {
     // The pin is RETAINED (safe leak): the source is NOT reclaimable, its segments stay protected.
     *store.fail_delete.lock().unwrap() = None; // disarm so the reclaim attempt can run its deletes
     assert_eq!(
-        log.expire_segments_through(&source, 5, 200).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, 200).unwrap(),
         0,
         "the retained pin keeps the source fully protected — nothing is reclaimed after the cleanup failure"
     );
@@ -2056,6 +2151,12 @@ impl FailingBlobStore {
 }
 
 impl BlobStore for FailingBlobStore {
+    fn backend_kind(&self) -> BlobBackendKind {
+        BlobBackendKind::Memory
+    }
+    fn max_physical_attempts_per_primitive(&self) -> Option<std::num::NonZeroUsize> {
+        std::num::NonZeroUsize::new(1)
+    }
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         if Self::armed(&self.fail_put, key) {
             return Err(EngineError::Storage(format!("injected put failure: {key}")));
@@ -2143,7 +2244,7 @@ fn check_post_pin_store_failure(
         "all six source segments remain readable — no missing segment under any post-pin failure"
     );
     // (b)/(c) the pin is released iff the rollback's branch-object cleanup completed.
-    let deleted = log.expire_segments_through(&source, 5, 200).unwrap();
+    let deleted = expire_segments_as_local_owner(&log, &source, 5, 200).unwrap();
     if expect_source_reclaimable_after {
         assert_eq!(
             deleted, 6,
@@ -2249,11 +2350,9 @@ fn compound_marker_and_cleanup_failure_then_ttl_and_trim_never_yields_a_missing_
     // TTL passes: the pin (expires_at = created_now + ttl) lapses, so a trim on the source now reclaims the
     // segments the partial branch's manifest still references.
     let now_after_ttl = created_now + ttl_ms as i64 + 1;
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 5, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 5, now_after_ttl)
-            .unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, now_after_ttl).unwrap(),
         6,
         "after the TTL lapses the pin no longer protects the source — all six segments are reclaimed"
     );
@@ -2307,7 +2406,7 @@ fn committed_branch_is_readable_and_protected() {
     );
     // Its live pin protects the source segments against a concurrent trim.
     assert_eq!(
-        log.expire_segments_through(&source, 5, 200).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, 200).unwrap(),
         0,
         "the committed branch's live pin protects the source segments from reclamation"
     );
@@ -2328,10 +2427,9 @@ fn branch_inherits_source_retention_floor_and_reads_no_missing_segment() {
         log.seal(&source, 0, 10).unwrap();
     }
     // Reclaim through floor=3 (segments 0-3 deleted).
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 3, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 3, 20).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 20).unwrap(),
         4,
         "segments 0-3 are reclaimed"
     );
@@ -2420,12 +2518,11 @@ fn seed_trimmed_source<S: BlobStore, T: BlobStore>(
         log.enqueue(source, &pushes(1), 0, 10).unwrap();
         log.seal(source, 0, 11).unwrap();
     }
-    log.advance_retention_floor(source, CommandPosition::new(source.clone(), 0, floor), 12)
-        .unwrap();
+    advance_floor_as_local_owner(log, source, floor, 12).unwrap();
 
     let manifest_prefix = format!("{}manifest/", shard_prefix_of(source));
     let before = store.list(&manifest_prefix).unwrap();
-    let reclaimed = log.expire_segments_through(source, floor, 20).unwrap();
+    let reclaimed = expire_segments_as_local_owner(log, source, floor, 20).unwrap();
     assert_eq!(
         reclaimed,
         floor + 1,
@@ -2500,12 +2597,18 @@ fn branch_inheritance_uses_retained_floor_metadata() {
     }
     // The RETAINED floor metadata survives ABOVE the read-horizon: the authoritative retention-floor entry is
     // the inheritance substrate branch creation is left with (the watermark stops strictly below it).
-    let floor_entry_key = manifest_head_key_of(&source, 8);
-    let floor_entry: serde_json::Value =
-        serde_json::from_slice(&store.inner.get(&floor_entry_key).unwrap().expect(
-            "the AUTHORITATIVE retention-floor entry is RETAINED (read_retention_floor still needs it)",
-        ))
-        .unwrap();
+    let (floor_entry_key, floor_entry): (String, serde_json::Value) = store
+        .inner
+        .list(&format!("{}manifest_head/", shard_prefix_of(&source)))
+        .unwrap()
+        .into_iter()
+        .filter_map(|key| {
+            let bytes = store.inner.get(&key).ok().flatten()?;
+            let entry = serde_json::from_slice(&bytes).ok()?;
+            Some((key, entry))
+        })
+        .find(|(_, entry): &(String, serde_json::Value)| entry["retention_floor_through"] == 3)
+        .expect("the authoritative retention-floor entry is retained");
     assert_eq!(
         floor_entry["retention_floor_through"], 3,
         "the retained floor entry carries the source floor f = 3"
@@ -2881,7 +2984,7 @@ fn branch_inheritance_source_pins_preserved() {
     // ... and the orphan GC guarantee is not relaxed: a fully COMMITTED branch is never reclaimed by
     // gc_orphaned_branches, whether or not its source was trimmed before the branch was created.
     assert_eq!(
-        log.gc_orphaned_branches(&source).unwrap(),
+        gc_orphans_as_local_owner(&log, &source).unwrap(),
         0,
         "a committed branch created off retained floor metadata is never an orphan"
     );
@@ -2902,7 +3005,7 @@ fn branch_inheritance_source_pins_preserved() {
     // branch's own cut must reclaim NOTHING while the branch is live — the retained-metadata inheritance path
     // does not weaken the pin an ordinary (untrimmed-source) branch would have installed.
     assert_eq!(
-        log.expire_segments_through(&source, 7, 61).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 7, 61).unwrap(),
         0,
         "the live branch pins every retained source segment it reads (4..7) against expiry"
     );
@@ -2924,7 +3027,7 @@ fn branch_inheritance_source_pins_preserved() {
         "discarding the branch releases the source pin"
     );
     assert_eq!(
-        log.expire_segments_through(&source, 7, 62).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 7, 62).unwrap(),
         4,
         "once the pin is released the formerly-pinned retained segments (4..7) become reclaimable"
     );
@@ -3134,6 +3237,7 @@ struct OrphanBranchFaultStore {
     inner: InMemoryBlobStore,
     fail_marker_put: AtomicBool,
     fail_deletes: AtomicBool,
+    permanent_delete_fault: AtomicBool,
     missing_get: Mutex<Option<String>>,
 }
 
@@ -3143,6 +3247,7 @@ impl OrphanBranchFaultStore {
             inner: InMemoryBlobStore::new(),
             fail_marker_put: AtomicBool::new(false),
             fail_deletes: AtomicBool::new(false),
+            permanent_delete_fault: AtomicBool::new(false),
             missing_get: Mutex::new(None),
         }
     }
@@ -3155,6 +3260,7 @@ impl OrphanBranchFaultStore {
     fn disarm(&self) {
         self.fail_marker_put.store(false, Ordering::SeqCst);
         self.fail_deletes.store(false, Ordering::SeqCst);
+        self.permanent_delete_fault.store(false, Ordering::SeqCst);
         *self.missing_get.lock().unwrap() = None;
     }
 
@@ -3164,6 +3270,19 @@ impl OrphanBranchFaultStore {
 }
 
 impl BlobStore for OrphanBranchFaultStore {
+    fn backend_kind(&self) -> BlobBackendKind {
+        BlobBackendKind::Memory
+    }
+
+    fn classify_fault(&self, error: &EngineError) -> BlobStoreFault {
+        if matches!(error, EngineError::Storage(message) if message.contains("cleanup delete failed"))
+        {
+            BlobStoreFault::new(BlobResultClass::Transport, true, false, false)
+        } else {
+            BlobStoreFault::from_engine_error(error)
+        }
+    }
+
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         if self.fail_marker_put.load(Ordering::SeqCst) && key.ends_with("branch.json") {
             return Err(EngineError::Storage(
@@ -3199,6 +3318,26 @@ impl BlobStore for OrphanBranchFaultStore {
         self.inner.delete(key)
     }
 
+    fn observed_delete(&self, key: &str) -> ClassifiedBlobResult<ObservedBlobCall<bool>> {
+        if self.fail_deletes.load(Ordering::SeqCst) {
+            let outward =
+                EngineError::Storage("typed injected branch cleanup delete failed".into());
+            let fault = if self.permanent_delete_fault.load(Ordering::SeqCst) {
+                BlobStoreFault::new(BlobResultClass::Corrupt, false, false, false)
+            } else {
+                BlobStoreFault::new(BlobResultClass::Transport, true, false, false)
+            };
+            return Err(ClassifiedBlobError {
+                outward,
+                fault,
+                attempts: 1,
+                request_bytes: 0,
+                response_bytes: 0,
+            });
+        }
+        self.inner.observed_delete(key)
+    }
+
     fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
         self.inner.list(prefix)
     }
@@ -3218,9 +3357,14 @@ fn seed_orphaned_branch(
     created_at: i64,
 ) -> pqueue_engine::QueueKey {
     log.create_queue(&qdef()).unwrap();
+    log.fence_epoch(source, 0, created_at.saturating_sub(2))
+        .unwrap();
+    let owner_epoch = log
+        .acquire_epoch(source, created_at.saturating_sub(1))
+        .unwrap();
     for _ in 0..6 {
-        log.enqueue(source, &pushes(1), 0, 10).unwrap();
-        log.seal(source, 0, 10).unwrap();
+        log.enqueue(source, &pushes(1), owner_epoch, 10).unwrap();
+        log.seal(source, owner_epoch, 10).unwrap();
     }
     assert_eq!(log.read_all(source).unwrap().len(), 6);
 
@@ -3232,7 +3376,7 @@ fn seed_orphaned_branch(
     let result = log.branch(
         source,
         &branch_def,
-        &CommandPosition::new(source.clone(), 0, 3),
+        &CommandPosition::new(source.clone(), owner_epoch, 3),
         1_000_000_000, // large TTL: the orphan pin stays "live" well past the GC safety window
         created_at,
     );
@@ -3241,6 +3385,7 @@ fn seed_orphaned_branch(
         result.is_err(),
         "the injected marker-put + cleanup failure fails branch creation: {result:?}"
     );
+    log.acquire_epoch(source, created_at + 1).unwrap();
     branch
 }
 
@@ -3263,8 +3408,8 @@ fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
         "leftover sentinel is durable"
     );
     assert!(
-        !store.list(&format!("{bp}manifest/")).unwrap().is_empty(),
-        "partial branch manifest objects are durable"
+        store.list(&bp).unwrap().len() > 1,
+        "partial branch authority objects are durable"
     );
     assert!(
         store.get(&format!("{bp}branch.json")).unwrap().is_none(),
@@ -3282,14 +3427,14 @@ fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
     );
     // While the orphan pin is live it BLOCKS reclamation of the branched range (the pin is genuinely held).
     assert_eq!(
-        log.expire_segments_through(&source, 3, 2_000).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 2_000).unwrap(),
         0,
         "the orphaned source pin blocks reclamation of the branched range"
     );
 
     // GC reclaims exactly the one abandoned orphan (marker-absent, provably not in-flight under the guard).
     assert_eq!(
-        log.gc_orphaned_branches(&source).unwrap(),
+        gc_orphans_as_local_owner(&log, &source).unwrap(),
         1,
         "the abandoned uncommitted branch is reclaimed"
     );
@@ -3315,7 +3460,7 @@ fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
     );
     // With the pin released the source's branched range reclaims normally, and the surviving tail is intact.
     assert_eq!(
-        log.expire_segments_through(&source, 3, 3_000).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 3_000).unwrap(),
         4,
         "seq 0..3 reclaim once the orphan pin is released"
     );
@@ -3327,7 +3472,7 @@ fn gc_orphaned_branches_reclaims_partial_branch_and_source_stays_reclaimable() {
 
     // Idempotent: a second GC pass over the now-clean source is a no-op.
     assert_eq!(
-        log.gc_orphaned_branches(&source).unwrap(),
+        gc_orphans_as_local_owner(&log, &source).unwrap(),
         0,
         "re-running GC after a clean pass is a no-op"
     );
@@ -3343,6 +3488,7 @@ fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
     log.create_queue(&qdef()).unwrap();
     log.enqueue(&source, &pushes(4), 0, 10).unwrap();
     log.seal(&source, 0, 11).unwrap();
+    log.acquire_epoch(&source, 12).unwrap();
 
     let branch_def = branch_qdef("gc-committed");
     let branch =
@@ -3362,7 +3508,7 @@ fn gc_orphaned_branches_leaves_a_committed_branch_untouched() {
 
     // GC must NOT touch a committed branch.
     assert_eq!(
-        log.gc_orphaned_branches(&source).unwrap(),
+        gc_orphans_as_local_owner(&log, &source).unwrap(),
         0,
         "a committed branch is never an orphan"
     );
@@ -3445,6 +3591,7 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
         log.enqueue(&source, &pushes(1), 0, 10).unwrap();
         log.seal(&source, 0, 10).unwrap();
     }
+    log.acquire_epoch(&source, 11).unwrap();
 
     let (creator_paused_tx, creator_paused_rx) = std::sync::mpsc::channel();
     let (creator_resume_tx, creator_resume_rx) = std::sync::mpsc::channel();
@@ -3483,7 +3630,7 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
     let gc = {
         let log = log.clone();
         let source = source.clone();
-        std::thread::spawn(move || log.gc_orphaned_branches(&source))
+        std::thread::spawn(move || gc_orphans_as_local_owner(&log, &source))
     };
 
     // (3) resume the creator and JOIN it, so `branch.json` is provably committed and the guard released.
@@ -3526,7 +3673,7 @@ fn gc_excludes_a_concurrent_branch_creation_and_never_destroys_a_committing_bran
     );
     // The committing branch's pin protects the source range: a trim through the cut reclaims nothing.
     assert_eq!(
-        log.expire_segments_through(&source, 3, 2_000).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 2_000).unwrap(),
         0,
         "the committed branch's pin protects the source's branched range from reclamation"
     );
@@ -3627,7 +3774,7 @@ fn branch_commit_is_fenced_on_the_source_epoch_and_cross_instance_gc_stays_safe(
     let gc = {
         let log = owner_log.clone();
         let source = source.clone();
-        std::thread::spawn(move || log.gc_orphaned_branches(&source))
+        std::thread::spawn(move || gc_orphans_as_local_owner(&log, &source))
     };
 
     gc_paused_rx.recv().unwrap();
@@ -3646,8 +3793,8 @@ fn branch_commit_is_fenced_on_the_source_epoch_and_cross_instance_gc_stays_safe(
     owner_log.set_fault_hook(None);
 
     assert_eq!(
-        reclaimed, 1,
-        "the current owner's GC reclaims the abandoned orphan once the superseded creator rolls back"
+        reclaimed, 0,
+        "the superseded creator's rollback removes the orphan before the current owner's GC resumes"
     );
 
     let bp = shard_prefix_of(&branch);
@@ -4270,9 +4417,11 @@ fn segmented_authority_recovery_walks_only_the_live_candidate_suffix() {
         log.enqueue(&shard, &pushes(1), 0, now).unwrap();
         log.seal(&shard, 0, now + 100).unwrap();
     }
-    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
-        .unwrap();
-    assert_eq!(log.expire_segments_through(&shard, 3, 10_000).unwrap(), 4);
+    advance_floor_as_local_owner(&log, &shard, 3, 0).unwrap();
+    assert_eq!(
+        expire_segments_as_local_owner(&log, &shard, 3, 10_000).unwrap(),
+        4
+    );
     let candidate_prefix = format!(
         "t/{}/q/{}/manifest_candidates/",
         hex_lower(shard.tenant_id.as_str().as_bytes()),
@@ -4316,17 +4465,11 @@ fn trim_cycle<S: BlobStore>(
     log: &SegmentedObjectLog<S>,
     shard: &QueueKey,
     through_seq: u64,
-    epoch: u64,
+    _epoch: u64,
     now_ms: i64,
 ) {
-    log.advance_retention_floor(
-        shard,
-        CommandPosition::new(shard.clone(), epoch, through_seq),
-        epoch,
-    )
-    .unwrap();
-    log.expire_segments_through(shard, through_seq, now_ms)
-        .unwrap();
+    advance_floor_as_local_owner(log, shard, through_seq, now_ms).unwrap();
+    expire_segments_as_local_owner(log, shard, through_seq, now_ms).unwrap();
 }
 
 fn lagging_partial_expire_fixture() -> (
@@ -4352,8 +4495,7 @@ fn lagging_partial_expire_fixture() -> (
         .map(|first| (first, segment_key_for(store.as_ref(), &source, first)))
         .collect();
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 15), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 15, 100).unwrap();
     for (first_seq, seg_key) in seg_keys.iter().take(2) {
         assert!(
             store.delete(seg_key).unwrap(),
@@ -4379,6 +4521,7 @@ fn assert_partial_expire_visibility_decision_fixture(
 ) {
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef()).unwrap();
+    let owner_epoch = reopened.acquire_epoch(source, 2_000).unwrap();
 
     assert_eq!(
         reopened
@@ -4421,8 +4564,10 @@ fn assert_partial_expire_visibility_decision_fixture(
 
     let reopened = SegmentedObjectLog::open(store.clone(), cfg);
     reopened.create_queue(&qdef()).unwrap();
-    reopened.enqueue(source, &pushes(1), 0, 2_000).unwrap();
-    let reopened_ack = reopened.seal(source, 0, 2_001).unwrap();
+    reopened
+        .enqueue(source, &pushes(1), owner_epoch, 2_000)
+        .unwrap();
+    let reopened_ack = reopened.seal(source, owner_epoch, 2_001).unwrap();
     assert_eq!(
         reopened_ack[0].sequence, 16,
         "recovery still sees the remaining below-floor tail after the partial expire"
@@ -4562,8 +4707,8 @@ fn TestManifestObjectCountBoundedAfterLongTrim() {
     assert_eq!(floor.sequence, 11);
     let legacy_manifest_keys = store.list(&manifest_prefix_s(&shard())).unwrap();
     assert!(
-        legacy_manifest_keys.len() <= 5,
-        "the reclaimed legacy prefix stays within a small constant bound instead of growing with history"
+        legacy_manifest_keys.len() <= 6,
+        "the reclaimed legacy prefix, including the acquired-owner authority record, stays within a small constant bound instead of growing with history"
     );
     assert!(
         legacy_manifest_keys.len() < initial_manifest_keys,
@@ -4673,8 +4818,9 @@ fn TestUnexpectedLiveManifestHoleFailsClosed() {
 
     // A missing live floor entry is not below the durable floor, so reopen must not reconstruct the
     // authoritative floor from the watermark alone.
-    assert!(store.delete(&manifest_head_key_s(&shard(), 2)).unwrap());
-    assert!(store.delete(&manifest_key_s(&shard(), 2)).unwrap());
+    // Acquiring the maintenance epoch occupies index 2; the subsequent floor record is index 3.
+    assert!(store.delete(&manifest_head_key_s(&shard(), 3)).unwrap());
+    assert!(store.delete(&manifest_key_s(&shard(), 3)).unwrap());
     let broken = SegmentedObjectLog::open(store.clone(), cfg);
     assert!(
         broken.create_queue(&qdef()).is_ok(),
@@ -4877,7 +5023,7 @@ fn TestBranchGcPreservesInheritedFloorPins() {
     );
 
     assert_eq!(
-        log.gc_orphaned_branches(&source).unwrap(),
+        gc_orphans_as_local_owner(&log, &source).unwrap(),
         0,
         "branch GC ignores the committed branch even after the source manifest prefix is deleted"
     );
@@ -4917,11 +5063,18 @@ fn TestBranchGcFailClosedOnMissingInheritanceMetadata() {
     let registry_key = branch_registry_key_of(&source, &branch);
     store.arm_missing_get(&registry_key);
 
-    let err = log.gc_orphaned_branches(&source).unwrap_err();
-    assert!(
-        matches!(err, EngineError::Storage(ref msg) if msg.contains("missing branch registry entry")),
-        "branch GC must fail closed when the inherited source-pin metadata disappears: {err:?}"
+    let owner_epoch = log.maintenance_owner_epoch(&source).unwrap();
+    let limits =
+        MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 8).unwrap();
+    let report = log
+        .gc_orphaned_branches_bounded(&source, owner_epoch, 10_000, 100, limits, false)
+        .unwrap();
+    assert_eq!(
+        report.failure_cause,
+        Some(MaintenanceFailureCause::MissingInheritanceMetadata),
+        "branch GC must preserve the structured missing-inheritance cause"
     );
+    assert_eq!(report.permanent_failures, 1);
     assert!(
         store
             .get(&format!("{}branch.pending", shard_prefix_of(&branch)))
@@ -4937,12 +5090,792 @@ fn TestBranchGcFailClosedOnMissingInheritanceMetadata() {
         "the source pin remains registered after the aborted GC pass"
     );
     assert!(
-        !store
-            .list(&format!("{}manifest/", shard_prefix_of(&branch)))
-            .unwrap()
-            .is_empty(),
-        "the branch-local manifest objects are left untouched when GC refuses to proceed"
+        store.list(&shard_prefix_of(&branch)).unwrap().len() > 1,
+        "the branch-local authority objects are left untouched when GC refuses to proceed"
     );
+}
+
+#[test]
+fn bounded_orphan_gc_dry_run_and_partial_resume_preserve_the_pin() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-bounded", 1_000);
+    let owner_epoch = log.maintenance_owner_epoch(&source).unwrap();
+    let registry_key = branch_registry_key_of(&source, &branch);
+    let pending_key = format!("{}branch.pending", shard_prefix_of(&branch));
+
+    let dry_limits =
+        MaintenanceLimits::new(32, 1_000_000, 64, std::time::Duration::from_secs(1), 8).unwrap();
+    let dry = log
+        .gc_orphaned_branches_bounded(&source, owner_epoch, 10_000, 100, dry_limits, true)
+        .unwrap();
+    assert!(dry.requests <= dry_limits.requests.get());
+    assert!(dry.would_delete > 1);
+    assert!(dry.would_delete_bytes > 0);
+    assert_eq!(dry.deleted, 0);
+    assert!(
+        dry.cursor.is_none(),
+        "dry-run must not persist or return a cursor"
+    );
+    assert!(store.get(&registry_key).unwrap().is_some());
+    assert!(store.get(&pending_key).unwrap().is_some());
+
+    let tiny_limits =
+        MaintenanceLimits::new(2, 1_000_000, 16, std::time::Duration::from_secs(1), 2).unwrap();
+    let partial = log
+        .gc_orphaned_branches_bounded(&source, owner_epoch, 10_000, 100, tiny_limits, false)
+        .unwrap();
+    assert!(partial.requests <= tiny_limits.requests.get());
+    assert_eq!(partial.completed_candidates, 0);
+    assert!(
+        partial.cursor.is_none(),
+        "the unresolved first candidate cannot be skipped"
+    );
+    assert!(
+        store.get(&registry_key).unwrap().is_some(),
+        "pin is released last"
+    );
+    assert!(
+        store.get(&pending_key).unwrap().is_some(),
+        "sentinel survives partial cleanup"
+    );
+
+    let finish_limits =
+        MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 1).unwrap();
+    let mut live_deleted = partial.deleted;
+    let mut completed = 0;
+    for _ in 0..64 {
+        let pass = log
+            .gc_orphaned_branches_bounded(&source, owner_epoch, 10_000, 100, finish_limits, false)
+            .unwrap();
+        assert!(pass.requests <= finish_limits.requests.get());
+        live_deleted += pass.deleted;
+        completed += pass.completed_candidates;
+        if completed == 1 {
+            break;
+        }
+    }
+    assert_eq!(
+        completed, 1,
+        "page_size=1 must converge across soft resumes"
+    );
+    assert_eq!(
+        dry.would_delete, live_deleted,
+        "dry-run and live enumerate the same physical object set"
+    );
+    assert!(store.get(&registry_key).unwrap().is_none());
+    assert!(store.get(&pending_key).unwrap().is_none());
+}
+
+#[test]
+fn bounded_orphan_gc_rejects_stale_owner_before_deleting() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let log = SegmentedObjectLog::open(store.clone(), cfg);
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-fenced", 1_000);
+    log.acquire_epoch(&source, 2_000).unwrap();
+    let limits =
+        MaintenanceLimits::new(32, 1_000_000, 64, std::time::Duration::from_secs(1), 8).unwrap();
+    let report = log
+        .gc_orphaned_branches_bounded(&source, 0, 10_000, 100, limits, false)
+        .unwrap();
+    assert!(report.fenced);
+    assert_eq!(
+        report.stopped_by,
+        Some(MaintenanceExecutionReason::EpochChanged)
+    );
+    assert!(
+        store
+            .get(&branch_registry_key_of(&source, &branch))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn bounded_orphan_gc_rejects_registry_redirect_before_live_marker_lookup() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-redirect", 1_000);
+    let owner_epoch = log.maintenance_owner_epoch(&source).unwrap();
+    let registry_key = branch_registry_key_of(&source, &branch);
+    let mut metadata: serde_json::Value = serde_json::from_slice(
+        &store
+            .get(&registry_key)
+            .unwrap()
+            .expect("registry metadata"),
+    )
+    .unwrap();
+    metadata["branch"]["queue_id"] = serde_json::Value::String("protected-live".into());
+    store
+        .put(&registry_key, &serde_json::to_vec(&metadata).unwrap())
+        .unwrap();
+
+    let limits =
+        MaintenanceLimits::new(32, 1_000_000, 64, std::time::Duration::from_secs(1), 8).unwrap();
+    let report = log
+        .gc_orphaned_branches_bounded(&source, owner_epoch, 10_000, 100, limits, false)
+        .unwrap();
+    assert_eq!(report.permanent_failures, 1);
+    assert!(store.get(&registry_key).unwrap().is_some());
+    assert!(
+        !store.list(&shard_prefix_of(&branch)).unwrap().is_empty(),
+        "redirected metadata must not authorize cleanup of the indexed branch"
+    );
+}
+
+struct FenceAfterFirstGcDelete<S: BlobStore> {
+    peer: std::sync::Weak<SegmentedObjectLog<S>>,
+    source: pqueue_engine::QueueKey,
+    fired: AtomicBool,
+}
+
+impl<S: BlobStore + 'static> FaultHook for FenceAfterFirstGcDelete<S> {
+    fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+        if cut == FaultCutPoint::GcAfterOrphanObjectDeleted
+            && !self.fired.swap(true, Ordering::SeqCst)
+            && let Some(peer) = self.peer.upgrade()
+        {
+            peer.acquire_epoch(&self.source, 20_000)?;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn bounded_orphan_gc_reports_partial_effects_and_retains_authority_after_remote_fence() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let owner = std::sync::Arc::new(SegmentedObjectLog::open(store.clone(), cfg));
+    let source = shard();
+    let branch = seed_orphaned_branch(&owner, &store, &source, "gc-mid-fence", 1_000);
+    let owner_epoch = owner.maintenance_owner_epoch(&source).unwrap();
+    let peer = std::sync::Arc::new(SegmentedObjectLog::open(store.clone(), cfg));
+    peer.create_queue(&qdef()).unwrap();
+    owner.set_fault_hook(Some(std::sync::Arc::new(FenceAfterFirstGcDelete {
+        peer: std::sync::Arc::downgrade(&peer),
+        source: source.clone(),
+        fired: AtomicBool::new(false),
+    })));
+    let limits =
+        MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 8).unwrap();
+    let report = owner
+        .gc_orphaned_branches_bounded(&source, owner_epoch, 10_000, 100, limits, false)
+        .unwrap();
+    owner.set_fault_hook(None);
+    assert!(
+        report.deleted > 0,
+        "partial effects remain visible in the report"
+    );
+    assert!(report.fenced);
+    assert_eq!(
+        report.stopped_by,
+        Some(MaintenanceExecutionReason::EpochChanged)
+    );
+    assert!(
+        store
+            .get(&branch_registry_key_of(&source, &branch))
+            .unwrap()
+            .is_some(),
+        "the source pin is retained after fencing"
+    );
+    assert!(
+        store
+            .get(&format!("{}branch.pending", shard_prefix_of(&branch)))
+            .unwrap()
+            .is_some(),
+        "the sentinel is retained after fencing"
+    );
+}
+
+#[test]
+fn bounded_orphan_gc_reports_retryable_delete_failure_without_releasing_pin() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-retry-report", 1_000);
+    let owner_epoch = log.maintenance_owner_epoch(&source).unwrap();
+    store.fail_deletes.store(true, Ordering::SeqCst);
+    let limits =
+        MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 8).unwrap();
+    let report = log
+        .gc_orphaned_branches_bounded(&source, owner_epoch, 10_000, 100, limits, false)
+        .unwrap();
+    store.disarm();
+    assert_eq!(report.retryable_failures, 1);
+    assert_eq!(
+        report.stopped_by,
+        Some(MaintenanceExecutionReason::RetryableFailure)
+    );
+    assert!(
+        store
+            .get(&branch_registry_key_of(&source, &branch))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn bounded_orphan_gc_preserves_typed_permanent_corrupt_delete_fault() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-corrupt-report", 1_000);
+    let owner_epoch = log.maintenance_owner_epoch(&source).unwrap();
+    store.fail_deletes.store(true, Ordering::SeqCst);
+    store.permanent_delete_fault.store(true, Ordering::SeqCst);
+    let report = log
+        .gc_orphaned_branches_bounded(
+            &source,
+            owner_epoch,
+            10_000,
+            100,
+            MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 8)
+                .unwrap(),
+            false,
+        )
+        .unwrap();
+    store.disarm();
+    assert_eq!(report.retryable_failures, 0);
+    assert_eq!(report.permanent_failures, 1);
+    assert_eq!(
+        report.failure_cause,
+        Some(MaintenanceFailureCause::Provider(BlobResultClass::Corrupt))
+    );
+    assert!(
+        store
+            .get(&branch_registry_key_of(&source, &branch))
+            .unwrap()
+            .is_some()
+    );
+}
+
+fn captured_authority_key<S: BlobStore>(store: &S, source: &pqueue_engine::QueueKey) -> String {
+    store
+        .list(&shard_prefix_of(source))
+        .unwrap()
+        .into_iter()
+        .filter(|key| key.contains("/authority_head/") || key.contains("/manifest_head/"))
+        .max()
+        .expect("captured authority object")
+}
+
+#[test]
+fn bounded_orphan_gc_fences_when_captured_authority_object_is_deleted() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-token-deleted", 1_000);
+    let owner_epoch = log.maintenance_owner_epoch(&source).unwrap();
+    store
+        .delete(&captured_authority_key(&store, &source))
+        .unwrap();
+    let report = log
+        .gc_orphaned_branches_bounded(
+            &source,
+            owner_epoch,
+            10_000,
+            100,
+            MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 8)
+                .unwrap(),
+            false,
+        )
+        .unwrap();
+    assert!(report.fenced);
+    assert!(
+        store
+            .get(&branch_registry_key_of(&source, &branch))
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn bounded_orphan_gc_fences_when_captured_authority_body_changes() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    let branch = seed_orphaned_branch(&log, &store, &source, "gc-token-corrupt", 1_000);
+    let owner_epoch = log.maintenance_owner_epoch(&source).unwrap();
+    store
+        .put(&captured_authority_key(&store, &source), b"corrupt")
+        .unwrap();
+    let report = log
+        .gc_orphaned_branches_bounded(
+            &source,
+            owner_epoch,
+            10_000,
+            100,
+            MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 8)
+                .unwrap(),
+            false,
+        )
+        .unwrap();
+    assert!(report.fenced);
+    assert!(
+        store
+            .get(&branch_registry_key_of(&source, &branch))
+            .unwrap()
+            .is_some()
+    );
+}
+
+fn seeded_expiry_owner() -> (
+    std::sync::Arc<InMemoryBlobStore>,
+    SegmentedObjectLog<std::sync::Arc<InMemoryBlobStore>>,
+    pqueue_engine::QueueKey,
+) {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    let epoch = log.acquire_epoch(&source, 1).unwrap();
+    for _ in 0..2 {
+        log.enqueue(&source, &pushes(1), epoch, 10).unwrap();
+        log.seal(&source, epoch, 11).unwrap();
+    }
+    log.advance_retention_floor(
+        &source,
+        CommandPosition::new(source.clone(), epoch, 1),
+        epoch,
+    )
+    .unwrap();
+    (store, log, source)
+}
+
+fn assert_expiry_segments_remain(store: &InMemoryBlobStore, source: &pqueue_engine::QueueKey) {
+    assert!(
+        store
+            .list(&shard_prefix_of(source))
+            .unwrap()
+            .iter()
+            .any(|key| key.ends_with(".seg")),
+        "fenced expiry must not delete segment objects"
+    );
+}
+
+#[test]
+fn segment_expiry_fences_when_captured_authority_object_is_deleted() {
+    let (store, log, source) = seeded_expiry_owner();
+    store
+        .delete(&captured_authority_key(&store, &source))
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 1, 100).unwrap_err(),
+        EngineError::EpochFenced
+    );
+    assert_expiry_segments_remain(&store, &source);
+}
+
+#[test]
+fn segment_expiry_fences_when_captured_authority_body_changes() {
+    let (store, log, source) = seeded_expiry_owner();
+    store
+        .put(&captured_authority_key(&store, &source), b"corrupt")
+        .unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 1, 100).unwrap_err(),
+        EngineError::EpochFenced
+    );
+    assert_expiry_segments_remain(&store, &source);
+}
+
+#[test]
+fn segment_expiry_fences_on_same_epoch_authority_successor() {
+    let (store, log, source) = seeded_expiry_owner();
+    let current = captured_authority_key(&store, &source);
+    let (prefix, file) = current.rsplit_once('/').unwrap();
+    let version: u64 = file.trim_end_matches(".json").parse().unwrap();
+    let successor = format!("{prefix}/{:020}.json", version + 1);
+    store.put(&successor, b"same-epoch-successor").unwrap();
+    assert_eq!(
+        log.expire_segments_through(&source, 1, 100).unwrap_err(),
+        EngineError::EpochFenced
+    );
+    assert_expiry_segments_remain(&store, &source);
+}
+
+#[test]
+fn bounded_segment_expiry_large_prefix_resumes_without_exceeding_caps() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    let epoch = log.acquire_epoch(&source, 1).unwrap();
+    for i in 0..40 {
+        log.enqueue(&source, &pushes(1), epoch, 10 + i).unwrap();
+        log.seal(&source, epoch, 10 + i).unwrap();
+    }
+    log.advance_retention_floor(
+        &source,
+        CommandPosition::new(source.clone(), epoch, 39),
+        epoch,
+    )
+    .unwrap();
+    let limits =
+        MaintenanceLimits::new(2, 1_000_000, 30, std::time::Duration::from_secs(1), 5).unwrap();
+    let mut deleted = 0;
+    let mut bytes = 0;
+    let mut saw_cursor = false;
+    for _ in 0..128 {
+        let report = log
+            .expire_segments_through_bounded(&source, 39, 1_000, limits, false)
+            .unwrap();
+        assert!(report.deleted <= limits.objects.get());
+        assert!(report.bytes_deleted <= limits.bytes.get());
+        assert!(report.requests <= limits.requests.get());
+        saw_cursor |= report.cursor.is_some();
+        deleted += report.deleted;
+        bytes += report.bytes_deleted;
+        if report.cursor.is_none() {
+            break;
+        }
+    }
+    assert!(saw_cursor);
+    assert_eq!(deleted, 40, "every segment is reconciled exactly once");
+    assert!(bytes > 0);
+    assert!(
+        log.read_read_horizon(&source).unwrap().is_some(),
+        "completed bounded traversal publishes its proven contiguous watermark"
+    );
+    assert_eq!(
+        store
+            .list(&shard_prefix_of(&source))
+            .unwrap()
+            .into_iter()
+            .filter(|key| key.ends_with(".seg"))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn bounded_segment_expiry_reopen_discards_soft_cursor_and_reconciles() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let source = shard();
+    {
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&qdef()).unwrap();
+        let epoch = log.acquire_epoch(&source, 1).unwrap();
+        for i in 0..12 {
+            log.enqueue(&source, &pushes(1), epoch, 10 + i).unwrap();
+            log.seal(&source, epoch, 10 + i).unwrap();
+        }
+        log.advance_retention_floor(
+            &source,
+            CommandPosition::new(source.clone(), epoch, 11),
+            epoch,
+        )
+        .unwrap();
+        let first = log
+            .expire_segments_through_bounded(
+                &source,
+                11,
+                1_000,
+                MaintenanceLimits::new(1, 1_000_000, 24, std::time::Duration::from_secs(1), 4)
+                    .unwrap(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(first.deleted, 1);
+        assert!(first.cursor.is_some());
+    }
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    reopened.acquire_epoch(&source, 2_000).unwrap();
+    let limits =
+        MaintenanceLimits::new(2, 1_000_000, 30, std::time::Duration::from_secs(1), 4).unwrap();
+    for _ in 0..64 {
+        let report = reopened
+            .expire_segments_through_bounded(&source, 11, 3_000, limits, false)
+            .unwrap();
+        assert!(report.requests <= limits.requests.get());
+        if report.cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        store
+            .list(&shard_prefix_of(&source))
+            .unwrap()
+            .into_iter()
+            .filter(|key| key.ends_with(".seg"))
+            .count(),
+        0
+    );
+    assert!(reopened.read_read_horizon(&source).unwrap().is_some());
+}
+
+#[test]
+fn bounded_segment_expiry_rescans_when_target_increases() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    let epoch = log.acquire_epoch(&source, 1).unwrap();
+    for i in 0..4 {
+        log.enqueue(&source, &pushes(1), epoch, 10 + i).unwrap();
+        log.seal(&source, epoch, 10 + i).unwrap();
+    }
+    log.advance_retention_floor(
+        &source,
+        CommandPosition::new(source.clone(), epoch, 3),
+        epoch,
+    )
+    .unwrap();
+    let limits =
+        MaintenanceLimits::new(8, 1_000_000, 64, std::time::Duration::from_secs(1), 8).unwrap();
+    let first = log
+        .expire_segments_through_bounded(&source, 1, 1_000, limits, false)
+        .unwrap();
+    assert_eq!(first.deleted, 2);
+    assert!(first.cursor.is_none());
+
+    let second = log
+        .expire_segments_through_bounded(&source, 3, 2_000, limits, false)
+        .unwrap();
+    assert_eq!(
+        second.deleted, 2,
+        "a larger target must rescan skipped entries"
+    );
+    assert_eq!(
+        store
+            .list(&shard_prefix_of(&source))
+            .unwrap()
+            .into_iter()
+            .filter(|key| key.ends_with(".seg"))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn bounded_segment_expiry_retries_first_pinned_candidate_after_pin_ttl() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    let epoch = log.acquire_epoch(&source, 1).unwrap();
+    log.enqueue(&source, &pushes(1), epoch, 10).unwrap();
+    log.seal(&source, epoch, 10).unwrap();
+    let branch_def = branch_qdef("bounded-pin-ttl");
+    log.branch(
+        &source,
+        &branch_def,
+        &CommandPosition::new(source.clone(), epoch, 0),
+        100,
+        10,
+    )
+    .unwrap();
+    log.advance_retention_floor(
+        &source,
+        CommandPosition::new(source.clone(), epoch, 0),
+        epoch,
+    )
+    .unwrap();
+    let limits =
+        MaintenanceLimits::new(2, 1_000_000, 32, std::time::Duration::from_secs(1), 4).unwrap();
+    let pinned = log
+        .expire_segments_through_bounded(&source, 0, 50, limits, false)
+        .unwrap();
+    assert_eq!(pinned.deleted, 0);
+    assert!(pinned.cursor.is_some());
+    assert_eq!(
+        pinned.stopped_by,
+        Some(MaintenanceExecutionReason::BudgetExhausted)
+    );
+
+    let expired = log
+        .expire_segments_through_bounded(&source, 0, 200, limits, false)
+        .unwrap();
+    assert_eq!(
+        expired.deleted, 1,
+        "expired pin must release the unresolved entry"
+    );
+    assert!(expired.cursor.is_none());
+}
+
+#[test]
+fn bounded_segment_expiry_resumes_large_branch_registry_under_request_cap() {
+    let store = std::sync::Arc::new(InMemoryBlobStore::new());
+    let log = SegmentedObjectLog::open(store.clone(), SegmentConfig::new(10_000_000, 100).unwrap());
+    let source = shard();
+    log.create_queue(&qdef()).unwrap();
+    let epoch = log.acquire_epoch(&source, 1).unwrap();
+    log.enqueue(&source, &pushes(1), epoch, 10).unwrap();
+    log.seal(&source, epoch, 10).unwrap();
+    for i in 0..20 {
+        log.branch(
+            &source,
+            &branch_qdef(&format!("bounded-registry-{i}")),
+            &CommandPosition::new(source.clone(), epoch, 0),
+            1,
+            10,
+        )
+        .unwrap();
+    }
+    log.advance_retention_floor(
+        &source,
+        CommandPosition::new(source.clone(), epoch, 0),
+        epoch,
+    )
+    .unwrap();
+    let limits =
+        MaintenanceLimits::new(1, 1_000_000, 14, std::time::Duration::from_secs(1), 3).unwrap();
+    let mut deleted = 0;
+    for _ in 0..64 {
+        let report = log
+            .expire_segments_through_bounded(&source, 0, 1_000, limits, false)
+            .unwrap();
+        assert!(report.requests <= limits.requests.get());
+        deleted += report.deleted;
+        if report.cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        deleted, 1,
+        "registry pagination must not starve segment work"
+    );
+}
+
+#[test]
+fn bounded_segment_expiry_counts_watermark_publication_failures() {
+    for (failure_key, put_if_absent) in [("~watermark.json", true), ("read_horizon.json", false)] {
+        let recorder = std::sync::Arc::new(BlobMetricsRecorder::new());
+        let raw = std::sync::Arc::new(FailingBlobStore::default());
+        let store =
+            InstrumentedBlobStore::new(raw.clone(), recorder.clone(), BlobBackendKind::Memory);
+        let log = SegmentedObjectLog::open(store, SegmentConfig::new(10_000_000, 100).unwrap());
+        let source = shard();
+        log.create_queue(&qdef()).unwrap();
+        let epoch = log.acquire_epoch(&source, 1).unwrap();
+        log.enqueue(&source, &pushes(1), epoch, 10).unwrap();
+        log.seal(&source, epoch, 10).unwrap();
+        log.advance_retention_floor(
+            &source,
+            CommandPosition::new(source.clone(), epoch, 0),
+            epoch,
+        )
+        .unwrap();
+        if put_if_absent {
+            raw.arm_put_if_absent(failure_key);
+        } else {
+            raw.arm_put(failure_key);
+        }
+        let before = recorder.snapshot();
+        let report = log
+            .expire_segments_through_bounded(
+                &source,
+                0,
+                1_000,
+                MaintenanceLimits::new(2, 1_000_000, 32, std::time::Duration::from_secs(1), 4)
+                    .unwrap(),
+                false,
+            )
+            .unwrap();
+        let physical = recorder.snapshot().delta(&before).physical_totals();
+        let physical_attempts = physical.puts + physical.gets + physical.lists + physical.deletes;
+        assert_eq!(report.requests as u64, physical_attempts);
+        assert_eq!(report.permanent_failures, 1);
+        assert_eq!(
+            report.stopped_by,
+            Some(MaintenanceExecutionReason::PermanentFailure)
+        );
+        assert_eq!(
+            report
+                .cursor
+                .as_ref()
+                .and_then(|cursor| cursor.resume_after.as_deref()),
+            Some("finalize")
+        );
+    }
+}
+
+#[test]
+fn bounded_orphan_gc_reopens_and_finishes_from_persisted_size_inventory() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let source = shard();
+    let branch = {
+        let first = SegmentedObjectLog::open(store.clone(), cfg);
+        seed_orphaned_branch(&first, &store, &source, "gc-reopen-inventory", 1_000)
+    };
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    let owner_epoch = reopened.acquire_epoch(&source, 20_000).unwrap();
+    let limits =
+        MaintenanceLimits::new(64, 1_000_000, 128, std::time::Duration::from_secs(1), 8).unwrap();
+    let mut completed = 0;
+    for _ in 0..32 {
+        let report = reopened
+            .gc_orphaned_branches_bounded(&source, owner_epoch, 30_000, 100, limits, false)
+            .unwrap();
+        completed += report.completed_candidates;
+        if completed == 1 {
+            break;
+        }
+    }
+    assert_eq!(completed, 1);
+    assert!(
+        store
+            .get(&branch_registry_key_of(&source, &branch))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn bounded_orphan_gc_legacy_inventory_fallback_respects_tight_request_cap() {
+    let store = std::sync::Arc::new(OrphanBranchFaultStore::new());
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let source = shard();
+    let branch = {
+        let first = SegmentedObjectLog::open(store.clone(), cfg);
+        seed_orphaned_branch(&first, &store, &source, "gc-legacy-tight-cap", 1_000)
+    };
+    let registry_key = branch_registry_key_of(&source, &branch);
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&store.get(&registry_key).unwrap().expect("branch registry"))
+            .unwrap();
+    legacy.as_object_mut().unwrap().remove("object_sizes");
+    store
+        .put(&registry_key, &serde_json::to_vec(&legacy).unwrap())
+        .unwrap();
+
+    let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+    reopened.create_queue(&qdef()).unwrap();
+    let owner_epoch = reopened.acquire_epoch(&source, 20_000).unwrap();
+    let limits =
+        MaintenanceLimits::new(64, 1_000_000, 17, std::time::Duration::from_secs(1), 1).unwrap();
+    let mut saw_partial = false;
+    let mut completed = 0;
+    for _ in 0..64 {
+        let report = reopened
+            .gc_orphaned_branches_bounded(&source, owner_epoch, 30_000, 100, limits, false)
+            .unwrap();
+        assert!(report.requests <= limits.requests.get());
+        if report.stopped_by == Some(MaintenanceExecutionReason::BudgetExhausted) {
+            saw_partial = true;
+            assert!(report.cursor.is_none() || report.completed_candidates == 0);
+        }
+        completed += report.completed_candidates;
+        if completed == 1 {
+            break;
+        }
+    }
+    assert!(
+        saw_partial,
+        "tight cap must force restart-safe partial cleanup"
+    );
+    assert_eq!(completed, 1, "legacy GET fallback eventually completes");
+    assert!(store.get(&registry_key).unwrap().is_none());
 }
 
 /// TestBranchGcFailClosedOnCorruptInheritanceMetadata: branch GC refuses to touch an orphan when the
@@ -4959,7 +5892,7 @@ fn TestBranchGcFailClosedOnCorruptInheritanceMetadata() {
     let registry_key = branch_registry_key_of(&source, &branch);
     store.inner.put(&registry_key, b"{not-valid-json").unwrap();
 
-    let err = log.gc_orphaned_branches(&source).unwrap_err();
+    let err = gc_orphans_as_local_owner(&log, &source).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(_)),
         "corrupt source-pin metadata must surface as a storage error so GC cannot guess: {err:?}"
@@ -4979,11 +5912,8 @@ fn TestBranchGcFailClosedOnCorruptInheritanceMetadata() {
         "the source pin remains registered after the aborted GC pass"
     );
     assert!(
-        !store
-            .list(&format!("{}manifest/", shard_prefix_of(&branch)))
-            .unwrap()
-            .is_empty(),
-        "the branch-local manifest objects are left untouched when GC refuses to proceed"
+        store.list(&shard_prefix_of(&branch)).unwrap().len() > 1,
+        "the branch-local authority objects are left untouched when GC refuses to proceed"
     );
 }
 
@@ -5036,11 +5966,10 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranch() {
     )
     .unwrap();
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 3, 0).unwrap();
 
     assert_eq!(
-        log.expire_segments_through(&source, 3, 100).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 100).unwrap(),
         0,
         "every below-floor segment stays pinned while both branches remain readable"
     );
@@ -5056,7 +5985,7 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranch() {
         "with branch_a gone, branch_b alone still keeps every below-floor segment retained"
     );
     assert_eq!(
-        log.expire_segments_through(&source, 3, 150).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 150).unwrap(),
         0,
         "GC deletes nothing while branch_b remains the last readable branch"
     );
@@ -5074,7 +6003,7 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranch() {
     // reclaimable via the existing trim path.
     log.discard_branch(&source, &branch_b).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 3, 200).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 200).unwrap(),
         4,
         "with no readable branch left, the below-floor segments become reclaimable"
     );
@@ -5115,8 +6044,7 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFailClosed() {
         "the branch is committed and fully readable before the fault is injected"
     );
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 3, 0).unwrap();
 
     let seg_key = segment_key_for(store.as_ref(), &source, 2);
     let registry_key = branch_registry_key_of(&source, &branch);
@@ -5125,7 +6053,7 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFailClosed() {
     // release.
     store.arm_missing_get(&registry_key);
 
-    let err = log.expire_segments_through(&source, 3, 2_000).unwrap_err();
+    let err = expire_segments_as_local_owner(&log, &source, 3, 2_000).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(ref msg) if msg.contains("missing branch registry entry")),
         "the trim path must fail closed when a still-registered source pin cannot be fetched: {err:?}"
@@ -5199,11 +6127,10 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinal() {
     )
     .unwrap();
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 3, 0).unwrap();
 
     assert_eq!(
-        log.expire_segments_through(&source, 3, 100).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 100).unwrap(),
         0,
         "below-floor segments stay retained while both branches remain readable"
     );
@@ -5223,7 +6150,7 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinal() {
     // branch_a advances out of the picture, leaving branch_b as the LAST readable branch: still retained.
     log.discard_branch(&source, &branch_a).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 3, 150).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 150).unwrap(),
         0,
         "the last remaining readable branch alone keeps below-floor segments retained"
     );
@@ -5231,7 +6158,7 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinal() {
     // The final readable branch itself now advances (is discarded): no branch can read the below-floor range.
     log.discard_branch(&source, &branch_b).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 3, 200).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 200).unwrap(),
         4,
         "with the final readable branch gone, every below-floor segment becomes physically deletable"
     );
@@ -5290,15 +6217,14 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinalConservative() {
         "the branch is committed and fully readable before the fault is injected"
     );
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 3, 0).unwrap();
 
     // This IS the last readable branch — it is not discarded, but its source-pin proof becomes unfetchable,
     // simulating an inconsistency between `list` and `get` rather than a genuine release.
     let registry_key = branch_registry_key_of(&source, &branch);
     store.arm_missing_get(&registry_key);
 
-    let err = log.expire_segments_through(&source, 3, 2_000).unwrap_err();
+    let err = expire_segments_as_local_owner(&log, &source, 3, 2_000).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(ref msg) if msg.contains("missing branch registry entry")),
         "branch GC must fail closed rather than guess the final branch has advanced: {err:?}"
@@ -5321,7 +6247,7 @@ fn TestBranchGcDeletesBelowFloorAfterLastReadableBranchFinalConservative() {
     store.disarm();
     log.discard_branch(&source, &branch).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 3, 3_000).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 3_000).unwrap(),
         4,
         "once ambiguity clears and the final branch is genuinely discarded, below-floor segments become deletable"
     );
@@ -5418,7 +6344,7 @@ fn TestDeletionWatermarkOwnerFenceIndependence() {
     owner_b
         .advance_retention_floor(&shard(), CommandPosition::new(shard(), 1, 5), 1)
         .unwrap();
-    owner_b.expire_segments_through(&shard(), 5, 1_000).unwrap();
+    expire_segments_as_local_owner(&owner_b, &shard(), 5, 1_000).unwrap();
 
     let horizon = owner_b
         .read_read_horizon(&shard())
@@ -5821,11 +6747,13 @@ fn TestBranchSeedSeqNotSuppressedByFloor() {
     let log = SegmentedObjectLog::open(store.clone(), cfg);
     let source = shard();
     log.create_queue(&qdef()).unwrap();
+    let source_epoch = log.acquire_epoch(&source, 1).unwrap();
     // seqs 0..7 (4 segments). Trim so the source floor is 3 (segs 0-1, 2-3 reclaimed) — leaving live 4..7.
     for i in 0..4u64 {
-        log.enqueue(&source, &pushes(2), 0, (i as i64 + 1) * 10)
+        log.enqueue(&source, &pushes(2), source_epoch, (i as i64 + 1) * 10)
             .unwrap();
-        log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
+        log.seal(&source, source_epoch, (i as i64 + 1) * 10 + 1)
+            .unwrap();
     }
     trim_cycle(&log, &source, 3, 0, 1_000);
     assert!(
@@ -5839,7 +6767,7 @@ fn TestBranchSeedSeqNotSuppressedByFloor() {
     log.branch(
         &source,
         &branch_def,
-        &CommandPosition::new(source.clone(), 0, 5),
+        &CommandPosition::new(source.clone(), source_epoch, 5),
         60_000,
         2_000,
     )
@@ -5869,7 +6797,7 @@ fn TestBranchSeedSeqNotSuppressedByFloor() {
         .branch(
             &source,
             &seed_def,
-            &CommandPosition::new(source.clone(), 0, 8),
+            &CommandPosition::new(source.clone(), source_epoch, 8),
             60_000,
             3_000,
         )
@@ -5942,8 +6870,11 @@ fn ac_txn_3_fresh_log_recovers_identically_after_horizon_advance() {
         "the below-floor fail-closed survives a restart"
     );
     // A post-restart append continues contiguously.
-    reopened.enqueue(&shard(), &pushes(1), 0, 5_000).unwrap();
-    let pos = reopened.seal(&shard(), 0, 5_001).unwrap();
+    let owner_epoch = reopened.acquire_epoch(&shard(), 5_000).unwrap();
+    reopened
+        .enqueue(&shard(), &pushes(1), owner_epoch, 5_000)
+        .unwrap();
+    let pos = reopened.seal(&shard(), owner_epoch, 5_001).unwrap();
     assert_eq!(
         pos[0].sequence, 12,
         "next-seq recovered exactly from the ranged tail"
@@ -6017,10 +6948,9 @@ fn TestPartialExpireReadHorizonAloneDoesNotHideBelowFloorEntries() {
         log.seal(&source, 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 7), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 7, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 3, 1_000).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 3, 1_000).unwrap(),
         2,
         "the partial expire reclaims only the leading below-floor prefix"
     );
@@ -6501,10 +7431,9 @@ fn TestManifestReclamationAdvancesWatermarkAfterDeleteProgress() {
         "no watermark exists before cleanup"
     );
 
-    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard(), 3, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&shard(), 3, 1_000).unwrap(),
+        expire_segments_as_local_owner(&log, &shard(), 3, 1_000).unwrap(),
         2,
         "the first cleanup pass reclaims the below-floor segments"
     );
@@ -6518,10 +7447,9 @@ fn TestManifestReclamationAdvancesWatermarkAfterDeleteProgress() {
         "the read-horizon must remain below the durable floor"
     );
 
-    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 7), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard(), 7, 2_000).unwrap();
     assert_eq!(
-        log.expire_segments_through(&shard(), 7, 2_000).unwrap(),
+        expire_segments_as_local_owner(&log, &shard(), 7, 2_000).unwrap(),
         2,
         "the second cleanup pass advances the durable watermark again"
     );
@@ -6573,11 +7501,10 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
         log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard(), 5, 0).unwrap();
     store.arm_delete(&segment_key_for(store.as_ref(), &shard(), 0));
 
-    let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
+    let err = expire_segments_as_local_owner(&log, &shard(), 5, 1_000).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(_)),
         "the injected delete failure must surface as a storage error, got {err:?}"
@@ -6598,7 +7525,7 @@ fn TestManifestReclamationWatermarkUnchangedAfterPartialDelete() {
 
     store.disarm();
     assert_eq!(
-        log.expire_segments_through(&shard(), 5, 2_000).unwrap(),
+        expire_segments_as_local_owner(&log, &shard(), 5, 2_000).unwrap(),
         3,
         "the retry resumes from the durable floor and finishes the remaining cleanup"
     );
@@ -6658,11 +7585,10 @@ fn TestInterruptedManifestReclaimRecovery() {
         log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard(), 5, 0).unwrap();
     store.arm_delete(&segment_key_for(store.as_ref(), &shard(), 2));
 
-    let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
+    let err = expire_segments_as_local_owner(&log, &shard(), 5, 1_000).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(_)),
         "the injected delete failure must abort the reclaim pass"
@@ -6730,10 +7656,9 @@ fn TestInterruptedManifestReclaimRecovery() {
             .is_some_and(|w| w == 0),
         "the recovery pass resumes at the committed watermark"
     );
+    reopened.acquire_epoch(&shard(), 2_000).unwrap();
     assert_eq!(
-        reopened
-            .expire_segments_through(&shard(), 5, 2_000)
-            .unwrap(),
+        expire_segments_as_local_owner(&reopened, &shard(), 5, 2_000).unwrap(),
         2,
         "the next reclaim finishes from the durable watermark"
     );
@@ -6759,11 +7684,10 @@ fn TestManifestReclamationWatermarkUnchangedAfterFailedDelete() {
         log.seal(&shard(), 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard(), 5, 0).unwrap();
     store.arm_delete(&segment_key_for(store.as_ref(), &shard(), 0));
 
-    let err = log.expire_segments_through(&shard(), 5, 1_000).unwrap_err();
+    let err = expire_segments_as_local_owner(&log, &shard(), 5, 1_000).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(_)),
         "the injected delete failure must surface as a storage error, got {err:?}"
@@ -6968,10 +7892,9 @@ fn TestLegacyManifestBootstrapDoesNotInferWatermarkFloor() {
         log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard, 3, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&shard, 3, 1_000).unwrap(),
+        expire_segments_as_local_owner(&log, &shard, 3, 1_000).unwrap(),
         2,
         "the durable watermark is produced by the reclaim path before the cache is removed"
     );
@@ -7302,10 +8225,9 @@ fn TestManifestDeletionWatermarkStorageNoCorruptOnStale() {
         log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 3), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard, 3, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&shard, 3, 999).unwrap(),
+        expire_segments_as_local_owner(&log, &shard, 3, 999).unwrap(),
         2,
         "the watermark boundary is backed by completed physical deletion"
     );
@@ -7354,8 +8276,7 @@ fn TestManifestDeletionWatermarkReclaimNeverExceedsFloor() {
     trim_cycle(&log, &shard(), 3, 0, 1_000);
     let before = log.read_read_horizon(&shard()).unwrap().unwrap();
 
-    log.advance_retention_floor(&shard(), CommandPosition::new(shard(), 0, 7), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard(), 7, 2_000).unwrap();
     log.persist_manifest_deletion_watermark(&shard(), 11, 2_000)
         .unwrap();
 
@@ -7402,11 +8323,10 @@ fn TestManifestDeletionWatermarkPersistsAfterPhysicalDelete() {
         log.seal(&shard, 0, (i as i64 + 1) * 10 + 1).unwrap();
     }
 
-    log.advance_retention_floor(&shard, CommandPosition::new(shard.clone(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &shard, 5, 0).unwrap();
     store.arm_delete(&segment_key_for(store.as_ref(), &shard, 2));
 
-    let err = log.expire_segments_through(&shard, 5, 1_000).unwrap_err();
+    let err = expire_segments_as_local_owner(&log, &shard, 5, 1_000).unwrap_err();
     assert!(
         matches!(err, EngineError::Storage(_)),
         "the injected delete failure must abort the reclaim pass"
@@ -7435,7 +8355,7 @@ fn TestManifestDeletionWatermarkPersistsAfterPhysicalDelete() {
 
     store.disarm();
     assert_eq!(
-        log.expire_segments_through(&shard, 5, 2_000).unwrap(),
+        expire_segments_as_local_owner(&log, &shard, 5, 2_000).unwrap(),
         2,
         "the retry completes the contiguous reclaimed prefix"
     );
@@ -7553,10 +8473,9 @@ fn TestManifestDeletionWatermarkContiguousPrefixOnly() {
     )
     .unwrap();
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 5, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 5, 31).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, 31).unwrap(),
         2,
         "the pass reclaims only the unpinned below-floor segments"
     );
@@ -7589,7 +8508,7 @@ fn TestManifestDeletionWatermarkContiguousPrefixOnly() {
 
     log.discard_branch(&source, &branch).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 5, 32).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, 32).unwrap(),
         1,
         "once the gap clears, the previously pinned segment becomes reclaimable"
     );
@@ -7629,10 +8548,9 @@ fn TestManifestReclamationPreservesPinnedSourceSegments() {
     )
     .unwrap();
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 5, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 5, 31).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, 31).unwrap(),
         2,
         "the reclaim pass deletes only the unpinned below-floor segments"
     );
@@ -7697,10 +8615,9 @@ fn TestManifestReclamationPreservesPinnedManifestObjects() {
     let reclaimed_head_key = manifest_head_key_s(&source, 1);
     let reclaimed_legacy_key = manifest_key_s(&source, 1);
 
-    log.advance_retention_floor(&source, CommandPosition::new(source.clone(), 0, 5), 0)
-        .unwrap();
+    advance_floor_as_local_owner(&log, &source, 5, 0).unwrap();
     assert_eq!(
-        log.expire_segments_through(&source, 5, 31).unwrap(),
+        expire_segments_as_local_owner(&log, &source, 5, 31).unwrap(),
         2,
         "the reclaim pass deletes only the unpinned below-floor segments"
     );
