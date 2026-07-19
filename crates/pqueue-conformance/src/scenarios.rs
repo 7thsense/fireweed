@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, CohortPolicy, CompoundIndexDef, CompoundIndexField, EntitySchemaDocument,
-    GateKeyPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType, ItemId, ItemState, LeaseToken,
-    Metadata, MetadataValue, PriorityValue, QueueDefinition, QueueIndex, RequestId,
+    FilterOp, GateKeyPolicy, GroupKey, IndexDeclaration, IndexDef, IndexType, ItemId, ItemState,
+    LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, PriorityValue, QueryFilter,
+    QueueDefinition, QueueIndex, RequestId, TypedValue,
 };
 use pqueue_engine::{
     ClaimCommand, ClaimCompatibility, ClaimRef, ClaimRequest, CommandPosition, EngineError,
@@ -27,8 +28,176 @@ pub use crate::claimed_item_shape_includes_payload_fields_and_gate_keys_if_suppo
 // traits need not be imported here.
 use crate::{
     Adr011ConformanceBackend, ConformanceBackend, ConformanceCommitTransition, ConformanceCore,
-    claim_req, claim_req_at, commit, envelope, item, item_max, qdef, qkey, shard, ts,
+    FilteredMetricsConformanceBackend, claim_req, claim_req_at, commit, envelope, item, item_max,
+    qdef, qkey, shard, ts,
 };
+
+/// Exact lifecycle counts over a declared compound-index filter, including terminal rows, while
+/// colocated non-work record kinds in every state remain excluded and the query performs no mutation.
+pub async fn filtered_lifecycle_metrics_are_exact_and_read_only<
+    B: FilteredMetricsConformanceBackend,
+>(
+    make: impl Fn() -> B,
+) {
+    let backend = make();
+    let definition = QueueDefinition {
+        typed_indexes: vec![adr011_compound_index(
+            "by_record_kind_scheduled_at",
+            [
+                ("record_kind", IndexType::String),
+                ("scheduled_at", IndexType::Datetime),
+            ],
+            false,
+        )],
+        ..qdef()
+    };
+    backend.create_queue(definition).await.unwrap();
+
+    let kinds = ["transition", "effect", "await", "result"];
+    let mut specs = Vec::new();
+    for (state_group, priority_base) in [
+        ("complete", 0_i64),
+        ("failed", 10),
+        ("leased", 20),
+        ("pending", 30),
+    ] {
+        for (offset, kind) in kinds.iter().enumerate() {
+            specs.push(PushSpec {
+                client_item_key: Some(ClientItemKey::new(format!("{state_group}-{kind}")).unwrap()),
+                priority: Some(PriorityValue::Int64(priority_base + offset as i64)),
+                entity: Some(serde_json::json!({
+                    "record_kind": kind,
+                    "scheduled_at": "2026-07-19T12:00:00Z"
+                })),
+                ..Default::default()
+            });
+        }
+    }
+    let ids = backend.push(&shard(), specs, ts(0), None).await.unwrap();
+
+    let claim = |token: &str| {
+        let mut request = claim_req(4, 1_000, 1);
+        request.lease_token = LeaseToken::new(token).unwrap();
+        request
+    };
+    let complete = backend.claim(claim("metrics-complete")).await.unwrap();
+    assert_eq!(
+        complete
+            .items
+            .iter()
+            .map(|item| item.item_id)
+            .collect::<Vec<_>>(),
+        ids[0..4]
+    );
+    backend
+        .finalize(
+            &shard(),
+            complete
+                .items
+                .iter()
+                .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+                .collect(),
+            ts(2),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let failed = backend.claim(claim("metrics-failed")).await.unwrap();
+    assert_eq!(
+        failed
+            .items
+            .iter()
+            .map(|item| item.item_id)
+            .collect::<Vec<_>>(),
+        ids[4..8]
+    );
+    backend
+        .finalize(
+            &shard(),
+            failed
+                .items
+                .iter()
+                .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Fail))
+                .collect(),
+            ts(3),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let leased = backend.claim(claim("metrics-leased")).await.unwrap();
+    assert_eq!(
+        leased
+            .items
+            .iter()
+            .map(|item| item.item_id)
+            .collect::<Vec<_>>(),
+        ids[8..12]
+    );
+
+    let request = MetricsByQueryRequest {
+        index: Some("by_record_kind_scheduled_at".to_string()),
+        filters: vec![QueryFilter {
+            field: "record_kind".to_string(),
+            op: FilterOp::Eq,
+            value: TypedValue::String("transition".to_string()),
+        }],
+    };
+    let ordinary_before = backend.metrics(&shard()).await.unwrap();
+    assert_eq!(ordinary_before.pending, 4);
+    assert_eq!(ordinary_before.leased, 4);
+    assert_eq!(ordinary_before.complete, 4);
+    assert_eq!(ordinary_before.failed, 4);
+
+    let filtered = backend
+        .metrics_by_query(&shard(), request.clone())
+        .await
+        .unwrap();
+    assert_eq!(filtered.pending, 1);
+    assert_eq!(filtered.leased, 1);
+    assert_eq!(filtered.complete, 1);
+    assert_eq!(filtered.failed, 1);
+    assert_eq!(filtered.resident_terminal_count, 2);
+    assert_eq!(
+        backend.metrics_by_query(&shard(), request).await.unwrap(),
+        filtered,
+        "repeating a read-only metrics query is stable"
+    );
+    assert_eq!(
+        backend.metrics(&shard()).await.unwrap(),
+        ordinary_before,
+        "filtered metrics must not lease, finalize, or otherwise mutate rows"
+    );
+
+    for invalid in [
+        MetricsByQueryRequest {
+            index: Some("not_declared".to_string()),
+            filters: vec![],
+        },
+        MetricsByQueryRequest {
+            index: Some("by_record_kind_scheduled_at".to_string()),
+            filters: vec![QueryFilter {
+                field: "private_payload".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("x".to_string()),
+            }],
+        },
+        MetricsByQueryRequest {
+            index: Some("by_record_kind_scheduled_at".to_string()),
+            filters: vec![QueryFilter {
+                field: "record_kind".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::Integer(1),
+            }],
+        },
+    ] {
+        assert!(matches!(
+            backend.metrics_by_query(&shard(), invalid).await,
+            Err(EngineError::Invalid(_))
+        ));
+    }
+}
 
 fn adr011_qdef_with_entity_schema() -> QueueDefinition {
     QueueDefinition {

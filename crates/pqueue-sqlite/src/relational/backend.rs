@@ -6,8 +6,8 @@ use pqueue_core::{
     BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey, CohortId,
     DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexType, ItemId,
-    ItemState, LeaseToken, Metadata, MutationOutcome, MutationResult, PriorityValue,
-    QueryCapabilityFlags, QueryCursor, QueueDefinition, QueueId, RangeScanRequest,
+    ItemState, LeaseToken, Metadata, MetricsByQueryRequest, MutationOutcome, MutationResult,
+    PriorityValue, QueryCapabilityFlags, QueryCursor, QueueDefinition, QueueId, RangeScanRequest,
     RangeScanResponse, RangeScanRow, RequestId, TenantId, TypedValue, UtcTimestamp,
 };
 use pqueue_engine::ClaimUnit;
@@ -1956,6 +1956,22 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             let image = export_projection_image_sql(&g.conn, shard)?;
             query_projection_image(&definition, image, |projection, shard| {
                 projection.grouped_aggregate(shard, request)
+            })
+        })();
+        std::future::ready(result)
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("projection store poisoned");
+            let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let image = export_projection_image_sql(&g.conn, shard)?;
+            query_projection_image(&definition, image, |projection, shard| {
+                projection.metrics_by_query(shard, request)
             })
         })();
         std::future::ready(result)

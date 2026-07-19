@@ -138,6 +138,29 @@ fn hot_projection_capabilities_are_explicit() {
 }
 
 #[test]
+fn filtered_lifecycle_metrics_conformance() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "POSTGRES FILTERED METRICS SKIPPED (filtered_lifecycle_metrics_conformance) — set PQUEUE_PG_TEST_URL to a live DB"
+        );
+        return;
+    };
+
+    futures::executor::block_on(async {
+        pqueue_conformance::scenarios::filtered_lifecycle_metrics_are_exact_and_read_only(|| {
+            PostgresBackend::connect_in_schema(&url, &fresh_schema())
+                .expect("connect postgres log-replay backend")
+        })
+        .await;
+        pqueue_conformance::scenarios::filtered_lifecycle_metrics_are_exact_and_read_only(|| {
+            PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
+                .expect("connect postgres relational backend")
+        })
+        .await;
+    });
+}
+
+#[test]
 fn read_as_of_unavailable_relational() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
         eprintln!(

@@ -55,8 +55,8 @@ use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
 use pqueue_core::{
     ClientItemKey, CohortId, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken,
-    Metadata, PriorityModel, PriorityValue, QueueDefinition, QueueId, QueueIndex, RequestId,
-    TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
+    Metadata, MetricsByQueryRequest, PriorityModel, PriorityValue, QueueDefinition, QueueId,
+    QueueIndex, RequestId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
@@ -3075,6 +3075,49 @@ fn metrics_sql(client: &mut Client, shard: &QueueKey) -> EngineResult<QueueMetri
     Ok(m)
 }
 
+fn metrics_by_query_sql(
+    client: &mut Client,
+    typed_indexes: &[QueueIndex],
+    shard: &QueueKey,
+    request: MetricsByQueryRequest,
+) -> EngineResult<QueueMetrics> {
+    let index_name = match request.index.as_deref() {
+        Some(name) => typed_indexes
+            .iter()
+            .find(|index| index.name == name)
+            .map(|index| index.name.clone())
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+        None => typed_indexes
+            .first()
+            .map(|index| index.name.clone())
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+    };
+    let (t, q) = parts(shard);
+    let rows = st(client.query(
+        "SELECT i.lifecycle_state, i.superseded, idx.index_key \
+         FROM pqueue_item_index idx \
+         JOIN pqueue_items i \
+           ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id AND i.item_id=idx.item_id \
+         WHERE idx.tenant_id=$1 AND idx.queue_id=$2 AND idx.index_name=$3",
+        &[&t, &q, &index_name],
+    ))?;
+    let mut records = Vec::with_capacity(rows.len());
+    for row in rows {
+        records.push((
+            parse_state(&row.get::<_, String>(0))?,
+            row.get::<_, bool>(1),
+            row.get::<_, Vec<u8>>(2),
+        ));
+    }
+    pqueue_projection::filtered_lifecycle_metrics_by_index_key(
+        typed_indexes,
+        &request,
+        records
+            .iter()
+            .map(|(state, superseded, key)| (*state, *superseded, key.as_slice())),
+    )
+}
+
 /// Lifecycle state + flags for a BATCH of items in ONE round-trip (was one SELECT per id), keyed by
 /// `item_id` string. Absent ids are simply missing from the map (the per-id classifier treats a miss as
 /// `NotFound`). Replaces the former per-item `item_flags` helper.
@@ -4469,9 +4512,25 @@ impl RecoveryReadPort for PostgresRelationalBackend {
     }
 }
 
-/// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
-/// the postgres-relational family inherits the all-`Unavailable` default.
-impl pqueue_engine::HotProjectionQueryPort for PostgresRelationalBackend {}
+impl pqueue_engine::HotProjectionQueryPort for PostgresRelationalBackend {
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let typed_indexes = g
+                .queues
+                .get(shard)
+                .ok_or(EngineError::NotFound)?
+                .typed_indexes
+                .clone();
+            metrics_by_query_sql(&mut g.client, &typed_indexes, shard, request)
+        })();
+        std::future::ready(result)
+    }
+}
 
 impl FinalizePort for PostgresRelationalBackend {
     fn finalize(
@@ -6126,6 +6185,21 @@ impl ProjectionStore for PostgresRelational {
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         metrics_sql(&mut self.lock().client, shard)
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
+        let mut g = self.lock();
+        let typed_indexes = g
+            .queues
+            .get(shard)
+            .ok_or(EngineError::NotFound)?
+            .typed_indexes
+            .clone();
+        metrics_by_query_sql(&mut g.client, &typed_indexes, shard, request)
     }
 
     fn terminal_emission_metrics(

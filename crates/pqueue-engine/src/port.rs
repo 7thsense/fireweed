@@ -13,8 +13,8 @@ use pqueue_core::{
     BodyHash, BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
     CohortId, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken, Metadata,
-    PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest,
-    RangeScanResponse, RequestId, TenantId, UtcTimestamp, WorkerId,
+    MetricsByQueryRequest, PriorityValue, QueryCapabilityFlags, QueueDefinition, QueueId,
+    RangeScanRequest, RangeScanResponse, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 
 use crate::claim_validation::ClaimCompatibility;
@@ -1130,6 +1130,14 @@ pub trait HotProjectionQueryPort: Send + Sync {
         _shard: &QueueKey,
         _request: GroupedAggregateRequest,
     ) -> impl std::future::Future<Output = EngineResult<GroupedAggregateResponse>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+
+    fn metrics_by_query(
+        &self,
+        _shard: &QueueKey,
+        _request: MetricsByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }
 

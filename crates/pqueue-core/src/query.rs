@@ -153,6 +153,14 @@ pub struct GroupedAggregateRequest {
     pub max_groups: u32,
 }
 
+/// A `MetricsByQuery` request: filter a declared index and return lifecycle counts for the matching
+/// rows. Unlike `GroupedAggregate`, the response is the queue lifecycle metric shape itself.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MetricsByQueryRequest {
+    pub index: Option<String>,
+    pub filters: Vec<QueryFilter>,
+}
+
 /// One reported group: its key tuple and row count. Empty groups (zero matching rows) are never
 /// reported (API-004).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -621,6 +629,22 @@ mod core_domain_tests_hot_projection_query_types {
         };
         let json = serde_json::to_string(&req).expect("serialize");
         let round_tripped: GroupedAggregateRequest =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, round_tripped);
+    }
+
+    #[test]
+    fn metrics_by_query_request_serde_round_trip() {
+        let req = MetricsByQueryRequest {
+            index: Some("by_record_kind_scheduled_at".to_string()),
+            filters: vec![QueryFilter {
+                field: "record_kind".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("transition".to_string()),
+            }],
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let round_tripped: MetricsByQueryRequest =
             serde_json::from_str(&json).expect("deserialize");
         assert_eq!(req, round_tripped);
     }

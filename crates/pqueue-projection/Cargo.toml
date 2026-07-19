@@ -12,6 +12,7 @@ path = "src/lib.rs"
 # I/O. Driven adapters (memory/sqlite/postgres) provide PERSISTENCE of this shared core rather than each
 # re-implementing the apply/eligibility/lease domain logic. Depends only on the domain (engine + core).
 [dependencies]
+axon-esf.workspace = true
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 bytes = "1"

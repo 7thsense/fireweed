@@ -2704,6 +2704,7 @@ dependencies = [
 name = "pqueue-projection"
 version = "0.18.0"
 dependencies = [
+ "axon-esf",
  "bytes",
  "pqueue-core",
  "pqueue-engine",

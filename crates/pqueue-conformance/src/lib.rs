@@ -63,10 +63,10 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     Backend, ClaimCompatibility, ClaimPort, ClaimRequest, CommandChecksum, CommandEnvelope,
-    CommandId, CommitTransitionPort, ControlPlaneStore, FinalizePort, IndexQueryPort, LogRead,
-    ProjectionRead, PurgePort, PushItem, PushPort, QueueCommand, QueueKey, RawCommitRequest,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, SnapshotStore,
-    UpdateFieldsPort, UpsertPort,
+    CommandId, CommitTransitionPort, ControlPlaneStore, FinalizePort, HotProjectionQueryPort,
+    IndexQueryPort, LogRead, ProjectionRead, PurgePort, PushItem, PushPort, QueueCommand, QueueKey,
+    RawCommitRequest, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
+    RenewLeasePort, SnapshotStore, UpdateFieldsPort, UpsertPort,
 };
 
 pub mod fault;
@@ -141,6 +141,11 @@ impl<T> ConformanceCommitTransition for T where
 pub trait Adr011ConformanceBackend: ConformanceCore + IndexQueryPort {}
 
 impl<T> Adr011ConformanceBackend for T where T: ConformanceCore + IndexQueryPort {}
+
+/// Backend class for the public filtered lifecycle metrics query.
+pub trait FilteredMetricsConformanceBackend: ConformanceCore + HotProjectionQueryPort {}
+
+impl<T> FilteredMetricsConformanceBackend for T where T: ConformanceCore + HotProjectionQueryPort {}
 
 // ---------------------------------------------------------------------------
 // Shared fixtures (public so adapters' own white-box tests can reuse them too)

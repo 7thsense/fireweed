@@ -20,7 +20,7 @@ use bytes::Bytes;
 use pqueue_core::{
     BoundedMutationRequest, BoundedMutationResponse, DeclaredBucketSegmentRequest,
     DeclaredBucketSegmentResponse, GroupedAggregateRequest, GroupedAggregateResponse,
-    RangeScanRequest, RangeScanResponse,
+    MetricsByQueryRequest, RangeScanRequest, RangeScanResponse,
 };
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
@@ -556,6 +556,14 @@ impl ProjectionStore for InMemoryProjection {
         request: GroupedAggregateRequest,
     ) -> EngineResult<GroupedAggregateResponse> {
         self.get(shard)?.grouped_aggregate(request)
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
+        self.get(shard)?.metrics_by_query(request)
     }
 
     fn declared_bucket_segment(
