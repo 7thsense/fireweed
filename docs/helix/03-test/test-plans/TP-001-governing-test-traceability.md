@@ -18,24 +18,24 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
   review:
-    self_hash: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
+    self_hash: d464a1278868cd3f72797114d4c49dd25778e0e21b738b187534adf6c1b6e910
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
-      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
+      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       api-workload-integration-profiles: 3206a0ad7896fa01deb790f1dca95bddab1cbe9d8f69a761cfb041a34498450e
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-      tp-scale-substantiation: cc3a398c4bba61be4755019b3e4713fab4b12244d5d1f287131635fc797f467b
-    reviewed_at: "2026-07-18T02:36:05Z"
+      td-s3-object-log-sqlite-projection-mode: ec22ad6a2a2f16f8164253f0f8c321ae5e33f24f250daf6a7aadcc016340acbd
+      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
+      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
+      tp-scale-substantiation: 8f3f7109a1e0183ed6a05cf3fa0041ca72277159a68c6683d546ac87b1453ebd
+    reviewed_at: "2026-07-19T23:13:10Z"
 ---
 
 # Test Plan: TP-001 Governing Test Traceability
@@ -58,7 +58,7 @@ when the workspace is created, but implementation beads must preserve the suite
 intent and cite the relevant requirement IDs.
 
 Scale, queue-density, horizontal-envelope evidence, and object-log latency/cost
-evidence (the per-queue throughput floor, ≥1000-active-queue density,
+evidence (the portable progress/capacity contract, ≥1000-active-queue density,
 cross-queue scale-out, and object-log commit-latency-bound matrix) are owned by the **scale-substantiation test plan**
 (`tp-scale-substantiation`, TP-002, evidence records E0–E3). This governing plan
 references TP-002 for those records rather than restating them; the two plans are
