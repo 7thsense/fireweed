@@ -82,6 +82,15 @@ fn rejects_missing_profile() {
 }
 
 #[test]
+fn rejects_legacy_contract_without_explicit_fence_and_timing_links() {
+    let fixture = Fixture::new();
+    fixture.mutate_json("contract.json", |value| {
+        value["schema_version"] = serde_json::json!(1);
+    });
+    assert!(fixture.errors().contains("expected 2"));
+}
+
+#[test]
 fn rejects_missing_bound() {
     let fixture = Fixture::new();
     fixture.mutate_json("contract.json", |value| {
@@ -222,6 +231,31 @@ fn rejects_non_governed_e3_producer() {
     );
 }
 
+#[test]
+fn rejects_missing_or_false_portable_gate_markers_and_quiet_host_text() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path)
+        .unwrap()
+        .replacen("\"portable_gate\":true,", "", 1);
+    fs::write(path, body).unwrap();
+    assert!(fixture.errors().contains("requires portable_gate=true"));
+
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "synthetic-fixture",
+        "synthetic-fixture on a quiet host",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("contains a non-portable quiet-host gate")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_symlink_authority_and_writer_target() {
@@ -260,6 +294,30 @@ fn rejects_force_sealed_path_labeled_window_timed() {
         fixture
             .errors()
             .contains("force-sealed request_id evidence must not be labeled latency-window timed")
+    );
+}
+
+#[test]
+fn rejects_ac7_without_distinct_latency_window_and_request_id_timing() {
+    let fixture = Fixture::new();
+    fixture.mutate_json("contract.json", |value| {
+        value["ac7_binding"]["latency_window_timing"] =
+            serde_json::json!("force_sealed_config_independent");
+    });
+    assert!(fixture.errors().contains("genuine latency-window timing"));
+}
+
+#[test]
+fn rejects_entry_without_passing_manifest_fence_link() {
+    let fixture = Fixture::new();
+    fixture.mutate_json("contract.json", |value| {
+        value["entries"][0]["manifest_fence"]["applicability"] =
+            serde_json::json!({"status":"capability_na","reason":"not measured"});
+    });
+    assert!(
+        fixture
+            .errors()
+            .contains("manifest fence authority does not link the passing stale-epoch fence")
     );
 }
 
