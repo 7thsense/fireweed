@@ -122,11 +122,10 @@
 //! ProjectionImage, request-id replay/conflict) through that real group-commit composed write pipeline
 //! (`apply_live_owned` → strict `apply_durable_then_memory`) — closing the prior real-server-path GAP. The
 //! `ac_txn_5_hybrid_strict_poison_replay_scenario` row remains as the direct ProjectionStore-layer companion.
-//! AC-TXN-5A stays `partial` on ONE remaining caveat — backpressure: its fail-closed clause is proven against
-//! the standalone [`pqueue_sqlite::HybridAsyncMonitor`], but pqueue-server opens `HybridProjectionStore`
-//! WITHOUT wiring that monitor/thresholds into the composed write path (the `hybrid-async` arm merely logs the
-//! resolved thresholds), so TD-004's hard-debt admission/high-water/retention gate is NOT yet enforced
-//! end-to-end on the server (tracked follow-up), recorded as an explicit `GAP` assertion in that row.
+//! AC-TXN-5A stays `partial` only for segment deletion authority: the server-wired async monitor enforces the
+//! hard-debt admission/high-water/retention gate end-to-end, but the projection cannot yet prove the immutable
+//! complete retention frontier. Segment maintenance therefore stops with `FrontierProofMissing` and safely
+//! retains the log; terminal-row retention in the checkpointed projection remains independently covered.
 //!
 //! `^` AC-TXN-7 (row 213): the commit-latency bound is not a correctness knob. `ac_txn_7_latency_sweep_scenario`
 //! proves this two ways. (1) Across the two commit-latency-bound WRITE REGIMES — force-seal (`ObjectLog::open`,
@@ -179,8 +178,9 @@ use pqueue_core::{ClientItemKey, ItemId, RequestId};
 use pqueue_engine::{
     Backend, ClaimCommand, ClaimPort, CommandPosition, ComposeFaultHook, ComposeFaultPoint,
     ComposedBackend, ControlPlaneStore, EngineError, FinalizeKind, FinalizeOutcome, FinalizePort,
-    InProcessControlPlane, LogRead, LogStore, ProjectionRead, ProjectionSnapshot, ProjectionStore,
-    PushCommand, PushPort, QueueCommand, RawCommitRequest,
+    InProcessControlPlane, LogRead, LogStore, MaintenanceStopReason, ProjectionRead,
+    ProjectionSnapshot, ProjectionStore, PushCommand, PushPort, QueueCommand, RawCommitRequest,
+    ReclaimDriver,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{
@@ -2418,7 +2418,7 @@ async fn ac_txn_5a_high_water_withhold_scenario(target_bytes: usize, bound_ms: u
 
     Ok(vec![
         "high-water withholding (real server-wired composition): a real deferred backlog over budget withholds the lagging durable high-water (None, observed on recovery_high_water) and recovery reports hard backpressure while Hard; the high-water advances strictly ahead of the withheld seed exactly once the drain clears debt below the release band".into(),
-        "retention gate wired (real path): the retention gate the real reap path (reap_terminal_items_locked → retention_may_advance) consults is CLOSED under Hard debt and reopens once debt clears (its downstream segment-trim effect is proven end-to-end in ac_txn_5a_retention_advancement_scenario)".into(),
+        "retention gate wired (real path): the gate consulted by reap_terminal_items_locked is CLOSED under Hard debt and reopens once debt clears; terminal-row advancement is proven end-to-end, while segment deletion remains independently blocked on complete-frontier proof".into(),
     ])
 }
 
@@ -2619,7 +2619,7 @@ async fn ac_txn_5a_retention_advancement_scenario(target_bytes: usize, bound_ms:
     Ok(vec![
         "retention advancement (real server-wired composition, DURABLE state): a real deferred backlog over the hard budget WITHHOLDS terminal-item retention — the durable terminal-item count in the checkpointed SQLite image is frozen while debt is Hard (3 past-retention rows NOT reclaimed) — and the very next reap tick after the drain clears debt below the release band reclaims them (durable count 3 → 0), reclaiming durable space for terminal records no longer needed".into(),
         "retention advancement is durable + recovery-safe: the reap deletes only rows the durable checkpoint image already shows terminal, so a reopen keeps them reaped (0 resurrected from the object-log tail, which replays strictly after the checkpoint) while the 6 live pending items recover intact".into(),
-        "object-log SEGMENT-object reclamation (bead pqueue-b5cc2bc7, bounded-recovery retention floor): on TOP of the durable TERMINAL-ITEM row reclamation proven above, the underlying object-log SEGMENT OBJECTS are now reclaimed too. A durable, monotonic retention_floor.json records the highest trimmed position; the trim caller (in the reap tick + the background sink loop, under the composed unit-of-work lock, gated on retention_may_advance) computes trim_through = min(checkpoint_high_water, request_id_retention-expired manifest prefix minus a skew guard), writes the floor FIRST, then deletes the segment objects (crash-safe order). Recovery reads the floor once per shard and starts BOTH idempotency folds AND the projection replay at floor+1 (the R1 fix max(resolve_recovery_start, floor)), so a trimmed below-floor segment is never read and NO request-id within request_id_retention_ms is dropped — the AC-TXN-3 unknown-outcome-replay-across-restart guarantee is preserved (proven directly by ac_txn_5a_segment_object_reclamation_scenario below AND the objectlog_segment_reclamation_tests suite tests 1-7: reclaim / withheld-under-Hard / AC-TXN-3-across-trim+restart both replay-if-retained and fresh-if-reclaimed / recovery-correctness-from-floor / crash-safety / backward-compat / branch-pin). commit_transition stays capability-N/A on this eventual-apply backend (Unavailable), so its across-trim replay is vacuous here; its recovery fold is floor-threaded + back-compat regardless.".into(),
+        "object-log segment retention authority: terminal-row retention above does not imply segment deletion authority. Hybrid-async lacks the immutable complete-frontier proof, so bounded segment maintenance stops with FrontierProofMissing, publishes no retention floor, and retains every segment for genesis recovery. Hybrid-strict separately proves floor-first physical reclamation. AC-TXN-3 remains preserved here because an in-window request_id replays across restart while its durable segment remains available.".into(),
     ])
 }
 
@@ -2932,22 +2932,19 @@ async fn ac_txn_5a_hybrid_async_success_barrier_scenario() -> AcOutcome {
     asserts.extend(ac_txn_5a_high_water_withhold_scenario(1, 1).await?);
     asserts.extend(ac_txn_5a_retention_advancement_scenario(1, 1).await?);
     asserts.extend(ac_txn_5a_retention_no_id_resurrection_scenario(1, 1).await?);
-    // --- (e) object-log SEGMENT-object reclamation on the bounded-recovery retention floor (bead
-    // pqueue-b5cc2bc7): the prior AC-TXN-5A GAP. Reclaim segment OBJECTS while preserving AC-TXN-3
-    // unknown-outcome-replay-across-restart. ---
+    // --- (e) hybrid-async segment-retention authority: without a complete-frontier proof, maintenance must
+    // retain the log and surface FrontierProofMissing while preserving AC-TXN-3 replay. ---
     asserts.extend(ac_txn_5a_segment_object_reclamation_scenario().await?);
 
     Ok(asserts)
 }
 
-/// **AC-TXN-5A object-log segment-object reclamation** on the REAL server-wired `objectlog/hybrid-async`
-/// composition (bead pqueue-b5cc2bc7 — closes the prior AC-TXN-5A GAP). Proves that once a segment's commands
-/// are (a) durably checkpointed AND (b) past `request_id_retention_ms` (+ skew guard), the segment OBJECTS are
-/// reclaimed from durable storage via the durable, monotonic retention floor — WITHOUT regressing AC-TXN-3
-/// unknown-outcome-request_id-replay-across-restart: a request_id still WITHIN retention has its segment
-/// RETAINED and replays its committed ids after a real drop+reopen, while one PAST retention is reclaimed and
-/// a retry is (correctly) fresh. `SegmentConfig(1,1)` seals one segment per push, so a push's timestamp is its
-/// segment's `committed_at_ms` and the logical clock places segments in/out of the retention window.
+/// **AC-TXN-5A object-log segment retention** on the real server-wired `objectlog/hybrid-async` composition.
+/// Even after commands are durably checkpointed and past request-id retention, async projection state alone
+/// is not complete deletion authority. Maintenance must surface `FrontierProofMissing`, publish no floor, and
+/// retain the genesis-readable log. The scenario also preserves the request-id contract: an in-window retry
+/// replays across restart, while a retry after the idempotency window closes is fresh independently of
+/// physical segment reclamation.
 async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
     const RETENTION_MS: u64 = 3_600_000; // 1h in ms; timestamps are in SECONDS.
     let mk = || {
@@ -2967,11 +2964,6 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
             .ok()
             .flatten()
             .map(|p| p.sequence)
-    };
-    let floor_pos = |b: &HybridBackend| {
-        b.with_log(|l| LogStore::retention_floor(l, &pqueue_conformance::shard()))
-            .ok()
-            .flatten()
     };
     let deletes = |b: &HybridBackend| b.with_log(|l| l.counters().delete_count);
     let drain = |b: &HybridBackend| -> Result<(), String> {
@@ -2996,6 +2988,10 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
         .await
         .map_err(|e| format!("create_queue A: {e:?}"))?;
     backend
+        .acquire_epoch(&shard)
+        .await
+        .map_err(|e| format!("acquire maintenance owner A: {e:?}"))?;
+    backend
         .push(
             &shard,
             vec![pqueue_conformance::fault::spec("filler", 5)],
@@ -3017,30 +3013,36 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
         .map_err(|e| format!("commit R: {e:?}"))?; // seq 1 @ 1_000_000ms
     drain(&backend)?;
     let deletes_before = deletes(&backend);
-    // Trim at t=4000s: cutoff = 4_000_000 - 3_600_000 - 5_000 = 395_000ms. filler(1_000) expired; R(1_000_000)
-    // retained. trim_through = min(checkpoint=1, time_expired=0) = 0 -> only the filler reclaimed.
-    backend
-        .trim_reclaimable_segments(&shard, RETENTION_MS, pqueue_conformance::ts(4_000))
-        .map_err(|e| format!("trim A: {e:?}"))?;
-    if deletes(&backend) <= deletes_before || floor_seq(&backend) != Some(0) {
-        return Err(format!(
-            "trim must reclaim the filler segment + write floor=0: deletes {}→{}, floor {:?}",
-            deletes_before,
-            deletes(&backend),
-            floor_seq(&backend)
-        ));
-    }
-    // Reading from GENESIS now hits the reclaimed filler segment; reading from the floor is clean.
-    if !matches!(
-        backend.read_from(&shard, None, 100).await,
-        Err(EngineError::Storage(_))
-    ) {
-        return Err("read_from(genesis) after trim must hit the reclaimed segment".into());
-    }
-    backend
-        .read_from(&shard, floor_pos(&backend), 100)
+    // At t=4000s the filler is time-eligible, but hybrid-async cannot prove the complete frontier.
+    let report = backend
+        .tick(pqueue_conformance::ts(4_000))
         .await
-        .map_err(|e| format!("read_from(floor) A must be clean: {e:?}"))?;
+        .map_err(|e| format!("tick A: {e:?}"))?;
+    ensure!(
+        report.maintenance.stopped_by == Some(MaintenanceStopReason::FrontierProofMissing),
+        "hybrid-async must surface FrontierProofMissing; got {:?}",
+        report.maintenance
+    );
+    ensure!(
+        deletes(&backend) == deletes_before && floor_seq(&backend).is_none(),
+        "missing frontier proof must retain the log: deletes {}→{}, floor {:?}",
+        deletes_before,
+        deletes(&backend),
+        floor_seq(&backend)
+    );
+    let retained = backend
+        .read_from(&shard, None, 100)
+        .await
+        .map_err(|e| format!("read_from(genesis) A must remain clean: {e:?}"))?;
+    ensure!(
+        retained
+            .entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>()
+            == vec![0, 1],
+        "hybrid-async must retain the filler and request segment"
+    );
     drop(backend);
     let reopened = objectlog_hybrid_async_composed_at(
         &root_a,
@@ -3079,6 +3081,10 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
         .create_queue(qdef())
         .await
         .map_err(|e| format!("create_queue B: {e:?}"))?;
+    backend2
+        .acquire_epoch(&shard)
+        .await
+        .map_err(|e| format!("acquire maintenance owner B: {e:?}"))?;
     let r2_ids = backend2
         .push_with_request_id(
             &shard,
@@ -3090,15 +3096,20 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
         .await
         .map_err(|e| format!("commit R2: {e:?}"))?;
     drain(&backend2)?;
-    backend2
-        .trim_reclaimable_segments(&shard, RETENTION_MS, pqueue_conformance::ts(10_000_000))
-        .map_err(|e| format!("trim B: {e:?}"))?;
-    if floor_seq(&backend2) != Some(0) {
-        return Err(format!(
-            "R2's segment must be reclaimed (floor=0); got {:?}",
-            floor_seq(&backend2)
-        ));
-    }
+    let deletes_before_b = deletes(&backend2);
+    let report_b = backend2
+        .tick(pqueue_conformance::ts(10_000_000))
+        .await
+        .map_err(|e| format!("tick B: {e:?}"))?;
+    ensure!(
+        report_b.maintenance.stopped_by == Some(MaintenanceStopReason::FrontierProofMissing),
+        "past-retention async maintenance must still require complete frontier proof; got {:?}",
+        report_b.maintenance
+    );
+    ensure!(
+        floor_seq(&backend2).is_none() && deletes(&backend2) == deletes_before_b,
+        "past-retention request segment must remain durable without frontier proof"
+    );
     drop(backend2);
     let reopened2 = objectlog_hybrid_async_composed_at(
         &root_b,
@@ -3110,7 +3121,7 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
         .push_with_request_id(
             &shard,
             RequestId::new("R2".to_string()).unwrap(),
-            vec![pqueue_conformance::fault::spec("R2-body", 5)],
+            vec![pqueue_conformance::fault::spec("R2-fresh-body", 5)],
             pqueue_conformance::ts(10_000_000),
             None,
         )
@@ -3121,9 +3132,9 @@ async fn ac_txn_5a_segment_object_reclamation_scenario() -> AcOutcome {
     }
 
     Ok(vec![
-        "segment-object reclamation (real hybrid-async composition, DURABLE storage): a segment whose commands are checkpointed AND past request_id_retention_ms is reclaimed — the trim writes the monotonic durable retention floor FIRST then deletes the segment objects (crash-safe order), delete_count advances, and reading from GENESIS now hits the reclaimed segment while reading from the floor stays clean".into(),
-        "AC-TXN-3 PRESERVED across segment reclamation + restart (push_with_request_id): a request_id still WITHIN retention has its segment RETAINED across a trim, and after a real drop+reopen a same-body retry REPLAYS its one committed result with 0 new durable segments (the recovery idempotency fold starts at floor+1, and the retained segment is above the floor)".into(),
-        "AC-TXN-3 window-close across segment reclamation + restart: a request_id PAST retention has its segment RECLAIMED, and after restart a retry is correctly FRESH (a new id) — the idempotency window legitimately closed, no stale replay from a trimmed segment".into(),
+        "segment retention (real hybrid-async composition): checkpoint and time eligibility do not substitute for immutable complete-frontier authority; maintenance reports FrontierProofMissing, publishes no floor, issues no deletes, and keeps the log readable from genesis".into(),
+        "AC-TXN-3 PRESERVED across conservative retention + restart: a request_id still within retention replays its committed result with zero new durable segments after reopen".into(),
+        "AC-TXN-3 window-close remains independent of physical deletion: after retention expires, a request_id retry with fresh work mints a new id even though the old segment was conservatively retained".into(),
     ])
 }
 
@@ -3164,8 +3175,8 @@ async fn ac_txn_5a_debt_withholds_high_water_and_retention() {
 }
 
 /// AC-TXN-5A retention advancement (bead pqueue-41bf00d7): on the REAL server-wired hybrid-async
-/// composition, object-log segment-trim retention is WITHHELD while async-apply debt is Hard and ADVANCES
-/// (durable segment objects reclaimed) once the backlog drains — asserted on durable state + a recovery reopen.
+/// composition, durable terminal-row retention is WITHHELD while async-apply debt is Hard and ADVANCES once
+/// the backlog drains. Segment deletion remains blocked on complete-frontier proof and is covered separately.
 #[tokio::test]
 async fn ac_txn_5a_retention_advances_when_debt_clears() {
     let outcome = ac_txn_5a_retention_advancement_scenario(1, 1).await;
