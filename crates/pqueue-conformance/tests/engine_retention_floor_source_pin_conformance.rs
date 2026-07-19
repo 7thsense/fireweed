@@ -17,7 +17,8 @@
 //!     - Retained floor/head replay recovery: reopen preserves floor, fail-closed, and tail.
 //!     - Source-pin: branch pins block reclamation; release enables fail-closed.
 //!     - Behind-image: deleted SQLite projection causes recovery to fail closed.
-//!     - Both hybrid-strict and hybrid-async projection modes.
+//!     - Hybrid-strict exercises deletion; hybrid-async proves it retains until
+//!       the complete frontier authority adapter lands.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pqueue_conformance::{qdef, qkey, ts};
 use pqueue_engine::{
     ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane, LogRead, LogStore,
-    PushPort, PushSpec, ReclaimDriver,
+    MaintenanceStopReason, PushPort, PushSpec, ReclaimDriver,
 };
 use pqueue_objectlog::{ObjectLog, SegmentConfig};
 use pqueue_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
@@ -75,6 +76,18 @@ fn drain(backend: &HybridBackend) {
     }
 }
 
+async fn acquire_maintenance_owner(backend: &HybridBackend) {
+    let epoch = backend
+        .acquire_epoch(&qkey())
+        .await
+        .expect("acquire log owner");
+    assert_eq!(
+        backend.with_log(|log| log.maintenance_owner_epoch(&qkey())),
+        Some(epoch),
+        "retention maintenance requires a positively acquired local owner"
+    );
+}
+
 fn floor_seq(backend: &HybridBackend) -> Option<u64> {
     backend
         .with_log(|l| LogStore::retention_floor(l, &qkey()))
@@ -111,6 +124,7 @@ async fn push_commands(backend: &HybridBackend, prefix: &str, n: u64, at_ts: i64
 async fn create_trimmed_backend(root: &Path, mode: ProjectionMode) -> HybridBackend {
     let backend = make_mode(root, mode).recover().expect("recover");
     backend.create_queue(qdef()).await.unwrap();
+    acquire_maintenance_owner(&backend).await;
 
     // Push 4 old commands (seq 0..3) at ts=10 (past retention at tick time).
     push_commands(&backend, "old", 4, 10).await;
@@ -228,6 +242,7 @@ async fn behind_image_fails_closed_impl(root: &Path, mode: ProjectionMode) {
 async fn source_pin_blocks_reclamation_impl(root: &Path, mode: ProjectionMode) {
     let backend = make_mode(root, mode).recover().expect("recover");
     backend.create_queue(qdef()).await.unwrap();
+    acquire_maintenance_owner(&backend).await;
 
     // Push 4 commands (seq 0..3) at ts=10.
     push_commands(&backend, "pin", 4, 10).await;
@@ -335,6 +350,7 @@ async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMo
     // --- Phase 1: setup + trim with live pin ---
     let backend = make_mode(root, mode).recover().expect("recover");
     backend.create_queue(qdef()).await.unwrap();
+    acquire_maintenance_owner(&backend).await;
 
     // Push 4 old commands (seq 0..3) at early timestamps so they expire.
     push_commands(&backend, "elpr-old", 4, 10).await;
@@ -412,6 +428,7 @@ async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMo
 
     // --- Phase 2: REOPEN with live pin ---
     let reopened = make_mode(root, mode).recover().expect("recover");
+    acquire_maintenance_owner(&reopened).await;
 
     // AC1: exact pinned boundary survives reopen.
     let pinned_after = reopened
@@ -522,13 +539,13 @@ async fn engine_live_pin_reopen_and_release_impl(root: &Path, mode: ProjectionMo
 }
 
 /// TestConformanceEngineLiveSourcePinSurvivesReopen (AC1):
-/// engine integration reopens hybrid-strict and hybrid-async backends with a live
+/// engine integration reopens the hybrid-strict backend with a live
 /// source pin and proves the pin remains active (lowest_branch_pinned_below, floor,
 /// and above-floor tail all survive reopen).
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestConformanceEngineLiveSourcePinSurvivesReopen() {
-    for mode in [ProjectionMode::HybridStrict, ProjectionMode::HybridAsync] {
+    for mode in [ProjectionMode::HybridStrict] {
         let tag = match mode {
             ProjectionMode::HybridStrict => "eng-ac1-strict",
             ProjectionMode::HybridAsync => "eng-ac1-async",
@@ -545,7 +562,7 @@ async fn TestConformanceEngineLiveSourcePinSurvivesReopen() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestConformanceEnginePinnedBelowFloorDataReadable() {
-    for mode in [ProjectionMode::HybridStrict, ProjectionMode::HybridAsync] {
+    for mode in [ProjectionMode::HybridStrict] {
         let tag = match mode {
             ProjectionMode::HybridStrict => "eng-ac2-strict",
             ProjectionMode::HybridAsync => "eng-ac2-async",
@@ -562,7 +579,7 @@ async fn TestConformanceEnginePinnedBelowFloorDataReadable() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestConformanceEnginePinReleaseFailClosed() {
-    for mode in [ProjectionMode::HybridStrict, ProjectionMode::HybridAsync] {
+    for mode in [ProjectionMode::HybridStrict] {
         let tag = match mode {
             ProjectionMode::HybridStrict => "eng-ac3-strict",
             ProjectionMode::HybridAsync => "eng-ac3-async",
@@ -573,14 +590,14 @@ async fn TestConformanceEnginePinReleaseFailClosed() {
     }
 }
 
-/// Test the retention-floor and source-pin invariants on both hybrid-strict and
-/// hybrid-async backends through the full engine ComposedBackend integration,
+/// Test the retention-floor and source-pin invariants on hybrid-strict through
+/// the full engine ComposedBackend integration,
 /// covering deleted-prefix fail-closed, retained floor/head replay recovery,
 /// behind-image failure, and source-pin block/release guarantees.
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestConformanceRetentionFloorSourcePinEngineInvariant() {
-    for mode in [ProjectionMode::HybridStrict, ProjectionMode::HybridAsync] {
+    for mode in [ProjectionMode::HybridStrict] {
         let tag = match mode {
             ProjectionMode::HybridStrict => "strict",
             ProjectionMode::HybridAsync => "async",
@@ -598,4 +615,52 @@ async fn TestConformanceRetentionFloorSourcePinEngineInvariant() {
         source_pin_blocks_reclamation_impl(&root_pin, mode).await;
         std::fs::remove_dir_all(&root_pin).ok();
     }
+}
+
+#[tokio::test]
+#[allow(non_snake_case)]
+async fn TestConformanceHybridAsyncRetentionWaitsForCompleteFrontierProof() {
+    let root = base_dir("async-frontier-retain");
+    let backend = make_mode(&root, ProjectionMode::HybridAsync)
+        .recover()
+        .expect("recover");
+    backend.create_queue(qdef()).await.unwrap();
+    acquire_maintenance_owner(&backend).await;
+    push_commands(&backend, "old", 4, 10).await;
+    drain(&backend);
+    push_commands(&backend, "fresh", 2, 10_000).await;
+    drain(&backend);
+    let report = backend.tick(ts(10_000)).await.unwrap();
+    assert_eq!(
+        report.maintenance.stopped_by,
+        Some(MaintenanceStopReason::FrontierProofMissing)
+    );
+    assert_eq!(floor_seq(&backend), None);
+    assert_eq!(
+        backend
+            .read_from(&qkey(), None, 100)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        6,
+        "frontier-missing async maintenance retains the complete log"
+    );
+    drop(backend);
+    let reopened = make_mode(&root, ProjectionMode::HybridAsync)
+        .recover()
+        .expect("reopen retained async log");
+    assert_eq!(floor_seq(&reopened), None);
+    assert_eq!(
+        reopened
+            .read_from(&qkey(), None, 100)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        6,
+        "frontier-missing async history remains readable after reopen"
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(&root).ok();
 }

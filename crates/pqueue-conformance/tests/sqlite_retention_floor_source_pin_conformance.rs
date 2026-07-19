@@ -20,9 +20,10 @@
 //! Bead pqueue-879c9d05 (adversarial follow-up): adds
 //! `TestConformanceSqliteLiveSourcePinSurvivesReopen`,
 //! `TestConformanceSqlitePinReleaseReclaimsExactBoundary`, and
-//! `TestConformanceSqlitePinAssertionStrength` — each with hybrid-strict and
-//! hybrid-async variants — replacing weak `seg_count >= 1` evidence with exact
-//! key/boundary assertions using `lowest_branch_pinned_below` and `retention_floor`.
+//! `TestConformanceSqlitePinAssertionStrength`. Hybrid-strict exercises exact
+//! deletion boundaries; hybrid-async separately proves safe retention while
+//! complete-frontier authority is unavailable. Assertions use
+//! `lowest_branch_pinned_below` and `retention_floor` rather than weak counts.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +32,7 @@ use pqueue_conformance::ts;
 use pqueue_core::{ClientItemKey, QueueDefinition, QueueId, TenantId};
 use pqueue_engine::{
     CommandPosition, ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane,
-    LogRead, LogStore, PushPort, PushSpec, ReclaimDriver,
+    LogRead, LogStore, MaintenanceStopReason, PushPort, PushSpec, ReclaimDriver,
 };
 use pqueue_objectlog::{ObjectLog, SegmentConfig};
 use pqueue_sqlite::{HybridAsyncThresholds, HybridProjectionStore};
@@ -131,11 +132,46 @@ fn floor_pos(backend: &HybridBackend) -> Option<CommandPosition> {
         .expect("retention_floor")
 }
 
+async fn acquire_maintenance_owner(backend: &HybridBackend) {
+    let epoch = backend
+        .acquire_epoch(&shard())
+        .await
+        .expect("acquire log owner");
+    assert_eq!(
+        backend.with_log(|log| log.maintenance_owner_epoch(&shard())),
+        Some(epoch),
+        "retention maintenance requires a positively acquired local owner"
+    );
+}
+
+async fn create_owned_queue(backend: &HybridBackend) {
+    backend.create_queue(qdef()).await.unwrap();
+    acquire_maintenance_owner(backend).await;
+}
+
+fn trim_until_quiescent(
+    backend: &HybridBackend,
+    retention_ms: u64,
+    now: pqueue_core::UtcTimestamp,
+) {
+    for _ in 0..32 {
+        let report = backend
+            .trim_reclaimable_segments(&shard(), retention_ms, now)
+            .expect("bounded trim pass");
+        if !report.cursor_pending
+            && report.stopped_by != Some(MaintenanceStopReason::BudgetExhausted)
+        {
+            return;
+        }
+    }
+    panic!("bounded trim did not quiesce within 32 passes");
+}
+
 /// Assert deleted-prefix fail-closed and retained floor/head replay recovery
 /// on the hybrid-strict backend.
 async fn retention_floor_fail_closed_and_recovery_impl(root: &Path) {
     let backend = open_hybrid_strict(root);
-    backend.create_queue(qdef()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     // Seq 0..3 at t=10s (will be past retention at tick time).
     for i in 0..4u64 {
@@ -252,7 +288,7 @@ async fn retained_floor_head_replay_impl(root: &Path) {
 ///   below-floor reads fail closed.
 async fn source_pin_blocks_reclamation_impl(root: &Path) {
     let backend = open_hybrid_strict(root);
-    backend.create_queue(qdef()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     // Push 4 single-item commands (seq 0..3) then drain.
     for i in 0..4u64 {
@@ -298,10 +334,11 @@ async fn source_pin_blocks_reclamation_impl(root: &Path) {
     }
     drain(&backend);
 
-    // Trim. The pinned segment must survive; the unpinned segments are reclaimed.
+    // One bounded pass publishes the safe floor but conservatively stops at
+    // the pinned first address. It is not expected to quiesce until release.
     backend
         .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
-        .expect("trim with live pin");
+        .expect("bounded trim with live pin");
 
     // EXACT PINNED BOUNDARY (AC3): lowest_branch_pinned_below identifies seq 0.
     let pinned = backend
@@ -313,7 +350,8 @@ async fn source_pin_blocks_reclamation_impl(root: &Path) {
         "exact pinned source segment is seq 0, not a weak seg_count check"
     );
 
-    // EXACT FLOOR: floor advanced through the reclaimed unpinned segments (1..3).
+    // EXACT FLOOR: the durable safe horizon advances through seq 3 even when
+    // physical prefix deletion remains conservatively pinned.
     let floor = floor_seq(&backend).expect("floor advanced");
     assert_eq!(
         floor, 3,
@@ -396,7 +434,7 @@ async fn live_pin_reopen_and_release_impl(root: &Path, mode: &str) {
     } else {
         open_hybrid_async(root)
     };
-    backend.create_queue(qdef()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     // Push 4 old commands (seq 0..3) at early timestamps so they expire.
     for i in 0..4u64 {
@@ -491,6 +529,7 @@ async fn live_pin_reopen_and_release_impl(root: &Path, mode: &str) {
     } else {
         open_hybrid_async(root)
     };
+    acquire_maintenance_owner(&reopened).await;
 
     // AC1: exact pinned boundary survives reopen.
     let pinned_after = reopened
@@ -530,9 +569,7 @@ async fn live_pin_reopen_and_release_impl(root: &Path, mode: &str) {
         .expect("discard branch");
 
     // Trim again: now the previously-pinned segment (seq 0) is eligible.
-    reopened
-        .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
-        .expect("trim after pin release");
+    trim_until_quiescent(&reopened, 1_000, ts(1_000_000));
 
     // AC2: exact source segment file is reclaimed after pin release + trim.
     assert!(
@@ -606,10 +643,11 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
     source_pin_blocks_reclamation_impl(&root_pin).await;
     std::fs::remove_dir_all(&root_pin).ok();
 
-    // Run against hybrid-async (deferred SQLite apply).
+    // Hybrid-async retains the complete log until its immutable complete-
+    // frontier authority adapter lands.
     let root_async = base_dir("async");
     let backend = open_hybrid_async(&root_async);
-    backend.create_queue(qdef()).await.unwrap();
+    create_owned_queue(&backend).await;
     for i in 0..4u64 {
         backend
             .push(
@@ -641,40 +679,41 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
             .expect("push");
     }
     drain(&backend);
-    backend.tick(ts(10_000)).await.unwrap();
-    let floor = floor_seq(&backend).expect("floor advanced (async)");
-    assert_eq!(floor, 3, "retention floor advanced through seq 3 (async)");
-
-    // Fail-closed (async).
-    let async_err = backend
+    let report = backend.tick(ts(10_000)).await.unwrap();
+    assert_eq!(
+        report.maintenance.stopped_by,
+        Some(MaintenanceStopReason::FrontierProofMissing),
+        "hybrid-async stops before deletion without a complete frontier proof"
+    );
+    assert_eq!(floor_seq(&backend), None, "hybrid-async publishes no floor");
+    let all = backend
         .read_from(&shard(), None, 100)
         .await
-        .expect_err("read_from genesis must fail closed (async)");
-    assert!(
-        matches!(async_err, EngineError::Storage(ref m) if m.contains("read below retention floor")),
-        "async: expected Storage, got {async_err:?}"
+        .expect("hybrid-async retains a genesis-readable log");
+    assert_eq!(
+        all.entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        (0..8).collect::<Vec<_>>(),
+        "hybrid-async retains every command"
     );
     drop(backend);
 
     // Reopen (async).
     let reopened = open_hybrid_async(&root_async);
-    let reopened_err = reopened
+    let reopened_all = reopened
         .read_from(&shard(), None, 100)
         .await
-        .expect_err("read_from genesis must fail closed after reopen (async)");
-    assert!(
-        matches!(reopened_err, EngineError::Storage(ref m) if m.contains("read below retention floor")),
-        "async reopen: expected Storage, got {reopened_err:?}"
-    );
-    let tail = reopened
-        .read_from(&shard(), floor_pos(&reopened), 100)
-        .await
-        .expect("read_from(floor) above floor succeeds (async)");
-    let tail_seqs: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
+        .expect("hybrid-async retained log survives reopen");
     assert_eq!(
-        tail_seqs,
-        vec![4, 5, 6, 7],
-        "above-floor read succeeds after reopen (async)"
+        reopened_all
+            .entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        (0..8).collect::<Vec<_>>(),
+        "hybrid-async replays the complete retained log"
     );
 
     std::fs::remove_dir_all(&root_async).ok();
@@ -683,7 +722,7 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
     let root_async_pin = base_dir("async-pin");
     {
         let backend = open_hybrid_async(&root_async_pin);
-        backend.create_queue(qdef()).await.unwrap();
+        create_owned_queue(&backend).await;
 
         // Push 4 old commands (seq 0..3) then drain.
         for i in 0..4u64 {
@@ -734,13 +773,14 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
         }
         drain(&backend);
 
-        // Tick should reclaim unpinned old commands (seq 1..3) but keep seq 0.
-        backend.tick(ts(1_000_000)).await.unwrap();
-        let async_floor = floor_seq(&backend).expect("floor advanced (async)");
+        // The source pin remains observable, but async maintenance cannot use
+        // it as a substitute for a complete deletion frontier.
+        let report = backend.tick(ts(1_000_000)).await.unwrap();
         assert_eq!(
-            async_floor, 3,
-            "floor advanced through reclaimed seq 1..3 (async)"
+            report.maintenance.stopped_by,
+            Some(MaintenanceStopReason::FrontierProofMissing)
         );
+        assert_eq!(floor_seq(&backend), None);
 
         // EXACT PINNED BOUNDARY (AC3): lowest_branch_pinned_below identifies seq 0.
         let pinned_async = backend
@@ -752,27 +792,38 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
             "exact pinned source segment is seq 0 (async)"
         );
 
-        // Above-floor tail readable: floor at seq 3, tail is seq 4..5.
-        let tail = backend
-            .read_from(&shard(), floor_pos(&backend), 100)
+        let retained = backend
+            .read_from(&shard(), None, 100)
             .await
-            .expect("read_from above floor (async)");
-        let tail_seqs_async: Vec<u64> = tail.entries.iter().map(|(p, _)| p.sequence).collect();
+            .expect("async pin case remains readable from genesis");
         assert_eq!(
-            tail_seqs_async,
-            vec![4, 5],
-            "above-floor tail is exactly seq 4,5 (async)"
+            retained
+                .entries
+                .iter()
+                .map(|(p, _)| p.sequence)
+                .collect::<Vec<_>>(),
+            (0..6).collect::<Vec<_>>()
         );
 
-        // Release pin and re-tick — pinned segment reclaimed.
+        // Releasing the pin does not weaken the independent complete-frontier
+        // requirement: the next tick still retains every segment.
         backend
             .with_log(|l| l.discard_branch(&shard(), &branch_shard()))
             .expect("discard branch (async)");
-        backend.tick(ts(1_000_000)).await.unwrap();
-        let after_pin = backend.read_from(&shard(), None, 100).await;
-        assert!(
-            after_pin.is_err(),
-            "read_from genesis fails closed after pin release (async)"
+        let after_release = backend.tick(ts(1_000_000)).await.unwrap();
+        assert_eq!(
+            after_release.maintenance.stopped_by,
+            Some(MaintenanceStopReason::FrontierProofMissing)
+        );
+        assert_eq!(floor_seq(&backend), None);
+        assert_eq!(
+            backend
+                .read_from(&shard(), None, 100)
+                .await
+                .expect("retained log after pin release")
+                .entries
+                .len(),
+            6
         );
     }
     std::fs::remove_dir_all(&root_async_pin).ok();
@@ -790,7 +841,7 @@ async fn TestConformanceRetentionFloorSourcePinSqliteInvariant() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestConformanceSqliteLiveSourcePinSurvivesReopen() {
-    for mode in ["strict", "async"] {
+    for mode in ["strict"] {
         let root = base_dir(&format!("ac1-{mode}"));
         live_pin_reopen_and_release_impl(&root, mode).await;
         std::fs::remove_dir_all(&root).ok();
@@ -803,7 +854,7 @@ async fn TestConformanceSqliteLiveSourcePinSurvivesReopen() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestConformanceSqlitePinReleaseReclaimsExactBoundary() {
-    for mode in ["strict", "async"] {
+    for mode in ["strict"] {
         let root = base_dir(&format!("ac2-{mode}"));
         live_pin_reopen_and_release_impl(&root, mode).await;
         std::fs::remove_dir_all(&root).ok();
@@ -820,14 +871,14 @@ async fn TestConformanceSqlitePinReleaseReclaimsExactBoundary() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestConformanceSqlitePinAssertionStrength() {
-    for mode in ["strict", "async"] {
+    for mode in ["strict"] {
         let root = base_dir(&format!("ac3-{mode}"));
         let backend = if mode == "strict" {
             open_hybrid_strict(&root)
         } else {
             open_hybrid_async(&root)
         };
-        backend.create_queue(qdef()).await.unwrap();
+        create_owned_queue(&backend).await;
 
         // Push 4 old commands (seq 0..3).
         for i in 0..4u64 {
@@ -878,10 +929,11 @@ async fn TestConformanceSqlitePinAssertionStrength() {
         }
         drain(&backend);
 
-        // Trim with live pin.
+        // A live first-address pin prevents physical deletion from quiescing;
+        // one bounded pass still publishes the exact safe horizon.
         backend
             .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
-            .expect("trim with live pin");
+            .expect("bounded trim with live pin");
 
         // EXACT BOUNDARY (AC3): lowest_branch_pinned_below gives deterministic seq, not >= 1.
         let pinned = backend
@@ -916,9 +968,7 @@ async fn TestConformanceSqlitePinAssertionStrength() {
         backend
             .with_log(|l| l.discard_branch(&shard(), &branch_shard()))
             .expect("discard branch");
-        backend
-            .trim_reclaimable_segments(&shard(), 1_000, ts(1_000_000))
-            .expect("trim after pin release");
+        trim_until_quiescent(&backend, 1_000, ts(1_000_000));
 
         // No pinned segments remain.
         let pinned_after = backend
@@ -967,7 +1017,7 @@ async fn TestConformanceSqlitePinAssertionStrength() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestSqliteObjectlogDeletedManifestRecovery() {
-    for tag in ["strict", "async"] {
+    for tag in ["strict"] {
         let root = base_dir(&format!("{tag}-objlog-del"));
         // Set up a queue with a trimmed object log and a fresh SQLite projection.
         let backend = if tag == "strict" {
@@ -975,7 +1025,7 @@ async fn TestSqliteObjectlogDeletedManifestRecovery() {
         } else {
             open_hybrid_async(&root)
         };
-        backend.create_queue(qdef()).await.unwrap();
+        create_owned_queue(&backend).await;
 
         // Write old segments (seq 0..3 at t=10) that will be past retention.
         for i in 0..4u64 {
@@ -1070,7 +1120,7 @@ async fn TestSqliteDeletedManifestErrorPreservesGuarantees() {
     // Set up a queue with a branch pin BEFORE trim to prove source-pin guarantee.
     // Pin at seq 0 so the first segment is retained even after the floor advances.
     let backend = open_hybrid_strict(&root);
-    backend.create_queue(qdef()).await.unwrap();
+    create_owned_queue(&backend).await;
     for i in 0..4u64 {
         backend
             .push(
@@ -1237,14 +1287,14 @@ fn TestSqlitePropagationPqueueC33c367eInteractionRecorded() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestSqliteObjectlogFloorHeadReplayRecovery() {
-    for tag in ["strict-fhr", "async-fhr"] {
+    for tag in ["strict-fhr"] {
         let root = base_dir(tag);
         let backend = if tag.starts_with("strict") {
             open_hybrid_strict(&root)
         } else {
             open_hybrid_async(&root)
         };
-        backend.create_queue(qdef()).await.unwrap();
+        create_owned_queue(&backend).await;
 
         // Push old commands (seq 0..3) at ts=10 that will be past retention.
         for i in 0..4u64 {
@@ -1339,7 +1389,7 @@ async fn TestSqliteObjectlogFloorHeadReplayRecovery() {
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestSqliteFloorHeadReplayPreservesFailClosedBoundary() {
-    for tag in ["strict-bnd", "async-bnd"] {
+    for tag in ["strict-bnd"] {
         let root = base_dir(tag);
 
         // --- Part 1: healthy reopen succeeds from retained floor/head ---
@@ -1348,7 +1398,7 @@ async fn TestSqliteFloorHeadReplayPreservesFailClosedBoundary() {
         } else {
             open_hybrid_async(&root)
         };
-        backend.create_queue(qdef()).await.unwrap();
+        create_owned_queue(&backend).await;
 
         for i in 0..4u64 {
             backend

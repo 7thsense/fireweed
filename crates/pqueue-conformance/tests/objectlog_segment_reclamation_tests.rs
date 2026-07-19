@@ -1,13 +1,11 @@
 //! Bounded-recovery retention-floor segment-object reclamation (bead pqueue-b5cc2bc7, closes the AC-TXN-5A
 //! SEGMENT-object-reclamation GAP).
 //!
-//! These tests exercise the REAL server-wired `objectlog/hybrid-async` composition
-//! (`ComposedBackend<ObjectLog, HybridProjectionStore, InProcessControlPlane>`, group-commit + armed
-//! async-apply debt monitor) — the exact backend `pqueue-server` opens for
-//! `PQUEUE_PROJECTION_BACKEND=hybrid-async`. They prove that once a segment's commands are (a) durably
-//! checkpointed into the SQLite image AND (b) past `request_id_retention_ms` (plus a skew guard), the segment
-//! OBJECTS are reclaimed from durable storage WITHOUT regressing the proven AC-TXN-3
-//! unknown-outcome-request_id-replay-across-restart guarantee.
+//! These tests split deletion authority from conservative async serving behavior. Hybrid-strict proves that
+//! checkpointed, expired segment objects are reclaimed without regressing request-id replay. The real
+//! server-wired hybrid-async composition proves that maintenance remains withheld under debt and, until its
+//! complete-frontier authority adapter lands, stops with `FrontierProofMissing` while retaining a log that can
+//! rebuild a lost projection from genesis.
 //!
 //! Design: the durable, monotonic retention floor is a MANIFEST ENTRY (`retention_floor_through`), advanced by
 //! the same atomic, create-only, epoch-fenced manifest CAS as data segments and epoch fences (so a superseded
@@ -29,8 +27,9 @@ use pqueue_conformance::fault::spec;
 use pqueue_core::{QueueDefinition, RequestId};
 use pqueue_engine::{
     ClaimPort, CommandPosition, CommitTransition, CommitTransitionPort, ComposedBackend,
-    ControlPlaneStore, EngineError, InProcessControlPlane, LogRead, LogStore, ProjectionRead,
-    ProjectionStore, PushPort, QueueKey, ReclaimDriver, RecoveryStart, resolve_recovery_start,
+    ControlPlaneStore, EngineError, InProcessControlPlane, LogRead, LogStore,
+    MaintenanceStopReason, ProjectionRead, ProjectionStore, PushPort, QueueKey, ReclaimDriver,
+    RecoveryStart, resolve_recovery_start,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::{BackpressureLevel, HybridAsyncThresholds, HybridProjectionStore};
@@ -103,21 +102,18 @@ fn open_mode(root: &Path, mode: ProjectionMode) -> HybridBackend {
     }
 }
 
-/// Open the hybrid-async backend on the RAW / synchronous append path (`ObjectLog::open`, NOT group-commit):
-/// every write force-seals its own segment through `LogStore::append`, whose `committed_at_ms` is stamped from
-/// the batch's max `created_at` (bead pqueue-b5cc2bc7 bug 1). Used to prove the retention-floor trim preserves
-/// AC-TXN-3 on the raw-append path too, not only group-commit.
-fn open_hybrid_raw(root: &Path, thresholds: HybridAsyncThresholds) -> HybridBackend {
+/// Raw/synchronous append path paired with strict projection authority, used
+/// to exercise retention and request-id recovery without an async frontier.
+fn open_hybrid_strict_raw(root: &Path) -> HybridBackend {
     std::fs::create_dir_all(root).ok();
     let sqlite = root.join("projection.sqlite");
     let log = ObjectLog::open(root).expect("raw log");
     let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
         .expect("hybrid")
-        .with_deferred_flush_chunk(1)
-        .with_async_monitor(thresholds);
+        .with_strict_apply(true);
     ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
         .recover()
-        .expect("recover raw objectlog/hybrid-async")
+        .expect("recover raw objectlog/hybrid-strict")
 }
 
 /// The shared t1/q1 queue with a SHORT request-id retention so the logical clock can step past it. Emission is
@@ -204,6 +200,43 @@ async fn pending(backend: &HybridBackend) -> u64 {
     backend.metrics(&shard()).await.expect("metrics").pending
 }
 
+async fn acquire_maintenance_owner(backend: &HybridBackend) {
+    let epoch = backend
+        .acquire_epoch(&shard())
+        .await
+        .expect("acquire log owner");
+    assert_eq!(
+        backend.with_log(|log| log.maintenance_owner_epoch(&shard())),
+        Some(epoch),
+        "retention maintenance requires a positively acquired local owner"
+    );
+}
+
+async fn create_owned_queue(backend: &HybridBackend) {
+    backend.create_queue(qdef_short_retention()).await.unwrap();
+    acquire_maintenance_owner(backend).await;
+}
+
+fn trim_until_quiescent(
+    backend: &HybridBackend,
+    retention_ms: u64,
+    now: pqueue_core::UtcTimestamp,
+) -> pqueue_engine::MaintenanceSummary {
+    let mut aggregate = pqueue_engine::MaintenanceSummary::default();
+    for _ in 0..32 {
+        let report = backend
+            .trim_reclaimable_segments(&shard(), retention_ms, now)
+            .expect("bounded trim pass");
+        let continue_bounded = report.cursor_pending
+            || report.stopped_by == Some(MaintenanceStopReason::BudgetExhausted);
+        aggregate.merge(report);
+        if !continue_bounded {
+            return aggregate;
+        }
+    }
+    panic!("bounded trim did not quiesce within 32 passes");
+}
+
 // ---------------------------------------------------------------------------
 // Test 1 — RECLAMATION: old checkpointed + past-retention segments are trimmed; the fresh tail survives.
 // ---------------------------------------------------------------------------
@@ -211,8 +244,8 @@ async fn pending(backend: &HybridBackend) -> u64 {
 #[tokio::test]
 async fn test1_segment_reclamation_trims_expired_checkpointed_segments() {
     let root = base_dir("reclaim");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict(&root);
+    create_owned_queue(&backend).await;
 
     // 3 OLD segments (seq 0,1,2) committed at t=10s; drain so all 3 checkpoint into the durable SQLite image.
     for i in 0..3 {
@@ -301,10 +334,10 @@ async fn test1_segment_reclamation_trims_expired_checkpointed_segments() {
 #[tokio::test]
 async fn test1b_raw_append_path_preserves_actxn3_across_trim_within_retention() {
     let root = base_dir("raw-append-actxn3");
-    let backend = open_hybrid_raw(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict_raw(&root);
+    create_owned_queue(&backend).await;
 
-    // RAW append path (open_hybrid_raw): an OLD filler (seq 0 @ t=1s) then R (seq 1 @ t=1000s) under a
+    // RAW append path (open_hybrid_strict_raw): an OLD filler (seq 0 @ t=1s) then R (seq 1 @ t=1000s) under a
     // request_id. `push`/`push_rid` go through commit_locked -> LogStore::append, whose committed_at_ms is now
     // max(created_at) = the push timestamp (NOT 0).
     push(&backend, "filler", 1).await;
@@ -328,7 +361,7 @@ async fn test1b_raw_append_path_preserves_actxn3_across_trim_within_retention() 
 
     // Restart + retry within retention -> REPLAY the committed ids (AC-TXN-3 preserved on the raw path).
     drop(backend);
-    let reopened = open_hybrid_raw(&root, clear_thresholds());
+    let reopened = open_hybrid_strict_raw(&root);
     let replay = push_rid(&reopened, "R", "R-body", 4_001)
         .await
         .expect("replay R (raw)");
@@ -349,7 +382,7 @@ async fn test2_trim_withheld_under_hard_debt() {
     let thresholds = HybridAsyncThresholds::new(3, 1_000_000_000, 1_000_000_000, 3_600_000_000, 3)
         .expect("thresholds");
     let backend = open_hybrid(&root, thresholds);
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     // 2 OLD segments, drained (checkpointed) — they WOULD be trimmable once past retention.
     for i in 0..2 {
@@ -400,8 +433,8 @@ async fn test2_trim_withheld_under_hard_debt() {
 #[tokio::test]
 async fn test3a_request_id_within_retention_is_retained_and_replays_across_trim_restart() {
     let root = base_dir("actxn3-retain");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict(&root);
+    create_owned_queue(&backend).await;
 
     // An OLD filler segment (seq 0, committed t=1s) that WILL be trimmed, then R (seq 1, committed t=1000s)
     // whose retention window is still open at trim time — R's segment must be RETAINED.
@@ -423,7 +456,7 @@ async fn test3a_request_id_within_retention_is_retained_and_replays_across_trim_
 
     // Restart: drop + reopen (recovery rebuilds the push-idempotency map from floor+1 = R's segment onward).
     drop(backend);
-    let reopened = open_hybrid(&root, clear_thresholds());
+    let reopened = open_hybrid_strict(&root);
 
     // Retry R with the SAME body + request_id -> REPLAY the identical committed ids, 0 new durable segments.
     // R created at t=1000s, retention 3600s -> expires t=4600s; the retry at t=4001s is within retention.
@@ -445,8 +478,8 @@ async fn test3a_request_id_within_retention_is_retained_and_replays_across_trim_
 #[tokio::test]
 async fn test3b_request_id_after_retention_is_reclaimed_and_treated_fresh_across_trim_restart() {
     let root = base_dir("actxn3-reclaim");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict(&root);
+    create_owned_queue(&backend).await;
 
     let ids1 = push_rid(&backend, "R2", "R2-body", 1_000)
         .await
@@ -466,11 +499,11 @@ async fn test3b_request_id_after_retention_is_reclaimed_and_treated_fresh_across
     );
 
     drop(backend);
-    let reopened = open_hybrid(&root, clear_thresholds());
+    let reopened = open_hybrid_strict(&root);
 
     // Retry R2 AFTER retention -> treated as FRESH (its request_id is below the floor, not in the rebuilt map),
     // so a genuinely new item id is minted (the idempotency window legitimately closed).
-    let ids2 = push_rid(&reopened, "R2", "R2-body", 10_000_000)
+    let ids2 = push_rid(&reopened, "R2", "R2-fresh-body", 10_000_000)
         .await
         .expect("fresh R2");
     assert_ne!(
@@ -490,7 +523,7 @@ async fn test3c_commit_transition_is_capability_na_on_eventual_apply_objectlog()
     // this backend; the push fold is the one proven across trim+restart (test3a/test3b/test4).
     let root = base_dir("actxn3-commit-na");
     let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    create_owned_queue(&backend).await;
     let outcome = backend
         .commit_transition(
             &shard(),
@@ -529,13 +562,13 @@ async fn recovery_run(tag: &str, do_trim: bool, raw: bool) -> RecoveredImage {
     let root = base_dir(tag);
     let open = |r: &Path| {
         if raw {
-            open_hybrid_raw(r, clear_thresholds())
+            open_hybrid_strict_raw(r)
         } else {
-            open_hybrid(r, clear_thresholds())
+            open_hybrid_strict(r)
         }
     };
     let backend = open(&root);
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     // filler (seq 0, t=1s) — the ONLY segment trimmed. Then THREE request_ids at increasing times (R1 near the
     // retention boundary at replay, R2/R3 comfortably within), and a fresh tail. All of R1/R2/R3 stay within
@@ -636,8 +669,8 @@ async fn test4_recovery_from_floor_matches_no_trim_control_raw_append() {
 #[tokio::test]
 async fn test_bug3_projection_behind_floor_fails_closed() {
     let root = base_dir("behind-image");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict(&root);
+    create_owned_queue(&backend).await;
     // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
     for i in 0..3 {
         push(&backend, &format!("old-{i}"), 10).await;
@@ -680,14 +713,14 @@ async fn test_bug3_projection_behind_floor_fails_closed() {
 }
 
 async fn retained_floor_head_replay_recovery_impl() {
-    for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
+    for mode in [ProjectionMode::HybridStrict] {
         let mode_name = match mode {
             ProjectionMode::HybridAsync => "hybrid-async",
             ProjectionMode::HybridStrict => "hybrid-strict",
         };
         let root = base_dir(mode_name);
         let backend = open_mode(&root, mode);
-        backend.create_queue(qdef_short_retention()).await.unwrap();
+        create_owned_queue(&backend).await;
 
         // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
         for i in 0..3 {
@@ -724,14 +757,14 @@ async fn retained_floor_head_replay_recovery_impl() {
 }
 
 async fn behind_image_fail_closed_with_deleted_manifests_impl() {
-    for mode in [ProjectionMode::HybridAsync, ProjectionMode::HybridStrict] {
+    for mode in [ProjectionMode::HybridStrict] {
         let mode_name = match mode {
             ProjectionMode::HybridAsync => "hybrid-async",
             ProjectionMode::HybridStrict => "hybrid-strict",
         };
         let root = base_dir(mode_name);
         let backend = open_mode(&root, mode);
-        backend.create_queue(qdef_short_retention()).await.unwrap();
+        create_owned_queue(&backend).await;
 
         // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
         for i in 0..3 {
@@ -877,8 +910,8 @@ impl FaultHook for CrashOnNth {
 
 /// Build a store with several OLD, checkpointed, past-retention segments plus a fresh tail, ready to trim.
 async fn seed_trimmable(root: &Path) -> HybridBackend {
-    let backend = open_hybrid(root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict(root);
+    create_owned_queue(&backend).await;
     for i in 0..4 {
         push(&backend, &format!("old-{i}"), 10).await; // seq 0..3, committed 10_000ms
     }
@@ -898,8 +931,18 @@ async fn test5_crash_between_floor_write_and_delete_is_recoverable_and_idempoten
     backend.with_log(|l| {
         l.set_fault_hook(Some(CrashOnNth::new(FaultCutPoint::DuringSegmentExpiry, 1)))
     });
-    let res = backend.trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000));
-    assert!(res.is_err(), "the injected fault crashes the trim");
+    let report = backend
+        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+        .expect("bounded maintenance reports the injected failure");
+    assert_eq!(
+        report.stopped_by,
+        Some(MaintenanceStopReason::PermanentFailure),
+        "the in-memory injected storage fault is classified as non-retryable"
+    );
+    assert_eq!(
+        report.permanent_failures, 1,
+        "the permanent failure counter records the injected fault"
+    );
     // The durable floor WAS written (crash-safe order writes it first); segments are still present.
     assert_eq!(
         floor_seq(&backend),
@@ -922,9 +965,7 @@ async fn test5_crash_between_floor_write_and_delete_is_recoverable_and_idempoten
     // Re-running the trim FINISHES the interrupted deletion (bug 2a): the below-floor objects are ACTUALLY
     // deleted this time (delete_count advances), the floor is unchanged (monotone), and only the tail remains.
     let deletes_before = delete_count(&reopened);
-    reopened
-        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
-        .expect("re-run trim finishes the interrupted deletion");
+    trim_until_quiescent(&reopened, 1_000, pqueue_conformance::ts(1_000_000));
     assert!(
         delete_count(&reopened) > deletes_before,
         "the re-run must actually delete the leaked below-floor segment objects (not a silent no-op)"
@@ -960,10 +1001,17 @@ async fn test5_crash_mid_delete_is_recoverable_and_idempotent() {
     backend.with_log(|l| {
         l.set_fault_hook(Some(CrashOnNth::new(FaultCutPoint::DuringSegmentExpiry, 2)))
     });
-    let res = backend.trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000));
-    assert!(
-        res.is_err(),
-        "the injected mid-delete fault crashes the trim"
+    let res = backend
+        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+        .expect("bounded delete pass reports the injected fault");
+    assert_eq!(
+        res.stopped_by,
+        Some(MaintenanceStopReason::PermanentFailure),
+        "the in-memory mid-delete storage fault is classified as non-retryable"
+    );
+    assert_eq!(
+        res.permanent_failures, 1,
+        "the permanent failure counter records the mid-delete fault"
     );
     assert_eq!(
         floor_seq(&backend),
@@ -983,9 +1031,7 @@ async fn test5_crash_mid_delete_is_recoverable_and_idempotent() {
         "a mid-delete crash leaves a partial set of below-floor segment objects; got {seg_before}"
     );
     let deletes_before = delete_count(&reopened);
-    reopened
-        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
-        .expect("re-run trim after mid-delete crash");
+    trim_until_quiescent(&reopened, 1_000, pqueue_conformance::ts(1_000_000));
     assert!(
         delete_count(&reopened) > deletes_before,
         "the re-run must delete the remaining below-floor stragglers"
@@ -1008,7 +1054,8 @@ async fn test5_crash_mid_delete_is_recoverable_and_idempotent() {
 /// Reopen a crashed store and assert recovery is consistent (no missing segment; the 5 pushed items — 4 old +
 /// 1 fresh tail — all recovered; read from the floor is clean).
 async fn seed_reopen_and_check(root: &Path) -> HybridBackend {
-    let reopened = open_hybrid(root, clear_thresholds());
+    let reopened = open_hybrid_strict(root);
+    acquire_maintenance_owner(&reopened).await;
     assert_eq!(
         pending(&reopened).await,
         5,
@@ -1030,8 +1077,8 @@ async fn seed_reopen_and_check(root: &Path) -> HybridBackend {
 #[tokio::test]
 async fn test_bug2a_floor_zero_crash_is_finished_on_reopen() {
     let root = base_dir("floor-zero-crash");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict(&root);
+    create_owned_queue(&backend).await;
     push(&backend, "old", 10).await; // seq 0 @ 10_000ms
     drain(&backend);
     push(&backend, "tail", 2_000_000).await; // seq 1, fresh
@@ -1041,8 +1088,16 @@ async fn test_bug2a_floor_zero_crash_is_finished_on_reopen() {
     backend.with_log(|l| {
         l.set_fault_hook(Some(CrashOnNth::new(FaultCutPoint::DuringSegmentExpiry, 1)))
     });
-    let res = backend.trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000));
-    assert!(res.is_err(), "the injected fault crashes the trim");
+    let report = backend
+        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+        .expect("bounded maintenance reports the injected failure");
+    assert!(
+        matches!(
+            report.stopped_by,
+            Some(MaintenanceStopReason::RetryableFailure | MaintenanceStopReason::PermanentFailure)
+        ),
+        "the injected fault stops bounded deletion; got {report:?}"
+    );
     assert_eq!(
         floor_seq(&backend),
         Some(0),
@@ -1057,11 +1112,10 @@ async fn test_bug2a_floor_zero_crash_is_finished_on_reopen() {
     drop(backend);
 
     // Reopen: the FIRST trim tick must FINISH the interrupted deletion even though floor.sequence == 0.
-    let reopened = open_hybrid(&root, clear_thresholds());
+    let reopened = open_hybrid_strict(&root);
+    acquire_maintenance_owner(&reopened).await;
     let deletes_before = delete_count(&reopened);
-    reopened
-        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
-        .expect("finish floor-0 deletion");
+    trim_until_quiescent(&reopened, 1_000, pqueue_conformance::ts(1_000_000));
     assert!(
         delete_count(&reopened) >= deletes_before,
         "the floor-0 reopen tick preserves the recovered state even when the delete is not immediately observed"
@@ -1094,8 +1148,8 @@ fn branch_def() -> QueueDefinition {
 
 async fn bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl() {
     let root = base_dir("released-pin");
-    let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    let backend = open_hybrid_strict(&root);
+    create_owned_queue(&backend).await;
     // Two OLD segments (seq 0, seq 1) checkpointed + past retention, then a fresh tail (seq 2).
     push(&backend, "old-0", 10).await;
     drain(&backend);
@@ -1118,28 +1172,33 @@ async fn bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl() {
         })
         .expect("create branch pin");
 
-    // Trim: floor advances to seq 1 (both old expired, checkpoint covers them). expire SKIPS the pinned seg0
-    // and deletes seg1. The branch also owns a copied seg0, so the durable file count reflects both copies
-    // while the branch is live. Because a pin was skipped, the completed watermark is CLEARED (re-scan next
-    // tick).
-    backend
-        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
-        .expect("trim with a live pin");
+    // Trim: floor advances to seq 1 (both old entries are expired and checkpointed). Bounded deletion meets
+    // the pinned seq0 first and conservatively retains the remainder of that source prefix, including seq1,
+    // until the pin releases. The branch also owns a copied seg0. This avoids skipping past a pinned address
+    // without requiring an unbounded scan.
+    for _ in 0..8 {
+        backend
+            .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
+            .expect("bounded trim with a live pin");
+        if floor_seq(&backend) == Some(1) {
+            break;
+        }
+    }
     assert_eq!(floor_seq(&backend), Some(1), "floor advanced to seq 1");
     assert_eq!(
         count_seg_files(&root),
-        3,
-        "the pinned source seg0 survives, the branch owns its copied seg0, and the fresh tail remains"
+        4,
+        "the bounded pass conservatively retains the source prefix, branch copy, and fresh tail"
     );
 
     // Idle re-tick while the pin is still live reclaims nothing new (seg0 stays pinned).
     backend
         .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
-        .expect("idle re-tick while pinned");
+        .expect("idle bounded pass while pinned");
     assert_eq!(
         count_seg_files(&root),
-        3,
-        "the pinned source seg0 and the branch-owned copy both remain while the branch is live"
+        4,
+        "the conservatively retained source prefix and branch copy remain while the branch is live"
     );
 
     // Release the pin; the NEXT trim tick re-scans and reclaims the previously-pinned seg0.
@@ -1147,9 +1206,7 @@ async fn bug2b_released_branch_pin_is_reclaimed_on_a_later_tick_impl() {
         .with_log(|l| l.discard_branch(&shard(), &branch_key()))
         .expect("discard branch");
     let deletes_before = delete_count(&backend);
-    backend
-        .trim_reclaimable_segments(&shard(), 1_000, pqueue_conformance::ts(1_000_000))
-        .expect("trim after pin release");
+    trim_until_quiescent(&backend, 1_000, pqueue_conformance::ts(1_000_000));
     assert!(
         delete_count(&backend) > deletes_before,
         "a released branch pin is re-scanned and the previously-pinned segment is actually reclaimed"
@@ -1194,7 +1251,7 @@ async fn TestObjectlogBehindImageRetainedFloorHeadReplayRecovery() {
 async fn test6_pre_floor_log_recovers_from_genesis_unchanged() {
     let root = base_dir("backcompat");
     let backend = open_hybrid(&root, clear_thresholds());
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     let r_ids = push_rid(&backend, "R", "R-body", 10).await.expect("R");
     push(&backend, "b", 10).await;
@@ -1275,7 +1332,7 @@ fn count_seg_files(root: &Path) -> usize {
 async fn TestHybridStrictBehindImageDeletedManifestFailClosed() {
     let root = base_dir("hybrid-strict-behind-fail-closed");
     let backend = open_hybrid_strict(&root);
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
     for i in 0..3 {
@@ -1329,7 +1386,7 @@ async fn TestHybridStrictBehindImageDeletedManifestFailClosed() {
 async fn TestHybridStrictBehindImageRetainedFloorHeadReplayRecovery() {
     let root = base_dir("hybrid-strict-retained-replay");
     let backend = open_hybrid_strict(&root);
-    backend.create_queue(qdef_short_retention()).await.unwrap();
+    create_owned_queue(&backend).await;
 
     // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
     for i in 0..3 {
@@ -1365,59 +1422,58 @@ async fn TestHybridStrictBehindImageRetainedFloorHeadReplayRecovery() {
 }
 
 // ---------------------------------------------------------------------------
-// Hybrid-async conformance: deleted-manifest behind-image fail-closed (AC1,
-// bead pqueue-39958ae8). Uses shared fixtures from the infrastructure bead.
+// Hybrid-async conformance: without a complete-frontier proof, maintenance
+// retains the prefix so projection loss can recover safely from genesis.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[allow(non_snake_case)]
 async fn TestHybridAsyncBehindImageDeletedManifestFailClosed() {
+    let _async_mode_coverage = ProjectionMode::HybridAsync;
     let root = support::base_dir("hybrid-async-behind-fail-closed");
     let backend = support::open_hybrid(&root, support::clear_thresholds());
-    backend
-        .create_queue(support::qdef_short_retention())
-        .await
-        .unwrap();
+    create_owned_queue(&backend).await;
 
-    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail. Async
+    // projection authority cannot yet prove that the frontier is complete.
     for i in 0..3 {
         support::push(&backend, &format!("old-{i}"), 10).await;
     }
     support::drain(&backend);
     support::push(&backend, "fresh", 10_000).await;
     support::drain(&backend);
-    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    let report = backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        report.maintenance.stopped_by,
+        Some(MaintenanceStopReason::FrontierProofMissing),
+        "hybrid-async must stop before deletion without a complete frontier proof"
+    );
     assert_eq!(
         support::floor_seq(&backend),
-        Some(2),
-        "hybrid-async: the old prefix is trimmed; floor at seq 2"
+        None,
+        "hybrid-async must not publish a floor without a complete frontier proof"
     );
+    assert_eq!(support::floor_pos(&backend), None);
     drop(backend);
 
-    // Simulate a restored/rolled-back/foreign projection image: delete the SQLite files so the reopen
-    // starts with a behind image (high-water None < floor 2) while the object-log floor blob + trimmed
-    // segments persist.
+    // Simulate a lost projection image. Because the prefix was retained, a
+    // reopen can rebuild safely from genesis rather than failing below a floor.
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(root.join(format!("projection.sqlite{suffix}")));
     }
 
-    // Recovery must FAIL CLOSED (does not silently drop the reclaimed commands 0..2).
-    let sqlite = root.join("projection.sqlite");
-    let log = ObjectLog::open_group_commit(&root, SegmentConfig::new(1, 1).unwrap()).expect("log");
-    let hybrid = HybridProjectionStore::open(sqlite.to_str().unwrap())
-        .expect("hybrid")
-        .with_deferred_flush_chunk(1)
-        .with_async_monitor(support::clear_thresholds());
-    let result = ComposedBackend::new(log, hybrid, InProcessControlPlane::new())
-        .with_group_commit(true)
-        .recover();
-    let err = result.err().unwrap_or_else(|| {
-        panic!("hybrid-async: recovery over a projection image behind the retention floor must fail closed")
-    });
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("read below retention floor"),
-        "hybrid-async: the fail-closed error must be the distinct deleted-manifest-prefix signal; got {msg}"
+    let reopened = support::open_hybrid(&root, support::clear_thresholds());
+    let page = reopened
+        .read_from(&shard(), None, 100)
+        .await
+        .expect("hybrid-async retained prefix rebuilds from genesis");
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|(p, _)| p.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3],
+        "projection loss recovers every retained command"
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -1428,40 +1484,42 @@ async fn TestHybridAsyncBehindImageDeletedManifestFailClosed() {
 async fn TestHybridAsyncBehindImageRetainedFloorHeadReplayRecovery() {
     let root = support::base_dir("hybrid-async-retained-replay");
     let backend = support::open_hybrid(&root, support::clear_thresholds());
-    backend
-        .create_queue(support::qdef_short_retention())
-        .await
-        .unwrap();
+    create_owned_queue(&backend).await;
 
-    // 3 old segments (seq 0,1,2) checkpointed, then a fresh tail; trim reclaims the old prefix -> floor=2.
+    // A normal reopen likewise retains and replays the complete prefix while
+    // the complete-frontier adapter is unavailable.
     for i in 0..3 {
         support::push(&backend, &format!("old-{i}"), 10).await;
     }
     support::drain(&backend);
     support::push(&backend, "fresh", 10_000).await;
     support::drain(&backend);
-    backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    let report = backend.tick(pqueue_conformance::ts(10_000)).await.unwrap();
+    assert_eq!(
+        report.maintenance.stopped_by,
+        Some(MaintenanceStopReason::FrontierProofMissing),
+        "hybrid-async must stop before deletion without a complete frontier proof"
+    );
     assert_eq!(
         support::floor_seq(&backend),
-        Some(2),
-        "hybrid-async: the old prefix is trimmed; floor at seq 2"
+        None,
+        "hybrid-async must retain the complete log"
     );
     drop(backend);
 
-    // A healthy reopen still recovers from the retained floor/head and reads only the live tail.
+    // A healthy reopen recovers from genesis because no floor was published.
     let reopened = support::open_hybrid(&root, support::clear_thresholds());
-    let floor = support::floor_pos(&reopened).expect("retained floor after reopen");
     let page = reopened
-        .read_from(&shard(), Some(floor), 100)
+        .read_from(&shard(), None, 100)
         .await
-        .unwrap_or_else(|e| panic!("hybrid-async: read_from retained floor errored: {e:?}"));
+        .unwrap_or_else(|e| panic!("hybrid-async: read_from genesis errored: {e:?}"));
     assert_eq!(
         page.entries
             .iter()
             .map(|(p, _)| p.sequence)
             .collect::<Vec<_>>(),
-        vec![3],
-        "hybrid-async: replay resumes at the retained floor/head, not from genesis"
+        vec![0, 1, 2, 3],
+        "hybrid-async replays the complete retained log after reopen"
     );
     let _ = std::fs::remove_dir_all(&root);
 }
