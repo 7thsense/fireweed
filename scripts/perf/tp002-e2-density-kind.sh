@@ -101,8 +101,10 @@ spec:
           ports: [ { containerPort: 8080 } ]
           env:
             - { name: PQUEUE_LOG_BACKEND, value: objectlog }
-            - { name: PQUEUE_PROJECTION_BACKEND, value: sqlite }
-            - { name: PQUEUE_OBJECT_LOG_MODE, value: segmented }
+            # TD-004's strict profile is the supported group-commit object-log + durable SQLite
+            # projection path. PQUEUE_OBJECT_LOG_MODE is a retired pseudo-axis and is intentionally
+            # absent; setting it would falsely imply that it selects segmented/group-commit behavior.
+            - { name: PQUEUE_PROJECTION_BACKEND, value: hybrid-strict }
             - { name: PQUEUE_OBJECT_LOG_ROOT, value: /data/object-log }
             - { name: PQUEUE_SQLITE_PROJECTION_PATH, value: /data/projection.db }
             - { name: PQUEUE_LISTEN_ADDR, value: "0.0.0.0:8080" }
@@ -139,7 +141,7 @@ SERVER_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$SERVER_POD" -o jsonpath='{.s
 NODE_IMAGE=$(docker inspect "${CLUSTER}-control-plane" --format '{{.Config.Image}}')
 NODE_CAPACITY=$(kubectl get node -o jsonpath='{.items[0].status.capacity.cpu} {.items[0].status.capacity.memory}')
 HARDWARE="$(nproc) host cores; $(awk '/MemTotal/ {printf "%.1f GiB RAM", $2/1024/1024}' /proc/meminfo); kind node $NODE_IMAGE capacity $NODE_CAPACITY; server limit 4 cores/4 GiB RAM"
-TOPOLOGY="live one-node kind deployment; objectlog/sqlite on bounded 4 GiB emptyDir tmpfs; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
+TOPOLOGY="live one-node kind deployment; TD-004 objectlog/hybrid-strict durable SQLite projection on bounded 4 GiB emptyDir tmpfs; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
 
 cat <<YAML | kubectl apply -f -
 apiVersion: batch/v1

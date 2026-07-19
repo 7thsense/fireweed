@@ -7,8 +7,9 @@ scripts/perf/tp002-e2-density-kind.sh
 ```
 
 The command builds the revision's `Dockerfile.e2` image, deploys one
-`pqueue-service` pod to kind with the durable local object-log authority and a
-SQLite projection, and provisions 1,001 queues through the generated bootstrap
+`pqueue-service` pod to kind with the durable local object-log authority and
+TD-004's `hybrid-strict` durable SQLite projection, and provisions 1,001 queues
+through the generated bootstrap
 inventory (`density:q0` through `density:q1000`). `density:q1000` is the hot
 queue; the other 1,000 queues are cold neighbors.
 
@@ -18,6 +19,9 @@ fsync and SQLite projection code paths, while unrelated host-disk contention
 cannot become an accidental release condition. Kubernetes accounts the volume
 against the pod's fixed memory limit. This one-node diagnostic excludes pod or
 node failover, so it makes no persistence claim beyond the live deployment.
+The wrapper does not set the retired `PQUEUE_OBJECT_LOG_MODE` pseudo-axis;
+`hybrid-strict` selects the supported manifest group-commit path, with durable
+SQLite apply completed before success becomes visible.
 
 The release command fails closed if the worktree is dirty. It always rebuilds
 the image, labels it with the full 40-character Git revision, records the
