@@ -21,6 +21,40 @@ async fn filtered_lifecycle_metrics_conformance() {
     .await;
 }
 
+#[tokio::test]
+async fn async_inspection_recovery_and_maintenance_helpers_are_deferred() {
+    use pqueue_conformance::{qdef, shard};
+    use pqueue_engine::{ControlPlaneStore, LogRead, PushPort, PushSpec};
+
+    let backend = composed_memory_backend();
+    let create = backend.create_queue(qdef());
+
+    // Constructing the future performs no control-plane/storage work.
+    assert!(
+        backend
+            .list_queues(&shard().tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    create.await.unwrap();
+
+    backend
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    let page = backend.read_from(&shard(), None, 16).await.unwrap();
+    assert_eq!(page.entries.len(), 1);
+
+    backend.flush_tick_async(0).await.unwrap();
+    backend.flush_deferred_projection_async().await.unwrap();
+    backend
+        .trim_reclaimable_segments_async(shard(), 1_000, ts(1))
+        .await
+        .unwrap();
+    backend.recover_async().await.unwrap();
+}
+
 /// ADR-012 Phase 1b-i: CAPABILITY PARITY between the composed memory backend and the monolithic
 /// `MemoryBackend`. The shared conformance suite above already covers the data-plane ports; these
 /// white-box tests cover the commit-class ports the monolith implements that the composition previously

@@ -3193,13 +3193,13 @@ mod tests {
         WriteSideRecordsCommand,
     };
     use std::future::Future;
-    use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
 
-    fn poll_once<F: Future + Unpin>(future: &mut F) -> Poll<F::Output> {
+    fn poll_once<F: Future>(future: F) -> Poll<F::Output> {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
-        Pin::new(future).poll(&mut cx)
+        let mut future = std::pin::pin!(future);
+        future.as_mut().poll(&mut cx)
     }
 
     #[derive(Default)]
@@ -3445,8 +3445,8 @@ mod tests {
         backend: &ObservedBackend,
         definition: QueueDefinition,
     ) {
-        let mut create = backend.create_queue(definition);
-        assert!(matches!(poll_once(&mut create), Poll::Ready(Ok(_))));
+        let create = backend.create_queue(definition);
+        assert!(matches!(poll_once(create), Poll::Ready(Ok(_))));
     }
 
     fn seed_terminal_item_via_commit(
@@ -3463,14 +3463,14 @@ mod tests {
     ) -> (ItemId, CommandPosition) {
         create_observed_queue_with_definition(backend, definition);
         let shard = shard();
-        let mut push = backend.push(&shard, vec![PushSpec::default()], ts(0), None);
-        let pushed = match poll_once(&mut push) {
+        let push = backend.push(&shard, vec![PushSpec::default()], ts(0), None);
+        let pushed = match poll_once(push) {
             Poll::Ready(Ok(ids)) => ids,
             other => panic!("unexpected push result: {other:?}"),
         };
         let item_id = pushed[0];
 
-        let mut claim = backend.claim(ClaimRequest {
+        let claim = backend.claim(ClaimRequest {
             eligibility_time: None,
             shard: shard.clone(),
             worker_id: WorkerId::new("claimer").unwrap(),
@@ -3481,15 +3481,15 @@ mod tests {
             compatibility: ClaimCompatibility::default(),
             expected_epoch: None,
         });
-        assert!(matches!(poll_once(&mut claim), Poll::Ready(Ok(_))));
+        assert!(matches!(poll_once(claim), Poll::Ready(Ok(_))));
 
-        let mut finalize = backend.finalize(
+        let finalize = backend.finalize(
             &shard,
             vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
             ts(2),
             None,
         );
-        assert!(matches!(poll_once(&mut finalize), Poll::Ready(Ok(()))));
+        assert!(matches!(poll_once(finalize), Poll::Ready(Ok(()))));
 
         assert_eq!(
             backend.with_projection(|projection| projection.item_state(&shard, &item_id)),

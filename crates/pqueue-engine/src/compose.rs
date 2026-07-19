@@ -74,6 +74,86 @@ use crate::{
     BufferedByteBudget, ByteAdmissionError, OwnedBytePermit, retained_records_plus_frame_bytes,
 };
 
+/// Defer synchronous compatibility work until the returned future is polled.
+///
+/// This helper is confined to the legacy in-process composition while each substrate moves behind its
+/// native async axis. In particular, constructing a port future must not itself perform storage work.
+struct Deferred<F> {
+    operation: Option<F>,
+}
+
+impl<F> Unpin for Deferred<F> {}
+
+impl<T, F> Future for Deferred<F>
+where
+    F: FnOnce() -> T,
+{
+    type Output = T;
+
+    fn poll(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(self
+            .operation
+            .take()
+            .expect("deferred future polled after completion")(
+        ))
+    }
+}
+
+fn deferred<T, F>(operation: F) -> Deferred<F>
+where
+    T: Send,
+    F: FnOnce() -> T + Send,
+{
+    Deferred {
+        operation: Some(operation),
+    }
+}
+
+struct QueueSerialized<F> {
+    acquire: crate::QueueGateAcquire<QueueKey>,
+    operation: Option<F>,
+}
+
+impl<F> Unpin for QueueSerialized<F> {}
+
+impl<T, F> Future for QueueSerialized<F>
+where
+    F: FnOnce() -> EngineResult<T>,
+{
+    type Output = EngineResult<T>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.acquire).poll(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(_)) => Poll::Ready(Err(EngineError::Unavailable)),
+            Poll::Ready(Ok(permit)) => {
+                let operation = self
+                    .operation
+                    .take()
+                    .expect("queue-serialized future polled after completion");
+                let result = operation();
+                drop(permit);
+                Poll::Ready(result)
+            }
+        }
+    }
+}
+
+fn queue_serialized<T, F>(
+    gate: &crate::KeyedQueueGate<QueueKey>,
+    shard: QueueKey,
+    operation: F,
+) -> QueueSerialized<F>
+where
+    T: Send,
+    F: FnOnce() -> EngineResult<T> + Send,
+{
+    QueueSerialized {
+        acquire: gate.acquire(shard),
+        operation: Some(operation),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Axis 1: LogStore — the durable command log + epoch/fence authority
 // ---------------------------------------------------------------------------
@@ -407,17 +487,6 @@ impl SealSlot {
     }
 }
 
-/// The future a write port returns. `Ready` resolves immediately (the synchronous atomic path, and the
-/// group-commit ops that complete under the lock); `Seal` parks on a [`SealSlot`] until the waiter's co-
-/// buffered batch seals (the ack-after-seal `push`). Works on any executor (no runtime dependency).
-enum AckFuture<T> {
-    Ready(Option<EngineResult<T>>),
-    Seal {
-        slot: Arc<SealSlot>,
-        value: Option<T>,
-    },
-}
-
 struct SealWait {
     slot: Arc<SealSlot>,
 }
@@ -438,44 +507,6 @@ impl Future for SealWait {
         }
         *self.slot.waker.lock().expect("seal slot poisoned") = Some(cx.waker().clone());
         Poll::Pending
-    }
-}
-
-impl<T> AckFuture<T> {
-    fn ready(result: EngineResult<T>) -> Self {
-        AckFuture::Ready(Some(result))
-    }
-
-    fn seal(slot: Arc<SealSlot>, value: T) -> Self {
-        AckFuture::Seal {
-            slot,
-            value: Some(value),
-        }
-    }
-}
-
-impl<T: Unpin> Future for AckFuture<T> {
-    type Output = EngineResult<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            AckFuture::Ready(slot) => {
-                Poll::Ready(slot.take().expect("AckFuture polled after completion"))
-            }
-            AckFuture::Seal { slot, value } => {
-                let mut r = slot.result.lock().expect("seal slot poisoned");
-                if let Some(outcome) = r.take() {
-                    return Poll::Ready(match outcome {
-                        Ok(()) => Ok(value.take().expect("AckFuture polled after completion")),
-                        Err(e) => Err(e),
-                    });
-                }
-                // Not sealed yet: register the waker WHILE holding the result lock (so `complete` cannot slip
-                // a result+wake between our check and our registration), then yield.
-                *slot.waker.lock().expect("seal slot poisoned") = Some(cx.waker().clone());
-                Poll::Pending
-            }
-        }
     }
 }
 
@@ -1095,21 +1126,21 @@ impl crate::AsyncControlPlane for InProcessControlPlane {
         &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        std::future::ready(ControlPlane::create_queue(self, definition))
+        deferred(move || ControlPlane::create_queue(self, definition))
     }
 
     fn queue_definition(
         &self,
         key: QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
-        std::future::ready(ControlPlane::queue_definition(self, &key))
+        deferred(move || ControlPlane::queue_definition(self, &key))
     }
 
     fn list_queues(
         &self,
         tenant: TenantId,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
-        std::future::ready(ControlPlane::list_queues(self, &tenant))
+        deferred(move || ControlPlane::list_queues(self, &tenant))
     }
 }
 
@@ -1196,6 +1227,8 @@ pub trait ComposeFaultHook: Send + Sync {
 pub struct ComposedBackend<L, P, C> {
     inner: Mutex<Inner<L, P>>,
     control: C,
+    /// Cancellation-safe queue-local admission. A permit never contains a standard mutex guard.
+    mutation_gate: crate::KeyedQueueGate<QueueKey>,
     /// Test-only composed-layer projection-apply fault hook (TP-003 §3.10 AC-TXN-4). `None` in every
     /// production path — installed only by the AC-TXN-4 conformance tests via [`Self::set_fault_hook`].
     fault_hook: Mutex<Option<Arc<dyn ComposeFaultHook>>>,
@@ -1206,6 +1239,10 @@ pub struct ComposedBackend<L, P, C> {
     /// `LogStore::durability_class` so the hot path never re-locks to decide whether an atomic-only port
     /// (upsert / update_fields / reschedule / commit_transition) is available.
     durability: DurabilityClass,
+    supports_gates: bool,
+    supports_commit_transition: bool,
+    supports_group_commit: bool,
+    group_commit_flush_interval_ms: u64,
     /// Recovery-window budget (max tail commands) before [`Self::recover`] logs a recovery-window warning.
     recovery_max_tail: u64,
     /// Group-commit mode (ADR-012 P2), DEFAULT OFF. When `false` every write funnels through the synchronous
@@ -1219,6 +1256,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// Assemble a backend from one of each axis.
     pub fn new(log: L, projection: P, control: C) -> Self {
         let durability = log.durability_class();
+        let supports_gates = projection.supports_gates();
+        let supports_commit_transition = projection.supports_commit_transition();
+        let supports_group_commit = log.supports_group_commit();
+        let group_commit_flush_interval_ms = (log.gc_max_latency_ms() / 4).max(1);
         Self {
             inner: Mutex::new(Inner {
                 log,
@@ -1234,10 +1275,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 queue_byte_limit: None,
             }),
             control,
+            mutation_gate: crate::KeyedQueueGate::new(1024),
             fault_hook: Mutex::new(None),
             node_id: 0,
             counters: QueueCounters::default(),
             durability,
+            supports_gates,
+            supports_commit_transition,
+            supports_group_commit,
+            group_commit_flush_interval_ms,
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             group_commit: false,
         }
@@ -1299,19 +1345,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// Whether the composition runs the group-commit write path (the builder flag AND a group-commit-capable
     /// log). The server uses this to decide whether to spawn the externalized flush task.
     pub fn group_commit_enabled(&self) -> bool {
-        self.group_commit
-            && self
-                .inner
-                .lock()
-                .expect("poisoned")
-                .log
-                .supports_group_commit()
+        self.group_commit && self.supports_group_commit
     }
 
     /// The flush-task poll interval (ms): `gc_max_latency_ms()/4` (≥ 1), so a buffered-but-quiet segment
     /// seals within ~one latency window — the same cadence the monolith's `spawn_flusher` uses.
     pub fn group_commit_flush_interval_ms(&self) -> u64 {
-        (self.inner.lock().expect("poisoned").log.gc_max_latency_ms() / 4).max(1)
+        self.group_commit_flush_interval_ms
     }
 
     /// Observability/test seam: number of accepted commands still buffered ahead of a durable seal.
@@ -1714,6 +1754,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         Self::trim_reclaimable_segments_locked(&mut g, shard, request_id_retention_ms, now)
     }
 
+    /// Async port-facing retention helper. Work begins only when polled and is queue-serialized.
+    pub fn trim_reclaimable_segments_async(
+        &self,
+        shard: QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<MaintenanceSummary>> + Send {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
+            self.trim_reclaimable_segments(&shard, request_id_retention_ms, now)
+        })
+    }
+
     fn durable_definitions_locked(inner: &Inner<L, P>) -> EngineResult<Vec<QueueDefinition>> {
         let mut seen: std::collections::HashSet<QueueKey> = std::collections::HashSet::new();
         let mut defs = Vec::new();
@@ -1955,8 +2007,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
 
     /// Whether the group-commit write path is active for this composition (the builder flag AND a capable
     /// log). Read on the hot path with the lock already held.
-    fn gc_active(&self, inner: &Inner<L, P>) -> bool {
-        self.group_commit && inner.log.supports_group_commit()
+    fn gc_active(&self, _inner: &Inner<L, P>) -> bool {
+        self.group_commit && self.supports_group_commit
     }
 
     /// Seal every latency-due queue's buffered batch + distribute it (ADR-012 P2 externalized flusher). The
@@ -1985,6 +2037,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         Ok(())
     }
 
+    /// Deferred async entrypoint for the group-commit latency flusher.
+    pub fn flush_tick_async(&self, now_ms: i64) -> impl Future<Output = EngineResult<()>> + Send {
+        deferred(move || self.flush_tick(now_ms))
+    }
+
     /// Drain deferred projection work, if the projection supports it. This is separate from `flush_tick` so
     /// latency-sensitive manifest sealing does not wait on a durable projection checkpoint.
     pub fn flush_deferred_projection(&self) -> EngineResult<()> {
@@ -1993,6 +2050,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             .expect("composed backend poisoned")
             .projection
             .flush_deferred()
+    }
+
+    /// Deferred async entrypoint for projection repair/checkpoint draining.
+    pub fn flush_deferred_projection_async(&self) -> impl Future<Output = EngineResult<()>> + Send {
+        deferred(move || self.flush_deferred_projection())
     }
 
     /// Best-effort deferred projection drain for background flusher tasks.
@@ -2027,6 +2089,11 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     ///
     /// A fresh (`:memory:` / never-written) composition has empty durable catalogs, so this is a cheap no-op.
     /// Durable constructors call this; the in-process memory composition does not need it.
+    /// Recovery-on-open whose storage work starts on first poll.
+    pub fn recover_async(self) -> impl Future<Output = EngineResult<Self>> + Send {
+        deferred(move || self.recover())
+    }
+
     pub fn recover(self) -> EngineResult<Self> {
         self.run_recovery()?;
         Ok(self)
@@ -2998,11 +3065,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
     /// this from its projection axis (the relational projection has the gate tables; the log-replay family
     /// does not), so a gate-bearing push / `SetGates` is admitted iff the projection can materialize it.
     fn supports_gates(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("composed backend poisoned")
-            .projection
-            .supports_gates()
+        self.supports_gates
     }
 
     /// The authoritative-commit capabilities (Snorri StateStore boundary, epic pqueue-2201fd37). The
@@ -3012,11 +3075,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
     /// before activation. This reaches parity with the monolithic `MemoryBackend` for the composed memory
     /// backend (`MemoryLog × InMemoryProjection`).
     fn commit_capabilities(&self) -> CommitCapabilities {
-        let supports = {
-            let g = self.inner.lock().expect("composed backend poisoned");
-            g.projection.supports_commit_transition()
-        };
-        if supports && self.is_atomic() {
+        if self.supports_commit_transition && self.is_atomic() {
             CommitCapabilities {
                 atomic_transition_commit: true,
                 vectorized_commit: true,
@@ -3038,12 +3097,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
         F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
         R: Send,
     {
-        let fault_hook = self
-            .fault_hook
-            .lock()
-            .expect("compose fault hook poisoned")
-            .clone();
-        let result = {
+        deferred(move || {
+            let fault_hook = self
+                .fault_hook
+                .lock()
+                .expect("compose fault hook poisoned")
+                .clone();
             let mut g = self.inner.lock().expect("composed backend poisoned");
             let admission_keys: Vec<QueueKey> = g.known_shards.iter().cloned().collect();
             let admissions = admission_keys
@@ -3068,8 +3127,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
                 fault_hook,
             };
             f(&mut lw, &mut pw)
-        };
-        std::future::ready(result)
+        })
     }
 }
 
@@ -3084,7 +3142,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
         &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        let result = (|| {
+        deferred(move || {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             let outcome = self.control.create_queue(definition)?;
             if outcome.created {
@@ -3103,48 +3161,47 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                 log.persist_definition(&outcome.definition)?;
             }
             Ok(outcome)
-        })();
-        std::future::ready(result)
+        })
     }
 
     fn queue_definition(
         &self,
         key: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
-        std::future::ready(self.control.queue_definition(key))
+        deferred(move || self.control.queue_definition(key))
     }
 
     fn list_queues(
         &self,
         tenant: &TenantId,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
-        std::future::ready(self.control.list_queues(tenant))
+        deferred(move || self.control.list_queues(tenant))
     }
 
     fn current_epoch(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .current_epoch(shard);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .current_epoch(shard)
+        })
     }
 
     fn acquire_epoch(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .acquire_epoch(shard);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .acquire_epoch(shard)
+        })
     }
 }
 
@@ -3160,60 +3217,59 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        // Prologue (shared with the OFF path): build the push items + envelope. A pre-commit failure resolves
-        // immediately. The ON path then co-buffers the envelope and returns an ack-after-seal `SealFuture`.
-        let prepared = (|| {
-            validate_gate_push(self.supports_gates(), &items)?;
-            let def = self.control.queue_definition(shard)?;
-            let schema = def
-                .entity_schema
-                .as_ref()
-                .and_then(|esd| esd.entity_schema.as_ref())
-                .map(compile_entity_schema)
-                .transpose()?;
-            for item in &items {
-                validate_entity(schema.as_ref(), item.entity.as_ref())?;
+        Box::pin(async move {
+            let permit = self
+                .mutation_gate
+                .acquire(shard.clone())
+                .await
+                .map_err(|_| EngineError::Unavailable)?;
+            let pending = (|| {
+                validate_gate_push(self.supports_gates(), &items)?;
+                let def = self.control.queue_definition(shard)?;
+                let schema = def
+                    .entity_schema
+                    .as_ref()
+                    .and_then(|esd| esd.entity_schema.as_ref())
+                    .map(compile_entity_schema)
+                    .transpose()?;
+                for item in &items {
+                    validate_entity(schema.as_ref(), item.entity.as_ref())?;
+                }
+                let max_attempts = def.retry_policy.max_attempts;
+                let epoch = expected_epoch.unwrap_or(0);
+                let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
+                let (push_items, ids) =
+                    build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
+                let mut g = self.inner.lock().expect("poisoned");
+                g.projection.admit_mutation(shard)?;
+                g.projection.index_validate_push(shard, &push_items)?;
+                if g.projection.pause_blocks_intake(shard)? {
+                    return Err(EngineError::Paused { drain_intake: true });
+                }
+                let env = Self::make_envelope(
+                    &mut g,
+                    self.node_id,
+                    QueueCommand::Push(PushCommand { items: push_items }),
+                    ids.clone(),
+                    now,
+                );
+                if self.gc_active(&g) {
+                    let slot = Self::gc_buffer(&mut g, shard, env, expected_epoch, now)?;
+                    Ok::<_, EngineError>((Some(slot), ids))
+                } else {
+                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+                    Ok((None, ids))
+                }
+            })()?;
+            let (slot, ids) = pending;
+            // Group-commit response waiting is not part of queue-local planning/append admission. Releasing
+            // here permits later same-queue operations to join or force-seal the batch.
+            drop(permit);
+            if let Some(slot) = slot {
+                SealWait::new(slot).await?;
             }
-            let max_attempts = def.retry_policy.max_attempts;
-            let epoch = expected_epoch.unwrap_or(0);
-            let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
-            let (push_items, ids) =
-                build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
-            let mut g = self.inner.lock().expect("poisoned");
-            // TD-004 hard-debt admission gate: fail a new mutating push CLOSED (typed backpressure) BEFORE it
-            // is enqueued/sealed, so async-apply debt over budget adds no durable effect. No-op unless the
-            // projection is a hard-backpressured `objectlog/hybrid-async` store.
-            g.projection.admit_mutation(shard)?;
-            g.projection.index_validate_push(shard, &push_items)?;
-            if g.projection.pause_blocks_intake(shard)? {
-                return Err(EngineError::Paused { drain_intake: true });
-            }
-            let env = Self::make_envelope(
-                &mut g,
-                self.node_id,
-                QueueCommand::Push(PushCommand { items: push_items }),
-                ids.clone(),
-                now,
-            );
-            Ok::<_, EngineError>((g, env, ids))
-        })();
-        let (mut g, env, ids) = match prepared {
-            Ok(v) => v,
-            Err(e) => return AckFuture::ready(Err(e)),
-        };
-        if self.gc_active(&g) {
-            // Group-commit: co-buffer + register a SealSlot, drop the guard, return an ack-after-seal future.
-            let slot = match Self::gc_buffer(&mut g, shard, env, expected_epoch, now) {
-                Ok(slot) => slot,
-                Err(e) => return AckFuture::ready(Err(e)),
-            };
-            drop(g);
-            AckFuture::seal(slot, ids)
-        } else {
-            let result = Self::commit_locked(&mut g, shard, env, expected_epoch).map(|()| ids);
-            drop(g);
-            AckFuture::ready(result)
-        }
+            Ok(ids)
+        })
     }
 
     fn push_with_request_id(
@@ -3227,7 +3283,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
         // The request-id'd push is NOT the co-buffering hot path: in group-commit mode it force-seals the
         // prior buffer + commits synchronously (`gc_commit_sync`) so the retained idempotency record is only
         // written AFTER a successful durable commit (a deferred-seal failure must leave NO replay entry).
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             validate_gate_push(self.supports_gates(), &items)?;
             let fingerprint = push_body_hash(&items)?;
             let def = self.control.queue_definition(shard)?;
@@ -3295,8 +3351,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 expires_at,
             );
             Ok(ids)
-        })();
-        AckFuture::ready(result)
+        })
     }
 }
 
@@ -3551,134 +3606,144 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
             },
         }
 
-        let result = (|| {
-            // Resolve the claim unit from the compatibility options. Item-level (the default) is the unchanged
-            // hot path; a non-item unit (whole-group / same-group-key / whole-cohort) is delegated to the
-            // projection axis' rich-claim selection (BQ-14b/c). A projection without a group/cohort read model
-            // (the log-replay family) refuses the non-item units with `Unavailable` via `select_rich_claim`.
-            let def = self.control.queue_definition(&req.shard)?;
-            let unit = if req.compatibility != ClaimCompatibility::default() {
-                validate_claim_compatibility(&req.compatibility, req.max_items as u64, &def)?
-            } else {
-                ClaimUnit::Item
-            };
-            if !matches!(unit, ClaimUnit::Item) {
-                return self.claim_rich(&req, unit).map(ClaimStart::Ready);
-            }
-            let strict_candidate_cursor =
-                def.ordering_mode == OrderingMode::Strict || def.max_rank_error == 0;
-            let mut g = self.inner.lock().expect("poisoned");
-            let gc = self.gc_active(&g);
-            if gc {
-                // Claims must observe earlier buffered data-plane writes that can change eligibility (notably
-                // pushes), but pending claims are already represented by `in_flight_claims` below and should
-                // remain batchable instead of being force-sealed one command at a time.
-                let must_observe_prior_writes = g.coords.get(&req.shard).is_some_and(|coord| {
-                    coord
-                        .pending
-                        .iter()
-                        .any(|env| !matches!(env.command, QueueCommand::Claim(_)))
-                });
-                if must_observe_prior_writes {
-                    Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
+        Box::pin(async move {
+            let permit = self
+                .mutation_gate
+                .acquire(req.shard.clone())
+                .await
+                .map_err(|_| EngineError::Unavailable)?;
+            let result = (|| {
+                // Resolve the claim unit from the compatibility options. Item-level (the default) is the unchanged
+                // hot path; a non-item unit (whole-group / same-group-key / whole-cohort) is delegated to the
+                // projection axis' rich-claim selection (BQ-14b/c). A projection without a group/cohort read model
+                // (the log-replay family) refuses the non-item units with `Unavailable` via `select_rich_claim`.
+                let def = self.control.queue_definition(&req.shard)?;
+                let unit = if req.compatibility != ClaimCompatibility::default() {
+                    validate_claim_compatibility(&req.compatibility, req.max_items as u64, &def)?
+                } else {
+                    ClaimUnit::Item
+                };
+                if !matches!(unit, ClaimUnit::Item) {
+                    return self.claim_rich(&req, unit).map(ClaimStart::Ready);
                 }
-            }
-            // Selection runs at the caller-resolved eligibility epoch (`eligibility_time`, defaulting to
-            // `now`); the lease/command stamping below stays on `req.now`, so a claim can select work due at
-            // one epoch while leasing it against the operational clock.
-            let eligibility_at = req.eligibility_at();
-            let candidates: Vec<ItemId> = if gc && strict_candidate_cursor {
-                let after = g
-                    .coords
-                    .get(&req.shard)
-                    .and_then(|coord| coord.in_flight_claim_tail);
-                g.projection.eligible_candidates_after(
-                    &req.shard,
-                    eligibility_at,
-                    after,
-                    req.max_items,
-                )?
-            } else {
-                let in_flight_claims = g
-                    .coords
-                    .get(&req.shard)
-                    .map(|coord| coord.in_flight_claims.clone())
-                    .unwrap_or_default();
-                let candidate_limit = req.max_items.saturating_add(in_flight_claims.len()).max(1);
-                g.projection
-                    .eligible_candidates(&req.shard, eligibility_at, candidate_limit)?
-                    .into_iter()
-                    .filter(|id| !in_flight_claims.contains(id))
-                    .take(req.max_items)
-                    .collect()
-            };
-            if candidates.is_empty() {
-                return Ok(ClaimStart::Ready(Claimed::default()));
-            }
-            // TD-004 hard-debt admission gate: a claim that will lease candidates commits a new `Claim`
-            // command into the async-apply backlog — new work that adds debt — so it fails CLOSED under Hard
-            // backpressure, exactly like a push. Gated only here (candidates non-empty), so an empty claim
-            // that commits nothing is never rejected. No-op unless the projection is a hard-backpressured
-            // `objectlog/hybrid-async` store.
-            g.projection.admit_mutation(&req.shard)?;
-            let env = Self::make_envelope(
-                &mut g,
-                self.node_id,
-                QueueCommand::Claim(ClaimCommand {
-                    item_ids: candidates.clone(),
-                    lease_token: req.lease_token.clone(),
-                    lease_expires_at: req.lease_expires_at,
-                    worker_id: Some(req.worker_id.clone()),
-                }),
-                candidates.clone(),
-                req.now,
-            );
-            if gc {
-                let coord = g.coords.entry(req.shard.clone()).or_default();
-                coord.in_flight_claims.extend(candidates.iter().copied());
-                coord.in_flight_claim_tail = candidates.last().copied();
-                let slot = Self::gc_buffer(&mut g, &req.shard, env, req.expected_epoch, req.now)?;
-                return Ok(ClaimStart::Wait {
-                    slot,
-                    shard: req.shard.clone(),
-                    candidates,
-                });
-            } else {
-                Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
-            }
-            let items = g.projection.render_claimed(&req.shard, &candidates)?;
-            debug_assert_eq!(
-                items.len(),
-                candidates.len(),
-                "leased candidate failed to render"
-            );
-            Ok(ClaimStart::Ready(Claimed {
-                items,
-                ..Default::default()
-            }))
-        })();
-        match result {
-            Ok(ClaimStart::Wait {
-                slot,
-                shard,
-                candidates,
-            }) => Box::pin(async move {
-                SealWait::new(slot).await?;
-                let g = self.inner.lock().expect("poisoned");
-                let items = g.projection.render_claimed(&shard, &candidates)?;
+                let strict_candidate_cursor =
+                    def.ordering_mode == OrderingMode::Strict || def.max_rank_error == 0;
+                let mut g = self.inner.lock().expect("poisoned");
+                let gc = self.gc_active(&g);
+                if gc {
+                    // Claims must observe earlier buffered data-plane writes that can change eligibility (notably
+                    // pushes), but pending claims are already represented by `in_flight_claims` below and should
+                    // remain batchable instead of being force-sealed one command at a time.
+                    let must_observe_prior_writes = g.coords.get(&req.shard).is_some_and(|coord| {
+                        coord
+                            .pending
+                            .iter()
+                            .any(|env| !matches!(env.command, QueueCommand::Claim(_)))
+                    });
+                    if must_observe_prior_writes {
+                        Self::gc_force_seal(&mut g, &req.shard, ts_to_ms(req.now))?;
+                    }
+                }
+                // Selection runs at the caller-resolved eligibility epoch (`eligibility_time`, defaulting to
+                // `now`); the lease/command stamping below stays on `req.now`, so a claim can select work due at
+                // one epoch while leasing it against the operational clock.
+                let eligibility_at = req.eligibility_at();
+                let candidates: Vec<ItemId> = if gc && strict_candidate_cursor {
+                    let after = g
+                        .coords
+                        .get(&req.shard)
+                        .and_then(|coord| coord.in_flight_claim_tail);
+                    g.projection.eligible_candidates_after(
+                        &req.shard,
+                        eligibility_at,
+                        after,
+                        req.max_items,
+                    )?
+                } else {
+                    let in_flight_claims = g
+                        .coords
+                        .get(&req.shard)
+                        .map(|coord| coord.in_flight_claims.clone())
+                        .unwrap_or_default();
+                    let candidate_limit =
+                        req.max_items.saturating_add(in_flight_claims.len()).max(1);
+                    g.projection
+                        .eligible_candidates(&req.shard, eligibility_at, candidate_limit)?
+                        .into_iter()
+                        .filter(|id| !in_flight_claims.contains(id))
+                        .take(req.max_items)
+                        .collect()
+                };
+                if candidates.is_empty() {
+                    return Ok(ClaimStart::Ready(Claimed::default()));
+                }
+                // TD-004 hard-debt admission gate: a claim that will lease candidates commits a new `Claim`
+                // command into the async-apply backlog — new work that adds debt — so it fails CLOSED under Hard
+                // backpressure, exactly like a push. Gated only here (candidates non-empty), so an empty claim
+                // that commits nothing is never rejected. No-op unless the projection is a hard-backpressured
+                // `objectlog/hybrid-async` store.
+                g.projection.admit_mutation(&req.shard)?;
+                let env = Self::make_envelope(
+                    &mut g,
+                    self.node_id,
+                    QueueCommand::Claim(ClaimCommand {
+                        item_ids: candidates.clone(),
+                        lease_token: req.lease_token.clone(),
+                        lease_expires_at: req.lease_expires_at,
+                        worker_id: Some(req.worker_id.clone()),
+                    }),
+                    candidates.clone(),
+                    req.now,
+                );
+                if gc {
+                    let coord = g.coords.entry(req.shard.clone()).or_default();
+                    coord.in_flight_claims.extend(candidates.iter().copied());
+                    coord.in_flight_claim_tail = candidates.last().copied();
+                    let slot =
+                        Self::gc_buffer(&mut g, &req.shard, env, req.expected_epoch, req.now)?;
+                    return Ok(ClaimStart::Wait {
+                        slot,
+                        shard: req.shard.clone(),
+                        candidates,
+                    });
+                } else {
+                    Self::commit_locked(&mut g, &req.shard, env, req.expected_epoch)?;
+                }
+                let items = g.projection.render_claimed(&req.shard, &candidates)?;
                 debug_assert_eq!(
                     items.len(),
                     candidates.len(),
-                    "sealed claim failed to render"
+                    "leased candidate failed to render"
                 );
-                Ok(Claimed {
+                Ok(ClaimStart::Ready(Claimed {
                     items,
                     ..Default::default()
-                })
-            }),
-            Ok(ClaimStart::Ready(claimed)) => Box::pin(std::future::ready(Ok(claimed))),
-            Err(e) => Box::pin(std::future::ready(Err(e))),
-        }
+                }))
+            })();
+            drop(permit);
+            match result {
+                Ok(ClaimStart::Wait {
+                    slot,
+                    shard,
+                    candidates,
+                }) => {
+                    SealWait::new(slot).await?;
+                    let g = self.inner.lock().expect("poisoned");
+                    let items = g.projection.render_claimed(&shard, &candidates)?;
+                    debug_assert_eq!(
+                        items.len(),
+                        candidates.len(),
+                        "sealed claim failed to render"
+                    );
+                    Ok(Claimed {
+                        items,
+                        ..Default::default()
+                    })
+                }
+                Ok(ClaimStart::Ready(claimed)) => Ok(claimed),
+                Err(e) => Err(e),
+            }
+        })
     }
 }
 
@@ -3701,7 +3766,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             // Upsert (`ReplacePending`) needs the atomic look-then-replace boundary; an eventual-apply log
             // refuses it (parity with the monolith's `upsert_is_unavailable`), rather than splitting it.
             if !self.is_atomic() {
@@ -3789,8 +3854,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
                     }
                 }
             }
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -3806,47 +3870,53 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let result = (|| {
-            let mut g = self.inner.lock().expect("poisoned");
-            let gc = self.gc_active(&g);
-            g.projection.finalize_validate(shard, &outcomes)?;
-            let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
-            let outcomes = outcomes
-                .into_iter()
-                .map(|mut outcome| {
-                    // The legacy synchronous projection boundary does not return the persisted per-item
-                    // retry bound. Leave Retry unsealed so the authoritative apply transaction resolves it
-                    // from `retry_count` + `max_attempts`; native-async composition seals both values from
-                    // one typed validation row before append.
-                    outcome.applied_state = match outcome.kind {
-                        FinalizeKind::Complete => Some(ItemState::Complete),
-                        FinalizeKind::Fail => Some(ItemState::Failed),
-                        FinalizeKind::Retry => None,
-                        FinalizeKind::Release | FinalizeKind::Rearm => Some(ItemState::Pending),
-                    };
-                    outcome
-                })
-                .collect::<Vec<_>>();
-            let env = Self::make_envelope(
-                &mut g,
-                self.node_id,
-                QueueCommand::Finalize(FinalizeCommand { outcomes }),
-                item_ids,
-                now,
-            );
-            if gc {
-                let slot = Self::gc_buffer(&mut g, shard, env, expected_epoch, now)?;
-                Ok(Some(slot))
-            } else {
-                Self::commit_locked(&mut g, shard, env, expected_epoch)?;
-                Ok(None)
+        Box::pin(async move {
+            let permit = self
+                .mutation_gate
+                .acquire(shard.clone())
+                .await
+                .map_err(|_| EngineError::Unavailable)?;
+            let result = (|| {
+                let mut g = self.inner.lock().expect("poisoned");
+                let gc = self.gc_active(&g);
+                g.projection.finalize_validate(shard, &outcomes)?;
+                let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
+                let outcomes = outcomes
+                    .into_iter()
+                    .map(|mut outcome| {
+                        // The legacy synchronous projection boundary does not return the persisted per-item
+                        // retry bound. Leave Retry unsealed so the authoritative apply transaction resolves it
+                        // from `retry_count` + `max_attempts`; native-async composition seals both values from
+                        // one typed validation row before append.
+                        outcome.applied_state = match outcome.kind {
+                            FinalizeKind::Complete => Some(ItemState::Complete),
+                            FinalizeKind::Fail => Some(ItemState::Failed),
+                            FinalizeKind::Retry => None,
+                            FinalizeKind::Release | FinalizeKind::Rearm => Some(ItemState::Pending),
+                        };
+                        outcome
+                    })
+                    .collect::<Vec<_>>();
+                let env = Self::make_envelope(
+                    &mut g,
+                    self.node_id,
+                    QueueCommand::Finalize(FinalizeCommand { outcomes }),
+                    item_ids,
+                    now,
+                );
+                if gc {
+                    Self::gc_buffer(&mut g, shard, env, expected_epoch, now).map(Some)
+                } else {
+                    Self::commit_locked(&mut g, shard, env, expected_epoch)?;
+                    Ok(None)
+                }
+            })()?;
+            drop(permit);
+            if let Some(slot) = result {
+                SealWait::new(slot).await?;
             }
-        })();
-        match result {
-            Ok(Some(slot)) => AckFuture::seal(slot, ()),
-            Ok(None) => AckFuture::ready(Ok(())),
-            Err(e) => AckFuture::ready(Err(e)),
-        }
+            Ok(())
+        })
     }
 }
 
@@ -3863,7 +3933,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
             if gc {
@@ -3893,8 +3963,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
                     !claimed.is_empty() && claimed.iter().all(|item_id| renewed.contains(item_id))
                 });
             Ok(())
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -3910,7 +3979,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReassignLeasePort
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
             if gc {
@@ -3934,8 +4003,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReassignLeasePort
                 Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             }
             Ok(())
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -3952,7 +4020,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PurgePort for ComposedBac
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
             if gc {
@@ -3990,8 +4058,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PurgePort for ComposedBac
                 Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             }
             Ok(count)
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -4013,7 +4080,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             // In-place field/payload merge is an atomic-class feature; an eventual-apply log refuses it.
             if !self.is_atomic() {
                 return Err(EngineError::Unavailable);
@@ -4050,8 +4117,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
             g.projection
                 .item_version(shard, &item_id)?
                 .ok_or(EngineError::NotFound)
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -4067,7 +4133,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimPort for ComposedB
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
             if gc {
@@ -4095,8 +4161,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimPort for ComposedB
                 Self::commit_locked(&mut g, shard, env, expected_epoch)?;
             }
             Ok(ids)
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -4105,7 +4170,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
         &self,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        let result = (|| {
+        deferred(move || {
             let mut g = self.inner.lock().expect("poisoned");
             let gc = self.gc_active(&g);
             if gc {
@@ -4188,8 +4253,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                 report.maintenance.merge(maintenance);
             }
             Ok(report)
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -4204,13 +4268,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> LogRead for ComposedBacke
         from: Option<CommandPosition>,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .read_from(shard, from, limit);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .read_from(shard, from, limit)
+        })
     }
 }
 
@@ -4225,13 +4289,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .select_eligible(shard, now, limit);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .select_eligible(shard, now, limit)
+        })
     }
 
     fn peek(
@@ -4239,26 +4303,26 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
         shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .peek(shard, limit);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .peek(shard, limit)
+        })
     }
 
     fn pending(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .pending(shard);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .pending(shard)
+        })
     }
 
     fn claimed_view(
@@ -4266,13 +4330,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
         shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .render_claimed(shard, ids);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .render_claimed(shard, ids)
+        })
     }
 
     fn live_items(
@@ -4280,26 +4344,26 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .live_items(shard, keys);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .live_items(shard, keys)
+        })
     }
 
     fn metrics(
         &self,
         queue: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .metrics(queue);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .metrics(queue)
+        })
     }
 
     fn terminal_emission_metrics(
@@ -4309,13 +4373,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
         emit_change_records: bool,
         emission_cursor: Option<&CommandPosition>,
     ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .terminal_emission_metrics(shard, now, emit_change_records, emission_cursor);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .terminal_emission_metrics(shard, now, emit_change_records, emission_cursor)
+        })
     }
 }
 
@@ -4331,13 +4395,13 @@ where
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .current_position(shard);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .current_position(shard)
+        })
     }
 
     fn read_as_of<T, F>(
@@ -4350,7 +4414,7 @@ where
         T: Send,
         F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
     {
-        let result = (|| {
+        deferred(move || {
             let g = self.inner.lock().expect("poisoned");
             // Relational (no-replayable-log) projection stores cannot reconstruct historical state.
             // Decline as-of reads with `Unavailable` up-front, before the queue-existence lookup, so the
@@ -4396,8 +4460,7 @@ where
                 from = page.next;
             }
             query(&as_of)
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -4412,13 +4475,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> IndexQueryPort for Compos
         index: &str,
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .index_get_unique(shard, index, key);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .index_get_unique(shard, index, key)
+        })
     }
 
     fn index_lookup(
@@ -4427,13 +4490,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> IndexQueryPort for Compos
         index: &str,
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .index_lookup(shard, index, key);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .index_lookup(shard, index, key)
+        })
     }
 }
 
@@ -4448,47 +4511,46 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> SnapshotStore for Compose
         position: CommandPosition,
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .write_snapshot(shard, position, snapshot);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .write_snapshot(shard, position, snapshot)
+        })
     }
 
     fn latest_snapshot(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<SnapshotRef>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .latest_snapshot(shard);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .latest_snapshot(shard)
+        })
     }
 
     fn read_snapshot(
         &self,
         snapshot_ref: &SnapshotRef,
     ) -> impl std::future::Future<Output = EngineResult<ProjectionSnapshot>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .read_snapshot(snapshot_ref);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .read_snapshot(snapshot_ref)
+        })
     }
 
     fn high_water(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommandPosition>>> + Send {
-        let result = self.inner.lock().expect("poisoned").log.high_water(shard);
-        std::future::ready(result)
+        deferred(move || self.inner.lock().expect("poisoned").log.high_water(shard))
     }
 
     fn set_high_water(
@@ -4496,13 +4558,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> SnapshotStore for Compose
         shard: &QueueKey,
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .log
-            .set_high_water(shard, position);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .log
+                .set_high_water(shard, position)
+        })
     }
 }
 
@@ -4521,7 +4583,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             // Reschedule is an atomic-class feature; an eventual-apply log refuses it (no eligibility re-key).
             if !self.is_atomic() {
                 return Err(EngineError::Unavailable);
@@ -4551,8 +4613,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
             g.projection
                 .item_version(shard, &item_id)?
                 .ok_or(EngineError::NotFound)
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -4581,13 +4642,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         shard: &QueueKey,
         request: RangeScanRequest,
     ) -> impl std::future::Future<Output = EngineResult<RangeScanResponse>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .range_scan(shard, request);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .range_scan(shard, request)
+        })
     }
 
     fn grouped_aggregate(
@@ -4595,13 +4656,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         shard: &QueueKey,
         request: GroupedAggregateRequest,
     ) -> impl std::future::Future<Output = EngineResult<GroupedAggregateResponse>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .grouped_aggregate(shard, request);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .grouped_aggregate(shard, request)
+        })
     }
 
     fn metrics_by_query(
@@ -4609,13 +4670,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         shard: &QueueKey,
         request: MetricsByQueryRequest,
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .metrics_by_query(shard, request);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .metrics_by_query(shard, request)
+        })
     }
 
     fn declared_bucket_segment(
@@ -4623,13 +4684,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         shard: &QueueKey,
         request: DeclaredBucketSegmentRequest,
     ) -> impl std::future::Future<Output = EngineResult<DeclaredBucketSegmentResponse>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .declared_bucket_segment(shard, request);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .declared_bucket_segment(shard, request)
+        })
     }
 
     fn bounded_mutation(
@@ -4637,11 +4698,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         shard: &QueueKey,
         request: BoundedMutationRequest,
     ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
-        let result = {
+        deferred(move || {
             let mut g = self.inner.lock().expect("poisoned");
             g.projection.bounded_mutation(shard, request)
-        };
-        std::future::ready(result)
+        })
     }
 
     fn claim_by_query(
@@ -4650,172 +4710,172 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         request: ClaimByQueryRequest,
         context: crate::port::ClaimByQueryContext,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
-        let result =
-            (|| {
-                let definition = self.control.queue_definition(shard)?;
-                if request.max_items == 0
-                    || u64::from(request.max_items) > definition.max_claim_batch_size
-                {
-                    return Err(EngineError::Invalid("invalid claim_by_query max_items"));
-                }
-                if request.lease_duration_ms == 0
-                    || request.lease_duration_ms > definition.max_lease_duration_ms
-                {
-                    return Err(EngineError::Invalid(
-                        "invalid claim_by_query lease_duration_ms",
-                    ));
-                }
-                let request_id = request
-                    .request_id
-                    .clone()
-                    .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
-                let fingerprint = claim_by_query_body_hash(&request)?;
-                let expires_at =
-                    request_expires_at(context.now, definition.request_id_retention_ms);
-                let mut g = self.inner.lock().expect("poisoned");
-                match g
-                    .claim_by_query_idempotency
-                    .entry(shard.clone())
-                    .or_default()
-                    .check_conflict_first(&request_id, fingerprint, context.now)
-                {
-                    IdempotencyDecision::Replay((item_ids, lease_token)) => {
-                        let items = g.projection.render_claimed(shard, &item_ids)?;
-                        if items.len() != item_ids.len()
-                            || items
-                                .iter()
-                                .any(|item| item.lease_expires_at <= context.now)
-                        {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
+            let definition = self.control.queue_definition(shard)?;
+            if request.max_items == 0
+                || u64::from(request.max_items) > definition.max_claim_batch_size
+            {
+                return Err(EngineError::Invalid("invalid claim_by_query max_items"));
+            }
+            if request.lease_duration_ms == 0
+                || request.lease_duration_ms > definition.max_lease_duration_ms
+            {
+                return Err(EngineError::Invalid(
+                    "invalid claim_by_query lease_duration_ms",
+                ));
+            }
+            let request_id = request
+                .request_id
+                .clone()
+                .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
+            let fingerprint = claim_by_query_body_hash(&request)?;
+            let expires_at = request_expires_at(context.now, definition.request_id_retention_ms);
+            let mut g = self.inner.lock().expect("poisoned");
+            match g
+                .claim_by_query_idempotency
+                .entry(shard.clone())
+                .or_default()
+                .check_conflict_first(&request_id, fingerprint, context.now)
+            {
+                IdempotencyDecision::Replay((item_ids, lease_token)) => {
+                    let items = g.projection.render_claimed(shard, &item_ids)?;
+                    if items.len() != item_ids.len()
+                        || items
+                            .iter()
+                            .any(|item| item.lease_expires_at <= context.now)
+                    {
+                        return Err(EngineError::RequestExpired);
+                    }
+                    for item in &items {
+                        if item.lease_token.as_ref() != Some(&lease_token) {
                             return Err(EngineError::RequestExpired);
                         }
-                        for item in &items {
-                            if item.lease_token.as_ref() != Some(&lease_token) {
-                                return Err(EngineError::RequestExpired);
-                            }
-                        }
-                        return Ok(Claimed {
-                            items,
-                            ..Default::default()
-                        });
                     }
-                    IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
-                    IdempotencyDecision::Expired => return Err(EngineError::RequestExpired),
-                    IdempotencyDecision::Proceed => {}
+                    return Ok(Claimed {
+                        items,
+                        ..Default::default()
+                    });
                 }
-                let eligible: HashSet<ItemId> = g
-                    .projection
-                    .eligible_candidates(shard, context.eligibility_at(), usize::MAX)?
-                    .into_iter()
-                    .collect();
-                let reserved = g.coords.get(shard).map(|coord| &coord.in_flight_claims);
-                let page_size = request.max_items.clamp(1, 1_000);
-                let mut cursor = None;
-                let mut item_ids = Vec::new();
-                while item_ids.len() < request.max_items as usize {
-                    let page = g.projection.range_scan(
-                        shard,
-                        RangeScanRequest {
-                            index: request.index.clone(),
-                            filters: request.filters.clone(),
-                            order_by: vec![request.order_by.clone()],
-                            page_size,
-                            cursor,
-                        },
-                    )?;
-                    item_ids.extend(page.rows.into_iter().map(|row| row.item_id).filter(
-                        |item_id| {
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                IdempotencyDecision::Expired => return Err(EngineError::RequestExpired),
+                IdempotencyDecision::Proceed => {}
+            }
+            let eligible: HashSet<ItemId> = g
+                .projection
+                .eligible_candidates(shard, context.eligibility_at(), usize::MAX)?
+                .into_iter()
+                .collect();
+            let reserved = g.coords.get(shard).map(|coord| &coord.in_flight_claims);
+            let page_size = request.max_items.clamp(1, 1_000);
+            let mut cursor = None;
+            let mut item_ids = Vec::new();
+            while item_ids.len() < request.max_items as usize {
+                let page = g.projection.range_scan(
+                    shard,
+                    RangeScanRequest {
+                        index: request.index.clone(),
+                        filters: request.filters.clone(),
+                        order_by: vec![request.order_by.clone()],
+                        page_size,
+                        cursor,
+                    },
+                )?;
+                item_ids.extend(
+                    page.rows
+                        .into_iter()
+                        .map(|row| row.item_id)
+                        .filter(|item_id| {
                             eligible.contains(item_id)
                                 && reserved.is_none_or(|reserved| !reserved.contains(item_id))
-                        },
-                    ));
-                    item_ids.truncate(request.max_items as usize);
-                    cursor = page.next_cursor;
-                    if cursor.is_none() {
-                        break;
-                    }
-                }
-
-                if item_ids.is_empty() {
-                    let lease_token = LeaseToken::new("empty-claim").expect("valid token");
-                    let command_id = Self::next_command_id(&mut g, self.node_id);
-                    let env = CommandEnvelope {
-                        command_id,
-                        request_id: Some(request_id.clone()),
-                        request_fingerprint: Some(fingerprint.0),
-                        request_outcome: Some(RequestOutcome::ClaimByQuery {
-                            item_ids: Vec::new(),
-                            lease_token: lease_token.clone(),
-                            worker_id: Some(request.worker_id.clone()),
                         }),
-                        item_ids: Vec::new(),
-                        command: QueueCommand::Claim(ClaimCommand {
-                            item_ids: Vec::new(),
-                            lease_token: lease_token.clone(),
-                            lease_expires_at: context.lease_expires_at(request.lease_duration_ms),
-                            worker_id: Some(request.worker_id.clone()),
-                        }),
-                        checksum: CommandChecksum(0),
-                        created_at: context.now,
-                    };
-                    Self::commit_locked(&mut g, shard, env, None)?;
-                    g.claim_by_query_idempotency
-                        .entry(shard.clone())
-                        .or_default()
-                        .record(
-                            request_id,
-                            fingerprint,
-                            (Vec::new(), lease_token),
-                            expires_at,
-                        );
-                    return Ok(Claimed::default());
+                );
+                item_ids.truncate(request.max_items as usize);
+                cursor = page.next_cursor;
+                if cursor.is_none() {
+                    break;
                 }
+            }
 
-                let created_at = context.now;
-                let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
-                let lease_token = generate_query_lease_token()?;
+            if item_ids.is_empty() {
+                let lease_token = LeaseToken::new("empty-claim").expect("valid token");
                 let command_id = Self::next_command_id(&mut g, self.node_id);
                 let env = CommandEnvelope {
                     command_id,
                     request_id: Some(request_id.clone()),
                     request_fingerprint: Some(fingerprint.0),
                     request_outcome: Some(RequestOutcome::ClaimByQuery {
-                        item_ids: item_ids.clone(),
+                        item_ids: Vec::new(),
                         lease_token: lease_token.clone(),
                         worker_id: Some(request.worker_id.clone()),
                     }),
-                    item_ids: item_ids.clone(),
+                    item_ids: Vec::new(),
                     command: QueueCommand::Claim(ClaimCommand {
-                        item_ids: item_ids.clone(),
+                        item_ids: Vec::new(),
                         lease_token: lease_token.clone(),
-                        lease_expires_at,
+                        lease_expires_at: context.lease_expires_at(request.lease_duration_ms),
                         worker_id: Some(request.worker_id.clone()),
                     }),
                     checksum: CommandChecksum(0),
-                    created_at,
+                    created_at: context.now,
                 };
                 Self::commit_locked(&mut g, shard, env, None)?;
-                let items = g.projection.render_claimed(shard, &item_ids)?;
-                debug_assert_eq!(
-                    items.len(),
-                    item_ids.len(),
-                    "every queried claim candidate must render"
-                );
-                let replay_expires_at = expires_at.max(lease_expires_at);
                 g.claim_by_query_idempotency
                     .entry(shard.clone())
                     .or_default()
                     .record(
                         request_id,
                         fingerprint,
-                        (item_ids, lease_token),
-                        replay_expires_at,
+                        (Vec::new(), lease_token),
+                        expires_at,
                     );
-                Ok(Claimed {
-                    items,
-                    ..Default::default()
-                })
-            })();
-        std::future::ready(result)
+                return Ok(Claimed::default());
+            }
+
+            let created_at = context.now;
+            let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+            let lease_token = generate_query_lease_token()?;
+            let command_id = Self::next_command_id(&mut g, self.node_id);
+            let env = CommandEnvelope {
+                command_id,
+                request_id: Some(request_id.clone()),
+                request_fingerprint: Some(fingerprint.0),
+                request_outcome: Some(RequestOutcome::ClaimByQuery {
+                    item_ids: item_ids.clone(),
+                    lease_token: lease_token.clone(),
+                    worker_id: Some(request.worker_id.clone()),
+                }),
+                item_ids: item_ids.clone(),
+                command: QueueCommand::Claim(ClaimCommand {
+                    item_ids: item_ids.clone(),
+                    lease_token: lease_token.clone(),
+                    lease_expires_at,
+                    worker_id: Some(request.worker_id.clone()),
+                }),
+                checksum: CommandChecksum(0),
+                created_at,
+            };
+            Self::commit_locked(&mut g, shard, env, None)?;
+            let items = g.projection.render_claimed(shard, &item_ids)?;
+            debug_assert_eq!(
+                items.len(),
+                item_ids.len(),
+                "every queried claim candidate must render"
+            );
+            let replay_expires_at = expires_at.max(lease_expires_at);
+            g.claim_by_query_idempotency
+                .entry(shard.clone())
+                .or_default()
+                .record(
+                    request_id,
+                    fingerprint,
+                    (item_ids, lease_token),
+                    replay_expires_at,
+                );
+            Ok(Claimed {
+                items,
+                ..Default::default()
+            })
+        })
     }
 }
 
@@ -4837,7 +4897,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
-        let result = (|| {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let CommitTransition {
                 request_id,
                 entries,
@@ -5151,8 +5211,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     .record(rid, fingerprint, recovery, expires_at);
             }
             Ok(outcomes)
-        })();
-        std::future::ready(result)
+        })
     }
 }
 
@@ -5168,20 +5227,20 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RecoveryReadPort
         shard: &QueueKey,
         request_id: RequestId,
     ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
-        let g = self.inner.lock().expect("poisoned");
-        // A backend with no commit boundary exposes no recovery surface (parity with the trait default).
-        let result = if !self.is_atomic() || !g.projection.supports_commit_transition() {
-            Err(EngineError::Unavailable)
-        } else {
-            Ok(g.commit_idempotency
-                .get(shard)
-                .and_then(|c| c.peek(&request_id))
-                .map(|entries| CommitRecovery {
-                    request_id,
-                    entries,
-                }))
-        };
-        std::future::ready(result)
+        deferred(move || {
+            let g = self.inner.lock().expect("poisoned");
+            if !self.is_atomic() || !g.projection.supports_commit_transition() {
+                Err(EngineError::Unavailable)
+            } else {
+                Ok(g.commit_idempotency
+                    .get(shard)
+                    .and_then(|c| c.peek(&request_id))
+                    .map(|entries| CommitRecovery {
+                        request_id,
+                        entries,
+                    }))
+            }
+        })
     }
 
     fn side_record(
@@ -5189,13 +5248,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RecoveryReadPort
         shard: &QueueKey,
         key: &[u8],
     ) -> impl std::future::Future<Output = EngineResult<Option<Bytes>>> + Send {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .side_record(shard, key);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .side_record(shard, key)
+        })
     }
 }
 
@@ -5221,7 +5280,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let result = {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
             let env = Self::make_envelope(
                 &mut g,
@@ -5231,8 +5290,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
                 now,
             );
             Self::commit_locked(&mut g, shard, env, expected_epoch)
-        };
-        std::future::ready(result)
+        })
     }
 }
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::DiscoveryPort
@@ -5247,13 +5305,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::DiscoveryPor
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<Vec<crate::active_scope::ActiveScope>>> + Send
     {
-        let result = self
-            .inner
-            .lock()
-            .expect("poisoned")
-            .projection
-            .discover_active_scopes(shard, granularity, now);
-        std::future::ready(result)
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .discover_active_scopes(shard, granularity, now)
+        })
     }
 }
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::CohortFinalizePort
