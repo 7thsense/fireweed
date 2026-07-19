@@ -32,7 +32,7 @@ ddx:
 
 **Governing artifacts**: ADR-015, ADR-016, ADR-017, TD-001, TD-010, TP-003.
 
-**Excluded**: Niflheim; quiet-host tests; Turso as log/control-plane authority; remote/sync/MVCC Turso;
+**Excluded**: Niflheim; deployment-capacity benchmarks; Turso as log/control-plane authority; remote/sync/MVCC Turso;
 new broad Actions matrix dimensions; release/push activity.
 
 ## Shared Constraints
@@ -77,7 +77,7 @@ commits each non-overlapping slice and removes only worktrees/processes created 
 - [ ] Each bead's focused tests pass before close.
 - [ ] Cancellation cuts yield zero or one recoverable outcome.
 - [ ] SQLite remains the differential reference and rollback path.
-- [ ] No Niflheim or quiet-host test file changes.
+- [ ] No Niflheim or deployment-capacity benchmark file changes.
 - [ ] No new broad CI matrix dimension.
 - [ ] Final `cargo fmt`, workspace clippy/tests, HELIX structure, and traceability checks pass without
       relying on a DDx execution route.

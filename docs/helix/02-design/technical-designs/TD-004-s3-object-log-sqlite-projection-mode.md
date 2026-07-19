@@ -866,7 +866,7 @@ eligibility, FR-10).
   One-unapplied-tail hydration recorded 347,500 physical requests, 40,600 immutable GETs, 40,400 avoidable
   GETs, 200 unique required segment GETs, and 200 replayed commands. Queue item counts 256 and 1,000 produced
   the same object-read shape; this is not an active-queue-density test. These modeled totals expose metadata
-  amplification; they are not a quiet-host wall-clock verdict.
+  amplification; they are not a deployment-capacity verdict.
 
 ## Testing
 

@@ -269,15 +269,16 @@ come from primitive attempts; logical head/acquire/fence/branch spans are exclud
 Tests assert LIST pages are attempts rather than retries, protocol retries equal loop iterations minus one,
 legacy manifest mirrors are not retries, and hostile key/error inputs cannot create new series.
 
-Disabled-recorder transparency and deterministic accounting are normal CI gates. The quiet-host no-op
-overhead measurement (median regression no greater than 2%) remains a release-host performance gate and MUST
-NOT be inferred from a contended development host.
+Disabled-recorder transparency and deterministic accounting are normal CI gates. Recorder overhead is
+judged against an interleaved, same-run disabled-recorder control with identical seeded work; no pass/fail
+decision may depend on an otherwise idle or specially selected host. Absolute throughput and latency are
+capacity evidence only when the deployment topology and resource limits are declared with the result.
 
 SP-06 is a negative cache spike, not a release performance claim. The deterministic single-page BlobStore
 model assigns each
 physical request a fixed 25/100 ms cost without sleeping, so it identifies request shape and computes modeled
 p95 reproducibly. Its ignored harness output is separate from live E2 evidence; the live schema-v2 row carries
-a null profile while the quiet-host wall-clock arm remains deferred. No cache may land from this evidence:
+a null profile. No cache may land from this evidence:
 avoidable reads exceed 70% and absolute modeled gain exceeds 50 ms, but relative p95 gain is only 8.97% to
 11.69%, below 20%. The observed authority-head history amplification is a new
 design input for constant-time head access and async bounded-parallel tail recovery.

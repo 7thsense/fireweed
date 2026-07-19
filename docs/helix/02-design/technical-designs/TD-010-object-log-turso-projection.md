@@ -56,7 +56,7 @@ Out of scope:
 - Turso as command-log authority, control plane, remote database, or embedded replica;
 - replacing the standalone SQLite durable profile;
 - experimental Turso MVCC, sync, FTS, or remote/cloud features;
-- Niflheim changes and deferred quiet-host tests;
+- Niflheim changes and deployment-capacity benchmarks;
 - a new broad GitHub Actions matrix dimension.
 
 ## Technical Approach

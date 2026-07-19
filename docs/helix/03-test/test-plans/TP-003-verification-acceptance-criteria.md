@@ -428,7 +428,7 @@ After final oracle/adapter reconciliation, the complete eight-test integration t
 The typed corpus detects the two historical and five synthetic mutants with expected invariant identity.
 Untargeted discovery of both historical bugs, cross-host repeats, clean target-dir growth, and process-kill
 replay remain release evidence and were not claimed or run here. The suite has a precise repeat-suite entry
-but is not wired into broad GitHub Actions; no quiet-host test is part of this suite.
+but is not wired into broad GitHub Actions; no host-capacity benchmark is part of this suite.
 
 ## 5. CI Quality Gates (the green set)
 
@@ -456,7 +456,7 @@ while admission reserves the maximum ambiguous-publication cost.
 Hybrid-async segment/manifest deletion has a negative acceptance result until a single owner-fenced API can
 prove the complete TD-004 authority snapshot. Its required assertion is conservative retention plus a
 missing-frontier/storage-growth signal; recovery-success and bounded-growth claims remain unverified. The
-SP-04 quiet-host overhead measurement remains deferred and is not part of this functional gate.
+SP-04 same-run overhead comparison remains separate and is not part of this functional gate.
 
 Gates run at two cadences. **Per-PR (fast)** gates MUST pass to merge.
 **Release (full)** gates MUST pass to call a build "verified" for v1; they include

@@ -91,9 +91,9 @@ ordinary CI:
 cargo test -p pqueue-objectlog segment_v2_v3_integrity_overhead_manual_benchmark -- --ignored --nocapture
 ```
 
-Quiet-host timing is intentionally deferred. Release N keeps v2 as the default; the manual encode/decode/replay
-measurement and soak evidence are required before the release-N+1 default flip, not before reader compatibility
-lands. No extra GitHub Actions runner is introduced for this evidence.
+Release N keeps v2 as the default. An interleaved same-run v2/v3 encode/decode/replay comparison under
+representative load and soak evidence are required before the release-N+1 default flip, not before reader
+compatibility lands. No extra GitHub Actions runner is introduced for this evidence.
 
 ## Risks and Rollbacks
 

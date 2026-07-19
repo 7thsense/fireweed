@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual SP-07 v2/v3 encode/decode overhead benchmark; run on a quiet host"]
+    #[ignore = "manual SP-07 v2/v3 encode/decode overhead benchmark; compare interleaved same-run profiles"]
     fn segment_v2_v3_integrity_overhead_manual_benchmark() {
         use std::hint::black_box;
         use std::time::Instant;

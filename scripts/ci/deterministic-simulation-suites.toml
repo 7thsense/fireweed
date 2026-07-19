@@ -1,6 +1,6 @@
 # SP-02 bounded zero-flake seed corpus. The test itself replays the generated trace 100 times and runs the
 # checked-in historical/synthetic corpus; repeat-suite adds a process-level determinism check without any
-# quiet-host benchmark. Expected warm target-dir use is below 1 GiB and wall time below five minutes.
+# host-performance benchmark. Expected warm target-dir use is below 1 GiB and wall time below five minutes.
 [[suites]]
 name = "objectlog_deterministic_storage_simulation"
 command = ["cargo", "test", "-p", "pqueue-objectlog", "--test", "deterministic_storage_simulation", "--quiet"]

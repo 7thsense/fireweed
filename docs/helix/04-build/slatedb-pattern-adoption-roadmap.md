@@ -34,7 +34,7 @@ policy separation, ownership-handoff warmup, and stronger segment integrity. Eac
 green `main`, updates governing artifacts before behavior, and ends with focused correctness, performance,
 and compatibility evidence.
 
-Niflheim and quiet-host tests remain out of scope. Turso remains a derived projection, never log authority.
+Niflheim and deployment-capacity benchmarks remain out of scope. Turso remains a derived projection, never log authority.
 No iteration may add a broad GitHub Actions matrix dimension; focused jobs require path filters and an
 explicit cost ceiling.
 
@@ -94,7 +94,7 @@ beads without changing the acceptance contract here.
 - [ ] Every implementation preserves full-async boundaries and backend conformance.
 - [ ] SQLite, Postgres, Turso, in-memory, and object-log paths share policy rather than fork semantics.
 - [ ] Object-log crash/replay, epoch handoff, retention, and format-compatibility suites are green.
-- [ ] No quiet-host or Niflheim tests run or change.
+- [ ] No deployment-capacity or Niflheim tests run or change.
 - [ ] CI workflow cost and runner size do not increase without a measured need.
 - [ ] Final workspace tests, clippy, formatting, HELIX alignment, and release evidence pass.
 
@@ -112,15 +112,15 @@ beads without changing the acceptance contract here.
 
 SP-04 is implemented through deterministic gates: one construction funnel, typed S3 faults, physical-attempt
 and logical-retry separation, scoped E3 snapshots, and counter reconciliation. Its remaining release
-condition is the deferred quiet-host no-op median-overhead measurement; later functional iterations may
-proceed, but the release performance claim cannot be promoted without that record.
+condition is an interleaved same-run recorder-disabled control proving the no-op median-overhead bound; later
+functional iterations may proceed, but the release performance claim cannot be promoted without that record.
 
 SP-06 completed as a negative spike. Its explicit 200-handoff, two-queue-size, 25/100 ms matrix found
 content-addressed candidates but only 8.97% to 11.69% projected p95 benefit, below the 20% gate. No warmup
 code landed. The spike
 identified two prerequisite gaps for separately governed work: the versioned authority-head walk is not
 constant-time, and ownership hydration still runs synchronous storage work without a node-global bounded
-background dispatcher. Quiet-host/live timing remains deferred.
+background dispatcher. Any later timing comparison must use interleaved same-run controls under representative load.
 
 - [ ] Every accepted iteration is individually committed and pushed with its tests and governing docs.
 - [ ] Any rejected spike has reproducible evidence, a recorded decision, and no dormant production code.

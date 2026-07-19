@@ -48,7 +48,7 @@ maintenance interactions.
 | 0 | **Complete:** define measurement protocol and extend E2 failover evidence to optional schema-v2 `handoff_object_store_profile` | isolated SP-04 snapshot deltas reconcile with named requests |
 | 1 | **Complete:** profile clean and one-unapplied-tail handoff with dedicated recorders | 200 samples × two queue sizes × 25/100 ms schedules |
 | 2 | **Stopped by gate:** immutable candidates are identifiable, but projected relative p95 gain is below 20%; do not prototype | no payload cache or dormant warmup code |
-| 3 | **Not applicable:** no intervention exists to compare against the numeric adoption gates | quiet-host/live arm remains deferred |
+| 3 | **Not applicable:** no intervention exists to compare against the numeric adoption gates | no production intervention to benchmark |
 | 4 | **Negative integration decision:** prerequisites are absent and cache benefit gate failed | production behavior unchanged |
 | 5 | **Complete:** record decision and update TD-003/TD-004/TP-002/roadmap | reviewed evidence |
 
@@ -90,7 +90,7 @@ relative gain, so no prototype was created.
 
 The ignored deterministic BlobStore harness uses a single-page listing model and prints its reproducible
 matrix; it does not emit or claim live E2 evidence. The live TP-002 script emits schema v2 with a null handoff
-profile because the quiet-host arm remains deferred. Keeping the harness in an isolated test module avoids
+profile because the modeled negative spike rejected the intervention. Keeping the harness in an isolated test module avoids
 coupling production fixtures to this deliberately manual, 200-handoff matrix.
 
 The request totals expose a different problem: authoritative head reads walk retained version history, so
@@ -117,5 +117,5 @@ attempts/bytes. Disable by configuration or revert the isolated iteration; no du
 ## Exit Criteria
 
 **Met by negative spike.** pqueue retains cold authoritative recovery. Immutable candidates were identified,
-but projected relative p95 gain was only 8.97% to 11.69%, below the 20% adoption gate. The quiet-host/live arm
-remains deferred, and production contains no dormant warmup code.
+but projected relative p95 gain was only 8.97% to 11.69%, below the 20% adoption gate. No live comparison is
+applicable because no intervention landed, and production contains no dormant warmup code.

@@ -110,7 +110,7 @@ not release accepted work; rejection creates no pending coordinator state. All f
 flusher paths use weak backend ownership and exit on backend drop, releasing pending permits; direct
 programmatic `Config` is revalidated against its selected segment target in `start()`. Opt-in `[seg]` lines
 carry the complete low-cardinality byte snapshot for every profile. Full TP-002 contention and p99
-evidence remains the one unchecked validation item and is intentionally separate from quiet-host tests.
+evidence remains the one unchecked validation item and is intentionally separate from portable correctness gates.
 
 ## Risks and Rollbacks
 

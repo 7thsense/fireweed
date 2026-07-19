@@ -112,8 +112,9 @@ tests cover hostile cardinality, disabled/nested transparency, in-flight calls, 
 pagination without fabricated retries, S3 HTTP/transport/corruption classes, stats isolation, acquire/fence
 CAS retries, bounded branch floor retries, and legacy mirror zero-retry behavior.
 
-The quiet-host timing gate in slice 6 is deliberately deferred. Functional evidence proves the disabled path
-uses no clock or atomic recording and allocates no bucket table, but does not claim the 2% median bar here.
+The timing gate in slice 6 requires an interleaved same-run disabled-recorder control under representative
+load. Functional evidence proves the disabled path uses no clock or atomic recording and allocates no bucket
+table, but does not claim the 2% median bar here.
 
 The implemented schema uses counts for completions/attempts/retries/errors/throttles/timeouts, bytes for
 request/response payload bodies, and monotonic nanoseconds for summed latency. Request bytes exclude keys,

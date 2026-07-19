@@ -130,4 +130,4 @@ current adapters cannot atomically prove committed object-snapshot recovery cove
 durable replay minimum. Async maintenance therefore retains affected segment/manifest objects and reports
 missing authority. Consequence: storage growth until an owner-fenced complete-frontier API, recovery tests,
 and a retained-work/storage-growth alert land. Rollback is conservative retention or disabling that profile.
-SP-04's quiet-host measurement remains deferred; no Niflheim or quiet-host test was run or changed here.
+SP-04's same-run overhead comparison remains outstanding; no Niflheim or host-capacity benchmark was run or changed here.

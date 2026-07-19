@@ -29,7 +29,7 @@ ddx:
 
 The probe covers the pod-local, rebuildable relational projection. It does not evaluate Turso as the
 standalone durable log authority, enable Turso sync or experimental MVCC, change production dependencies,
-or select a different backend. It did not run Niflheim or quiet-host tests.
+or select a different backend. It did not run Niflheim or host-capacity benchmarks.
 
 Run it from the repository root:
 

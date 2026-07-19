@@ -40,7 +40,7 @@ it is not a production scheduler, a replacement for integration tests, or a proo
   vocabulary. A new cut point requires a documented missing durable event, not a parallel taxonomy.
 - The fake versioned `BlobStore` models success, failure-before-effect, durable-effect-then-error, ambiguous
   create, CAS loss, and stale/incomplete list results using the existing store trait surface.
-- CI runs a bounded seed corpus; long campaigns remain explicit release/local evidence and avoid quiet-host tests.
+- CI runs a bounded seed corpus; long campaigns remain explicit release/local deterministic evidence.
 
 ## Implementation Slices
 
@@ -106,7 +106,7 @@ Focused evidence on Rust 1.92, local in-memory object store, seed `0x5eed`, trac
   epoch head, floor/horizon, deletion, and paginated LIST. Ambiguous effect-then-error and CAS loss are
   asserted at the manifest-head phase; stale/incomplete pages drive real recovery.
 - `scripts/ci/deterministic-simulation-suites.toml` is the bounded repeat-suite entrypoint. It contains no
-  quiet-host benchmark or Tokio scheduler simulation.
+  host-capacity benchmark or Tokio scheduler simulation.
 - `repeat-suite.sh --count 100 --max-flaky-rate 0`: v2 passed 100/100, 0 failures, 0.000000 flaky rate,
   82.38 seconds elapsed (below five minutes), 101,068 KiB maximum resident set. Incremental target-dir
   growth was not isolated from the prewarmed shared workspace and remains a clean-CI measurement.

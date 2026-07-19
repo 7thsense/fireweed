@@ -335,7 +335,7 @@ row = {
  "topology":"kind: 3 pqueue pods; shared MinIO S3 object log; Postgres ownership; per-pod SQLite projection",
  "hardware":${HARDWARE@Q},"seed":int(${SEED@Q}),"duration_ms":int(${DURATION_MS@Q}),
  "fault_schedule":"after one redirected/retried push plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
- "exclusions":"density throughput managed-cloud S3/Postgres and the deferred SP-06 quiet-host profile; performance is covered by the separate E3 lane",
+ "exclusions":"density throughput managed-cloud S3/Postgres and the SP-06 modeled handoff profile; performance is covered by the separate E3 lane",
  "handoff_object_store_profile":None
 }
 with open(sys.argv[1], "w") as f: json.dump(row, f, indent=2); f.write("\n")
