@@ -43,6 +43,30 @@ fn pos(sequence: u64) -> CommandPosition {
     CommandPosition::new(shard(), 0, sequence)
 }
 
+fn pos_for(queue: &QueueKey, sequence: u64) -> CommandPosition {
+    CommandPosition::new(queue.clone(), 0, sequence)
+}
+
+fn run_bounded_queue_workers(
+    store: &Arc<SqliteProjectionStore>,
+    queues: &[QueueKey],
+    workers: usize,
+    operation: impl Fn(&SqliteProjectionStore, usize, &QueueKey) + Sync,
+) {
+    let chunk_size = queues.len().div_ceil(workers.max(1));
+    std::thread::scope(|scope| {
+        for (chunk_index, chunk) in queues.chunks(chunk_size.max(1)).enumerate() {
+            let store = Arc::clone(store);
+            let operation = &operation;
+            scope.spawn(move || {
+                for (offset, queue) in chunk.iter().enumerate() {
+                    operation(&store, chunk_index * chunk_size + offset, queue);
+                }
+            });
+        }
+    });
+}
+
 fn named_qdef(name: &str) -> QueueDefinition {
     let mut definition = qdef();
     definition.queue_id = QueueId::new(name).unwrap();
@@ -164,6 +188,181 @@ async fn projection_replays_committed_push_claim_finalize() {
     assert_eq!(metrics.pending, 0);
     assert_eq!(metrics.leased, 0);
     assert_eq!(metrics.complete, 1);
+}
+
+#[tokio::test]
+async fn same_queue_reseed_revisit_remains_claim_visible() {
+    let store = SqliteProjectionStore::in_memory().unwrap();
+    store.create_queue_projection(qdef()).unwrap();
+    for cycle in 0..2_u64 {
+        let item_id = ItemId::new((cycle + 1).to_string()).unwrap();
+        let sequence = cycle * 3;
+        store
+            .apply_committed(
+                &pos(sequence),
+                &envelope(
+                    &format!("reseed-push-{cycle}"),
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item(
+                            &(cycle + 1).to_string(),
+                            &format!("reseed-key-{cycle}"),
+                            10,
+                        )],
+                    }),
+                    vec![item_id],
+                    sequence as i64,
+                ),
+            )
+            .unwrap();
+        let token = LeaseToken::new(format!("reseed-lease-{cycle}")).unwrap();
+        store
+            .apply_committed(
+                &pos(sequence + 1),
+                &envelope(
+                    &format!("reseed-claim-{cycle}"),
+                    QueueCommand::Claim(ClaimCommand {
+                        item_ids: vec![item_id],
+                        lease_token: token.clone(),
+                        lease_expires_at: ts(60),
+                        worker_id: Some(WorkerId::new("reseed-worker").unwrap()),
+                    }),
+                    vec![item_id],
+                    sequence as i64 + 1,
+                ),
+            )
+            .unwrap();
+        let claimed = store.claimed_view(&shard(), &[item_id]).await.unwrap();
+        assert_eq!(claimed.len(), 1, "cycle {cycle} claim disappeared");
+        assert_eq!(claimed[0].lease_token.as_ref(), Some(&token));
+        store
+            .apply_committed(
+                &pos(sequence + 2),
+                &envelope(
+                    &format!("reseed-finalize-{cycle}"),
+                    QueueCommand::Finalize(FinalizeCommand {
+                        outcomes: vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+                    }),
+                    vec![item_id],
+                    sequence as i64 + 2,
+                ),
+            )
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn concurrent_many_queue_reseeds_remain_visible_with_bounded_workers_and_exact_reopen() {
+    const QUEUES: usize = 64;
+    const WORKERS: usize = 8;
+    const CYCLES: u64 = 4;
+
+    let path = temp_projection_path("many-queue-reseed");
+    let store = Arc::new(SqliteProjectionStore::open(path.to_str().unwrap()).unwrap());
+    let mut queues = Vec::with_capacity(QUEUES);
+    for index in 0..QUEUES {
+        let definition = named_qdef(&format!("reseed-q-{index}"));
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        store.create_queue_projection(definition).unwrap();
+        queues.push(queue);
+    }
+
+    for cycle in 0..CYCLES {
+        let item_id = ItemId::new((cycle + 1).to_string()).unwrap();
+        let sequence = cycle * 3;
+        run_bounded_queue_workers(&store, &queues, WORKERS, |_, index, queue| {
+            let push = envelope(
+                &format!("many-push-{cycle}-{index}"),
+                QueueCommand::Push(PushCommand {
+                    items: vec![item(
+                        &(cycle + 1).to_string(),
+                        &format!("many-key-{cycle}-{index}"),
+                        10,
+                    )],
+                }),
+                vec![item_id],
+                sequence as i64,
+            );
+            store
+                .apply_committed(&pos_for(queue, sequence), &push)
+                .unwrap();
+        });
+        run_bounded_queue_workers(&store, &queues, WORKERS, |_, index, queue| {
+            let claim = envelope(
+                &format!("many-claim-{cycle}-{index}"),
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: vec![item_id],
+                    lease_token: LeaseToken::new(format!("many-lease-{cycle}-{index}")).unwrap(),
+                    lease_expires_at: ts(60),
+                    worker_id: Some(WorkerId::new(format!("many-worker-{index}")).unwrap()),
+                }),
+                vec![item_id],
+                sequence as i64 + 1,
+            );
+            store
+                .apply_committed(&pos_for(queue, sequence + 1), &claim)
+                .unwrap();
+        });
+
+        // Finalizing half the queues clears colliding queue-local item ids. Before the fix these clears
+        // erased the other queues' tokens from the process-global ItemId map, producing empty claims after
+        // successful reseeds. Keep the worker pool fixed while the active queue count is eight times larger.
+        let even_queues: Vec<_> = queues.iter().step_by(2).cloned().collect();
+        run_bounded_queue_workers(&store, &even_queues, WORKERS, |_, _, queue| {
+            let finalize = envelope(
+                &format!("many-finalize-even-{cycle}-{}", queue.queue_id),
+                QueueCommand::Finalize(FinalizeCommand {
+                    outcomes: vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+                }),
+                vec![item_id],
+                sequence as i64 + 2,
+            );
+            store
+                .apply_committed(&pos_for(queue, sequence + 2), &finalize)
+                .unwrap();
+        });
+        for (index, queue) in queues
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % 2 == 1)
+        {
+            let claimed = store.claimed_view(queue, &[item_id]).await.unwrap();
+            assert_eq!(
+                claimed.len(),
+                1,
+                "cycle {cycle} queue {index} lost claim visibility under concurrent finalization"
+            );
+            assert_eq!(
+                claimed[0].lease_token.as_ref(),
+                Some(&LeaseToken::new(format!("many-lease-{cycle}-{index}")).unwrap())
+            );
+        }
+        let odd_queues: Vec<_> = queues.iter().skip(1).step_by(2).cloned().collect();
+        run_bounded_queue_workers(&store, &odd_queues, WORKERS, |_, _, queue| {
+            let finalize = envelope(
+                &format!("many-finalize-odd-{cycle}-{}", queue.queue_id),
+                QueueCommand::Finalize(FinalizeCommand {
+                    outcomes: vec![FinalizeOutcome::new(item_id, FinalizeKind::Complete)],
+                }),
+                vec![item_id],
+                sequence as i64 + 2,
+            );
+            store
+                .apply_committed(&pos_for(queue, sequence + 2), &finalize)
+                .unwrap();
+        });
+    }
+
+    drop(store);
+    let reopened = SqliteProjectionStore::open(path.to_str().unwrap()).unwrap();
+    for (index, queue) in queues.iter().enumerate() {
+        let metrics = reopened.metrics(queue).await.unwrap();
+        assert_eq!(metrics.pending, 0, "queue {index} pending mismatch");
+        assert_eq!(metrics.leased, 0, "queue {index} lease mismatch");
+        assert_eq!(metrics.complete, CYCLES, "queue {index} recovery mismatch");
+        assert_eq!(metrics.failed, 0, "queue {index} failed mismatch");
+    }
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

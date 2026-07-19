@@ -745,7 +745,7 @@ pub(crate) fn discover_active_scopes_sql(
 /// keeps only the hash); a leased item whose token was lost to a reopen is omitted.
 pub(crate) fn pending_sql(
     conn: &Connection,
-    live_tokens: &HashMap<ItemId, LeaseToken>,
+    live_tokens: &HashMap<QueueKey, HashMap<ItemId, LeaseToken>>,
     shard: &QueueKey,
 ) -> EngineResult<Vec<LeaseView>> {
     let (t, q) = parts(shard);
@@ -764,7 +764,12 @@ pub(crate) fn pending_sql(
     for r in rows {
         let (id, exp, retry) = st(r)?;
         let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
-        let (Some(token), Some(exp)) = (live_tokens.get(&item_id), exp) else {
+        let (Some(token), Some(exp)) = (
+            live_tokens
+                .get(shard)
+                .and_then(|tokens| tokens.get(&item_id)),
+            exp,
+        ) else {
             continue;
         };
         out.push(LeaseView {

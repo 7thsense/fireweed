@@ -419,7 +419,12 @@ impl ProjectionRead for SqliteRelationalBackend {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         let result = {
             let g = self.inner.lock().expect("poisoned");
-            render_claimed(&g.conn, shard, ids, |id| g.live_tokens.get(id).cloned())
+            render_claimed(&g.conn, shard, ids, |id| {
+                g.live_tokens
+                    .get(shard)
+                    .and_then(|tokens| tokens.get(id))
+                    .cloned()
+            })
         };
         std::future::ready(result)
     }
@@ -1678,7 +1683,10 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 })?;
                 st(tx.commit())?;
                 for item_id in &replay.item_ids {
-                    live_tokens.insert(*item_id, replay.lease_token.clone());
+                    live_tokens
+                        .entry(shard.clone())
+                        .or_default()
+                        .insert(*item_id, replay.lease_token.clone());
                 }
                 return Ok(Claimed {
                     items,
@@ -1904,7 +1912,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     ],
                 ))?;
                 if changed == 1 {
-                    token_ops.push(TokenOp::Set(item_id, lease_token.clone()));
+                    token_ops.push(TokenOp::Set(shard.clone(), item_id, lease_token.clone()));
                     claimed_ids.push(item_id);
                 }
             }
