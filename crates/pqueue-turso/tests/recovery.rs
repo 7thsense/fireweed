@@ -1,0 +1,69 @@
+mod support;
+
+use pqueue_conformance::qdef;
+use pqueue_core::{ItemId, ItemState};
+use pqueue_engine::{AsyncProjectionStore, CommandPosition, QueueKey};
+use pqueue_turso::{TursoConfig, TursoRelational};
+
+use support::{assert_state, lifecycle};
+
+#[tokio::test]
+async fn reopen_and_genesis_replay_converge_to_the_same_cursor_and_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("projection.db");
+    let definition = qdef();
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let id = ItemId::new("201").unwrap();
+    let commands = lifecycle(id);
+
+    let store = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    AsyncProjectionStore::ensure_shard(&store, definition.clone())
+        .await
+        .unwrap();
+    for (sequence, command) in commands.iter().cloned().enumerate() {
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, sequence as u64)],
+            vec![command],
+        )
+        .await
+        .unwrap();
+    }
+    drop(store);
+
+    let reopened = TursoRelational::open(TursoConfig::local(&path))
+        .await
+        .unwrap();
+    assert_state(&reopened, shard.clone(), id, Some(ItemState::Complete)).await;
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&reopened, shard.clone())
+            .await
+            .unwrap(),
+        Some(CommandPosition::new(shard.clone(), 0, 3))
+    );
+
+    let replayed = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&replayed, definition)
+        .await
+        .unwrap();
+    AsyncProjectionStore::apply_recovery(
+        &replayed,
+        (0..commands.len())
+            .map(|sequence| CommandPosition::new(shard.clone(), 0, sequence as u64))
+            .collect(),
+        commands,
+    )
+    .await
+    .unwrap();
+    assert_state(&replayed, shard.clone(), id, Some(ItemState::Complete)).await;
+    assert_eq!(
+        AsyncProjectionStore::recovery_high_water(&replayed, shard.clone())
+            .await
+            .unwrap(),
+        AsyncProjectionStore::recovery_high_water(&reopened, shard)
+            .await
+            .unwrap()
+    );
+}

@@ -39,3 +39,23 @@ required-features = ["local"]
 name = "async_reclaim_selection"
 path = "tests/async_reclaim_selection.rs"
 required-features = ["local"]
+
+[[test]]
+name = "differential"
+path = "tests/differential.rs"
+required-features = ["local"]
+
+[[test]]
+name = "recovery"
+path = "tests/recovery.rs"
+required-features = ["local"]
+
+[[test]]
+name = "concurrency"
+path = "tests/concurrency.rs"
+required-features = ["local"]
+
+[[test]]
+name = "cancellation"
+path = "tests/cancellation.rs"
+required-features = ["local"]
