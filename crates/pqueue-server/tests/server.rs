@@ -650,7 +650,7 @@ async fn draining_owner_refuses_new_claim_but_serves_inflight_epoch() {
     assert_eq!(in_flight, Some(1));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(1_000)); // t = 1000s
@@ -699,26 +699,28 @@ async fn background_reclaim_recovers_orphaned_lease_without_client_traffic() {
 
     // The worker "crashes": no renew, no ack. Advance the clock past the lease — and DO NOTHING ELSE.
     clock.set(1_061); // 1s past expiry
-    // Poll (not a fixed sleep) for the background reclaim task to recover the orphaned lease — no client
-    // traffic occurs during this wait, so the ONLY actor that can change state is the reclaim loop.
-    let mut reclaimed = false;
-    for _ in 0..200 {
-        if backend.metrics(&qkey()).await.unwrap().leased == 0 {
-            reclaimed = true;
+    // Advance Tokio's virtual clock instead of waiting for host scheduling. Observe the complete outcome:
+    // the backend mutation and the counter publication are consecutive operations, not one atomic snapshot.
+    let ticks_before = server.reclaim_stats().ticks;
+    tokio::time::advance(Duration::from_millis(10)).await;
+    let mut observed = None;
+    for _ in 0..100 {
+        let metrics = backend.metrics(&qkey()).await.unwrap();
+        let stats = server.reclaim_stats();
+        if metrics.leased == 0 && stats.leases_reclaimed >= 1 {
+            observed = Some((metrics, stats));
             break;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
     }
     assert!(
-        reclaimed,
-        "the orphaned lease was reclaimed by the background task alone (TD-007 §3)"
+        observed.is_some(),
+        "the background task must publish both the reclaim and its observability counter"
     );
-    let m = backend.metrics(&qkey()).await.unwrap();
+    let (m, stats) = observed.unwrap();
     assert_eq!((m.pending, m.leased), (1, 0));
-    assert!(
-        server.reclaim_stats().leases_reclaimed >= 1,
-        "the reclaim is counted/observable, not silently swallowed"
-    );
+    assert!(stats.ticks > ticks_before);
+    assert_eq!(stats.errors, 0);
     server.shutdown();
 }
 

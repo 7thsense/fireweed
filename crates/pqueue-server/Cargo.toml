@@ -70,7 +70,7 @@ external-kafka = ["dep:rskafka", "dep:chrono"]
 
 [dev-dependencies]
 pqueue-core = { path = "../pqueue-core" }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "test-util"] }
 redis = { version = "1", features = ["tokio-comp"] }
 # The TP-002 E3 live object-log ack/recovery benchmark harness emits + strict-validates release-ledger rows.
 pqueue-release = { path = "../pqueue-release" }
