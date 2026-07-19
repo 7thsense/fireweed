@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse,
-    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, QueueDefinition,
-    UtcTimestamp,
+    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, MetricsByQueryRequest,
+    QueueDefinition, UtcTimestamp,
 };
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{AsOfProjectionStore, ProjectionSnapshot, ProjectionStore};
@@ -1171,6 +1171,15 @@ impl ProjectionStore for HybridProjectionStore {
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         self.require_hydrated(shard)?;
         self.memory.metrics(shard)
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
+        self.require_hydrated(shard)?;
+        self.memory.metrics_by_query(shard, request)
     }
 
     fn terminal_emission_metrics(

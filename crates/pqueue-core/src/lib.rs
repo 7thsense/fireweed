@@ -29,6 +29,6 @@ pub use query::{
     ClaimByQueryRequest, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp,
     GroupByField, GroupedAggregateRequest, GroupedAggregateResponse, MetricsByQueryRequest,
     MutationOutcome, MutationResult, OrderField, QueryCapabilityFlags, QueryCursor, QueryFilter,
-    QueryRequestError, RangeScanRequest, RangeScanResponse, RangeScanRow, SortDirection, TimeBucket,
-    TypedValue,
+    QueryRequestError, RangeScanRequest, RangeScanResponse, RangeScanRow, SortDirection,
+    TimeBucket, TypedValue,
 };

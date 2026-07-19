@@ -505,14 +505,6 @@ impl ProjectionStore for InMemoryProjection {
         Ok(self.get(shard)?.metrics())
     }
 
-    fn metrics_by_query(
-        &self,
-        shard: &QueueKey,
-        request: MetricsByQueryRequest,
-    ) -> EngineResult<QueueMetrics> {
-        Ok(self.get(shard)?.metrics_by_query(request)?)
-    }
-
     fn terminal_emission_metrics(
         &self,
         shard: &QueueKey,

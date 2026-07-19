@@ -13,6 +13,14 @@ use pqueue_conformance::ts;
 // (`ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`).
 pqueue_conformance::conformance_suite!(composed_memory_backend);
 
+#[tokio::test]
+async fn filtered_lifecycle_metrics_conformance() {
+    pqueue_conformance::scenarios::filtered_lifecycle_metrics_are_exact_and_read_only(
+        composed_memory_backend,
+    )
+    .await;
+}
+
 /// ADR-012 Phase 1b-i: CAPABILITY PARITY between the composed memory backend and the monolithic
 /// `MemoryBackend`. The shared conformance suite above already covers the data-plane ports; these
 /// white-box tests cover the commit-class ports the monolith implements that the composition previously

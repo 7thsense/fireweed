@@ -7,13 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::executor::block_on;
 use pqueue::{
-    Bytes, ClaimRef, CommitCapabilities, CommitEntry, CommitRequest, EligibilityPolicy,
-    EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
-    EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
-    EngineError, EntryOutcome, FinalizeKind, InstanceFence, LeaseToken, NewItem, OrderingMode,
+    Bytes, ClaimRef, CommitCapabilities, CommitEntry, CommitRequest, CompoundIndexDef,
+    CompoundIndexField, EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig,
+    EmbeddedProjectionConfig, EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret,
+    EmbeddedSegmentConfig, EngineError, EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration,
+    IndexType, InstanceFence, LeaseToken, MetricsByQueryRequest, NewItem, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
-    QueueDefinition, QueueId, QueueKey, RecurrencePolicy, RequestId, RetryPolicy, SideRecord,
-    TenantId, UtcTimestamp,
+    QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey, RecurrencePolicy, RequestId,
+    RetryPolicy, SideRecord, TenantId, TypedValue, UtcTimestamp,
 };
 use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
@@ -467,6 +468,103 @@ fn public_objectlog_sqlite_strict_writes_fail_closed_while_projection_is_deleted
     block_on(pq.ack(&key, [claimed[0].item_id])).unwrap();
     block_on(pq.push(&key, item(2))).unwrap();
     assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 1);
+    drop(pq);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-filtered-metrics-{}", nonce()));
+    let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
+    let pq = pqueue::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let key = queue("filtered-metrics-queue");
+    let mut queue_definition = definition("filtered-metrics-queue");
+    queue_definition.typed_indexes = vec![QueueIndex {
+        name: "by_record_kind_scheduled_at".to_string(),
+        declaration: IndexDeclaration::Compound(CompoundIndexDef {
+            fields: vec![
+                CompoundIndexField {
+                    field: "record_kind".to_string(),
+                    index_type: IndexType::String,
+                },
+                CompoundIndexField {
+                    field: "scheduled_at".to_string(),
+                    index_type: IndexType::Datetime,
+                },
+            ],
+            unique: false,
+        }),
+    }];
+    block_on(pq.create_queue(queue_definition)).unwrap();
+
+    let mut items = Vec::new();
+    for (priority_base, state) in [
+        (0, "complete"),
+        (10, "failed"),
+        (20, "leased"),
+        (30, "pending"),
+    ] {
+        for (offset, record_kind) in ["transition", "effect", "await", "result"]
+            .into_iter()
+            .enumerate()
+        {
+            items.push(NewItem {
+                priority: Some(PriorityValue::Int64(priority_base + offset as i64)),
+                entity: Some(serde_json::json!({
+                    "record_kind": record_kind,
+                    "scheduled_at": "2026-07-19T12:00:00Z",
+                    "expected_state": state
+                })),
+                ..NewItem::default()
+            });
+        }
+    }
+    let ids = block_on(pq.push_batch(&key, items)).unwrap();
+    let complete = block_on(pq.claim(&key, 4, 30_000)).unwrap();
+    assert_eq!(
+        complete.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+        ids[0..4]
+    );
+    block_on(pq.ack(&key, complete.iter().map(|item| item.item_id))).unwrap();
+    let failed = block_on(pq.claim(&key, 4, 30_000)).unwrap();
+    assert_eq!(
+        failed.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+        ids[4..8]
+    );
+    block_on(pq.fail(&key, failed.iter().map(|item| item.item_id))).unwrap();
+    let leased = block_on(pq.claim(&key, 4, 30_000)).unwrap();
+    assert_eq!(
+        leased.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+        ids[8..12]
+    );
+
+    let request = MetricsByQueryRequest {
+        index: Some("by_record_kind_scheduled_at".to_string()),
+        filters: vec![QueryFilter {
+            field: "record_kind".to_string(),
+            op: FilterOp::Eq,
+            value: TypedValue::String("transition".to_string()),
+        }],
+    };
+    let expected = block_on(pq.metrics_by_query(&key, request.clone())).unwrap();
+    assert_eq!(
+        (
+            expected.pending,
+            expected.leased,
+            expected.complete,
+            expected.failed
+        ),
+        (1, 1, 1, 1)
+    );
+
+    block_on(pq.delete_projection()).unwrap();
+    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.verify_projection()).unwrap();
+    assert_eq!(
+        block_on(pq.metrics_by_query(&key, request)).unwrap(),
+        expected
+    );
+    assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 4);
     drop(pq);
     let _ = fs::remove_dir_all(fixture);
 }

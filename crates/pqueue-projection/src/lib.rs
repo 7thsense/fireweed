@@ -1006,6 +1006,143 @@ fn matches_filters_on_entity(entity: &Value, filters: &[QueryFilter]) -> EngineR
     Ok(true)
 }
 
+/// Count lifecycle states for records matching filters on one declared typed index.
+///
+/// This is the backend-neutral evaluation seam used by projection implementations whose authoritative
+/// rows live outside [`ProjectionData`] (for example, a relational projection). Callers provide only the
+/// lifecycle state, supersession flag, and public entity document; backend-private row types never escape.
+pub fn filtered_lifecycle_metrics<'a>(
+    typed_indexes: &[QueueIndex],
+    request: &MetricsByQueryRequest,
+    records: impl IntoIterator<Item = (ItemState, bool, Option<&'a Value>)>,
+) -> EngineResult<QueueMetrics> {
+    let spec = match request.index.as_deref() {
+        Some(name) => typed_indexes
+            .iter()
+            .find(|spec| spec.name == name)
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+        None => typed_indexes
+            .first()
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+    };
+    let fields = index_fields(spec);
+    for filter in &request.filters {
+        let Some((_, index_type)) = fields
+            .iter()
+            .find(|(field, _)| *field == filter.field.as_str())
+        else {
+            return Err(EngineError::Invalid("unindexed-field"));
+        };
+        typed_value_from_filter_value(&filter.value, index_type)?;
+    }
+
+    let mut metrics = QueueMetrics::default();
+    for (state, superseded, entity) in records {
+        if superseded {
+            continue;
+        }
+        let Some(entity) = entity else {
+            continue;
+        };
+        if !matches_filters_on_entity(entity, &request.filters)? {
+            continue;
+        }
+        match state {
+            ItemState::Pending => metrics.pending += 1,
+            ItemState::Leased => metrics.leased += 1,
+            ItemState::Complete => metrics.complete += 1,
+            ItemState::Failed => metrics.failed += 1,
+        }
+    }
+    metrics.resident_terminal_count = metrics.complete + metrics.failed;
+    Ok(metrics)
+}
+
+/// Count lifecycle states from canonical Axon index keys held by a relational projection.
+///
+/// Canonical compound keys frame every declared field independently, so this evaluator can apply typed
+/// equality and range predicates without reconstructing a backend's private item row or persisting a
+/// duplicate entity document.
+pub fn filtered_lifecycle_metrics_by_index_key<'a>(
+    typed_indexes: &[QueueIndex],
+    request: &MetricsByQueryRequest,
+    records: impl IntoIterator<Item = (ItemState, bool, &'a [u8])>,
+) -> EngineResult<QueueMetrics> {
+    let spec = match request.index.as_deref() {
+        Some(name) => typed_indexes
+            .iter()
+            .find(|spec| spec.name == name)
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+        None => typed_indexes
+            .first()
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+    };
+    let fields = index_fields(spec);
+    let mut encoded_filters = Vec::with_capacity(request.filters.len());
+    for filter in &request.filters {
+        let Some((position, (_, index_type))) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, (field, _))| *field == filter.field.as_str())
+        else {
+            return Err(EngineError::Invalid("unindexed-field"));
+        };
+        typed_value_from_filter_value(&filter.value, index_type)?;
+        let value = typed_value_to_json(&filter.value)?;
+        let encoded = axon_esf::encode_index_value(&value, index_type).map_err(|_| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?;
+        encoded_filters.push((position, filter.op, encoded));
+    }
+
+    let mut metrics = QueueMetrics::default();
+    for (state, superseded, key) in records {
+        if superseded {
+            continue;
+        }
+        let mut components = Vec::with_capacity(fields.len());
+        let mut offset = 0usize;
+        for _ in &fields {
+            let length_bytes: [u8; 4] = key
+                .get(offset..offset + 4)
+                .ok_or_else(|| EngineError::Storage("invalid canonical index key".into()))?
+                .try_into()
+                .expect("four-byte length slice");
+            offset += 4;
+            let length = u32::from_be_bytes(length_bytes) as usize;
+            let value = key
+                .get(offset..offset + length)
+                .ok_or_else(|| EngineError::Storage("invalid canonical index key".into()))?;
+            offset += length;
+            components.push(value);
+        }
+        if offset != key.len() {
+            return Err(EngineError::Storage("invalid canonical index key".into()));
+        }
+        let matches = encoded_filters.iter().all(|(position, op, filter)| {
+            let ordering = components[*position].cmp(filter.as_slice());
+            match op {
+                FilterOp::Eq => ordering.is_eq(),
+                FilterOp::Gte => ordering.is_ge(),
+                FilterOp::Gt => ordering.is_gt(),
+                FilterOp::Lte => ordering.is_le(),
+                FilterOp::Lt => ordering.is_lt(),
+            }
+        });
+        if !matches {
+            continue;
+        }
+        match state {
+            ItemState::Pending => metrics.pending += 1,
+            ItemState::Leased => metrics.leased += 1,
+            ItemState::Complete => metrics.complete += 1,
+            ItemState::Failed => metrics.failed += 1,
+        }
+    }
+    metrics.resident_terminal_count = metrics.complete + metrics.failed;
+    Ok(metrics)
+}
+
 fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
     Ok(match value {
         TypedValue::String(v) => Value::String(v.clone()),
@@ -2094,37 +2231,13 @@ impl ProjectionData {
 
     /// Filtered lifecycle metrics over the authoritative projection.
     pub fn metrics_by_query(&self, request: MetricsByQueryRequest) -> EngineResult<QueueMetrics> {
-        let spec = self.typed_range_index(request.index.as_deref())?;
-        let fields = index_fields(spec);
-        for filter in &request.filters {
-            if !fields
-                .iter()
-                .any(|(field, _)| *field == filter.field.as_str())
-            {
-                return Err(EngineError::Invalid("unindexed-field"));
-            }
-        }
-
-        let mut metrics = QueueMetrics::default();
-        for rec in self.items.values() {
-            if rec.superseded {
-                continue;
-            }
-            let Some(entity) = rec.entity_document.as_ref() else {
-                continue;
-            };
-            if !matches_filters_on_entity(entity, &request.filters)? {
-                continue;
-            }
-            match rec.state {
-                ItemState::Pending => metrics.pending += 1,
-                ItemState::Leased => metrics.leased += 1,
-                ItemState::Complete => metrics.complete += 1,
-                ItemState::Failed => metrics.failed += 1,
-            }
-        }
-        metrics.resident_terminal_count = metrics.complete + metrics.failed;
-        Ok(metrics)
+        filtered_lifecycle_metrics(
+            &self.typed_index_specs,
+            &request,
+            self.items
+                .values()
+                .map(|rec| (rec.state, rec.superseded, rec.entity_document.as_ref())),
+        )
     }
 
     fn remove_record(&mut self, rec: ItemRecord) -> EngineResult<()> {

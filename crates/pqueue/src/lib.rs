@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
-use pqueue_core::{IndexDeclaration, QueueIndex, WorkerId};
+use pqueue_core::WorkerId;
 use pqueue_engine::{
     Backend, ClaimPort, ClaimRequest, CommandPosition, CommitEntryOutcome, CommitTransition,
     CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
@@ -42,16 +42,17 @@ use pqueue_engine::{
 pub use bytes::Bytes;
 pub use pqueue_core::{
     AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, BucketRule,
-    ClaimByQueryRequest, ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, CreateQueue,
-    CreateQueueError, CreateQueueErrorKind, DecimalValue, DeclaredBucketSegmentRequest,
-    DeclaredBucketSegmentResponse, EligibilityPolicy, FilterOp, GateKeyPolicy, GroupByField,
-    GroupKey, GroupedAggregateRequest, GroupedAggregateResponse, IdentifierError, IndexSpec,
-    ItemId, LeaseToken, Metadata, MetadataValue, MutationOutcome, MutationResult, OrderField,
-    OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
-    PriorityValue, QueryCapabilityFlags, QueryCursor, QueryFilter, QueryRequestError,
-    QueueCreationPolicy, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse,
-    RangeScanRow, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, SortDirection,
-    TenantId, TimeBucket, TimestampError, TypedValue, UtcTimestamp,
+    ClaimByQueryRequest, ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy,
+    CompoundIndexDef, CompoundIndexField, CreateQueue, CreateQueueError, CreateQueueErrorKind,
+    DecimalValue, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, EligibilityPolicy,
+    FilterOp, GateKeyPolicy, GroupByField, GroupKey, GroupedAggregateRequest,
+    GroupedAggregateResponse, IdentifierError, IndexDeclaration, IndexSpec, IndexType, ItemId,
+    LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, MutationOutcome, MutationResult,
+    OrderField, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, QueryCapabilityFlags, QueryCursor, QueryFilter,
+    QueryRequestError, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex, RangeScanRequest,
+    RangeScanResponse, RangeScanRow, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy,
+    SortDirection, TenantId, TimeBucket, TimestampError, TypedValue, UtcTimestamp,
 };
 pub use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommitCapabilities,
@@ -2045,6 +2046,16 @@ impl<B: LibBackend> Pqueue<B> {
     /// Per-state counts for the queue.
     pub async fn metrics(&self, queue: &QueueKey) -> EngineResult<QueueMetrics> {
         self.backend.metrics(queue).await
+    }
+
+    /// Exact Pending/Leased/Complete/Failed counts restricted by filters over one declared typed index.
+    /// This is a read-only projection query and never claims or mutates matching rows.
+    pub async fn metrics_by_query(
+        &self,
+        queue: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
+        self.backend.metrics_by_query(queue, request).await
     }
 
     /// Extend the lease on the given in-flight items to `lease_ms` from now — a long-running worker keeps

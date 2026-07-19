@@ -5871,26 +5871,26 @@ mod ordered_tests {
             Ok(keys.iter().map(|_| None).collect())
         }
 
-    fn grouped_aggregate(
-        &self,
-        _shard: &QueueKey,
-        _request: GroupedAggregateRequest,
-    ) -> EngineResult<GroupedAggregateResponse> {
-        Err(EngineError::Unavailable)
-    }
+        fn grouped_aggregate(
+            &self,
+            _shard: &QueueKey,
+            _request: GroupedAggregateRequest,
+        ) -> EngineResult<GroupedAggregateResponse> {
+            Err(EngineError::Unavailable)
+        }
 
-    fn metrics_by_query(
-        &self,
-        _shard: &QueueKey,
-        _request: MetricsByQueryRequest,
-    ) -> EngineResult<QueueMetrics> {
-        Err(EngineError::Unavailable)
-    }
+        fn metrics_by_query(
+            &self,
+            _shard: &QueueKey,
+            _request: MetricsByQueryRequest,
+        ) -> EngineResult<QueueMetrics> {
+            Err(EngineError::Unavailable)
+        }
 
-    fn declared_bucket_segment(
-        &self,
-        _shard: &QueueKey,
-        _request: DeclaredBucketSegmentRequest,
+        fn declared_bucket_segment(
+            &self,
+            _shard: &QueueKey,
+            _request: DeclaredBucketSegmentRequest,
         ) -> EngineResult<DeclaredBucketSegmentResponse> {
             Err(EngineError::Unavailable)
         }
