@@ -932,9 +932,23 @@ impl pqueue_engine::DiscoveryPort for PostgresBackend {}
 /// Recovery/explain reads inherit the `Unavailable` default (no authoritative commit boundary on this path).
 impl pqueue_engine::RecoveryReadPort for PostgresBackend {}
 
-/// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
-/// the log-replay postgres family inherits the all-`Unavailable` default.
-impl pqueue_engine::HotProjectionQueryPort for PostgresBackend {}
+/// Hot projection query substrate (API-004) on the log-replay postgres family delegates to the shared
+/// in-memory projection, so the backend-neutral query surface stays identical to the other composed
+/// log-replay backends.
+impl pqueue_engine::HotProjectionQueryPort for PostgresBackend {
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: pqueue_core::MetricsByQueryRequest,
+    ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
+            proj.metrics_by_query(request)
+        })();
+        std::future::ready(result)
+    }
+}
 
 impl FinalizePort for PostgresBackend {
     fn finalize(
