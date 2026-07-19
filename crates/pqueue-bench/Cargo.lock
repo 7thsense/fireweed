@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -976,7 +976,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-core"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "axon-esf",
  "serde",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-engine"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-memory"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-objectlog"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "bytes",
  "crc32c",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-postgres"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-projection"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "axon-esf",
  "bytes",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-relational"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "bytes",
  "pqueue-core",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-release"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1077,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "pqueue-sqlite"
-version = "0.19.0"
+version = "0.19.1"
 dependencies = [
  "axon-esf",
  "bytes",

@@ -160,7 +160,8 @@ impl Future for CompletionFuture {
     }
 }
 
-type Operation = Box<dyn FnOnce(&ObjectLog) + Send + 'static>;
+type PublishReply = Box<dyn FnOnce() + Send + 'static>;
+type Operation = Box<dyn FnOnce(&ObjectLog) -> PublishReply + Send + 'static>;
 
 struct Job {
     operation: Operation,
@@ -299,8 +300,12 @@ fn worker_loop(shared: Arc<SharedExecutor>) {
             key,
             complete: false,
         };
-        (job.operation)(&shared.log);
+        let publish_reply = (job.operation)(&shared.log);
         running.complete();
+        // Make the executor slot available before the completed operation becomes observable to its
+        // caller. Otherwise a caller can receive success and immediately get a spurious `Unavailable`
+        // while this worker is still between publishing the reply and decrementing `outstanding`.
+        publish_reply();
     }
 }
 
@@ -554,7 +559,10 @@ impl AsyncObjectLog {
     {
         let (reply_sender, reply) = reply_channel();
         let job = Job {
-            operation: Box::new(move |log| reply_sender.send(operation(log))),
+            operation: Box::new(move |log| {
+                let result = operation(log);
+                Box::new(move || reply_sender.send(result))
+            }),
         };
         let mut state = self
             .actor
