@@ -14,7 +14,7 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: 3765364468e6c3355df70b89cf4a3d59c6cebae935c75ff9eb13fbbc95af210c
+    self_hash: 9c3b4dd2e25107fee51941c98dde6875e786d5627ab2704d58b79a30679918fa
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
@@ -25,9 +25,9 @@ ddx:
       concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
-      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-19T01:26:08Z"
+    reviewed_at: "2026-07-19T02:12:30Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -506,6 +506,23 @@ without treating local SQLite as the command authority.
 | High-water barrier | `HybridProjectionStore::recovery_high_water` MUST return SQLite's high-water only after the in-memory shard has been hydrated from that image. If hydration fails, is incomplete, or has not run, it MUST return `None` or fail closed so `ComposedBackend::recover` replays from genesis rather than skipping log history. |
 | Tail replay | After hydration, recovery replays only object-log commands beyond SQLite logical high-water through the normal hybrid apply path. For `objectlog/hybrid-async`, replay starts after the last ordered batch whose complete command range is covered by `sqlite_high_water`; any later committed commands are replayed from the object log even if local WAL or page-cache state contains partial effects. |
 
+### Ownership-handoff read policy
+
+`object_log_sqlite_projection` treats the persisted SQLite applied-high-water as its recovery snapshot.
+Post-fence hydration scans authoritative manifest metadata and fetches only segment objects whose commands
+are beyond that high-water. A clean handoff MUST NOT fetch an already-applied segment. An unapplied segment
+MUST be checksum/format validated and applied exactly once; reading a different segment on each handoff is
+required tail recovery, not evidence for a cache. First projection reads after hydration are local.
+
+SP-06 rejects targeted cache integration for the current design: the 200-sample, two-queue-size, 25/100 ms
+scripted matrix found that content-addressed manifest candidates pass the 70% identification gate but yield
+only 8.97% to 11.69% projected p95 improvement, below the 20% adoption gate. Production MUST NOT add a generic block cache,
+payload-wide prefetch, per-queue warmup task, or warmed mutable-head authority. The measured dominant cost is
+the versioned authoritative-head LIST/GET walk, which grows with head history and cannot safely be skipped by
+a hint. Address that through a separately governed constant-time conditional-head design. Bounded-parallel
+fetch of a genuinely unapplied tail is a separate recovery optimization and requires an async store path,
+the node-global dispatcher, generation cancellation, and byte/object/deadline permits before integration.
+
 ## Hybrid Snapshot Authority and Segment Retention (normative)
 
 `objectlog/hybrid-strict` and `objectlog/hybrid-async` have two supported
@@ -802,6 +819,14 @@ eligibility, FR-10).
   metrics, indexes, leases, and request-id replay state with zero invariant
   violations.
 - Telemetry overhead MUST be included in performance tests.
+- SP-06 handoff evidence uses dedicated recorder deltas around the post-fence hydration plus first-claim
+  window. The full explicit matrix is `sp06_full_handoff_profile_classifies_metadata_and_required_tail`;
+  ordinary CI runs only `sp06_handoff_profile_smoke_reconciles_required_tail_reads`. At 200 samples per arm,
+  clean hydration recorded 226,700 physical requests, 20,300 immutable GETs, and 20,100 avoidable GETs.
+  One-unapplied-tail hydration recorded 347,500 physical requests, 40,600 immutable GETs, 40,400 avoidable
+  GETs, 200 unique required segment GETs, and 200 replayed commands. Queue item counts 256 and 1,000 produced
+  the same object-read shape; this is not an active-queue-density test. These modeled totals expose metadata
+  amplification; they are not a quiet-host wall-clock verdict.
 
 ## Testing
 

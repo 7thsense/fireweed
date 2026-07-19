@@ -8,14 +8,14 @@ ddx:
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
-    self_hash: ff74b55a3869b335aa80e2e52abae5cea979d028c1c41559ab027e477a26c253
+    self_hash: 8d4b9a39799bd01ceb6007fd17832590e7af854bae5092894579b3bcb660d842
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-18T22:13:09Z"
+    reviewed_at: "2026-07-19T02:12:30Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -257,6 +257,7 @@ envelope).
 | Pass: per-queue floor preserved at scale (E0 invariant) | adding queues or total load — including at the ≥1000-active-queue density point — MUST NOT drop any individual queue below its reachable per-queue floor or cause a progress-bound violation. This is the "every queue at any scale" guarantee (noisy-neighbor isolation under load, FR-43). |
 | Pass: per-queue local progress | each queue's oldest-eligible item is claimed before `progress_bound_ms` from its own owner's local computation (queue-global, D1 / FR-12); there is no cross-shard aggregation. |
 | Pass: owner failover / fencing | killing a queue's owner: after lease expiry a new owner acquires a strictly greater epoch, the deposed owner's append is fenced, and the queue recovers from snapshot + log tail with no lost/double work (TD-003); a queue left unowned past `progress_bound_ms` surfaces as a progress-bound violation in metrics (FR-41) and `DiscoverActiveScopes` (TD-003). |
+| SP-06 handoff profile | The E2 failover evidence schema v2 may carry a dedicated-recorder `handoff_object_store_profile`; schema v1 remains readable for historical evidence. The explicit matrix runs 200 post-fence/pre-serve samples for 256- and 1,000-item queues at scripted 25 ms and 100 ms request latency, with clean and one-unapplied-tail arms. Recorder totals reconcile with named requests. Clean: 20,300 immutable / 20,100 avoidable / 20,099 repeated GETs. Tail: 40,600 immutable / 40,400 avoidable / 39,999 repeated GETs, including 200 unique required segment GETs and 200 replayed commands. First local read requests = 0. Queue item count is not active-queue density. |
 | Pass: single lease | no item double-leased across an owner reassignment/drain (TD-003). |
 | Pass: routing redirect | a client addressing a queue on the wrong node is redirected (`-MOVED`-style) to the current owner and converges in a single hop; a stale/misrouted write is fenced, never corrupting state (TD-006 §1A). |
 
@@ -271,6 +272,15 @@ legacy manifest mirrors are not retries, and hostile key/error inputs cannot cre
 Disabled-recorder transparency and deterministic accounting are normal CI gates. The quiet-host no-op
 overhead measurement (median regression no greater than 2%) remains a release-host performance gate and MUST
 NOT be inferred from a contended development host.
+
+SP-06 is a negative cache spike, not a release performance claim. The deterministic single-page BlobStore
+model assigns each
+physical request a fixed 25/100 ms cost without sleeping, so it identifies request shape and computes modeled
+p95 reproducibly. Its ignored harness output is separate from live E2 evidence; the live schema-v2 row carries
+a null profile while the quiet-host wall-clock arm remains deferred. No cache may land from this evidence:
+avoidable reads exceed 70% and absolute modeled gain exceeds 50 ms, but relative p95 gain is only 8.97% to
+11.69%, below 20%. The observed authority-head history amplification is a new
+design input for constant-time head access and async bounded-parallel tail recovery.
 
 Backend: `object_log_inmemory_projection` and `object_log_sqlite_projection`
 (TD-004). Reported against the per-queue throughput floor E0.

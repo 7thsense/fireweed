@@ -2700,6 +2700,10 @@ impl ProjectionRead for SegmentedObjectLogInMemoryBackend {
 // Snapshot-tail recovery tests (bead pqueue-8a76daad)
 // ===========================================================================
 #[cfg(test)]
+#[path = "object_log_sqlite_sp06_handoff_profile_tests.rs"]
+mod sp06_handoff_profile_tests;
+
+#[cfg(test)]
 mod recovery_tests {
     use super::*;
     use pqueue_core::{

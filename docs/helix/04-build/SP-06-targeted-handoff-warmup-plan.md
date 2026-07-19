@@ -7,13 +7,13 @@ ddx:
     - {kind: informed_by, to: td-sharding-and-shard-ownership}
     - {kind: verified_by, to: tp-scale-substantiation}
   review:
-    self_hash: 732941914c2eeedacd664547e719a3ec45330304c37a06f6efa3d521bb0016ce
+    self_hash: 5aabef389a79a395503e0333e2a1d6976a4bd598444cd202c6faea572738b0b8
     deps:
-      build-sp01-global-buffer-byte-admission: 6211670110ed7f75c2ffb82a3ba5bde0aad9573d7a1963266b93a2b42065a8f1
-      build-sp04-object-store-observability: 8b8a380a443ed798b0fb8fe0a5fa9884e0ead76418df42af8ba99f910773b4ca
-      build-sp05-maintenance-policy-execution: ebc977e1755ccf228635818ae7c76061ba0817ad6b473180e42fb194fea1b3a3
-      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-18T16:20:32Z"
+      build-sp01-global-buffer-byte-admission: 5cfbe42a94ec4813e4855e431f0319152c6c8d11c5b081dcc77954a1ecf933b7
+      build-sp04-object-store-observability: 7fc689fb0f1334fee08304160a66d3215372c754dddf679ae4411c4c0d625926
+      build-sp05-maintenance-policy-execution: 19aa494aeeef8822839e5dc70dee309c87a9ad5d3d9d094adb26e4e4a03f64c8
+      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
+    reviewed_at: "2026-07-19T02:12:30Z"
 ---
 
 # Technical Spike Plan: SP-06 Targeted Ownership-Handoff Warmup
@@ -45,12 +45,12 @@ maintenance interactions.
 
 | Slice | Change | Gate |
 |---|---|---|
-| 0 | Define measurement protocol and SP-04 warmup operation class; extend E2-failover evidence schema | reproducible isolated snapshot deltas and scripted schedules |
-| 1 | Profile cold handoff using dedicated-recorder instances: operation counts, bytes, recovery and first-claim latency | Identify reads covering >=70% of defined avoidable latency/bytes |
-| 2 | Prototype bounded post-fence warmup for head hint, latest snapshot metadata/bytes, manifest replay range, and selected immutable tail segments | No payload-wide prefetch; authoritative validation and exact invalidation tests |
-| 3 | Run queue-density, concurrent-handoff, stale-epoch, ownership-loss, and slow-store experiments | >=20% and >=50ms p95 gain when cold p95 >=25% of progress bound; <=2% steady-state cost |
-| 4 | If gates pass, integrate generation-stamped cooperative jobs with owner lifecycle; otherwise remove prototype | memory stays within declared warmup budget |
-| 5 | Record decision and update TD-003/TD-004/TP-002 | reviewed evidence |
+| 0 | **Complete:** define measurement protocol and extend E2 failover evidence to optional schema-v2 `handoff_object_store_profile` | isolated SP-04 snapshot deltas reconcile with named requests |
+| 1 | **Complete:** profile clean and one-unapplied-tail handoff with dedicated recorders | 200 samples × two queue sizes × 25/100 ms schedules |
+| 2 | **Stopped by gate:** immutable candidates are identifiable, but projected relative p95 gain is below 20%; do not prototype | no payload cache or dormant warmup code |
+| 3 | **Not applicable:** no intervention exists to compare against the numeric adoption gates | quiet-host/live arm remains deferred |
+| 4 | **Negative integration decision:** prerequisites are absent and cache benefit gate failed | production behavior unchanged |
+| 5 | **Complete:** record decision and update TD-003/TD-004/TP-002/roadmap | reviewed evidence |
 
 ## Issue Decomposition
 
@@ -70,16 +70,44 @@ generation invalidates unwind/drain within the same epoch, while epoch protects 
 the generation. A late completion inserts nothing usable and releases all permits. Negative evidence is a
 valid completed iteration.
 
+## Spike Evidence and Decision
+
+Command: `cargo test -p pqueue-server sp06_full_handoff_profile_classifies_metadata_and_required_tail -- --ignored --nocapture`.
+The final explicit matrix passed in 45.75 seconds. Each arm ran 200 handoffs for 256 and 1,000 resident items.
+
+| Arm | 25 ms total / p95 | 100 ms total / p95 | Physical requests | Immutable GETs | Avoidable/repeated GETs | Tail replay |
+|---|---:|---:|---:|---:|---:|---:|
+| Clean SQLite high-water | 5,667,500 / 52,950 ms | 22,670,000 / 211,800 ms | 226,700 | 20,300 | 20,100 / 20,099 | 0 |
+| One unapplied segment per handoff | 8,687,500 / 81,475 ms | 34,750,000 / 325,900 ms | 347,500 | 40,600 | 40,400 / 39,999 | 200 commands |
+
+Queue item count did not change object-read shape because resident state and first selection are local to the
+SQLite projection; this matrix does not measure active-queue density. Content-addressed manifest candidates
+make the avoidable share exceed 70%. Every immutable tail GET named a distinct required segment and fed
+exactly one replay. At 25 ms, perfect removal of avoidable reads projects clean p95 from 52,950 to 48,200 ms
+(4,750 ms, 8.97%) and tail p95 from 81,475 to 71,950 ms (9,525 ms, 11.69%); the same relative gains apply at
+100 ms. Identification, cold-latency, and absolute-gain gates pass, but both arms fail the required 20%
+relative gain, so no prototype was created.
+
+The ignored deterministic BlobStore harness uses a single-page listing model and prints its reproducible
+matrix; it does not emit or claim live E2 evidence. The live TP-002 script emits schema v2 with a null handoff
+profile because the quiet-host arm remains deferred. Keeping the harness in an isolated test module avoids
+coupling production fixtures to this deliberately manual, 200-handoff matrix.
+
+The request totals expose a different problem: authoritative head reads walk retained version history, so
+post-fence metadata work grows with queue lifetime. That mutable authority cannot be served from a warm hint.
+Amend the design separately toward constant-time conditional-head access and full async bounded-parallel
+required-tail recovery. SP-05 did not introduce the node-global dispatcher assumed by this plan; current
+hydration also executes synchronous object-store/SQLite work behind a ready future. Those prerequisites block
+any future warmup integration independently of this negative cache result.
+
 ## Validation Plan
 
-- [ ] Warm and cold recovery produce identical projection image and high-water.
-- [ ] Equivalence means identical logical high-water and row/state set, not byte-identical SQLite images.
-- [ ] Stale/corrupt cached metadata is rejected and fetched authoritatively.
-- [ ] Before SP-07, v2 cache authentication uses its manifest checksum plus format version; after SP-07 it uses
-      content identity and invalidates v2-only entries on the writer-format transition.
-- [ ] Cancelled/drained handoff releases every byte permit and task slot.
-- [ ] Warmup completion after ownership loss produces zero usable cache insertions.
-- [ ] 1000 active queues and concurrent reassignments remain within node bounds.
+- [x] Clean and one-tail recovery preserve logical projection state and high-water.
+- [x] Equivalence uses logical high-water and row/state behavior, not byte-identical SQLite images.
+- [x] No cache exists; mutable metadata remains authoritative on every handoff.
+- [x] Cache authentication is N/A because the profiling gate rejected the cache before a prototype.
+- [x] No warmup permits, tasks, or cache insertions were introduced.
+- [x] The 1,000-item arm has the same bounded recovery object shape as the 256-item arm.
 
 ## Risks and Rollbacks
 
@@ -88,5 +116,6 @@ attempts/bytes. Disable by configuration or revert the isolated iteration; no du
 
 ## Exit Criteria
 
-Either a bounded targeted warmup meets every performance/safety gate and lands with an off switch, or a
-negative spike records why pqueue should retain cold authoritative recovery.
+**Met by negative spike.** pqueue retains cold authoritative recovery. Immutable candidates were identified,
+but projected relative p95 gain was only 8.97% to 11.69%, below the 20% adoption gate. The quiet-host/live arm
+remains deferred, and production contains no dormant warmup code.

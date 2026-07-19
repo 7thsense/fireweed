@@ -14,14 +14,14 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 047bbc7eaf05041dd143371043747295b9157fa520bcde7e249e51b255c189b5
+    self_hash: 2795c75a109b566663002b98334a23a3a38d328918835ee10b33d0744eebc519
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      td-s3-object-log-sqlite-projection-mode: 3765364468e6c3355df70b89cf4a3d59c6cebae935c75ff9eb13fbbc95af210c
-      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-      tp-scale-substantiation: ff74b55a3869b335aa80e2e52abae5cea979d028c1c41559ab027e477a26c253
+      td-s3-object-log-sqlite-projection-mode: 9c3b4dd2e25107fee51941c98dde6875e786d5627ab2704d58b79a30679918fa
+      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
+      tp-scale-substantiation: 8d4b9a39799bd01ceb6007fd17832590e7af854bae5092894579b3bcb660d842
       tp-verification-acceptance-criteria: 499b3c2c4300fa311a7189c64fc1321903ad8b2f67045f9bd95c993d690158d5
-    reviewed_at: "2026-07-19T01:26:10Z"
+    reviewed_at: "2026-07-19T02:12:30Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption
@@ -63,7 +63,7 @@ explicit cost ceiling.
 | 3 | SP-03 sequenced metadata | Implemented locally; release gates pending | Shared eligibility classification removes repeated race logic before maintenance refactor | Typed retained create-only publication, real advance→delete and delete→advance paths, ambiguity reread, HCAS-F1/F2 crash evidence; full release perf matrix pending |
 | 4 | SP-04 object-store telemetry | Implement | Supplies evidence for maintenance and warmup policy | Metrics below retry layer with stable low-cardinality labels |
 | 5 | SP-05 maintenance separation | Implemented locally; hybrid-async frontier negative spike | Uses typed metadata and telemetry to bound execution | Pure planner plus bounded resumable dry-run executor; async object reclamation conservatively retained pending complete authority API |
-| 6 | SP-06 targeted handoff warmup | Evidence-gated spike | Avoids speculative cache complexity | Adopt only if failover/recovery bars improve within memory budget |
+| 6 | SP-06 targeted handoff warmup | Negative spike complete; no cache | Avoidable manifest candidates pass identification, but projected p95 gain is only 8.97%–11.69%; each unapplied segment is fetched once | Retain cold authoritative recovery; separately design constant-time head access and async bounded-parallel tail replay |
 | 7 | SP-07 segment integrity v3 | Implement | Highest migration risk; benefits from simulation and maintenance tooling | CRC32C corruption check, content identity, legacy v2 decode |
 
 The order is dependency-driven, not priority-driven. SP-01 and SP-02 are P0. SP-03 and SP-04 are P1.
@@ -114,6 +114,13 @@ SP-04 is implemented through deterministic gates: one construction funnel, typed
 and logical-retry separation, scoped E3 snapshots, and counter reconciliation. Its remaining release
 condition is the deferred quiet-host no-op median-overhead measurement; later functional iterations may
 proceed, but the release performance claim cannot be promoted without that record.
+
+SP-06 completed as a negative spike. Its explicit 200-handoff, two-queue-size, 25/100 ms matrix found
+content-addressed candidates but only 8.97% to 11.69% projected p95 benefit, below the 20% gate. No warmup
+code landed. The spike
+identified two prerequisite gaps for separately governed work: the versioned authority-head walk is not
+constant-time, and ownership hydration still runs synchronous storage work without a node-global bounded
+background dispatcher. Quiet-host/live timing remains deferred.
 
 - [ ] Every accepted iteration is individually committed and pushed with its tests and governing docs.
 - [ ] Any rejected spike has reproducible evidence, a recorded decision, and no dormant production code.

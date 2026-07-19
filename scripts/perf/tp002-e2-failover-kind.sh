@@ -322,7 +322,7 @@ E2_COMMAND="PQUEUE_E2_SEED=${SEED} bash scripts/perf/tp002-e2-failover-kind.sh"
 python3 - "${OUT}" <<PY
 import json, sys
 row = {
- "schema_version":1,"suite":"tp002_e2_live_owner_failover","command":${E2_COMMAND@Q},
+ "schema_version":2,"suite":"tp002_e2_live_owner_failover","command":${E2_COMMAND@Q},
  "evidence_id":"E2_FAILOVER","evidence_tier":"release","scale":"release",
  "backend_profile":"object_log_sqlite_projection","bars_met":True,"replicas":3,
  "image":${IMAGE@Q},"image_id":${IMAGE_ID@Q},"source_revision":${SOURCE_REV@Q},
@@ -335,7 +335,8 @@ row = {
  "topology":"kind: 3 pqueue pods; shared MinIO S3 object log; Postgres ownership; per-pod SQLite projection",
  "hardware":${HARDWARE@Q},"seed":int(${SEED@Q}),"duration_ms":int(${DURATION_MS@Q}),
  "fault_schedule":"after one redirected/retried push plus three owner pushes, delete active owner pod; await distinct owner and larger epoch",
- "exclusions":"density throughput and managed-cloud S3/Postgres; performance is covered by the separate E3 lane"
+ "exclusions":"density throughput managed-cloud S3/Postgres and the deferred SP-06 quiet-host profile; performance is covered by the separate E3 lane",
+ "handoff_object_store_profile":None
 }
 with open(sys.argv[1], "w") as f: json.dump(row, f, indent=2); f.write("\n")
 PY

@@ -4,6 +4,29 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// Optional SP-06 post-fence/pre-serve object-store profile. Queue identity is deliberately absent: the
+/// dedicated SP-04 recorder is isolated around one handoff arm instead of adding tenant/queue metric labels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffObjectStoreProfile {
+    pub samples: u64,
+    pub queue_items: u64,
+    pub scripted_request_latency_ms: u64,
+    pub unapplied_tail_per_handoff: bool,
+    pub physical_requests: u64,
+    pub p95_modeled_handoff_latency_ms: u64,
+    pub p95_perfect_cache_latency_ms: u64,
+    pub immutable_gets: u64,
+    pub repeated_immutable_gets: u64,
+    pub avoidable_immutable_gets: u64,
+    pub manifest_candidate_gets: u64,
+    pub repeated_manifest_candidate_gets: u64,
+    pub segment_gets: u64,
+    pub immutable_response_bytes: u64,
+    pub tail_commands_replayed: u64,
+    pub first_local_read_requests: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FailoverEvidence {
@@ -43,6 +66,8 @@ pub struct FailoverEvidence {
     pub duration_ms: u64,
     pub fault_schedule: String,
     pub exclusions: String,
+    /// `None` for historical/live failover runs that predate the bounded SP-06 profiling arm.
+    pub handoff_object_store_profile: Option<HandoffObjectStoreProfile>,
 }
 
 pub fn validate(row: &FailoverEvidence) -> Result<(), Vec<String>> {
@@ -69,8 +94,8 @@ pub fn validate(row: &FailoverEvidence) -> Result<(), Vec<String>> {
             errors.push(format!("{name} must be non-empty"));
         }
     }
-    if row.schema_version != 1 {
-        errors.push("schema_version must be 1".into());
+    if !matches!(row.schema_version, 1 | 2) {
+        errors.push("schema_version must be 1 or 2".into());
     }
     if row.evidence_id != "E2_FAILOVER" {
         errors.push("evidence_id must be E2_FAILOVER".into());
@@ -125,6 +150,81 @@ pub fn validate(row: &FailoverEvidence) -> Result<(), Vec<String>> {
     }
     if row.duration_ms == 0 {
         errors.push("duration_ms must be positive".into());
+    }
+    if row.schema_version == 1 && row.handoff_object_store_profile.is_some() {
+        errors.push("schema v1 cannot carry a handoff object-store profile".into());
+    }
+    if let Some(profile) = &row.handoff_object_store_profile {
+        if profile.samples == 0 {
+            errors.push("handoff profile samples must be positive".into());
+        }
+        if profile.queue_items == 0 {
+            errors.push("handoff profile queue_items must be positive".into());
+        }
+        if profile.scripted_request_latency_ms == 0 {
+            errors.push("handoff profile scripted latency must be positive".into());
+        }
+        if profile.physical_requests == 0 {
+            errors.push("handoff profile physical_requests must be positive".into());
+        }
+        if profile.p95_modeled_handoff_latency_ms == 0 {
+            errors.push("handoff profile modeled p95 must be positive".into());
+        }
+        let modeled_total = profile
+            .physical_requests
+            .saturating_mul(profile.scripted_request_latency_ms);
+        if profile.p95_modeled_handoff_latency_ms > modeled_total {
+            errors.push("handoff profile modeled p95 exceeds total modeled latency".into());
+        }
+        if profile.scripted_request_latency_ms != 0
+            && profile.p95_modeled_handoff_latency_ms % profile.scripted_request_latency_ms != 0
+        {
+            errors.push("handoff profile modeled p95 is off the scripted latency grid".into());
+        }
+        if profile.scripted_request_latency_ms != 0
+            && profile.p95_perfect_cache_latency_ms % profile.scripted_request_latency_ms != 0
+        {
+            errors
+                .push("handoff profile perfect-cache p95 is off the scripted latency grid".into());
+        }
+        if profile.p95_perfect_cache_latency_ms > profile.p95_modeled_handoff_latency_ms {
+            errors.push("handoff profile perfect-cache p95 exceeds cold p95".into());
+        }
+        if profile.immutable_gets > profile.physical_requests {
+            errors.push("handoff profile immutable GETs exceed physical requests".into());
+        }
+        if profile.repeated_immutable_gets > profile.immutable_gets {
+            errors.push("handoff profile repeated immutable GETs exceed immutable GETs".into());
+        }
+        if profile.avoidable_immutable_gets > profile.immutable_gets {
+            errors.push("handoff profile avoidable immutable GETs exceed immutable GETs".into());
+        }
+        if profile.manifest_candidate_gets > profile.immutable_gets
+            || profile.repeated_manifest_candidate_gets > profile.manifest_candidate_gets
+            || profile.repeated_manifest_candidate_gets > profile.repeated_immutable_gets
+            || profile.segment_gets > profile.immutable_gets
+            || profile
+                .manifest_candidate_gets
+                .saturating_add(profile.segment_gets)
+                > profile.immutable_gets
+        {
+            errors.push("handoff profile immutable class counts are inconsistent".into());
+        }
+        if (profile.immutable_gets == 0) != (profile.immutable_response_bytes == 0) {
+            errors.push("handoff profile immutable bytes/read presence is inconsistent".into());
+        }
+        if profile.unapplied_tail_per_handoff {
+            if profile.tail_commands_replayed != profile.samples
+                || profile.segment_gets != profile.samples
+            {
+                errors.push("handoff tail arm must replay and fetch one segment per sample".into());
+            }
+        } else if profile.tail_commands_replayed != 0 || profile.segment_gets != 0 {
+            errors.push("handoff clean arm cannot replay or fetch tail segments".into());
+        }
+        if profile.first_local_read_requests != 0 {
+            errors.push("handoff profile first local read performed object-store requests".into());
+        }
     }
     if errors.is_empty() {
         Ok(())

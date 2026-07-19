@@ -8,14 +8,14 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
+    self_hash: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
     deps:
       adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
       adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
       concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-    reviewed_at: "2026-07-18T02:36:05Z"
+      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
+    reviewed_at: "2026-07-19T02:12:30Z"
 ---
 
 # Technical Design: TD-003 Queue Ownership and Fencing
@@ -359,6 +359,17 @@ Recovery MUST be idempotent: replaying already-applied commands MUST NOT
 double-mutate (commands carry monotonic per-queue positions, TD-001). A new
 epoch never rewinds the log; it only fences who may extend it.
 
+**Post-fence acceleration boundary.** Ownership recovery MAY optimize required immutable tail reads only
+after the durable fence and before serving. It MUST NOT trust a warmed mutable authority head, skip the
+persisted projection high-water, or retain payload segments after hydration. Background recovery requires a
+node-global bounded dispatcher, an owner generation distinct from the durable epoch, and cooperative
+cancellation on acquire unwind, drain, or ownership loss. The current runtime does not provide those
+prerequisites. SP-06 rejected a cache after finding content-addressed manifest candidates identifiable but
+worth only 8.97% to 11.69% projected p95 improvement; a deliberately unapplied tail also read each unique
+segment exactly once. A future proposal must target bounded-parallel required
+tail recovery or constant-time authoritative-head access, not cache already-applied payloads. The in-memory
+comparator's genesis replay does not authorize a production SQLite cache.
+
 ## Per-Queue Progress Bound
 
 The progress bound is **queue-global and computed locally** on the queue's one
@@ -627,6 +638,7 @@ TD-003 is not satisfied until these scenarios pass for every backend profile.
 | Stale writer after epoch advance, before new data segment | Epoch E+1 is acquired and the epoch fence is committed, but NO E+1 data segment exists yet. An epoch-E writer's `append_batch`/manifest commit MUST be rejected immediately (it is not the current epoch), proving the fence binds at handoff, not at first conflicting data write. |
 | Single writer under contention | Two owners transiently believe they own a queue; only the current-epoch holder's appends commit; no duplicate/lost commands. |
 | Reassignment recovery | Kill the owner; after lease expiry a new owner acquires a greater epoch, durably fences it, recovers from snapshot + log tail, and reproduces queue state exactly. |
+| Handoff read profile | With a dedicated SP-04 recorder, 200 post-fence/pre-serve handoffs at each governed queue item count and scripted latency report clean and one-unapplied-tail arms separately. Clean recovery records 20,300 immutable / 20,100 avoidable / 20,099 repeated GETs; the tail arm records 40,600 / 40,400 / 39,999 respectively, including exactly 200 unique required segment GETs. These item-count arms do not establish active-queue density. |
 | Target vs active owner during rolling deploy | A new `target_owner` is selected while the previous `active_owner` lease is still live; `resolve_queue_owner` reports both; the target does not acquire until drain/expiry; no double-writer window. |
 | Graceful drain | `begin_drain` stops new claims, lets in-flight leases finalize within `drain_deadline_ms`, releases the lease; the new owner resumes with no orphaned leases and no progress-bound violation. |
 | Interrupted drain | Draining owner dies mid-drain; lease expiry + epoch fence still yield single-writer safety; unfinalized leases redeliver (at-least-once, FR-28). |
@@ -646,6 +658,7 @@ TD-003 is not satisfied until these scenarios pass for every backend profile.
 | Stale writer after epoch advance but before new data segment | M | H | Single Authoritative Fencing Rule: epoch durably fenced into the log at acquire; append rejects any non-current epoch; dedicated conformance row. |
 | Control-plane unavailability blocks ownership changes | M | M | Existing owners keep serving under live leases; new acquisitions fail closed (TD-001 control-plane fallback); appends never proceed on a stale epoch. |
 | Lease TTL too low causes ownership churn | M | M | TTL >> renew interval and GC pause; safety is epoch-based so churn only costs recovery, not correctness. |
+| Versioned authority history makes handoff metadata reads grow with queue lifetime | H | H | Treat the head as mutable authority that cannot be cached. Design a separately reviewed constant-time conditional-head primitive before adding handoff warmup; TP-002 records physical request amplification. |
 | Slow/indefinite drain hides a progress-bound violation | M | H | Owner-liveness guard counts draining/unowned queues; `drain_deadline_ms < progress_bound_ms`; stalled-queue conformance test. |
 | Single queue mistaken for unbounded scale | M | M | A queue cannot exceed one owner's throughput (ADR-008); horizontal scale is cross-queue, evidence-gated (TP-002 E2 cross-queue scale-out); the per-queue E0 floor is met by one owner. |
 
