@@ -9,8 +9,10 @@
 //! restart (the gap ADR-012 P2 closes). The db path is keyed by the test's thread id (see reconnect_smoke).
 
 use pqueue_conformance::{qdef, shard, ts};
-use pqueue_core::{ItemId, QueueId, TenantId};
-use pqueue_engine::{ChangeRecordSink, ControlPlaneStore, LogStore, PushPort, PushSpec};
+use pqueue_core::{ItemId, PriorityValue, QueueId, RequestId, TenantId};
+use pqueue_engine::{
+    ChangeRecordSink, ControlPlaneStore, EngineError, LogStore, ProjectionRead, PushPort, PushSpec,
+};
 use pqueue_sqlite::composed_sqlite_backend;
 use std::cell::Cell;
 use std::sync::Mutex;
@@ -158,4 +160,50 @@ async fn emission_cursor_persists_across_reopen_sqlite_log() {
             1
         )]]
     );
+}
+
+#[tokio::test]
+async fn request_id_replay_and_conflict_survive_composed_sqlite_log_reopen() {
+    let path = unique_path("request-id-reopen");
+    let _ = std::fs::remove_file(&path);
+    let request_id = RequestId::new("sqlite-compose-log-request-1").unwrap();
+    let body = vec![PushSpec {
+        priority: Some(PriorityValue::Int64(11)),
+        ..PushSpec::default()
+    }];
+
+    let first = {
+        let backend = composed_sqlite_backend(&path).expect("open composed sqlite-log db");
+        backend.create_queue(qdef()).await.unwrap();
+        backend
+            .push_with_request_id(&shard(), request_id.clone(), body.clone(), ts(0), None)
+            .await
+            .unwrap()
+    };
+
+    let reopened = composed_sqlite_backend(&path).expect("reopen composed sqlite-log db");
+    let replay = reopened
+        .push_with_request_id(&shard(), request_id.clone(), body, ts(0), None)
+        .await
+        .unwrap();
+    assert_eq!(replay, first);
+    assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
+
+    let conflict = reopened
+        .push_with_request_id(
+            &shard(),
+            request_id,
+            vec![PushSpec {
+                priority: Some(PriorityValue::Int64(12)),
+                ..PushSpec::default()
+            }],
+            ts(0),
+            None,
+        )
+        .await;
+    assert_eq!(conflict, Err(EngineError::RequestIdConflict));
+    assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
+
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
 }

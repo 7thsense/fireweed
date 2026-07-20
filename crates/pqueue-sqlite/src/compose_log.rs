@@ -14,7 +14,11 @@ use pqueue_engine::{
     CommandEnvelope, CommandPage, CommandPosition, EngineError, EngineResult, LogStore,
     ProjectionSnapshot, QueueKey, SnapshotRef,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use std::fmt::Write as _;
+
+use rusqlite::{
+    Connection, OptionalExtension, TransactionBehavior, params, params_from_iter, types::Value,
+};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS log_epochs (
@@ -26,6 +30,13 @@ CREATE TABLE IF NOT EXISTS log_entries (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
     envelope TEXT NOT NULL,
     PRIMARY KEY (tenant, queue, epoch, seq)
+);
+-- Queue-global sequence ordering crosses ownership epochs, so the primary key cannot serve `read_from`
+-- efficiently (`epoch` precedes `seq` there). This index makes each limit+1 page an indexed bounded read.
+CREATE INDEX IF NOT EXISTS log_entries_read_idx ON log_entries(tenant, queue, seq);
+CREATE TABLE IF NOT EXISTS log_counters (
+    tenant TEXT NOT NULL, queue TEXT NOT NULL, next_seq INTEGER NOT NULL,
+    PRIMARY KEY (tenant, queue)
 );
 CREATE TABLE IF NOT EXISTS high_water (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, epoch INTEGER NOT NULL, seq INTEGER NOT NULL,
@@ -49,6 +60,43 @@ CREATE TABLE IF NOT EXISTS queue_defs (
 );
 "#;
 
+const ALLOCATE_SEQUENCE_RANGE_SQL: &str = "INSERT INTO log_counters(tenant,queue,next_seq) \
+     VALUES(?1,?2,(SELECT COALESCE(MAX(seq),-1)+1+?3 FROM log_entries \
+                    WHERE tenant=?1 AND queue=?2)) \
+     ON CONFLICT(tenant,queue) DO UPDATE SET next_seq=log_counters.next_seq+?3 \
+     RETURNING next_seq-?3";
+
+const ADVANCE_HIGH_WATER_SQL: &str = "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
+     ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq";
+
+const READ_PAGE_SQL: &str = "SELECT seq, epoch, envelope FROM log_entries \
+     WHERE tenant=?1 AND queue=?2 AND seq>=?3 ORDER BY seq LIMIT ?4";
+
+// Five bind parameters per row. 128 rows stays below SQLite's historical 999-variable limit while
+// keeping accepted command batches set-based and bounding statement size on every host.
+const APPEND_INSERT_CHUNK_SIZE: usize = 128;
+
+fn insert_batch_sql(rows: usize) -> String {
+    debug_assert!(rows > 0 && rows <= APPEND_INSERT_CHUNK_SIZE);
+    let mut sql = String::from("INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES ");
+    for row in 0..rows {
+        if row > 0 {
+            sql.push(',');
+        }
+        let first = row * 5 + 1;
+        write!(
+            sql,
+            "(?{first},?{},?{},?{},?{})",
+            first + 1,
+            first + 2,
+            first + 3,
+            first + 4
+        )
+        .expect("writing to String cannot fail");
+    }
+    sql
+}
+
 fn st<T>(r: rusqlite::Result<T>) -> EngineResult<T> {
     r.map_err(|e| EngineError::Storage(e.to_string()))
 }
@@ -70,6 +118,13 @@ fn parts(shard: &QueueKey) -> (String, String) {
         shard.tenant_id.as_str().to_string(),
         shard.queue_id.as_str().to_string(),
     )
+}
+
+fn next_page_cursor(
+    has_more: bool,
+    last_returned: Option<&CommandPosition>,
+) -> Option<CommandPosition> {
+    has_more.then(|| last_returned.cloned()).flatten()
 }
 
 /// The durable sqlite command-log axis.
@@ -149,8 +204,15 @@ impl LogStore for SqliteLog {
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
-        let mut positions = Vec::with_capacity(commands.len());
-        let tx = st(self.conn.transaction())?;
+        let envelopes = commands
+            .iter()
+            .map(to_json)
+            .collect::<EngineResult<Vec<_>>>()?;
+        // Acquire the SQLite writer slot before the epoch read. A deferred read transaction can lose an
+        // upgrade race and fail an otherwise valid concurrent append with SQLITE_BUSY.
+        let tx = st(self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate))?;
         // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
         let epoch: i64 = st(tx
             .query_row(
@@ -163,32 +225,60 @@ impl LogStore for SqliteLog {
         if expected_epoch != epoch as u64 {
             return Err(EngineError::EpochFenced);
         }
-        for env in commands {
-            let json = to_json(env)?;
-            // MAX(seq)+1, NOT COUNT(*): must survive compaction/retention so a position never collides or
-            // regresses (TD-007 §4). Empty log → -1+1 = 0.
-            let seq: i64 = st(tx.query_row(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=?1 AND queue=?2",
-                params![t, q],
-                |row| row.get(0),
-            ))?;
-            st(tx.execute(
-                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,?3,?4,?5)",
-                params![t, q, epoch, seq, json],
-            ))?;
-            st(tx.execute(
-                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES(?1,?2,?3,?4) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=excluded.epoch, seq=excluded.seq",
-                params![t, q, epoch, seq],
-            ))?;
-            positions.push(CommandPosition::new(
-                shard.clone(),
-                epoch as u64,
-                seq as u64,
-            ));
+
+        if envelopes.is_empty() {
+            st(tx.commit())?;
+            return Ok(Vec::new());
         }
+
+        let batch_len = i64::try_from(envelopes.len())
+            .map_err(|_| EngineError::Invalid("append batch is too large"))?;
+        // Allocate a single contiguous sequence range. The transaction serializes this counter update
+        // with every insert chunk and the one final high-water advance.
+        let first_seq: i64 = st(tx.query_row(
+            ALLOCATE_SEQUENCE_RANGE_SQL,
+            params![t, q, batch_len],
+            |row| row.get(0),
+        ))?;
+
+        for (chunk_index, envelope_chunk) in envelopes.chunks(APPEND_INSERT_CHUNK_SIZE).enumerate()
+        {
+            let chunk_offset = chunk_index
+                .checked_mul(APPEND_INSERT_CHUNK_SIZE)
+                .ok_or(EngineError::Invalid("append batch is too large"))?;
+            let chunk_first = first_seq
+                .checked_add(
+                    i64::try_from(chunk_offset)
+                        .map_err(|_| EngineError::Invalid("append batch is too large"))?,
+                )
+                .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+            let mut values = Vec::with_capacity(envelope_chunk.len() * 5);
+            for (offset, envelope) in envelope_chunk.iter().enumerate() {
+                let seq = chunk_first
+                    .checked_add(offset as i64)
+                    .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+                values.extend([
+                    Value::Text(t.clone()),
+                    Value::Text(q.clone()),
+                    Value::Integer(epoch),
+                    Value::Integer(seq),
+                    Value::Text(envelope.clone()),
+                ]);
+            }
+            st(tx.execute(
+                &insert_batch_sql(envelope_chunk.len()),
+                params_from_iter(values.iter()),
+            ))?;
+        }
+
+        let last_seq = first_seq
+            .checked_add(batch_len - 1)
+            .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+        st(tx.execute(ADVANCE_HIGH_WATER_SQL, params![t, q, epoch, last_seq]))?;
         st(tx.commit())?;
-        Ok(positions)
+        Ok((first_seq..=last_seq)
+            .map(|seq| CommandPosition::new(shard.clone(), epoch as u64, seq as u64))
+            .collect())
     }
 
     fn read_from(
@@ -199,27 +289,31 @@ impl LogStore for SqliteLog {
     ) -> EngineResult<CommandPage> {
         let (t, q) = parts(shard);
         let start = match &from {
-            Some(p) => p.sequence + 1,
+            Some(p) => p
+                .sequence
+                .checked_add(1)
+                .ok_or(EngineError::Invalid("log cursor sequence exhausted"))?,
             None => 0,
         };
-        let total: i64 = st(self.conn.query_row(
-            "SELECT COUNT(*) FROM log_entries WHERE tenant=?1 AND queue=?2",
-            params![t, q],
-            |row| row.get(0),
-        ))?;
-        let mut stmt = st(self.conn.prepare(
-            "SELECT seq, epoch, envelope FROM log_entries \
-             WHERE tenant=?1 AND queue=?2 AND seq>=?3 ORDER BY seq LIMIT ?4",
-        ))?;
-        let mapped = st(
-            stmt.query_map(params![t, q, start as i64, limit as i64], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            }),
-        )?;
+        if limit == 0 {
+            return Ok(CommandPage {
+                entries: Vec::new(),
+                next: None,
+            });
+        }
+        let start = i64::try_from(start)
+            .map_err(|_| EngineError::Invalid("log cursor exceeds sqlite sequence range"))?;
+        let fetch_limit = i64::try_from(limit)
+            .unwrap_or(i64::MAX - 1)
+            .saturating_add(1);
+        let mut stmt = st(self.conn.prepare(READ_PAGE_SQL))?;
+        let mapped = st(stmt.query_map(params![t, q, start, fetch_limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        }))?;
         let mut entries = Vec::new();
         for r in mapped {
             let (seq, epoch, json) = st(r)?;
@@ -230,10 +324,11 @@ impl LogStore for SqliteLog {
                 env,
             ));
         }
-        let consumed = start + entries.len() as u64;
-        let cursor_epoch = entries.last().map(|(p, _)| p.backend_epoch).unwrap_or(0);
-        let next = (consumed < total as u64)
-            .then(|| CommandPosition::new(shard.clone(), cursor_epoch, consumed));
+        let has_more = entries.len() > limit;
+        if has_more {
+            entries.pop();
+        }
+        let next = next_page_cursor(has_more, entries.last().map(|(position, _)| position));
         Ok(CommandPage { entries, next })
     }
 
@@ -431,5 +526,255 @@ impl LogStore for SqliteLog {
             out.push(serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    use pqueue_conformance::{envelope, item, qkey};
+    use pqueue_engine::{LogStore, PushCommand, QueueCommand};
+
+    use super::*;
+
+    static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static PAGE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_statement(_: &str) {
+        TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_page_statement(_: &str) {
+        PAGE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn commands(start: usize, count: usize) -> Vec<CommandEnvelope> {
+        (start..start + count)
+            .map(|ordinal| {
+                let id = (ordinal + 1_000_000).to_string();
+                let key = format!("compose-log-{ordinal}");
+                envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![item(&id, &key, ordinal as i64)],
+                    }),
+                    vec![],
+                )
+            })
+            .collect()
+    }
+
+    fn ready_log() -> (SqliteLog, QueueKey, u64) {
+        let mut log = SqliteLog::in_memory().unwrap();
+        let shard = qkey();
+        log.ensure_shard(&shard).unwrap();
+        let epoch = log.acquire_epoch(&shard).unwrap();
+        (log, shard, epoch)
+    }
+
+    fn append_statement_count(rows: usize) -> usize {
+        let (mut log, shard, epoch) = ready_log();
+        let batch = commands(0, rows);
+        TRACE_COUNT.store(0, Ordering::Relaxed);
+        log.conn.trace(Some(count_statement));
+        log.append(&shard, &batch, epoch).unwrap();
+        log.conn.trace(None);
+        TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn append_statement_count_is_fixed_plus_bounded_insert_chunks() {
+        let one = append_statement_count(1);
+        let full_chunk = append_statement_count(APPEND_INSERT_CHUNK_SIZE);
+        let two_chunks = append_statement_count(APPEND_INSERT_CHUNK_SIZE + 1);
+        assert_eq!(one, full_chunk, "rows within one chunk add no statements");
+        assert_eq!(
+            two_chunks,
+            one + 1,
+            "only another set-based insert is added"
+        );
+        assert_eq!(
+            one, 6,
+            "BEGIN + fence + allocate + insert + high-water + COMMIT"
+        );
+    }
+
+    #[test]
+    fn append_and_page_queries_have_set_based_bounded_shapes() {
+        let insert = insert_batch_sql(APPEND_INSERT_CHUNK_SIZE);
+        assert_eq!(insert.matches("),(").count() + 1, APPEND_INSERT_CHUNK_SIZE);
+        assert_eq!(insert.matches('?').count(), APPEND_INSERT_CHUNK_SIZE * 5);
+        assert!(!insert.contains("SELECT MAX"));
+
+        let allocation = ALLOCATE_SEQUENCE_RANGE_SQL.to_ascii_uppercase();
+        assert!(allocation.contains("RETURNING NEXT_SEQ-?3"));
+        assert!(allocation.contains("NEXT_SEQ=LOG_COUNTERS.NEXT_SEQ+?3"));
+        let page = READ_PAGE_SQL.to_ascii_uppercase();
+        assert!(!page.contains("COUNT("));
+        assert!(page.contains("SEQ>=?3 ORDER BY SEQ LIMIT ?4"));
+        assert!(SCHEMA.to_ascii_uppercase().contains(
+            "CREATE INDEX IF NOT EXISTS LOG_ENTRIES_READ_IDX ON LOG_ENTRIES(TENANT, QUEUE, SEQ)"
+        ));
+    }
+
+    #[test]
+    fn chunked_append_preserves_order_and_limit_plus_one_pages() {
+        let (mut log, shard, epoch) = ready_log();
+        let batch = commands(0, APPEND_INSERT_CHUNK_SIZE * 2 + 1);
+        let positions = log.append(&shard, &batch, epoch).unwrap();
+        for (expected, position) in positions.iter().enumerate() {
+            assert_eq!(position.sequence, expected as u64);
+            assert_eq!(position.backend_epoch, epoch);
+        }
+        assert_eq!(log.high_water(&shard).unwrap().unwrap().sequence, 256);
+
+        PAGE_TRACE_COUNT.store(0, Ordering::Relaxed);
+        log.conn.trace(Some(count_page_statement));
+        let first = log
+            .read_from(&shard, None, APPEND_INSERT_CHUNK_SIZE)
+            .unwrap();
+        log.conn.trace(None);
+        assert_eq!(PAGE_TRACE_COUNT.load(Ordering::Relaxed), 1);
+        assert_eq!(first.entries.len(), APPEND_INSERT_CHUNK_SIZE);
+        assert_eq!(first.next.as_ref().unwrap().sequence, 127);
+
+        let second = log
+            .read_from(&shard, first.next, APPEND_INSERT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(second.entries[0].0.sequence, 128);
+        assert_eq!(second.entries.last().unwrap().0.sequence, 255);
+        assert_eq!(second.next.as_ref().unwrap().sequence, 255);
+        let final_page = log
+            .read_from(&shard, second.next, APPEND_INSERT_CHUNK_SIZE)
+            .unwrap();
+        assert_eq!(final_page.entries.len(), 1);
+        assert_eq!(final_page.entries[0].0.sequence, 256);
+        assert!(final_page.next.is_none());
+    }
+
+    #[test]
+    fn failure_in_second_insert_chunk_rolls_back_range_rows_and_high_water() {
+        let (mut log, shard, epoch) = ready_log();
+        st(log.conn.execute_batch(
+            "CREATE TRIGGER reject_second_chunk BEFORE INSERT ON log_entries
+             WHEN NEW.seq=128 BEGIN SELECT RAISE(ABORT, 'forced second chunk failure'); END;",
+        ))
+        .unwrap();
+        let batch = commands(0, APPEND_INSERT_CHUNK_SIZE + 1);
+        assert!(log.append(&shard, &batch, epoch).is_err());
+        assert!(log.read_from(&shard, None, 1).unwrap().entries.is_empty());
+        assert!(log.high_water(&shard).unwrap().is_none());
+        let counter_rows: i64 = log
+            .conn
+            .query_row("SELECT COUNT(*) FROM log_counters", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(counter_rows, 0);
+
+        log.conn
+            .execute_batch("DROP TRIGGER reject_second_chunk")
+            .unwrap();
+        let retry = log.append(&shard, &batch[..1], epoch).unwrap();
+        assert_eq!(retry[0].sequence, 0);
+    }
+
+    #[test]
+    fn chunked_log_reopens_with_exact_order_and_counter_continuity() {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-sqlite-compose-log-batch-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let path = path.to_str().unwrap();
+        let shard = qkey();
+        let epoch;
+        {
+            let mut log = SqliteLog::open(path).unwrap();
+            log.ensure_shard(&shard).unwrap();
+            epoch = log.acquire_epoch(&shard).unwrap();
+            log.append(&shard, &commands(0, APPEND_INSERT_CHUNK_SIZE + 1), epoch)
+                .unwrap();
+        }
+        {
+            let mut reopened = SqliteLog::open(path).unwrap();
+            let page = reopened.read_from(&shard, None, 256).unwrap();
+            assert_eq!(page.entries.len(), APPEND_INSERT_CHUNK_SIZE + 1);
+            for (expected, (position, _)) in page.entries.iter().enumerate() {
+                assert_eq!(position.sequence, expected as u64);
+            }
+            assert!(page.next.is_none());
+            let tail = reopened
+                .append(&shard, &commands(10_000, 1), epoch)
+                .unwrap();
+            assert_eq!(tail[0].sequence, (APPEND_INSERT_CHUNK_SIZE + 1) as u64);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn first_counter_allocation_continues_an_existing_pre_counter_log() {
+        let (mut log, shard, epoch) = ready_log();
+        let (tenant, queue) = parts(&shard);
+        let legacy = commands(0, 1);
+        log.conn
+            .execute(
+                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES(?1,?2,?3,41,?4)",
+                params![tenant, queue, epoch as i64, to_json(&legacy[0]).unwrap()],
+            )
+            .unwrap();
+        let appended = log.append(&shard, &commands(1, 2), epoch).unwrap();
+        assert_eq!(
+            appended
+                .iter()
+                .map(|position| position.sequence)
+                .collect::<Vec<_>>(),
+            vec![42, 43]
+        );
+    }
+
+    #[test]
+    fn concurrent_chunked_appenders_receive_disjoint_contiguous_ranges() {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-sqlite-compose-log-concurrent-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let path = path.to_str().unwrap().to_string();
+        let shard = qkey();
+        let epoch = {
+            let mut log = SqliteLog::open(&path).unwrap();
+            log.ensure_shard(&shard).unwrap();
+            log.acquire_epoch(&shard).unwrap()
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let handles = [0, 10_000].map(|start| {
+            let barrier = barrier.clone();
+            let path = path.clone();
+            let shard = shard.clone();
+            std::thread::spawn(move || {
+                let mut log = SqliteLog::open(&path).unwrap();
+                let batch = commands(start, APPEND_INSERT_CHUNK_SIZE + 1);
+                barrier.wait();
+                log.append(&shard, &batch, epoch).unwrap()
+            })
+        });
+        let mut positions = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .map(|position| position.sequence)
+            .collect::<Vec<_>>();
+        positions.sort_unstable();
+        assert_eq!(
+            positions,
+            (0..(APPEND_INSERT_CHUNK_SIZE as u64 + 1) * 2).collect::<Vec<_>>()
+        );
+
+        let reopened = SqliteLog::open(&path).unwrap();
+        assert_eq!(
+            reopened.read_from(&shard, None, 512).unwrap().entries.len(),
+            (APPEND_INSERT_CHUNK_SIZE + 1) * 2
+        );
+        drop(reopened);
+        std::fs::remove_file(path).unwrap();
     }
 }
