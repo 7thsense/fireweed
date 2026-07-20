@@ -84,7 +84,7 @@ pub use connect::{
     ConnectorChoice, CredentialProvider, PostgresConnectConfig, PostgresSslMode, connect,
     default_max_connection_lifetime, select_connector,
 };
-pub use control_plane::PostgresControlPlane;
+pub use control_plane::{PostgresControlPlane, PostgresControlPlaneDiagnostics};
 pub use credential::{
     Credential, DatabricksAuth, DatabricksCliCommand, DatabricksCredentialConfig,
     DatabricksCredentialProvider, RefreshingCredentialProvider, databricks_fetcher_with_runner,

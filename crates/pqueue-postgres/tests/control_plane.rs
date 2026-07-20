@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use postgres::{Client, NoTls};
 use pqueue_core::{OwnerId, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, ControlPlaneConfig, EngineError, LeaseState, QueueControlPlane, QueueKey,
+    AcquireOutcome, ControlPlaneConfig, EngineError, LeaseRenewal, LeaseRenewalOutcome, LeaseState,
+    QueueControlPlane, QueueKey,
 };
 use pqueue_postgres::PostgresControlPlane;
 
@@ -28,6 +29,260 @@ fn fresh_schema() -> String {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+#[test]
+fn batch_renewal_preserves_order_and_independent_outcomes() {
+    with_cp("batch_renewal", |cp| {
+        let a = owner("a");
+        let b = owner("b");
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.register_owner(&b, ts(0)).unwrap();
+        let assigned = qk("assigned");
+        let draining = qk("draining");
+        let missing = qk("missing");
+        let stale = qk("stale");
+        for queue in [&assigned, &draining, &stale] {
+            cp.acquire_queue_lease(queue, &a, ts(0)).unwrap();
+            cp.confirm_queue_lease_fence(queue, &a, 1, ts(0)).unwrap();
+        }
+        cp.begin_drain(&draining, 1, &b, ts(1)).unwrap();
+
+        let outcomes = cp
+            .renew_queue_leases(
+                &[
+                    LeaseRenewal {
+                        queue: assigned,
+                        owner: a.clone(),
+                        expected_epoch: 1,
+                    },
+                    LeaseRenewal {
+                        queue: draining,
+                        owner: a.clone(),
+                        expected_epoch: 1,
+                    },
+                    LeaseRenewal {
+                        queue: missing,
+                        owner: a.clone(),
+                        expected_epoch: 1,
+                    },
+                    LeaseRenewal {
+                        queue: stale,
+                        owner: a.clone(),
+                        expected_epoch: 99,
+                    },
+                    LeaseRenewal {
+                        queue: qk("assigned"),
+                        owner: a,
+                        expected_epoch: 99,
+                    },
+                ],
+                ts(2),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &outcomes[0],
+            LeaseRenewalOutcome::Renewed(lease) if lease.state == LeaseState::Assigned
+        ));
+        assert!(matches!(
+            &outcomes[1],
+            LeaseRenewalOutcome::Renewed(lease) if lease.state == LeaseState::Draining
+        ));
+        assert_eq!(outcomes[2], LeaseRenewalOutcome::Missing);
+        assert_eq!(outcomes[3], LeaseRenewalOutcome::Fenced);
+        assert_eq!(outcomes[4], LeaseRenewalOutcome::Fenced);
+    });
+}
+
+#[test]
+fn batch_renewal_handles_1000_queues_in_one_call() {
+    with_cp("batch_renewal_1000", |cp| {
+        let owner = owner("density-node");
+        cp.register_owner(&owner, ts(0)).unwrap();
+        let mut renewals = Vec::with_capacity(1_000);
+        for index in 0..1_000 {
+            let queue = qk(&format!("q{index:04}"));
+            cp.acquire_queue_lease(&queue, &owner, ts(0)).unwrap();
+            cp.confirm_queue_lease_fence(&queue, &owner, 1, ts(0))
+                .unwrap();
+            renewals.push(LeaseRenewal {
+                queue,
+                owner: owner.clone(),
+                expected_epoch: 1,
+            });
+        }
+
+        for size in [1, 100, 1_000] {
+            let before = cp.diagnostics();
+            let outcomes = cp.renew_queue_leases(&renewals[..size], ts(1)).unwrap();
+            let after = cp.diagnostics();
+            assert_eq!(outcomes.len(), size);
+            assert!(outcomes.iter().all(|outcome| matches!(
+                outcome,
+                LeaseRenewalOutcome::Renewed(lease)
+                    if lease.assignment_epoch == 1 && lease.lease_expires_at == Some(ts(16))
+            )));
+            assert_eq!(after.batch_renewal_calls - before.batch_renewal_calls, 1);
+            assert_eq!(
+                after.batch_renewal_transactions - before.batch_renewal_transactions,
+                1,
+                "{size} renewals use one transaction"
+            );
+            assert_eq!(
+                after.batch_renewal_statements - before.batch_renewal_statements,
+                1,
+                "{size} renewals use one SQL statement"
+            );
+            assert_eq!(after.connections, 1);
+        }
+    });
+}
+
+#[test]
+fn batch_resolution_is_one_statement_and_orders_present_and_missing_rows() {
+    with_cp("batch_resolution", |cp| {
+        let a = owner("resolve-a");
+        let b = owner("resolve-b");
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.register_owner(&b, ts(0)).unwrap();
+        let present = qk("resolve-present");
+        let missing = qk("resolve-missing");
+        cp.acquire_queue_lease(&present, &a, ts(0)).unwrap();
+        cp.confirm_queue_lease_fence(&present, &a, 1, ts(0))
+            .unwrap();
+        let before = cp.diagnostics();
+        let outcomes = cp
+            .resolve_queue_owners(&[missing.clone(), present.clone()], ts(1))
+            .unwrap();
+        let after = cp.diagnostics();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].assignment_epoch, None);
+        assert_eq!(outcomes[0].active_owner, None);
+        assert_eq!(outcomes[1].assignment_epoch, Some(1));
+        assert_eq!(outcomes[1].active_owner.as_ref(), Some(&a));
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.target_owner.is_some())
+        );
+        assert_eq!(
+            after.batch_resolution_calls - before.batch_resolution_calls,
+            1
+        );
+        assert_eq!(
+            after.batch_resolution_statements - before.batch_resolution_statements,
+            1
+        );
+        assert_eq!(after.connections, 1);
+    });
+}
+
+#[test]
+fn concurrent_reverse_order_batches_do_not_deadlock_or_shorten_leases() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "POSTGRES CONTROL-PLANE SKIPPED (concurrent_reverse_order_batches) — set PQUEUE_PG_TEST_URL"
+        );
+        return;
+    };
+    let schema = fresh_schema();
+    let mut client = Client::connect(&url, NoTls).expect("connect");
+    client
+        .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .expect("drop schema");
+    drop(client);
+
+    let node = owner("batch-node");
+    let cp_a = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("connect a");
+    cp_a.register_owner(&node, ts(0)).unwrap();
+    let mut forward = Vec::with_capacity(100);
+    for index in 0..100 {
+        let queue = qk(&format!("race-{index:03}"));
+        cp_a.acquire_queue_lease(&queue, &node, ts(0)).unwrap();
+        cp_a.confirm_queue_lease_fence(&queue, &node, 1, ts(0))
+            .unwrap();
+        forward.push(LeaseRenewal {
+            queue,
+            owner: node.clone(),
+            expected_epoch: 1,
+        });
+    }
+    let mut reverse = forward.clone();
+    reverse.reverse();
+    let cp_b = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("connect b");
+    let first = std::thread::spawn(move || cp_a.renew_queue_leases(&forward, ts(2)).unwrap());
+    let second = std::thread::spawn(move || cp_b.renew_queue_leases(&reverse, ts(1)).unwrap());
+    let first = first.join().expect("forward batch completed");
+    let second = second.join().expect("reverse batch completed");
+    assert_eq!(first.len(), 100);
+    assert_eq!(second.len(), 100);
+    assert!(first.iter().chain(&second).all(|outcome| matches!(
+        outcome,
+        LeaseRenewalOutcome::Renewed(lease) if lease.assignment_epoch == 1
+    )));
+    let verify = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("verify");
+    for index in 0..100 {
+        assert_eq!(
+            verify
+                .lease(&qk(&format!("race-{index:03}")))
+                .unwrap()
+                .lease_expires_at,
+            Some(ts(17)),
+            "an older concurrent sample must not shorten a newer renewal"
+        );
+    }
+}
+
+#[test]
+fn expired_batch_renewal_racing_takeover_is_fenced_at_epoch_two() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!(
+            "POSTGRES CONTROL-PLANE SKIPPED (expired_batch_renewal_racing_takeover) — set PQUEUE_PG_TEST_URL"
+        );
+        return;
+    };
+    let schema = fresh_schema();
+    let mut client = Client::connect(&url, NoTls).expect("connect");
+    client
+        .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .expect("drop schema");
+    drop(client);
+
+    let (a, b, queue) = (owner("expired-a"), owner("takeover-b"), qk("takeover"));
+    let cp_a = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("connect a");
+    cp_a.register_owner(&a, ts(0)).unwrap();
+    cp_a.acquire_queue_lease(&queue, &a, ts(0)).unwrap();
+    cp_a.confirm_queue_lease_fence(&queue, &a, 1, ts(0))
+        .unwrap();
+    let cp_b = PostgresControlPlane::connect_in_schema(&url, &schema, cfg()).expect("connect b");
+    cp_b.register_owner(&b, ts(20)).unwrap();
+
+    let renewal_queue = queue.clone();
+    let renewal_owner = a.clone();
+    let acquire_queue = queue.clone();
+    let acquire_owner = b.clone();
+    let renewal = std::thread::spawn(move || {
+        cp_a.renew_queue_leases(
+            &[LeaseRenewal {
+                queue: renewal_queue,
+                owner: renewal_owner,
+                expected_epoch: 1,
+            }],
+            ts(20),
+        )
+        .unwrap()
+    });
+    let acquire = std::thread::spawn(move || {
+        cp_b.acquire_queue_lease(&acquire_queue, &acquire_owner, ts(20))
+            .unwrap()
+    });
+    assert_eq!(renewal.join().unwrap(), vec![LeaseRenewalOutcome::Fenced]);
+    let AcquireOutcome::Acquired(lease) = acquire.join().unwrap() else {
+        panic!("expired lease must be reclaimable");
+    };
+    assert_eq!(lease.assignment_epoch, 2);
+    assert_eq!(lease.active_owner_id.as_ref(), Some(&b));
 }
 
 fn cfg() -> ControlPlaneConfig {

@@ -1008,6 +1008,8 @@ pub struct OwnershipRuntime<B, CP: ?Sized> {
     endpoint: String,
     owner_endpoints: Mutex<std::collections::HashMap<OwnerId, CachedOwnerEndpoint>>,
     endpoint_refreshes: AtomicU64,
+    renewal_batch_tasks: AtomicU64,
+    resolution_batch_tasks: AtomicU64,
     managed_queues: Mutex<std::collections::HashSet<QueueKey>>,
     sessions: Mutex<std::collections::HashMap<QueueKey, OwnedSession>>,
     /// Per-queue gate serializing COLD-START acquisition. `acquire_queue_lease` is non-idempotent (it bumps
@@ -1047,6 +1049,8 @@ where
             endpoint,
             owner_endpoints: Mutex::new(std::collections::HashMap::new()),
             endpoint_refreshes: AtomicU64::new(0),
+            renewal_batch_tasks: AtomicU64::new(0),
+            resolution_batch_tasks: AtomicU64::new(0),
             managed_queues: Mutex::new(std::collections::HashSet::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
             acquire_gates: Mutex::new(std::collections::HashMap::new()),
@@ -1064,6 +1068,13 @@ where
     /// Number of node-wide endpoint snapshot polls attempted by this runtime.
     pub fn endpoint_refresh_count(&self) -> u64 {
         self.endpoint_refreshes.load(Ordering::Relaxed)
+    }
+
+    pub fn ownership_batch_task_counts(&self) -> (u64, u64) {
+        (
+            self.renewal_batch_tasks.load(Ordering::Relaxed),
+            self.resolution_batch_tasks.load(Ordering::Relaxed),
+        )
     }
 
     pub fn watch_queue(&self, queue: QueueKey) {
@@ -1196,7 +1207,38 @@ where
     }
 
     pub async fn renew_sessions(&self, now: UtcTimestamp) -> EngineResult<()> {
-        self.advertise_and_refresh_owner_endpoints(now).await?;
+        // Endpoint refresh and lease renewal are independent node-level work. Preserve the first
+        // error for the caller, but never let a discovery failure suppress healthy lease renewals.
+        let mut first_error = self.advertise_and_refresh_owner_endpoints(now).await.err();
+        // Renew cached sessions FIRST. Assignment polling and drain maintenance are independently fallible;
+        // one unhealthy queue must never suppress every healthy queue's lease extension.
+        let renewals: Vec<pqueue_engine::LeaseRenewal> = self
+            .sessions
+            .lock()
+            .expect("poisoned")
+            .values()
+            .map(|session| pqueue_engine::LeaseRenewal {
+                queue: session.queue.clone(),
+                owner: self.owner.clone(),
+                expected_epoch: session.lease_epoch,
+            })
+            .collect();
+        if !renewals.is_empty() {
+            let outcomes = self.cp_renew_batch(renewals.clone(), now).await?;
+            if outcomes.len() != renewals.len() {
+                return Err(EngineError::Storage(format!(
+                    "control-plane batch renewal returned {} outcomes for {} inputs",
+                    outcomes.len(),
+                    renewals.len()
+                )));
+            }
+            if let Some(error) = self.apply_session_renewal_outcomes(renewals, outcomes)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+
         let mut queues: std::collections::BTreeSet<QueueKey> = self
             .managed_queues
             .lock()
@@ -1205,8 +1247,16 @@ where
             .cloned()
             .collect();
         queues.extend(self.sessions.lock().expect("poisoned").keys().cloned());
-        for queue in queues {
-            let resolution = self.cp_resolve(queue.clone(), now).await?;
+        let queues: Vec<QueueKey> = queues.into_iter().collect();
+        let resolutions = self.cp_resolve_batch(queues.clone(), now).await?;
+        if resolutions.len() != queues.len() {
+            return Err(EngineError::Storage(format!(
+                "control-plane batch resolution returned {} outcomes for {} inputs",
+                resolutions.len(),
+                queues.len()
+            )));
+        }
+        for (queue, resolution) in queues.into_iter().zip(resolutions) {
             if resolution.active_owner.as_ref() == Some(&self.owner)
                 && resolution
                     .target_owner
@@ -1214,51 +1264,41 @@ where
                     .is_some_and(|target| target != &self.owner)
                 && resolution.state == LeaseState::Assigned
                 && let Some(active_epoch) = resolution.assignment_epoch
-            {
-                let _ = self
+                && let Err(error) = self
                     .cp_begin_drain(
                         queue.clone(),
                         active_epoch,
                         resolution.target_owner.as_ref().expect("checked").clone(),
                         now,
                     )
-                    .await?;
+                    .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
             let session = self.sessions.lock().expect("poisoned").get(&queue).cloned();
             match (resolution.state, resolution.active_owner.as_ref(), session) {
-                (LeaseState::Assigned, Some(owner), Some(session)) if owner == &self.owner => {
-                    match self
-                        .cp_renew(queue.clone(), self.owner.clone(), session.lease_epoch, now)
-                        .await
-                    {
-                        Ok(_) => {}
-                        Err(EngineError::EpochFenced) => {
-                            self.sessions.lock().expect("poisoned").remove(&queue);
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
+                (LeaseState::Assigned, Some(owner), Some(_)) if owner == &self.owner => {}
                 (LeaseState::Draining, Some(owner), Some(session)) if owner == &self.owner => {
-                    let metrics = self.backend.metrics(&queue).await?;
+                    let metrics = match self.backend.metrics(&queue).await {
+                        Ok(metrics) => metrics,
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                            continue;
+                        }
+                    };
                     if metrics.leased == 0 {
-                        self.cp_release(
-                            queue.clone(),
-                            self.owner.clone(),
-                            session.lease_epoch,
-                            now,
-                        )
-                        .await?;
-                        self.sessions.lock().expect("poisoned").remove(&queue);
-                    } else {
-                        match self
-                            .cp_renew(queue.clone(), self.owner.clone(), session.lease_epoch, now)
+                        if let Err(error) = self
+                            .cp_release(queue.clone(), self.owner.clone(), session.lease_epoch, now)
                             .await
                         {
-                            Ok(_) => {}
-                            Err(EngineError::EpochFenced) => {
-                                self.sessions.lock().expect("poisoned").remove(&queue);
+                            if first_error.is_none() {
+                                first_error = Some(error);
                             }
-                            Err(e) => return Err(e),
+                        } else {
+                            self.sessions.lock().expect("poisoned").remove(&queue);
                         }
                     }
                 }
@@ -1267,13 +1307,46 @@ where
                 {
                     match self.acquire_queue(&queue, now).await {
                         Ok(()) | Err(EngineError::Unavailable) => {}
-                        Err(e) => return Err(e),
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
                     }
                 }
                 _ => {}
             }
         }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(())
+    }
+
+    fn apply_session_renewal_outcomes(
+        &self,
+        renewals: Vec<pqueue_engine::LeaseRenewal>,
+        outcomes: Vec<pqueue_engine::LeaseRenewalOutcome>,
+    ) -> Option<EngineError> {
+        let mut first_error = None;
+        for (renewal, outcome) in renewals.into_iter().zip(outcomes) {
+            match outcome {
+                pqueue_engine::LeaseRenewalOutcome::Renewed(_) => {}
+                pqueue_engine::LeaseRenewalOutcome::Fenced
+                | pqueue_engine::LeaseRenewalOutcome::Missing => {
+                    self.sessions
+                        .lock()
+                        .expect("poisoned")
+                        .remove(&renewal.queue);
+                }
+                pqueue_engine::LeaseRenewalOutcome::Error(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        first_error
     }
 
     async fn ensure_epoch(
@@ -1487,6 +1560,16 @@ where
         blocking_control_plane(move || cp.resolve_queue_owner(&queue, now)).await
     }
 
+    async fn cp_resolve_batch(
+        &self,
+        queues: Vec<QueueKey>,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<pqueue_engine::OwnerResolution>> {
+        self.resolution_batch_tasks.fetch_add(1, Ordering::Relaxed);
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.resolve_queue_owners(&queues, now)).await
+    }
+
     async fn cp_acquire(
         &self,
         queue: QueueKey,
@@ -1497,16 +1580,14 @@ where
         blocking_control_plane(move || cp.acquire_queue_lease(&queue, &owner, now)).await
     }
 
-    async fn cp_renew(
+    async fn cp_renew_batch(
         &self,
-        queue: QueueKey,
-        owner: OwnerId,
-        expected_epoch: u64,
+        renewals: Vec<pqueue_engine::LeaseRenewal>,
         now: UtcTimestamp,
-    ) -> EngineResult<pqueue_engine::QueueLease> {
+    ) -> EngineResult<Vec<pqueue_engine::LeaseRenewalOutcome>> {
+        self.renewal_batch_tasks.fetch_add(1, Ordering::Relaxed);
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.renew_queue_lease(&queue, &owner, expected_epoch, now))
-            .await
+        blocking_control_plane(move || cp.renew_queue_leases(&renewals, now)).await
     }
 
     async fn cp_confirm(
@@ -2635,9 +2716,9 @@ mod byte_admission_wiring_tests {
         PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
     };
     use pqueue_engine::{
-        AcquireOutcome, ControlPlaneConfig, ControlPlaneStore, InMemoryControlPlane, LeaseState,
-        OwnerEndpointAdvertisement, OwnerResolution, ProjectionRead, PushPort, PushSpec,
-        QueueControlPlane, QueueLease,
+        AcquireOutcome, ControlPlaneConfig, ControlPlaneStore, InMemoryControlPlane, LeaseRenewal,
+        LeaseRenewalOutcome, LeaseState, OwnerEndpointAdvertisement, OwnerResolution,
+        ProjectionRead, PushPort, PushSpec, QueueControlPlane, QueueLease,
     };
     use pqueue_objectlog::segmented::InMemoryBlobStore;
     use std::sync::mpsc;
@@ -2924,6 +3005,125 @@ mod byte_admission_wiring_tests {
             .err()
             .expect("direct Config must not bypass segment-target validation");
         assert!(matches!(error, EngineError::Invalid(_)));
+    }
+
+    #[test]
+    fn server_mixed_renewal_outcomes_evict_only_fenced_and_missing_sessions() {
+        let backend = Arc::new(pqueue_memory::composed_memory_backend());
+        let cp = Arc::new(InMemoryControlPlane::default());
+        let owner = OwnerId::new("node").unwrap();
+        let runtime = OwnershipRuntime::new(backend, cp, owner.clone(), "127.0.0.1:7000".into());
+        let queues: Vec<QueueKey> = ["assigned", "draining", "error", "fenced", "missing"]
+            .into_iter()
+            .map(|name| {
+                QueueKey::new(
+                    TenantId::new("tenant").unwrap(),
+                    QueueId::new(name).unwrap(),
+                )
+            })
+            .collect();
+        for queue in &queues {
+            runtime.sessions.lock().unwrap().insert(
+                queue.clone(),
+                OwnedSession {
+                    owner: owner.clone(),
+                    queue: queue.clone(),
+                    lease_epoch: 1,
+                    fence_epoch: 1,
+                },
+            );
+        }
+        let renewals = queues
+            .iter()
+            .cloned()
+            .map(|queue| LeaseRenewal {
+                queue,
+                owner: owner.clone(),
+                expected_epoch: 1,
+            })
+            .collect();
+        let lease = |state| QueueLease {
+            state,
+            active_owner_id: Some(owner.clone()),
+            target_owner_id: None,
+            assignment_epoch: 1,
+            lease_expires_at: Some(UtcTimestamp::new(15, 0).unwrap()),
+        };
+        let error = EngineError::Storage("transient row".into());
+        let result = runtime.apply_session_renewal_outcomes(
+            renewals,
+            vec![
+                LeaseRenewalOutcome::Renewed(lease(LeaseState::Assigned)),
+                LeaseRenewalOutcome::Renewed(lease(LeaseState::Draining)),
+                LeaseRenewalOutcome::Error(error.clone()),
+                LeaseRenewalOutcome::Fenced,
+                LeaseRenewalOutcome::Missing,
+            ],
+        );
+        assert_eq!(result, Some(error));
+        let sessions = runtime.sessions.lock().unwrap();
+        assert!(sessions.contains_key(&queues[0]));
+        assert!(sessions.contains_key(&queues[1]));
+        assert!(
+            sessions.contains_key(&queues[2]),
+            "transient error retains session"
+        );
+        assert!(!sessions.contains_key(&queues[3]));
+        assert!(!sessions.contains_key(&queues[4]));
+    }
+
+    #[tokio::test]
+    async fn node_renewal_uses_one_renewal_and_one_resolution_task_at_1_100_1000() {
+        for size in [1usize, 100, 1_000] {
+            let backend = Arc::new(pqueue_memory::composed_memory_backend());
+            let cp = Arc::new(InMemoryControlPlane::default());
+            let owner = OwnerId::new(format!("node-{size}")).unwrap();
+            cp.register_owner(&owner, UtcTimestamp::new(0, 0).unwrap())
+                .unwrap();
+            let runtime =
+                OwnershipRuntime::new(backend, cp.clone(), owner.clone(), "127.0.0.1:7000".into());
+            for index in 0..size {
+                let queue = QueueKey::new(
+                    TenantId::new("tenant").unwrap(),
+                    QueueId::new(format!("q-{index:04}")).unwrap(),
+                );
+                let AcquireOutcome::Acquired(lease) = cp
+                    .acquire_queue_lease(&queue, &owner, UtcTimestamp::new(0, 0).unwrap())
+                    .unwrap()
+                else {
+                    panic!("owner acquires queue");
+                };
+                cp.confirm_queue_lease_fence(
+                    &queue,
+                    &owner,
+                    lease.assignment_epoch,
+                    UtcTimestamp::new(0, 0).unwrap(),
+                )
+                .unwrap();
+                runtime.sessions.lock().unwrap().insert(
+                    queue.clone(),
+                    OwnedSession {
+                        owner: owner.clone(),
+                        queue,
+                        lease_epoch: lease.assignment_epoch,
+                        fence_epoch: lease.assignment_epoch,
+                    },
+                );
+            }
+            let before = runtime.ownership_batch_task_counts();
+            runtime
+                .renew_sessions(UtcTimestamp::new(1, 0).unwrap())
+                .await
+                .unwrap();
+            let after = runtime.ownership_batch_task_counts();
+            assert_eq!(after.0 - before.0, 1, "{size} queues use one renewal task");
+            assert_eq!(
+                after.1 - before.1,
+                1,
+                "{size} queues use one assignment-poll task"
+            );
+            assert_eq!(runtime.sessions.lock().unwrap().len(), size);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

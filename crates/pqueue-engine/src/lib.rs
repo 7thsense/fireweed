@@ -83,9 +83,9 @@ pub use compose::{
     push_items_fingerprint_sha256, push_specs_fingerprint_sha256, resolve_recovery_start,
 };
 pub use control_plane::{
-    AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState,
-    OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueLease,
-    lease_decide_acquire, lease_decide_begin_drain, lease_decide_confirm_fence,
+    AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseRenewal, LeaseRenewalOutcome,
+    LeaseState, OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueLease,
+    add_millis, lease_decide_acquire, lease_decide_begin_drain, lease_decide_confirm_fence,
     lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
     resolve_target,
 };

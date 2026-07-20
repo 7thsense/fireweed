@@ -18,15 +18,16 @@
 //! row. A stale owner is therefore fenced by one durable epoch value before the new owner serves.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use postgres::Client;
 use pqueue_core::{OwnerId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseState,
-    OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueKey, QueueLease,
-    lease_decide_acquire, lease_decide_begin_drain, lease_decide_confirm_fence,
-    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
-    resolve_target,
+    AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseRenewal,
+    LeaseRenewalOutcome, LeaseState, OwnerEndpointAdvertisement, OwnerResolution,
+    QueueControlPlane, QueueKey, QueueLease, lease_decide_acquire, lease_decide_begin_drain,
+    lease_decide_confirm_fence, lease_decide_release, lease_decide_renew, lease_resolution,
+    owner_heartbeat_live, resolve_target,
 };
 
 use crate::{PostgresConnectConfig, connect};
@@ -115,6 +116,96 @@ fn row_to_lease(row: &postgres::Row) -> EngineResult<QueueLease> {
 
 const SELECT_LEASE_COLS: &str =
     "state, active_owner_id, target_owner_id, assignment_epoch, lease_expires_at";
+
+const BATCH_RENEW_SQL: &str = r#"
+WITH input AS MATERIALIZED (
+    SELECT tenant, queue, owner_id, expected_epoch, ord
+    FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[])
+         WITH ORDINALITY AS i(tenant, queue, owner_id, expected_epoch, ord)
+),
+locked AS MATERIALIZED (
+    SELECT q.tenant, q.queue, q.state, q.active_owner_id, q.target_owner_id,
+           q.assignment_epoch, q.lease_expires_at
+    FROM pqueue_queue_owner q
+    JOIN (SELECT DISTINCT tenant, queue FROM input) i
+      ON i.tenant = q.tenant AND i.queue = q.queue
+    ORDER BY q.tenant, q.queue
+    FOR UPDATE OF q
+),
+updated AS (
+    UPDATE pqueue_queue_owner q
+       SET lease_expires_at = GREATEST(q.lease_expires_at, $6)
+      FROM input i, locked l
+     WHERE q.tenant = i.tenant AND q.queue = i.queue
+       AND l.tenant = q.tenant AND l.queue = q.queue
+       AND q.active_owner_id = i.owner_id
+       AND q.assignment_epoch = i.expected_epoch
+       AND q.state IN ('assigned', 'draining')
+       AND q.lease_expires_at > $5
+    RETURNING q.tenant, q.queue, q.state, q.active_owner_id, q.target_owner_id,
+              q.assignment_epoch, q.lease_expires_at
+)
+SELECT i.ord,
+       COALESCE((l.active_owner_id = i.owner_id
+        AND l.assignment_epoch = i.expected_epoch
+        AND l.state IN ('assigned', 'draining')
+        AND l.lease_expires_at > $5), FALSE) AS renewed,
+       l.tenant IS NOT NULL AS present,
+       COALESCE(u.state, l.state), COALESCE(u.active_owner_id, l.active_owner_id),
+       COALESCE(u.target_owner_id, l.target_owner_id),
+       COALESCE(u.assignment_epoch, l.assignment_epoch),
+       COALESCE(u.lease_expires_at, l.lease_expires_at)
+  FROM input i
+  LEFT JOIN locked l ON l.tenant = i.tenant AND l.queue = i.queue
+  LEFT JOIN updated u ON u.tenant = i.tenant AND u.queue = i.queue
+ ORDER BY i.ord
+"#;
+
+const BATCH_RESOLVE_SQL: &str = r#"
+WITH live AS MATERIALIZED (
+    SELECT COALESCE(array_agg(owner_id ORDER BY owner_id), ARRAY[]::text[]) AS owners
+      FROM pqueue_workers
+     WHERE heartbeat_at > $3
+), input AS MATERIALIZED (
+    SELECT tenant, queue, ord
+    FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS i(tenant, queue, ord)
+)
+SELECT i.ord, q.state, q.active_owner_id, q.target_owner_id,
+       q.assignment_epoch, q.lease_expires_at,
+       CASE WHEN i.ord = 1 THEN live.owners END
+  FROM input i
+  LEFT JOIN pqueue_queue_owner q ON q.tenant = i.tenant AND q.queue = i.queue
+ CROSS JOIN live
+ ORDER BY i.ord
+"#;
+
+fn optional_lease(
+    state: Option<String>,
+    active: Option<String>,
+    target: Option<String>,
+    epoch: Option<i64>,
+    expires: Option<i64>,
+) -> EngineResult<QueueLease> {
+    let Some(state) = state else {
+        return Ok(QueueLease::unassigned());
+    };
+    let owner = |value: Option<String>| -> EngineResult<Option<OwnerId>> {
+        value
+            .map(|value| {
+                OwnerId::new(value).map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .transpose()
+    };
+    Ok(QueueLease {
+        state: parse_state(&state)?,
+        active_owner_id: owner(active)?,
+        target_owner_id: owner(target)?,
+        assignment_epoch: epoch
+            .ok_or_else(|| EngineError::Storage("authority row omitted assignment epoch".into()))?
+            as u64,
+        lease_expires_at: expires.map(nanos_ts),
+    })
+}
 
 /// Persist a (possibly mutated) authority record under `tx` (UPSERT on the queue key).
 fn upsert_lease(
@@ -207,6 +298,23 @@ fn bind_storage_epoch_if_present(
 pub struct PostgresControlPlane {
     config: ControlPlaneConfig,
     inner: Mutex<Client>,
+    batch_renewal_calls: AtomicU64,
+    batch_renewal_transactions: AtomicU64,
+    batch_renewal_statements: AtomicU64,
+    batch_resolution_calls: AtomicU64,
+    batch_resolution_statements: AtomicU64,
+}
+
+/// Structural amplification counters for node-level ownership work. These count protocol operations,
+/// not elapsed time, so the density contract is portable across hosts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PostgresControlPlaneDiagnostics {
+    pub batch_renewal_calls: u64,
+    pub batch_renewal_transactions: u64,
+    pub batch_renewal_statements: u64,
+    pub batch_resolution_calls: u64,
+    pub batch_resolution_statements: u64,
+    pub connections: u64,
 }
 
 impl PostgresControlPlane {
@@ -240,7 +348,23 @@ impl PostgresControlPlane {
         Ok(PostgresControlPlane {
             config,
             inner: Mutex::new(client),
+            batch_renewal_calls: AtomicU64::new(0),
+            batch_renewal_transactions: AtomicU64::new(0),
+            batch_renewal_statements: AtomicU64::new(0),
+            batch_resolution_calls: AtomicU64::new(0),
+            batch_resolution_statements: AtomicU64::new(0),
         })
+    }
+
+    pub fn diagnostics(&self) -> PostgresControlPlaneDiagnostics {
+        PostgresControlPlaneDiagnostics {
+            batch_renewal_calls: self.batch_renewal_calls.load(Ordering::Relaxed),
+            batch_renewal_transactions: self.batch_renewal_transactions.load(Ordering::Relaxed),
+            batch_renewal_statements: self.batch_renewal_statements.load(Ordering::Relaxed),
+            batch_resolution_calls: self.batch_resolution_calls.load(Ordering::Relaxed),
+            batch_resolution_statements: self.batch_resolution_statements.load(Ordering::Relaxed),
+            connections: 1,
+        }
     }
 
     /// Read the authority record for `queue` under `tx` with a `FOR UPDATE` row lock.
@@ -388,6 +512,58 @@ impl QueueControlPlane for PostgresControlPlane {
         Ok(lease_resolution(&current, target, now))
     }
 
+    fn resolve_queue_owners(
+        &self,
+        queues: &[QueueKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerResolution>> {
+        if queues.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tenants: Vec<String> = queues
+            .iter()
+            .map(|queue| queue.tenant_id.as_str().to_string())
+            .collect();
+        let queue_ids: Vec<String> = queues
+            .iter()
+            .map(|queue| queue.queue_id.as_str().to_string())
+            .collect();
+        let cutoff =
+            ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
+        self.batch_resolution_calls.fetch_add(1, Ordering::Relaxed);
+        let mut client = self.inner.lock().expect("poisoned");
+        self.batch_resolution_statements
+            .fetch_add(1, Ordering::Relaxed);
+        let rows = st(client.query(BATCH_RESOLVE_SQL, &[&tenants, &queue_ids, &cutoff]))?;
+        if rows.len() != queues.len() {
+            return Err(EngineError::Storage(format!(
+                "batch owner resolution returned {} rows for {} inputs",
+                rows.len(),
+                queues.len()
+            )));
+        }
+        let live: Vec<OwnerId> = rows[0]
+            .get::<_, Option<Vec<String>>>(6)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|owner| {
+                OwnerId::new(owner).map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .collect::<EngineResult<_>>()?;
+        rows.into_iter()
+            .zip(queues)
+            .map(|(row, queue)| {
+                let current =
+                    optional_lease(row.get(1), row.get(2), row.get(3), row.get(4), row.get(5))?;
+                Ok(lease_resolution(
+                    &current,
+                    resolve_target(queue, live.iter()),
+                    now,
+                ))
+            })
+            .collect()
+    }
+
     fn acquire_queue_lease(
         &self,
         queue: &QueueKey,
@@ -459,6 +635,91 @@ impl QueueControlPlane for PostgresControlPlane {
         Ok(renewed)
     }
 
+    fn renew_queue_leases(
+        &self,
+        renewals: &[LeaseRenewal],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<LeaseRenewalOutcome>> {
+        if renewals.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tenants: Vec<String> = renewals
+            .iter()
+            .map(|renewal| renewal.queue.tenant_id.as_str().to_string())
+            .collect();
+        let queues: Vec<String> = renewals
+            .iter()
+            .map(|renewal| renewal.queue.queue_id.as_str().to_string())
+            .collect();
+        let owners: Vec<String> = renewals
+            .iter()
+            .map(|renewal| renewal.owner.as_str().to_string())
+            .collect();
+        let epochs: Vec<i64> = renewals
+            .iter()
+            .map(|renewal| renewal.expected_epoch as i64)
+            .collect();
+        let now_nanos = ts_nanos(now);
+        let expires_nanos = ts_nanos(pqueue_engine::add_millis(now, self.config.lease_ttl_ms));
+
+        self.batch_renewal_calls.fetch_add(1, Ordering::Relaxed);
+        let mut client = self.inner.lock().expect("poisoned");
+        let mut tx = st(client.transaction())?;
+        self.batch_renewal_transactions
+            .fetch_add(1, Ordering::Relaxed);
+        self.batch_renewal_statements
+            .fetch_add(1, Ordering::Relaxed);
+        let rows = st(tx.query(
+            BATCH_RENEW_SQL,
+            &[
+                &tenants,
+                &queues,
+                &owners,
+                &epochs,
+                &now_nanos,
+                &expires_nanos,
+            ],
+        ))?;
+        st(tx.commit())?;
+
+        rows.into_iter()
+            .map(|row| {
+                let renewed: bool = row.get(1);
+                let present: bool = row.get(2);
+                if !present {
+                    return Ok(LeaseRenewalOutcome::Missing);
+                }
+                if !renewed {
+                    return Ok(LeaseRenewalOutcome::Fenced);
+                }
+                let state: Option<String> = row.get(3);
+                let active: Option<String> = row.get(4);
+                let target: Option<String> = row.get(5);
+                let epoch: Option<i64> = row.get(6);
+                let expires: Option<i64> = row.get(7);
+                let owner = |value: Option<String>| -> EngineResult<Option<OwnerId>> {
+                    value
+                        .map(|value| {
+                            OwnerId::new(value)
+                                .map_err(|error| EngineError::Storage(error.to_string()))
+                        })
+                        .transpose()
+                };
+                Ok(LeaseRenewalOutcome::Renewed(QueueLease {
+                    state: parse_state(state.as_deref().ok_or_else(|| {
+                        EngineError::Storage("batch renewal omitted lease state".into())
+                    })?)?,
+                    active_owner_id: owner(active)?,
+                    target_owner_id: owner(target)?,
+                    assignment_epoch: epoch.ok_or_else(|| {
+                        EngineError::Storage("batch renewal omitted assignment epoch".into())
+                    })? as u64,
+                    lease_expires_at: expires.map(nanos_ts),
+                }))
+            })
+            .collect()
+    }
+
     fn begin_drain(
         &self,
         queue: &QueueKey,
@@ -527,6 +788,29 @@ mod sql_shape_tests {
             CONTROL_PLANE_SCHEMA.contains("PRIMARY KEY (tenant, queue)"),
             "one authority row per queue (single active lease)"
         );
+    }
+
+    #[test]
+    fn batch_renewal_is_one_ordered_set_based_statement() {
+        assert_eq!(
+            BATCH_RENEW_SQL.matches("UPDATE pqueue_queue_owner").count(),
+            1
+        );
+        assert!(
+            BATCH_RENEW_SQL.contains("unnest($1::text[], $2::text[], $3::text[], $4::bigint[])")
+        );
+        assert!(BATCH_RENEW_SQL.contains("ORDER BY q.tenant, q.queue"));
+        assert!(BATCH_RENEW_SQL.contains("FOR UPDATE OF q"));
+        assert!(BATCH_RENEW_SQL.contains("GREATEST(q.lease_expires_at, $6)"));
+        assert!(BATCH_RENEW_SQL.contains("ORDER BY i.ord"));
+    }
+
+    #[test]
+    fn batch_resolution_is_fixed_statement_set_and_preserves_order() {
+        assert!(BATCH_RESOLVE_SQL.contains("unnest($1::text[], $2::text[])"));
+        assert!(BATCH_RESOLVE_SQL.contains("heartbeat_at > $3"));
+        assert!(BATCH_RESOLVE_SQL.contains("CASE WHEN i.ord = 1 THEN live.owners END"));
+        assert!(BATCH_RESOLVE_SQL.contains("ORDER BY i.ord"));
     }
 
     #[test]

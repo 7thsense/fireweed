@@ -202,8 +202,15 @@ pub fn lease_decide_renew(
     {
         return Err(EngineError::EpochFenced);
     }
+    let requested_expiry = add_millis(now, lease_ttl_ms);
     Ok(QueueLease {
-        lease_expires_at: Some(add_millis(now, lease_ttl_ms)),
+        // Concurrent node-level batches may reach the authority in a different order from the
+        // clocks they sampled. A valid renewal must never shorten an already-extended lease.
+        lease_expires_at: Some(
+            current
+                .lease_expires_at
+                .map_or(requested_expiry, |expiry| expiry.max(requested_expiry)),
+        ),
         ..current.clone()
     })
 }
@@ -340,6 +347,23 @@ pub struct OwnerEndpointAdvertisement {
     pub expires_at: UtcTimestamp,
 }
 
+/// One queue lease renewal submitted as part of a node-level batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseRenewal {
+    pub queue: QueueKey,
+    pub owner: OwnerId,
+    pub expected_epoch: u64,
+}
+
+/// One ordered result from [`QueueControlPlane::renew_queue_leases`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseRenewalOutcome {
+    Renewed(QueueLease),
+    Fenced,
+    Missing,
+    Error(EngineError),
+}
+
 /// The pluggable control-plane seam (TD-003 §Queue Lease Lifecycle). All lease ops are transactional: each
 /// is one atomic mutation of the authority record. The production impl is transactional-postgres (BQ-22);
 /// [`InMemoryControlPlane`] is the reference + the default for single-node / tests.
@@ -385,6 +409,19 @@ pub trait QueueControlPlane: Send + Sync {
         now: UtcTimestamp,
     ) -> EngineResult<OwnerResolution>;
 
+    /// Resolve a node's queue inventory in input order. Durable implementations override this so one
+    /// assignment poll uses a fixed number of statements rather than one round trip per queue.
+    fn resolve_queue_owners(
+        &self,
+        queues: &[QueueKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerResolution>> {
+        queues
+            .iter()
+            .map(|queue| self.resolve_queue_owner(queue, now))
+            .collect()
+    }
+
     /// Acquire the queue at a strictly-greater, durably-recorded epoch (TD-003 acquire). Rejects if a
     /// DIFFERENT owner holds a live (`assigned`/`draining`, non-expired) lease. The caller MUST be a live
     /// registered owner (fail-closed) — else `EngineError::Forbidden`.
@@ -428,6 +465,31 @@ pub trait QueueControlPlane: Send + Sync {
         expected_epoch: u64,
         now: UtcTimestamp,
     ) -> EngineResult<QueueLease>;
+
+    /// Renew a node's owned queues as one logical batch while preserving input order and independent
+    /// per-queue outcomes. Durable implementations override this to use a fixed number of statements and
+    /// one transaction; the compatibility default preserves behavior for in-process and third-party stores.
+    fn renew_queue_leases(
+        &self,
+        renewals: &[LeaseRenewal],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<LeaseRenewalOutcome>> {
+        Ok(renewals
+            .iter()
+            .map(|renewal| {
+                match self.renew_queue_lease(
+                    &renewal.queue,
+                    &renewal.owner,
+                    renewal.expected_epoch,
+                    now,
+                ) {
+                    Ok(lease) => LeaseRenewalOutcome::Renewed(lease),
+                    Err(EngineError::EpochFenced) => LeaseRenewalOutcome::Fenced,
+                    Err(error) => LeaseRenewalOutcome::Error(error),
+                }
+            })
+            .collect())
+    }
 
     /// Begin a graceful drain toward `target_owner` (TD-003 §Graceful Drain). Records `state=draining` +
     /// `target_owner_id` for the CURRENT epoch; the active owner observes it on its next renew and stops
@@ -481,7 +543,7 @@ fn elapsed_ms(a: UtcTimestamp, b: UtcTimestamp) -> u64 {
 }
 
 /// `now + ms` as a normalized [`UtcTimestamp`] (seconds saturate; nanos carry). Used for lease deadlines.
-fn add_millis(t: UtcTimestamp, ms: u64) -> UtcTimestamp {
+pub fn add_millis(t: UtcTimestamp, ms: u64) -> UtcTimestamp {
     let add_secs = (ms / 1000) as i64;
     let add_nanos = ((ms % 1000) * 1_000_000) as u32;
     let mut secs = t.seconds.saturating_add(add_secs);
@@ -648,6 +710,27 @@ impl QueueControlPlane for InMemoryControlPlane {
         Ok(lease_resolution(&current, target, now))
     }
 
+    fn resolve_queue_owners(
+        &self,
+        queues: &[QueueKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerResolution>> {
+        let state = self.state.lock().expect("poisoned");
+        let live = self.live_owners(&state.owners, now);
+        Ok(queues
+            .iter()
+            .map(|queue| {
+                let target = resolve_target(queue, live.iter().copied());
+                let current = state
+                    .leases
+                    .get(queue)
+                    .cloned()
+                    .unwrap_or_else(QueueLease::unassigned);
+                lease_resolution(&current, target, now)
+            })
+            .collect())
+    }
+
     fn acquire_queue_lease(
         &self,
         queue: &QueueKey,
@@ -713,6 +796,36 @@ impl QueueControlPlane for InMemoryControlPlane {
         )?;
         g.leases.insert(queue.clone(), renewed.clone());
         Ok(renewed)
+    }
+
+    fn renew_queue_leases(
+        &self,
+        renewals: &[LeaseRenewal],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<LeaseRenewalOutcome>> {
+        let mut state = self.state.lock().expect("poisoned");
+        Ok(renewals
+            .iter()
+            .map(|renewal| {
+                let Some(current) = state.leases.get(&renewal.queue).cloned() else {
+                    return LeaseRenewalOutcome::Missing;
+                };
+                match lease_decide_renew(
+                    &current,
+                    &renewal.owner,
+                    renewal.expected_epoch,
+                    now,
+                    self.config.lease_ttl_ms,
+                ) {
+                    Ok(renewed) => {
+                        state.leases.insert(renewal.queue.clone(), renewed.clone());
+                        LeaseRenewalOutcome::Renewed(renewed)
+                    }
+                    Err(EngineError::EpochFenced) => LeaseRenewalOutcome::Fenced,
+                    Err(error) => LeaseRenewalOutcome::Error(error),
+                }
+            })
+            .collect())
     }
 
     fn begin_drain(

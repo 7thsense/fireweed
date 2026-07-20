@@ -1330,6 +1330,38 @@ pub struct Pqueue<B> {
     coordination: Coordination,
 }
 
+fn apply_owned_renewal_outcomes(
+    sessions: &Mutex<HashMap<QueueKey, OwnedSession>>,
+    draining: &Mutex<HashSet<QueueKey>>,
+    owned: Vec<(QueueKey, u64)>,
+    outcomes: Vec<pqueue_engine::LeaseRenewalOutcome>,
+) -> EngineResult<()> {
+    let mut first_error = None;
+    for ((queue, _lease_epoch), outcome) in owned.into_iter().zip(outcomes) {
+        match outcome {
+            pqueue_engine::LeaseRenewalOutcome::Renewed(lease) => {
+                let mut draining = draining.lock().expect("poisoned");
+                if lease.state == LeaseState::Draining {
+                    draining.insert(queue);
+                } else {
+                    draining.remove(&queue);
+                }
+            }
+            pqueue_engine::LeaseRenewalOutcome::Fenced
+            | pqueue_engine::LeaseRenewalOutcome::Missing => {
+                draining.lock().expect("poisoned").remove(&queue);
+                sessions.lock().expect("poisoned").remove(&queue);
+            }
+            pqueue_engine::LeaseRenewalOutcome::Error(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 impl<B: LibBackend> Pqueue<B> {
     /// Low-level backend-injection constructor for a **sole-owner** handle. Hidden from the published
     /// surface (ADR-009 §4a / L6): external clients build via [`open_memory`]/[`open_sqlite`]/
@@ -1529,26 +1561,23 @@ impl<B: LibBackend> Pqueue<B> {
             .iter()
             .map(|(q, s)| (q.clone(), s.lease_epoch))
             .collect();
-        for (queue, lease_epoch) in owned {
-            match control_plane.renew_queue_lease(&queue, owner_id, lease_epoch, now) {
-                Ok(lease) => {
-                    // Observe drain on the renew loop (TD-003): a `Draining` lease ⇒ stop serving NEW claims
-                    // for this queue (drain split); a non-draining lease clears the flag.
-                    let mut d = draining.lock().expect("poisoned");
-                    if lease.state == LeaseState::Draining {
-                        d.insert(queue.clone());
-                    } else {
-                        d.remove(&queue);
-                    }
-                }
-                // Superseded (or epoch-stale): drop the stale session so the next op re-resolves.
-                Err(_) => {
-                    draining.lock().expect("poisoned").remove(&queue);
-                    self.invalidate_session(&queue);
-                }
-            }
+        let renewals: Vec<pqueue_engine::LeaseRenewal> = owned
+            .iter()
+            .map(|(queue, lease_epoch)| pqueue_engine::LeaseRenewal {
+                queue: queue.clone(),
+                owner: owner_id.clone(),
+                expected_epoch: *lease_epoch,
+            })
+            .collect();
+        let outcomes = control_plane.renew_queue_leases(&renewals, now)?;
+        if outcomes.len() != owned.len() {
+            return Err(EngineError::Storage(format!(
+                "control-plane batch renewal returned {} outcomes for {} inputs",
+                outcomes.len(),
+                owned.len()
+            )));
         }
-        Ok(())
+        apply_owned_renewal_outcomes(sessions, draining, owned, outcomes)
     }
 
     /// Whether this owner has observed `queue` as `Draining` (drain split): new claims are refused while
@@ -2693,6 +2722,7 @@ pub fn open_postgres_coordinated(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2702,9 +2732,11 @@ mod tests {
         TypedValue, UtcTimestamp, WorkerId,
     };
 
-    use super::{ClaimByQueryAt, NewItem, Pqueue, SystemClock};
+    use super::{ClaimByQueryAt, NewItem, Pqueue, SystemClock, apply_owned_renewal_outcomes};
     use crate::EngineResult;
-    use pqueue_engine::Clock;
+    use pqueue_engine::{
+        Clock, LeaseRenewalOutcome, LeaseState, OwnedSession, QueueKey, QueueLease,
+    };
 
     fn ts(seconds: i64) -> UtcTimestamp {
         UtcTimestamp::new(seconds, 0).unwrap()
@@ -2783,6 +2815,77 @@ mod tests {
             worker_id: WorkerId::new("query-worker").unwrap(),
             request_id: Some(pqueue_core::RequestId::new(request_id).unwrap()),
         }
+    }
+
+    #[test]
+    fn mixed_renewal_outcomes_process_all_rows_and_preserve_transient_sessions() {
+        let owner = pqueue_core::OwnerId::new("owner").unwrap();
+        let queues: Vec<QueueKey> = ["assigned", "draining", "error", "fenced", "missing"]
+            .into_iter()
+            .map(|name| QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new(name).unwrap()))
+            .collect();
+        let sessions = std::sync::Mutex::new(
+            queues
+                .iter()
+                .map(|queue| {
+                    (
+                        queue.clone(),
+                        OwnedSession {
+                            owner: owner.clone(),
+                            queue: queue.clone(),
+                            lease_epoch: 1,
+                            fence_epoch: 1,
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        );
+        let draining = std::sync::Mutex::new(queues.iter().cloned().collect::<HashSet<_>>());
+        let lease = |state| QueueLease {
+            state,
+            active_owner_id: Some(owner.clone()),
+            target_owner_id: None,
+            assignment_epoch: 1,
+            lease_expires_at: Some(ts(15)),
+        };
+        let error = crate::EngineError::Storage("transient row".into());
+        let result = apply_owned_renewal_outcomes(
+            &sessions,
+            &draining,
+            queues.iter().cloned().map(|queue| (queue, 1)).collect(),
+            vec![
+                LeaseRenewalOutcome::Renewed(lease(LeaseState::Assigned)),
+                LeaseRenewalOutcome::Renewed(lease(LeaseState::Draining)),
+                LeaseRenewalOutcome::Error(error.clone()),
+                LeaseRenewalOutcome::Fenced,
+                LeaseRenewalOutcome::Missing,
+            ],
+        );
+        assert_eq!(result, Err(error));
+        let sessions = sessions.lock().unwrap();
+        assert!(sessions.contains_key(&queues[0]));
+        assert!(sessions.contains_key(&queues[1]));
+        assert!(
+            sessions.contains_key(&queues[2]),
+            "transient error retains session"
+        );
+        assert!(!sessions.contains_key(&queues[3]));
+        assert!(!sessions.contains_key(&queues[4]));
+        let draining = draining.lock().unwrap();
+        assert!(
+            !draining.contains(&queues[0]),
+            "assigned clears drain state"
+        );
+        assert!(
+            draining.contains(&queues[1]),
+            "draining outcome is observed"
+        );
+        assert!(
+            draining.contains(&queues[2]),
+            "error leaves prior drain state unchanged"
+        );
+        assert!(!draining.contains(&queues[3]));
+        assert!(!draining.contains(&queues[4]));
     }
 
     #[tokio::test]

@@ -92,11 +92,6 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
             .expect("backend present until drop")
             .clone()
     }
-
-    /// A borrow of the inner backend for the cheap synchronous descriptor methods.
-    fn backend(&self) -> &B {
-        self.inner.as_ref().expect("backend present until drop")
-    }
 }
 
 impl<B: Send + Sync + 'static> Drop for PostgresWholeOperationAdapter<B> {
