@@ -16,12 +16,11 @@
 //!    ([`QueueControlPlane::release_queue_lease`]) and drop the handle; until it does, the evicted queue
 //!    keeps its lease (the new owner can only reclaim it at TTL expiry). Wiring that release on the server
 //!    loop is the follow-up; this primitive only surfaces the eviction.
-//! 2. [`renew_all_resident`] — a per-resident renewal SWEEP: one node call that renews every resident
-//!    queue's lease, partitioning into renewed / fenced / errored. NOTE: this is N independent control-plane
-//!    `renew_queue_lease` calls in a loop (one round-trip per queue), NOT a single batched statement — a
-//!    true multi-lease batch is a postgres optimization left to the follow-up. A FENCED lease (the node lost
-//!    the queue to a newer owner) is evicted + shed; a TRANSIENT control-plane error leaves the queue
-//!    resident to retry next sweep (never sheds on a non-fence error).
+//! 2. [`renew_all_resident`] — a per-resident renewal SWEEP: one node-level batch call that renews every
+//!    resident queue's lease, partitioning ordered results into renewed / fenced / errored. PostgreSQL maps
+//!    this primitive to one transaction and one set-based statement. A FENCED lease (the node lost the queue
+//!    to a newer owner) is evicted + shed; a TRANSIENT control-plane error leaves the queue resident to retry
+//!    next sweep (never sheds on a non-fence error).
 
 use std::collections::HashMap;
 
@@ -161,8 +160,8 @@ pub struct RenewSweep {
     pub errored: Vec<(QueueKey, EngineError)>,
 }
 
-/// A per-resident renewal sweep: renew every resident queue's lease (N control-plane round-trips, one per
-/// queue — see the module doc on why this is not a single batched statement). A FENCED renewal evicts +
+/// A per-resident renewal sweep: renew every resident queue's lease through the control plane's node-level
+/// batch primitive. A FENCED renewal evicts +
 /// sheds the queue; a TRANSIENT error leaves it resident to retry; the full [`RenewSweep`] partition is
 /// always returned (never a mid-pass abort).
 pub fn renew_all_resident<CP>(
@@ -181,16 +180,44 @@ where
         .iter()
         .map(|(q, (s, _))| (q.clone(), s.clone()))
         .collect();
-    for (queue, session) in targets {
-        match control_plane.renew_queue_lease(&queue, &session.owner, session.lease_epoch, now) {
-            Ok(_) => sweep.renewed.push(queue),
-            Err(EngineError::EpochFenced) => {
+    let renewals: Vec<crate::LeaseRenewal> = targets
+        .iter()
+        .map(|(queue, session)| crate::LeaseRenewal {
+            queue: queue.clone(),
+            owner: session.owner.clone(),
+            expected_epoch: session.lease_epoch,
+        })
+        .collect();
+    let outcomes = match control_plane.renew_queue_leases(&renewals, now) {
+        Ok(outcomes) if outcomes.len() == targets.len() => outcomes,
+        Ok(outcomes) => {
+            let error = EngineError::Storage(format!(
+                "control-plane batch renewal returned {} outcomes for {} inputs",
+                outcomes.len(),
+                targets.len()
+            ));
+            sweep
+                .errored
+                .extend(targets.into_iter().map(|(queue, _)| (queue, error.clone())));
+            return sweep;
+        }
+        Err(error) => {
+            sweep
+                .errored
+                .extend(targets.into_iter().map(|(queue, _)| (queue, error.clone())));
+            return sweep;
+        }
+    };
+    for ((queue, _session), outcome) in targets.into_iter().zip(outcomes) {
+        match outcome {
+            crate::LeaseRenewalOutcome::Renewed(_) => sweep.renewed.push(queue),
+            crate::LeaseRenewalOutcome::Fenced | crate::LeaseRenewalOutcome::Missing => {
                 // Lost to a newer owner: shed it. No release owed (the lease is already theirs).
                 residents.evict(&queue);
                 sweep.fenced.push(queue);
             }
             // Transient (e.g. control-plane unreachable): keep the queue resident, retry next sweep.
-            Err(other) => sweep.errored.push((queue, other)),
+            crate::LeaseRenewalOutcome::Error(other) => sweep.errored.push((queue, other)),
         }
     }
     sweep

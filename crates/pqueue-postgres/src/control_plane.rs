@@ -22,11 +22,11 @@ use std::sync::Mutex;
 use postgres::Client;
 use pqueue_core::{OwnerId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseState,
-    OwnerEndpointAdvertisement, OwnerResolution, QueueControlPlane, QueueKey, QueueLease,
-    lease_decide_acquire, lease_decide_begin_drain, lease_decide_confirm_fence,
-    lease_decide_release, lease_decide_renew, lease_resolution, owner_heartbeat_live,
-    resolve_target,
+    AcquireOutcome, ControlPlaneConfig, EngineError, EngineResult, LeaseRenewal,
+    LeaseRenewalOutcome, LeaseState, OwnerEndpointAdvertisement, OwnerResolution,
+    QueueControlPlane, QueueKey, QueueLease, lease_decide_acquire, lease_decide_begin_drain,
+    lease_decide_confirm_fence, lease_decide_release, lease_decide_renew, lease_resolution,
+    owner_heartbeat_live, resolve_target,
 };
 
 use crate::{PostgresConnectConfig, connect};
@@ -115,6 +115,50 @@ fn row_to_lease(row: &postgres::Row) -> EngineResult<QueueLease> {
 
 const SELECT_LEASE_COLS: &str =
     "state, active_owner_id, target_owner_id, assignment_epoch, lease_expires_at";
+
+const BATCH_RENEW_SQL: &str = r#"
+WITH input AS MATERIALIZED (
+    SELECT tenant, queue, owner_id, expected_epoch, ord
+    FROM unnest($1::text[], $2::text[], $3::text[], $4::bigint[])
+         WITH ORDINALITY AS i(tenant, queue, owner_id, expected_epoch, ord)
+),
+locked AS MATERIALIZED (
+    SELECT q.tenant, q.queue, q.state, q.active_owner_id, q.target_owner_id,
+           q.assignment_epoch, q.lease_expires_at
+    FROM pqueue_queue_owner q
+    JOIN (SELECT DISTINCT tenant, queue FROM input) i
+      ON i.tenant = q.tenant AND i.queue = q.queue
+    ORDER BY q.tenant, q.queue
+    FOR UPDATE OF q
+),
+updated AS (
+    UPDATE pqueue_queue_owner q
+       SET lease_expires_at = $6
+      FROM input i, locked l
+     WHERE q.tenant = i.tenant AND q.queue = i.queue
+       AND l.tenant = q.tenant AND l.queue = q.queue
+       AND q.active_owner_id = i.owner_id
+       AND q.assignment_epoch = i.expected_epoch
+       AND q.state IN ('assigned', 'draining')
+       AND q.lease_expires_at > $5
+    RETURNING q.tenant, q.queue, q.state, q.active_owner_id, q.target_owner_id,
+              q.assignment_epoch, q.lease_expires_at
+)
+SELECT i.ord,
+       COALESCE((l.active_owner_id = i.owner_id
+        AND l.assignment_epoch = i.expected_epoch
+        AND l.state IN ('assigned', 'draining')
+        AND l.lease_expires_at > $5), FALSE) AS renewed,
+       l.tenant IS NOT NULL AS present,
+       COALESCE(u.state, l.state), COALESCE(u.active_owner_id, l.active_owner_id),
+       COALESCE(u.target_owner_id, l.target_owner_id),
+       COALESCE(u.assignment_epoch, l.assignment_epoch),
+       COALESCE(u.lease_expires_at, l.lease_expires_at)
+  FROM input i
+  LEFT JOIN locked l ON l.tenant = i.tenant AND l.queue = i.queue
+  LEFT JOIN updated u ON u.tenant = i.tenant AND u.queue = i.queue
+ ORDER BY i.ord
+"#;
 
 /// Persist a (possibly mutated) authority record under `tx` (UPSERT on the queue key).
 fn upsert_lease(
@@ -459,6 +503,86 @@ impl QueueControlPlane for PostgresControlPlane {
         Ok(renewed)
     }
 
+    fn renew_queue_leases(
+        &self,
+        renewals: &[LeaseRenewal],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<LeaseRenewalOutcome>> {
+        if renewals.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tenants: Vec<String> = renewals
+            .iter()
+            .map(|renewal| renewal.queue.tenant_id.as_str().to_string())
+            .collect();
+        let queues: Vec<String> = renewals
+            .iter()
+            .map(|renewal| renewal.queue.queue_id.as_str().to_string())
+            .collect();
+        let owners: Vec<String> = renewals
+            .iter()
+            .map(|renewal| renewal.owner.as_str().to_string())
+            .collect();
+        let epochs: Vec<i64> = renewals
+            .iter()
+            .map(|renewal| renewal.expected_epoch as i64)
+            .collect();
+        let now_nanos = ts_nanos(now);
+        let expires_nanos = ts_nanos(pqueue_engine::add_millis(now, self.config.lease_ttl_ms));
+
+        let mut client = self.inner.lock().expect("poisoned");
+        let mut tx = st(client.transaction())?;
+        let rows = st(tx.query(
+            BATCH_RENEW_SQL,
+            &[
+                &tenants,
+                &queues,
+                &owners,
+                &epochs,
+                &now_nanos,
+                &expires_nanos,
+            ],
+        ))?;
+        st(tx.commit())?;
+
+        rows.into_iter()
+            .map(|row| {
+                let renewed: bool = row.get(1);
+                let present: bool = row.get(2);
+                if !present {
+                    return Ok(LeaseRenewalOutcome::Missing);
+                }
+                if !renewed {
+                    return Ok(LeaseRenewalOutcome::Fenced);
+                }
+                let state: Option<String> = row.get(3);
+                let active: Option<String> = row.get(4);
+                let target: Option<String> = row.get(5);
+                let epoch: Option<i64> = row.get(6);
+                let expires: Option<i64> = row.get(7);
+                let owner = |value: Option<String>| -> EngineResult<Option<OwnerId>> {
+                    value
+                        .map(|value| {
+                            OwnerId::new(value)
+                                .map_err(|error| EngineError::Storage(error.to_string()))
+                        })
+                        .transpose()
+                };
+                Ok(LeaseRenewalOutcome::Renewed(QueueLease {
+                    state: parse_state(state.as_deref().ok_or_else(|| {
+                        EngineError::Storage("batch renewal omitted lease state".into())
+                    })?)?,
+                    active_owner_id: owner(active)?,
+                    target_owner_id: owner(target)?,
+                    assignment_epoch: epoch.ok_or_else(|| {
+                        EngineError::Storage("batch renewal omitted assignment epoch".into())
+                    })? as u64,
+                    lease_expires_at: expires.map(nanos_ts),
+                }))
+            })
+            .collect()
+    }
+
     fn begin_drain(
         &self,
         queue: &QueueKey,
@@ -527,6 +651,20 @@ mod sql_shape_tests {
             CONTROL_PLANE_SCHEMA.contains("PRIMARY KEY (tenant, queue)"),
             "one authority row per queue (single active lease)"
         );
+    }
+
+    #[test]
+    fn batch_renewal_is_one_ordered_set_based_statement() {
+        assert_eq!(
+            BATCH_RENEW_SQL.matches("UPDATE pqueue_queue_owner").count(),
+            1
+        );
+        assert!(
+            BATCH_RENEW_SQL.contains("unnest($1::text[], $2::text[], $3::text[], $4::bigint[])")
+        );
+        assert!(BATCH_RENEW_SQL.contains("ORDER BY q.tenant, q.queue"));
+        assert!(BATCH_RENEW_SQL.contains("FOR UPDATE OF q"));
+        assert!(BATCH_RENEW_SQL.contains("ORDER BY i.ord"));
     }
 
     #[test]

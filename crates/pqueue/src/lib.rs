@@ -1529,9 +1529,25 @@ impl<B: LibBackend> Pqueue<B> {
             .iter()
             .map(|(q, s)| (q.clone(), s.lease_epoch))
             .collect();
-        for (queue, lease_epoch) in owned {
-            match control_plane.renew_queue_lease(&queue, owner_id, lease_epoch, now) {
-                Ok(lease) => {
+        let renewals: Vec<pqueue_engine::LeaseRenewal> = owned
+            .iter()
+            .map(|(queue, lease_epoch)| pqueue_engine::LeaseRenewal {
+                queue: queue.clone(),
+                owner: owner_id.clone(),
+                expected_epoch: *lease_epoch,
+            })
+            .collect();
+        let outcomes = control_plane.renew_queue_leases(&renewals, now)?;
+        if outcomes.len() != owned.len() {
+            return Err(EngineError::Storage(format!(
+                "control-plane batch renewal returned {} outcomes for {} inputs",
+                outcomes.len(),
+                owned.len()
+            )));
+        }
+        for ((queue, _lease_epoch), outcome) in owned.into_iter().zip(outcomes) {
+            match outcome {
+                pqueue_engine::LeaseRenewalOutcome::Renewed(lease) => {
                     // Observe drain on the renew loop (TD-003): a `Draining` lease ⇒ stop serving NEW claims
                     // for this queue (drain split); a non-draining lease clears the flag.
                     let mut d = draining.lock().expect("poisoned");
@@ -1542,7 +1558,9 @@ impl<B: LibBackend> Pqueue<B> {
                     }
                 }
                 // Superseded (or epoch-stale): drop the stale session so the next op re-resolves.
-                Err(_) => {
+                pqueue_engine::LeaseRenewalOutcome::Fenced
+                | pqueue_engine::LeaseRenewalOutcome::Missing
+                | pqueue_engine::LeaseRenewalOutcome::Error(_) => {
                     draining.lock().expect("poisoned").remove(&queue);
                     self.invalidate_session(&queue);
                 }

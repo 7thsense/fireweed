@@ -17,7 +17,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use postgres::{Client, NoTls};
 use pqueue_core::{OwnerId, QueueId, TenantId, UtcTimestamp};
 use pqueue_engine::{
-    AcquireOutcome, ControlPlaneConfig, EngineError, LeaseState, QueueControlPlane, QueueKey,
+    AcquireOutcome, ControlPlaneConfig, EngineError, LeaseRenewal, LeaseRenewalOutcome, LeaseState,
+    QueueControlPlane, QueueKey,
 };
 use pqueue_postgres::PostgresControlPlane;
 
@@ -28,6 +29,98 @@ fn fresh_schema() -> String {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+#[test]
+fn batch_renewal_preserves_order_and_independent_outcomes() {
+    with_cp("batch_renewal", |cp| {
+        let a = owner("a");
+        let b = owner("b");
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.register_owner(&b, ts(0)).unwrap();
+        let assigned = qk("assigned");
+        let draining = qk("draining");
+        let missing = qk("missing");
+        let stale = qk("stale");
+        for queue in [&assigned, &draining, &stale] {
+            cp.acquire_queue_lease(queue, &a, ts(0)).unwrap();
+            cp.confirm_queue_lease_fence(queue, &a, 1, ts(0)).unwrap();
+        }
+        cp.begin_drain(&draining, 1, &b, ts(1)).unwrap();
+
+        let outcomes = cp
+            .renew_queue_leases(
+                &[
+                    LeaseRenewal {
+                        queue: assigned,
+                        owner: a.clone(),
+                        expected_epoch: 1,
+                    },
+                    LeaseRenewal {
+                        queue: draining,
+                        owner: a.clone(),
+                        expected_epoch: 1,
+                    },
+                    LeaseRenewal {
+                        queue: missing,
+                        owner: a.clone(),
+                        expected_epoch: 1,
+                    },
+                    LeaseRenewal {
+                        queue: stale,
+                        owner: a.clone(),
+                        expected_epoch: 99,
+                    },
+                    LeaseRenewal {
+                        queue: qk("assigned"),
+                        owner: a,
+                        expected_epoch: 99,
+                    },
+                ],
+                ts(2),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            &outcomes[0],
+            LeaseRenewalOutcome::Renewed(lease) if lease.state == LeaseState::Assigned
+        ));
+        assert!(matches!(
+            &outcomes[1],
+            LeaseRenewalOutcome::Renewed(lease) if lease.state == LeaseState::Draining
+        ));
+        assert_eq!(outcomes[2], LeaseRenewalOutcome::Missing);
+        assert_eq!(outcomes[3], LeaseRenewalOutcome::Fenced);
+        assert_eq!(outcomes[4], LeaseRenewalOutcome::Fenced);
+    });
+}
+
+#[test]
+fn batch_renewal_handles_1000_queues_in_one_call() {
+    with_cp("batch_renewal_1000", |cp| {
+        let owner = owner("density-node");
+        cp.register_owner(&owner, ts(0)).unwrap();
+        let mut renewals = Vec::with_capacity(1_000);
+        for index in 0..1_000 {
+            let queue = qk(&format!("q{index:04}"));
+            cp.acquire_queue_lease(&queue, &owner, ts(0)).unwrap();
+            cp.confirm_queue_lease_fence(&queue, &owner, 1, ts(0))
+                .unwrap();
+            renewals.push(LeaseRenewal {
+                queue,
+                owner: owner.clone(),
+                expected_epoch: 1,
+            });
+        }
+
+        let outcomes = cp.renew_queue_leases(&renewals, ts(1)).unwrap();
+        assert_eq!(outcomes.len(), 1_000);
+        assert!(outcomes.iter().all(|outcome| matches!(
+            outcome,
+            LeaseRenewalOutcome::Renewed(lease)
+                if lease.assignment_epoch == 1 && lease.lease_expires_at == Some(ts(16))
+        )));
+    });
 }
 
 fn cfg() -> ControlPlaneConfig {

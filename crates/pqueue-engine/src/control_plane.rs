@@ -340,6 +340,23 @@ pub struct OwnerEndpointAdvertisement {
     pub expires_at: UtcTimestamp,
 }
 
+/// One queue lease renewal submitted as part of a node-level batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseRenewal {
+    pub queue: QueueKey,
+    pub owner: OwnerId,
+    pub expected_epoch: u64,
+}
+
+/// One ordered result from [`QueueControlPlane::renew_queue_leases`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseRenewalOutcome {
+    Renewed(QueueLease),
+    Fenced,
+    Missing,
+    Error(EngineError),
+}
+
 /// The pluggable control-plane seam (TD-003 §Queue Lease Lifecycle). All lease ops are transactional: each
 /// is one atomic mutation of the authority record. The production impl is transactional-postgres (BQ-22);
 /// [`InMemoryControlPlane`] is the reference + the default for single-node / tests.
@@ -429,6 +446,31 @@ pub trait QueueControlPlane: Send + Sync {
         now: UtcTimestamp,
     ) -> EngineResult<QueueLease>;
 
+    /// Renew a node's owned queues as one logical batch while preserving input order and independent
+    /// per-queue outcomes. Durable implementations override this to use a fixed number of statements and
+    /// one transaction; the compatibility default preserves behavior for in-process and third-party stores.
+    fn renew_queue_leases(
+        &self,
+        renewals: &[LeaseRenewal],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<LeaseRenewalOutcome>> {
+        Ok(renewals
+            .iter()
+            .map(|renewal| {
+                match self.renew_queue_lease(
+                    &renewal.queue,
+                    &renewal.owner,
+                    renewal.expected_epoch,
+                    now,
+                ) {
+                    Ok(lease) => LeaseRenewalOutcome::Renewed(lease),
+                    Err(EngineError::EpochFenced) => LeaseRenewalOutcome::Fenced,
+                    Err(error) => LeaseRenewalOutcome::Error(error),
+                }
+            })
+            .collect())
+    }
+
     /// Begin a graceful drain toward `target_owner` (TD-003 §Graceful Drain). Records `state=draining` +
     /// `target_owner_id` for the CURRENT epoch; the active owner observes it on its next renew and stops
     /// serving new claims. Optimistically concurrency-checked: fails `queue-epoch-stale`
@@ -481,7 +523,7 @@ fn elapsed_ms(a: UtcTimestamp, b: UtcTimestamp) -> u64 {
 }
 
 /// `now + ms` as a normalized [`UtcTimestamp`] (seconds saturate; nanos carry). Used for lease deadlines.
-fn add_millis(t: UtcTimestamp, ms: u64) -> UtcTimestamp {
+pub fn add_millis(t: UtcTimestamp, ms: u64) -> UtcTimestamp {
     let add_secs = (ms / 1000) as i64;
     let add_nanos = ((ms % 1000) * 1_000_000) as u32;
     let mut secs = t.seconds.saturating_add(add_secs);
@@ -713,6 +755,36 @@ impl QueueControlPlane for InMemoryControlPlane {
         )?;
         g.leases.insert(queue.clone(), renewed.clone());
         Ok(renewed)
+    }
+
+    fn renew_queue_leases(
+        &self,
+        renewals: &[LeaseRenewal],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<LeaseRenewalOutcome>> {
+        let mut state = self.state.lock().expect("poisoned");
+        Ok(renewals
+            .iter()
+            .map(|renewal| {
+                let Some(current) = state.leases.get(&renewal.queue).cloned() else {
+                    return LeaseRenewalOutcome::Missing;
+                };
+                match lease_decide_renew(
+                    &current,
+                    &renewal.owner,
+                    renewal.expected_epoch,
+                    now,
+                    self.config.lease_ttl_ms,
+                ) {
+                    Ok(renewed) => {
+                        state.leases.insert(renewal.queue.clone(), renewed.clone());
+                        LeaseRenewalOutcome::Renewed(renewed)
+                    }
+                    Err(EngineError::EpochFenced) => LeaseRenewalOutcome::Fenced,
+                    Err(error) => LeaseRenewalOutcome::Error(error),
+                }
+            })
+            .collect())
     }
 
     fn begin_drain(
