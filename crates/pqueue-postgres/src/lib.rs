@@ -470,6 +470,18 @@ pub fn composed_postgres_backend_with_config(
     ComposedBackend::new(log, InMemoryProjection::new(), InProcessControlPlane::new()).recover()
 }
 
+/// Assemble and recover one member of a fixed server pool. Queue affinity is part of construction, before
+/// the durable catalog is replayed, so each shard is recovered by exactly one connection.
+pub fn composed_postgres_backend_for_worker_with_config(
+    config: PostgresConnectConfig,
+    index: usize,
+    partitions: usize,
+) -> EngineResult<ComposedPostgresBackend> {
+    let log = PostgresLog::connect_with_config(config)?;
+    ComposedBackend::new(log, InMemoryProjection::new(), InProcessControlPlane::new())
+        .recover_worker_partition(index, partitions)
+}
+
 /// Assemble the composed postgres backend isolated in `schema` (`CREATE SCHEMA IF NOT EXISTS` + `SET
 /// search_path`), with recovery-on-open. Reconnecting with the SAME `schema` reopens the same durable log
 /// (the postgres analogue of reopening a sqlite file) — used by the conformance + reopen/recovery suites.

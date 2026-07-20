@@ -34,7 +34,7 @@ use pqueue_resp::{
     RespBackend, RespHooks, RouteDecision, SystemClock, route, serve_with_shutdown,
     serve_with_shutdown_and_hooks,
 };
-use pqueue_sqlite::{HybridProjectionStore, composed_sqlite_backend};
+use pqueue_sqlite::HybridProjectionStore;
 // Re-exported: it is the type of the public `Config::hybrid_async` field, so composition-root callers and
 // tests that construct a `Config` directly can name the async-apply threshold config.
 pub use pqueue_sqlite::HybridAsyncThresholds;
@@ -1987,11 +1987,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let backends = tokio::task::spawn_blocking(move || {
                 (0..8)
                     .map(|index| {
-                        composed_sqlite_backend(&p).map(|backend| {
-                            backend
-                                .with_node_id(node_id)
-                                .with_worker_partition(index, 8)
-                        })
+                        pqueue_sqlite::composed_sqlite_backend_for_worker(&p, index, 8)
+                            .map(|backend| backend.with_node_id(node_id))
                     })
                     .collect::<EngineResult<Vec<_>>>()
             })
@@ -2365,14 +2362,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 }
                 (0..postgres_pool_size)
                     .map(|index| {
-                        pqueue_postgres::composed_postgres_backend_with_config(
+                        pqueue_postgres::composed_postgres_backend_for_worker_with_config(
                             connect_config.clone(),
+                            index,
+                            postgres_pool_size,
                         )
-                        .map(|backend| {
-                            backend
-                                .with_node_id(node_id)
-                                .with_worker_partition(index, postgres_pool_size)
-                        })
+                        .map(|backend| backend.with_node_id(node_id))
                     })
                     .collect::<EngineResult<Vec<_>>>()
             })

@@ -51,6 +51,21 @@ pub fn composed_sqlite_backend(path: &str) -> EngineResult<ComposedSqliteBackend
     .recover()
 }
 
+/// Assemble and recover exactly one fixed-pool worker partition. Affinity is installed before recovery,
+/// so opening an N-member server pool performs one aggregate rebuild rather than N full rebuilds.
+pub fn composed_sqlite_backend_for_worker(
+    path: &str,
+    index: usize,
+    partitions: usize,
+) -> EngineResult<ComposedSqliteBackend> {
+    ComposedBackend::new(
+        SqliteLog::open(path)?,
+        InMemoryProjection::new(),
+        InProcessControlPlane::new(),
+    )
+    .recover_worker_partition(index, partitions)
+}
+
 /// The composed sqlite-LOG + sqlite-PROJECTION backend (ADR-012 P1b-ii, Part B): a durable sqlite command
 /// LOG ([`SqliteLog`]) paired with the DERIVED relational SQL projection ([`SqliteProjectionStore`]) instead
 /// of the in-memory projection. Atomic durability class (the log axis), so it runs the full
