@@ -91,8 +91,8 @@ pub use credential::{
     parse_databricks_credential_response,
 };
 pub use relational::{
-    ComposedPostgresRelationalBackend, PostgresRelational, PostgresRelationalBackend,
-    composed_postgres_relational_in_schema,
+    ComposedPostgresRelationalBackend, MetricsMigrationProgress, PostgresRelational,
+    PostgresRelationalBackend, composed_postgres_relational_in_schema,
 };
 
 const SCHEMA: &str = r#"

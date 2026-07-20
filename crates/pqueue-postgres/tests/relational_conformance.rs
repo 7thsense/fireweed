@@ -112,6 +112,7 @@ pg_relational!(
     adr011_typed_purge_frees_unique_key,
     adr011_typed_upsert_insert_unique_conflict_is_atomic,
     adr011_typed_schema_less_queue_unaffected,
+    filtered_lifecycle_metrics_are_exact_and_read_only,
 );
 
 fn typed_qdef() -> pqueue_core::QueueDefinition {

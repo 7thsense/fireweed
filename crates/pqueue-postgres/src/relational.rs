@@ -54,9 +54,10 @@ use postgres::error::SqlState;
 use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
 use pqueue_core::{
-    ClientItemKey, CohortId, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken,
-    Metadata, MetricsByQueryRequest, PriorityModel, PriorityValue, QueueDefinition, QueueId,
-    QueueIndex, RequestId, TenantId, UtcTimestamp, is_retry_exhausted, priority_sort,
+    ClientItemKey, CohortId, FilterOp, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState,
+    LeaseToken, Metadata, MetricsByQueryRequest, PriorityModel, PriorityValue, QueryFilter,
+    QueueDefinition, QueueId, QueueIndex, RequestId, TenantId, TypedValue, UtcTimestamp,
+    is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
@@ -71,11 +72,11 @@ use pqueue_engine::{
     PayloadUpdate, ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushFingerprint,
     PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
-    TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
-    validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
-    validate_gate_push, validate_instance_fence, validate_purge_force,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ScheduleUpdate, SetGatesCommand,
+    SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema,
+    project_scopes, validate_api001_reserved_write_fields, validate_claim_compatibility,
+    validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogLineageIdentity,
@@ -84,6 +85,40 @@ use pqueue_engine::{
 use sha2::{Digest, Sha256};
 
 use crate::{PostgresConnectConfig, connect};
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PushSqlProbe {
+    admission_conflict_queries: u64,
+    admission_group_queries: u64,
+    group_summary_statements: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PUSH_SQL_PROBES: RefCell<HashMap<QueueKey, PushSqlProbe>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+fn reset_push_sql_probe(shard: &QueueKey) {
+    PUSH_SQL_PROBES.with(|probes| {
+        probes
+            .borrow_mut()
+            .insert(shard.clone(), PushSqlProbe::default());
+    });
+}
+
+#[cfg(test)]
+fn update_push_sql_probe(shard: &QueueKey, update: impl FnOnce(&mut PushSqlProbe)) {
+    PUSH_SQL_PROBES.with(|probes| {
+        update(probes.borrow_mut().entry(shard.clone()).or_default());
+    });
+}
+
+#[cfg(test)]
+fn push_sql_probe(shard: &QueueKey) -> PushSqlProbe {
+    PUSH_SQL_PROBES.with(|probes| probes.borrow().get(shard).copied().unwrap_or_default())
+}
 
 /// The relational schema (postgres). Mirrors the sqlite reference column-for-column: `pqueue_items` is
 /// TD-002's item projection plus the reference operational columns (`fenced`/`superseded`/`max_attempts`/
@@ -160,6 +195,11 @@ CREATE TABLE IF NOT EXISTS pqueue_group_summary (
     updated_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, queue_id, group_key)
 );
+CREATE TABLE IF NOT EXISTS pqueue_group_due_pending (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
+    group_key TEXT NOT NULL, due_at BIGINT NOT NULL, created_seq BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, item_id)
+);
 CREATE TABLE IF NOT EXISTS pqueue_item_key_retention (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, client_item_key TEXT NOT NULL,
     item_id TEXT NOT NULL, expires_at BIGINT NOT NULL,
@@ -231,6 +271,16 @@ CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
 CREATE UNIQUE INDEX IF NOT EXISTS pqueue_item_index_unique_key_idx
     ON pqueue_item_index (tenant_id, queue_id, index_name, index_key)
     WHERE is_unique = true;
+CREATE TABLE IF NOT EXISTS pqueue_item_index_component (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, index_name TEXT NOT NULL,
+    item_id TEXT NOT NULL, component_position INTEGER NOT NULL, component_value BYTEA NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, index_name, item_id, component_position)
+);
+CREATE TABLE IF NOT EXISTS pqueue_metrics_counted_item (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
+    lifecycle_state TEXT NOT NULL, superseded BOOLEAN NOT NULL, item_version BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, item_id)
+);
 -- C9 (epic pqueue-2201fd37): opaque NON-WORK side records written by the authoritative vectorized
 -- claimed-work commit (Snorri StateStore boundary). Deliberately SEPARATE from `pqueue_items`: a side
 -- record carries no lifecycle/lease/priority/eligibility, so it is never claimable, eligible, peekable, or
@@ -251,7 +301,329 @@ CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
 );
 "#;
 
+const QUEUE_METRICS_MIGRATION: &str = r#"
+-- The operator migration is standalone: it must create every relation used by
+-- its concurrent indexes before an upgraded backend has run constructor DDL.
+CREATE TABLE IF NOT EXISTS pqueue_group_due_pending (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
+    group_key TEXT NOT NULL, due_at BIGINT NOT NULL, created_seq BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, item_id)
+);
+CREATE TABLE IF NOT EXISTS pqueue_item_index_component (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, index_name TEXT NOT NULL,
+    item_id TEXT NOT NULL, component_position INTEGER NOT NULL, component_value BYTEA NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, index_name, item_id, component_position)
+);
+CREATE TABLE IF NOT EXISTS pqueue_queue_metrics_v2 (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL,
+    pending BIGINT NOT NULL DEFAULT 0, leased BIGINT NOT NULL DEFAULT 0,
+    complete BIGINT NOT NULL DEFAULT 0, failed BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, queue_id)
+);
+CREATE TABLE IF NOT EXISTS pqueue_metrics_migration_state (
+    migration_name TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    high_tenant TEXT, high_queue TEXT, high_item_id TEXT,
+    last_tenant TEXT, last_queue TEXT, last_item_id TEXT,
+    rows_backfilled BIGINT NOT NULL DEFAULT 0,
+    due_rows_backfilled BIGINT NOT NULL DEFAULT 0,
+    batches_completed BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TABLE IF NOT EXISTS pqueue_metrics_counted_item (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL,
+    lifecycle_state TEXT NOT NULL, superseded BOOLEAN NOT NULL, item_version BIGINT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, item_id)
+);
+ALTER TABLE pqueue_metrics_migration_state
+    ADD COLUMN IF NOT EXISTS due_rows_backfilled BIGINT NOT NULL DEFAULT 0;
+CREATE OR REPLACE FUNCTION pqueue_index_component(key BYTEA, component_offset INTEGER)
+RETURNS BYTEA AS $$
+DECLARE component_length INTEGER;
+BEGIN
+  IF component_offset < 0 OR octet_length(key) < component_offset + 4 THEN RETURN NULL; END IF;
+  component_length := (get_byte(key, component_offset) << 24)
+                    + (get_byte(key, component_offset + 1) << 16)
+                    + (get_byte(key, component_offset + 2) << 8)
+                    + get_byte(key, component_offset + 3);
+  IF octet_length(key) < component_offset + 4 + component_length THEN RETURN NULL; END IF;
+  RETURN substring(key FROM component_offset + 5 FOR component_length);
+END $$ LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE;
+CREATE OR REPLACE FUNCTION pqueue_index_components(key BYTEA)
+RETURNS TABLE(component_position INTEGER, component_value BYTEA) AS $$
+DECLARE component_offset INTEGER := 0;
+DECLARE component_length INTEGER;
+BEGIN
+  component_position := 0;
+  WHILE component_offset + 4 <= octet_length(key) LOOP
+    component_length := (get_byte(key, component_offset) << 24)
+                      + (get_byte(key, component_offset + 1) << 16)
+                      + (get_byte(key, component_offset + 2) << 8)
+                      + get_byte(key, component_offset + 3);
+    IF component_offset + 4 + component_length > octet_length(key) THEN RETURN; END IF;
+    component_value := substring(key FROM component_offset + 5 FOR component_length);
+    RETURN NEXT;
+    component_offset := component_offset + 4 + component_length;
+    component_position := component_position + 1;
+  END LOOP;
+END $$ LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE;
+CREATE OR REPLACE FUNCTION pqueue_sync_index_components() RETURNS trigger AS $$
+BEGIN
+  IF TG_OP <> 'INSERT' THEN
+    DELETE FROM pqueue_item_index_component
+     WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id
+       AND index_name=OLD.index_name AND item_id=OLD.item_id;
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    INSERT INTO pqueue_item_index_component(
+      tenant_id,queue_id,index_name,item_id,component_position,component_value)
+    SELECT NEW.tenant_id,NEW.queue_id,NEW.index_name,NEW.item_id,
+           component_position,component_value
+      FROM pqueue_index_components(NEW.index_key);
+  END IF;
+  RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
+END $$ LANGUAGE plpgsql;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_item_index_components_sync'
+             AND tgrelid='pqueue_item_index'::regclass
+             AND (tgfoid<>to_regprocedure('pqueue_sync_index_components()')
+                  OR tgenabled NOT IN ('O','A')
+                  OR pg_get_triggerdef(oid) NOT LIKE '%AFTER INSERT OR DELETE OR UPDATE OF index_key%')) THEN
+    DROP TRIGGER pqueue_item_index_components_sync ON pqueue_item_index;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_item_index_components_sync'
+                 AND tgrelid='pqueue_item_index'::regclass) THEN
+    CREATE TRIGGER pqueue_item_index_components_sync
+      AFTER INSERT OR DELETE OR UPDATE OF index_key ON pqueue_item_index
+      FOR EACH ROW EXECUTE FUNCTION pqueue_sync_index_components();
+  END IF;
+END $$;
+CREATE OR REPLACE FUNCTION pqueue_apply_metrics_delta() RETURNS trigger AS $$
+DECLARE p BIGINT := 0; l BIGINT := 0; c BIGINT := 0; f BIGINT := 0;
+DECLARE metric_tenant TEXT; metric_queue TEXT;
+DECLARE old_counted BOOLEAN := false; new_counted BOOLEAN := false;
+DECLARE marker_found BOOLEAN := false;
+DECLARE acquired BIGINT := 0;
+DECLARE counted_state TEXT; counted_superseded BOOLEAN; counted_version BIGINT;
+BEGIN
+  IF TG_OP <> 'INSERT' THEN
+    SELECT lifecycle_state,superseded,item_version
+      INTO counted_state,counted_superseded,counted_version
+      FROM pqueue_metrics_counted_item
+     WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id AND item_id=OLD.item_id
+     FOR UPDATE;
+    marker_found := FOUND;
+    old_counted := marker_found;
+  END IF;
+  IF TG_OP <> 'DELETE' THEN
+    LOOP
+      IF marker_found THEN
+        UPDATE pqueue_metrics_counted_item SET lifecycle_state=NEW.lifecycle_state,
+          superseded=NEW.superseded,item_version=NEW.item_version
+         WHERE tenant_id=NEW.tenant_id AND queue_id=NEW.queue_id AND item_id=NEW.item_id;
+        new_counted := true;
+        EXIT;
+      END IF;
+      INSERT INTO pqueue_metrics_counted_item(
+        tenant_id,queue_id,item_id,lifecycle_state,superseded,item_version)
+      VALUES(NEW.tenant_id,NEW.queue_id,NEW.item_id,NEW.lifecycle_state,NEW.superseded,NEW.item_version)
+      ON CONFLICT DO NOTHING;
+      GET DIAGNOSTICS acquired = ROW_COUNT;
+      IF acquired=1 THEN new_counted := true; EXIT; END IF;
+      SELECT lifecycle_state,superseded,item_version
+        INTO counted_state,counted_superseded,counted_version
+        FROM pqueue_metrics_counted_item
+       WHERE tenant_id=NEW.tenant_id AND queue_id=NEW.queue_id AND item_id=NEW.item_id
+       FOR UPDATE;
+      marker_found := FOUND;
+      old_counted := marker_found;
+    END LOOP;
+  END IF;
+  IF old_counted AND NOT counted_superseded THEN
+    p := p - CASE WHEN counted_state='Pending' THEN 1 ELSE 0 END;
+    l := l - CASE WHEN counted_state='Leased' THEN 1 ELSE 0 END;
+    c := c - CASE WHEN counted_state='Complete' THEN 1 ELSE 0 END;
+    f := f - CASE WHEN counted_state='Failed' THEN 1 ELSE 0 END;
+    metric_tenant := OLD.tenant_id; metric_queue := OLD.queue_id;
+  END IF;
+  IF TG_OP <> 'DELETE' AND new_counted AND NOT NEW.superseded THEN
+    p := p + CASE WHEN NEW.lifecycle_state='Pending' THEN 1 ELSE 0 END;
+    l := l + CASE WHEN NEW.lifecycle_state='Leased' THEN 1 ELSE 0 END;
+    c := c + CASE WHEN NEW.lifecycle_state='Complete' THEN 1 ELSE 0 END;
+    f := f + CASE WHEN NEW.lifecycle_state='Failed' THEN 1 ELSE 0 END;
+    metric_tenant := NEW.tenant_id; metric_queue := NEW.queue_id;
+  END IF;
+  IF p<>0 OR l<>0 OR c<>0 OR f<>0 THEN
+    INSERT INTO pqueue_queue_metrics_v2(tenant_id,queue_id,pending,leased,complete,failed)
+      VALUES(metric_tenant,metric_queue,p,l,c,f)
+    ON CONFLICT(tenant_id,queue_id) DO UPDATE SET
+      pending=pqueue_queue_metrics_v2.pending+EXCLUDED.pending,
+      leased=pqueue_queue_metrics_v2.leased+EXCLUDED.leased,
+      complete=pqueue_queue_metrics_v2.complete+EXCLUDED.complete,
+      failed=pqueue_queue_metrics_v2.failed+EXCLUDED.failed;
+  END IF;
+  IF TG_OP='DELETE' THEN
+    DELETE FROM pqueue_metrics_counted_item
+      WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id AND item_id=OLD.item_id;
+  END IF;
+  IF TG_OP <> 'INSERT' THEN
+    DELETE FROM pqueue_group_due_pending
+      WHERE tenant_id=OLD.tenant_id AND queue_id=OLD.queue_id AND item_id=OLD.item_id;
+  END IF;
+  IF TG_OP <> 'DELETE' AND NEW.group_key IS NOT NULL AND NEW.lifecycle_state='Pending'
+     AND NOT NEW.superseded AND NEW.not_before IS NOT NULL THEN
+    INSERT INTO pqueue_group_due_pending(
+      tenant_id,queue_id,item_id,group_key,due_at,created_seq)
+    VALUES(NEW.tenant_id,NEW.queue_id,NEW.item_id,NEW.group_key,NEW.not_before,NEW.created_seq)
+    ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET
+      group_key=EXCLUDED.group_key,due_at=EXCLUDED.due_at,created_seq=EXCLUDED.created_seq;
+  END IF;
+  RETURN CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END;
+END $$ LANGUAGE plpgsql;
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_items_metrics_delta'
+             AND tgrelid='pqueue_items'::regclass
+             AND (tgfoid<>to_regprocedure('pqueue_apply_metrics_delta()')
+                  OR tgenabled NOT IN ('O','A')
+                  OR pg_get_triggerdef(oid) NOT LIKE
+                    '%AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state, superseded, not_before, group_key%')) THEN
+    DROP TRIGGER pqueue_items_metrics_delta ON pqueue_items;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='pqueue_items_metrics_delta'
+                 AND tgrelid='pqueue_items'::regclass) THEN
+    CREATE TRIGGER pqueue_items_metrics_delta
+      AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state,superseded,not_before,group_key ON pqueue_items
+      FOR EACH ROW EXECUTE FUNCTION pqueue_apply_metrics_delta();
+  END IF;
+END $$;
+"#;
+
+const GROUP_SUMMARY_INDEX_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "pqueue_item_index_component_lookup_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_item_index_component_lookup_idx \
+         ON pqueue_item_index_component \
+           (tenant_id,queue_id,index_name,component_position,component_value,item_id)",
+    ),
+    (
+        "pqueue_items_group_summary_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_summary_idx \
+         ON pqueue_items (tenant_id,queue_id,group_key,priority_sort,created_seq) \
+         INCLUDE (eligible_since,created_at,item_id,not_before) \
+         WHERE lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL",
+    ),
+    (
+        "pqueue_items_group_oldest_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_oldest_idx \
+         ON pqueue_items (tenant_id,queue_id,group_key,eligible_since,created_seq) INCLUDE (not_before) \
+         WHERE lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL",
+    ),
+    (
+        "pqueue_items_group_active_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_active_idx \
+         ON pqueue_items (tenant_id,queue_id,group_key,item_id) \
+         WHERE lifecycle_state = ANY (ARRAY['Pending'::text,'Leased'::text]) \
+           AND superseded=false AND group_key IS NOT NULL",
+    ),
+    (
+        "pqueue_items_group_due_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_due_idx \
+         ON pqueue_items (tenant_id,queue_id,group_key,not_before,created_seq) INCLUDE (item_id) \
+         WHERE lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL \
+           AND not_before IS NOT NULL",
+    ),
+    (
+        "pqueue_group_summary_claim_rank_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_claim_rank_idx \
+         ON pqueue_group_summary \
+            (tenant_id,queue_id,rep_priority_sort,rep_item_id,group_key) \
+         WHERE oldest_eligible_at IS NOT NULL",
+    ),
+    (
+        "pqueue_group_summary_oldest_rank_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_oldest_rank_idx \
+         ON pqueue_group_summary (tenant_id,queue_id,oldest_eligible_at,group_key) \
+         WHERE oldest_eligible_at IS NOT NULL",
+    ),
+    (
+        "pqueue_group_summary_refresh_frontier_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_refresh_frontier_idx \
+         ON pqueue_group_summary (tenant_id,queue_id,updated_at,group_key)",
+    ),
+    (
+        "pqueue_items_global_expired_lease_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_global_expired_lease_idx \
+         ON pqueue_items (lease_expires_at,tenant_id,queue_id,item_id) \
+         WHERE lifecycle_state='Leased' AND cohort_size IS NULL \
+           AND fenced=false AND superseded=false",
+    ),
+    (
+        "pqueue_group_due_pending_frontier_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_due_pending_frontier_idx \
+         ON pqueue_group_due_pending (tenant_id,queue_id,due_at,created_seq,item_id)",
+    ),
+];
+
+fn normalized_index_signature(definition: &str, table: &str) -> Option<String> {
+    let normalized: String = definition
+        .to_ascii_lowercase()
+        .replace("::text", "")
+        .replace("using btree", "")
+        .chars()
+        .filter(|character| {
+            !character.is_ascii_whitespace()
+                && *character != '"'
+                && *character != '('
+                && *character != ')'
+                && *character != ';'
+        })
+        .collect();
+    let start = normalized.rfind(table)?;
+    Some(normalized[start..].to_string())
+}
+
+/// Fresh empty schemas may build the required indexes synchronously. Existing schemas never run DDL at
+/// constructor time: operators apply the versioned concurrent definitions before rollout, and startup
+/// fails fast if any index is absent, invalid, or definition-drifted.
+fn verify_group_summary_indexes(client: &mut Client, fresh: bool) -> EngineResult<()> {
+    for (name, ddl) in GROUP_SUMMARY_INDEX_MIGRATIONS {
+        if fresh {
+            let create = ddl.replacen(" CONCURRENTLY", "", 1);
+            st(client.batch_execute(&create))?;
+            continue;
+        }
+        let table = if ddl.contains(" ON pqueue_items ") {
+            "pqueue_items"
+        } else if ddl.contains("pqueue_item_index_component") {
+            "pqueue_item_index_component"
+        } else if ddl.contains(" ON pqueue_item_index ") {
+            "pqueue_item_index"
+        } else if ddl.contains(" ON pqueue_group_due_pending ") {
+            "pqueue_group_due_pending"
+        } else {
+            "pqueue_group_summary"
+        };
+        let Some(row) = st(client.query_opt(
+            "SELECT i.indisvalid,pg_get_indexdef(i.indexrelid) FROM pg_index i \
+             WHERE i.indexrelid=to_regclass($1)",
+            &[name],
+        ))?
+        else {
+            return Err(EngineError::Unavailable);
+        };
+        let valid: bool = row.get(0);
+        let actual: String = row.get(1);
+        if !valid
+            || normalized_index_signature(&actual, table) != normalized_index_signature(ddl, table)
+        {
+            return Err(EngineError::Unavailable);
+        }
+    }
+    Ok(())
+}
+
 const COHORT_EXPIRY_SWEEP_LIMIT: i64 = 128;
+const GLOBAL_EXPIRY_SWEEP_LIMIT: i64 = 128;
 const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
 
 /// The serialized claim CTE (TD-002 `BatchClaim`): select the eligible candidates under a real
@@ -1267,7 +1639,7 @@ fn refresh_group_summary(
     let count: i64 = agg.get(0);
     let oldest: Option<i64> = agg.get(1);
     let rep = st(tx.query_opt(
-        "SELECT priority_sort, created_at, item_id FROM pqueue_items \
+        "SELECT priority_sort, created_at, created_seq, item_id FROM pqueue_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
          AND lifecycle_state='Pending' AND superseded=false AND (not_before IS NULL OR not_before<=$4) \
          ORDER BY priority_sort, created_seq LIMIT 1",
@@ -1275,7 +1647,7 @@ fn refresh_group_summary(
     ))?;
     let (rep_psort, rep_created, rep_item): (Option<Vec<u8>>, Option<i64>, Option<String>) =
         match rep {
-            Some(row) => (Some(row.get(0)), Some(row.get(1)), Some(row.get(2))),
+            Some(row) => (Some(row.get(0)), Some(row.get(1)), Some(row.get(3))),
             None => (None, None, None),
         };
     st(tx.execute(
@@ -1302,6 +1674,267 @@ fn refresh_group_summary(
         ],
     ))?;
     Ok(())
+}
+
+/// Recompute all affected group summaries in one database round trip. Push batches routinely span many
+/// groups; issuing the three-statement single-group refresh for every distinct group multiplied round trips
+/// and repeated resident-group scans. The requested CTE also keeps groups that became empty, so the result
+/// is identical to calling `refresh_group_summary` for each key (zero count and null representative).
+fn refresh_group_summaries(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    group_keys: &[GroupKey],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    if group_keys.is_empty() {
+        return Ok(());
+    }
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    let groups: Vec<String> = group_keys
+        .iter()
+        .map(|group| group.as_str().to_string())
+        .collect();
+    #[cfg(test)]
+    update_push_sql_probe(shard, |probe| probe.group_summary_statements += 1);
+    st(tx.execute(
+        "WITH requested(group_key) AS (SELECT DISTINCT unnest($3::text[])), \
+         eligible AS ( \
+           SELECT group_key, eligible_since, priority_sort, created_at, item_id, created_seq \
+           FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=ANY($3) \
+             AND lifecycle_state='Pending' AND superseded=false \
+             AND (not_before IS NULL OR not_before<=$4) \
+         ), aggregated AS ( \
+           SELECT group_key, COUNT(*)::bigint AS item_count, MIN(eligible_since) AS oldest \
+           FROM eligible GROUP BY group_key \
+         ), representative AS ( \
+           SELECT DISTINCT ON (group_key) group_key, priority_sort, created_at, created_seq, item_id \
+           FROM eligible ORDER BY group_key, priority_sort, created_seq \
+         ) \
+         INSERT INTO pqueue_group_summary \
+           (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort, \
+            rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+         SELECT $1,$2,r.group_key,a.oldest,NULL,p.priority_sort,p.created_at,p.item_id, \
+                COALESCE(a.item_count,0),0,$4 \
+         FROM requested r LEFT JOIN aggregated a USING (group_key) \
+                          LEFT JOIN representative p USING (group_key) \
+         ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
+           oldest_eligible_at=EXCLUDED.oldest_eligible_at, \
+           rep_progress_guard_sort=EXCLUDED.rep_progress_guard_sort, \
+           rep_priority_sort=EXCLUDED.rep_priority_sort, rep_created_at=EXCLUDED.rep_created_at, \
+           rep_item_id=EXCLUDED.rep_item_id, eligible_item_count=EXCLUDED.eligible_item_count, \
+           at_risk_count=EXCLUDED.at_risk_count, updated_at=EXCLUDED.updated_at",
+        &[&t, &q, &groups, &now_n],
+    ))?;
+    Ok(())
+}
+
+/// Add newly-pending items to group summaries without scanning pre-existing group inventory. The source
+/// is bounded by `item_ids`; aggregate and representative work is therefore O(batch), not O(resident).
+fn increment_group_summaries_for_items(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    item_ids: &[String],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    #[cfg(test)]
+    update_push_sql_probe(shard, |probe| probe.group_summary_statements += 5);
+    st(tx.execute(
+        "WITH wanted AS ( \
+           SELECT DISTINCT group_key FROM pqueue_items \
+           WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
+         ), incoming_new AS ( \
+           SELECT group_key,eligible_since,priority_sort,created_at,item_id,created_seq \
+           FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) \
+             AND group_key IS NOT NULL AND lifecycle_state='Pending' AND superseded=false \
+             AND (not_before IS NULL OR not_before<=$4) \
+         ), incoming AS (SELECT * FROM incoming_new), aggregated AS ( \
+           SELECT group_key,COUNT(*)::bigint AS item_count,MIN(eligible_since) AS oldest \
+           FROM incoming GROUP BY group_key \
+         ), representative AS ( \
+           SELECT DISTINCT ON (group_key) group_key,priority_sort,created_at,created_seq,item_id \
+           FROM incoming ORDER BY group_key,priority_sort,created_seq \
+         ) \
+         INSERT INTO pqueue_group_summary \
+           (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort, \
+            rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+         SELECT $1,$2,w.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id, \
+                COALESCE(a.item_count,0),0,$4 FROM wanted w \
+                LEFT JOIN aggregated a USING (group_key) LEFT JOIN representative r USING (group_key) \
+         ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
+           oldest_eligible_at=CASE \
+             WHEN pqueue_group_summary.oldest_eligible_at IS NULL THEN EXCLUDED.oldest_eligible_at \
+             ELSE LEAST(pqueue_group_summary.oldest_eligible_at,EXCLUDED.oldest_eligible_at) END, \
+           eligible_item_count=pqueue_group_summary.eligible_item_count+EXCLUDED.eligible_item_count, \
+           at_risk_count=0,updated_at=pqueue_group_summary.updated_at",
+        &[&t, &q, &item_ids, &now_n],
+    ))?;
+    // The existing representative's authoritative FIFO tiebreak lives on its item row. Keeping it out of
+    // the summary schema makes this update rolling-version safe: old and new writers share the same rank
+    // authority, and a nullable duplicated created-sequence column cannot corrupt mixed-version ordering.
+    st(tx.execute(
+        "WITH wanted AS ( \
+           SELECT DISTINCT group_key FROM pqueue_items \
+           WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
+         ), incoming AS ( \
+           SELECT group_key,priority_sort,created_at,created_seq,item_id FROM pqueue_items \
+           WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
+             AND lifecycle_state='Pending' AND superseded=false \
+             AND (not_before IS NULL OR not_before<=$4) \
+         ), representative AS ( \
+           SELECT DISTINCT ON (group_key) group_key,priority_sort,created_at,created_seq,item_id \
+           FROM incoming ORDER BY group_key,priority_sort,created_seq \
+         ), winning AS ( \
+           SELECT r.* FROM representative r JOIN pqueue_group_summary s \
+             ON s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=r.group_key \
+           LEFT JOIN pqueue_items old ON old.tenant_id=s.tenant_id AND old.queue_id=s.queue_id \
+             AND old.item_id=s.rep_item_id \
+           WHERE s.rep_item_id IS NULL OR old.item_id IS NULL OR \
+             (r.priority_sort,r.created_seq,r.item_id) < \
+             (s.rep_priority_sort,old.created_seq,s.rep_item_id) \
+         ) UPDATE pqueue_group_summary s SET rep_priority_sort=w.priority_sort, \
+             rep_created_at=w.created_at,rep_item_id=w.item_id \
+           FROM winning w WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=w.group_key",
+        &[&t, &q, &item_ids, &now_n],
+    ))?;
+    st(tx.execute(
+        "UPDATE pqueue_group_summary s SET updated_at=GREATEST(s.updated_at,$4) \
+         FROM (SELECT DISTINCT group_key FROM pqueue_items \
+               WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL) w \
+         WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=w.group_key",
+        &[&t, &q, &item_ids, &now_n],
+    ))?;
+    // Future grouped items enter a durable due frontier. Rewriting an item first removes any obsolete
+    // schedule; the replacement row is inserted only while it is still pending and strictly future-due.
+    st(tx.execute(
+        "DELETE FROM pqueue_group_due_pending WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+        &[&t, &q, &item_ids],
+    ))?;
+    st(tx.execute(
+        "INSERT INTO pqueue_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+         SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq FROM pqueue_items \
+         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) AND group_key IS NOT NULL \
+           AND lifecycle_state='Pending' AND superseded=false AND not_before>$4 \
+         ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET group_key=EXCLUDED.group_key, \
+           due_at=EXCLUDED.due_at,created_seq=EXCLUDED.created_seq",
+        &[&t, &q, &item_ids, &now_n],
+    ))?;
+    Ok(())
+}
+
+/// Remove items that just left Pending from their summaries. Count changes are deltas. Oldest and
+/// representative are repaired only when one of the removed rows supplied that stored value; each repair
+/// is a bounded index lookup per affected group.
+fn decrement_group_summaries_for_items(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    item_ids: &[String],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    if item_ids.is_empty() {
+        return Ok(());
+    }
+    let (t, q) = parts(shard);
+    let now_n = ts_nanos(now);
+    st(tx.execute(
+        "WITH affected AS ( \
+           SELECT i.group_key,COUNT(*)::bigint AS removed_count, \
+                  BOOL_OR(i.item_id=s.rep_item_id) AS rep_removed, \
+                  BOOL_OR(i.eligible_since=s.oldest_eligible_at) AS oldest_removed \
+           FROM pqueue_items i JOIN pqueue_group_summary s \
+             ON s.tenant_id=i.tenant_id AND s.queue_id=i.queue_id AND s.group_key=i.group_key \
+           WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=ANY($3) \
+             AND i.group_key IS NOT NULL AND (i.not_before IS NULL OR i.not_before<=$4) \
+           GROUP BY i.group_key \
+         ), repaired AS ( \
+           SELECT a.*,nr.priority_sort,nr.created_at,nr.created_seq,nr.item_id,ne.eligible_since \
+           FROM affected a \
+           LEFT JOIN LATERAL ( \
+             SELECT priority_sort,created_at,created_seq,item_id FROM pqueue_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND group_key=a.group_key \
+               AND lifecycle_state='Pending' AND superseded=false \
+               AND item_id<>ALL($3) \
+               AND (not_before IS NULL OR not_before<=$4) \
+             ORDER BY priority_sort,created_seq LIMIT 1 \
+           ) nr ON a.rep_removed \
+           LEFT JOIN LATERAL ( \
+             SELECT eligible_since FROM pqueue_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND group_key=a.group_key \
+               AND lifecycle_state='Pending' AND superseded=false \
+               AND item_id<>ALL($3) \
+               AND (not_before IS NULL OR not_before<=$4) \
+             ORDER BY eligible_since,created_seq LIMIT 1 \
+           ) ne ON a.oldest_removed \
+         ) \
+         UPDATE pqueue_group_summary s SET \
+           eligible_item_count=GREATEST(s.eligible_item_count-r.removed_count,0), \
+           oldest_eligible_at=CASE WHEN r.oldest_removed THEN r.eligible_since \
+                                   ELSE s.oldest_eligible_at END, \
+           rep_priority_sort=CASE WHEN r.rep_removed THEN r.priority_sort \
+                                  ELSE s.rep_priority_sort END, \
+           rep_created_at=CASE WHEN r.rep_removed THEN r.created_at ELSE s.rep_created_at END, \
+           rep_item_id=CASE WHEN r.rep_removed THEN r.item_id ELSE s.rep_item_id END, \
+           at_risk_count=0,updated_at=GREATEST(s.updated_at,$4) \
+         FROM repaired r WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=r.group_key",
+        &[&t, &q, &item_ids, &now_n],
+    ))?;
+    Ok(())
+}
+
+const DUE_PROMOTION_ITEM_LIMIT: i64 = 128;
+
+/// Promote one bounded durable due-frontier chunk in the caller's transaction. Each future grouped item
+/// has exactly one frontier row; the item ids handed to the delta helper and all returned/materialized
+/// rows are capped at `DUE_PROMOTION_ITEM_LIMIT`. The extra row is a completion sentinel and remains on
+/// the durable frontier for the next retry.
+fn promote_due_group_summary_chunk_in_tx(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> EngineResult<bool> {
+    let (tenant, queue) = parts(shard);
+    let at = ts_nanos(now);
+    let fetch_limit = DUE_PROMOTION_ITEM_LIMIT + 1;
+    // The queue cursor is the common mutation/promotion fence. Serializing before the frontier read
+    // makes the 129th row a trustworthy completion sentinel even with concurrent claim/discovery.
+    st(tx.query_one(
+        "SELECT assignment_epoch FROM relational_cursor \
+         WHERE tenant=$1 AND queue=$2 FOR UPDATE",
+        &[&tenant, &queue],
+    ))?;
+    let rows = st(tx.query(
+        "SELECT item_id FROM pqueue_group_due_pending \
+         WHERE tenant_id=$1 AND queue_id=$2 AND due_at<=$3 \
+         ORDER BY due_at,created_seq,item_id LIMIT $4 FOR UPDATE",
+        &[&tenant, &queue, &at, &fetch_limit],
+    ))?;
+    if rows.is_empty() {
+        return Ok(true);
+    }
+    let complete = rows.len() <= DUE_PROMOTION_ITEM_LIMIT as usize;
+    let item_ids = rows
+        .into_iter()
+        .take(DUE_PROMOTION_ITEM_LIMIT as usize)
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>();
+    increment_group_summaries_for_items(tx, shard, &item_ids, now)?;
+    Ok(complete)
+}
+
+fn promote_due_group_summary_chunk(
+    client: &mut Client,
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> EngineResult<bool> {
+    let mut tx = st(client.transaction())?;
+    let complete = promote_due_group_summary_chunk_in_tx(&mut tx, shard, now)?;
+    st(tx.commit())?;
+    Ok(complete)
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,17 +2309,13 @@ fn apply_command_sql(
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
             insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
-            let mut groups: Vec<GroupKey> = Vec::new();
-            for it in &c.items {
-                if let Some(g) = &it.group_key
-                    && !groups.contains(g)
-                {
-                    groups.push(g.clone());
-                }
-            }
-            for g in &groups {
-                refresh_group_summary(tx, shard, g, now)?;
-            }
+            let ids: Vec<String> = c
+                .items
+                .iter()
+                .filter(|item| item.group_key.is_some())
+                .map(|item| item.item_id.to_string())
+                .collect();
+            increment_group_summaries_for_items(tx, shard, &ids, now)?;
             Ok(())
         }
         QueueCommand::Claim(c) => {
@@ -1704,9 +2333,7 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
-            for g in groups_of(tx, shard, &c.item_ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
-            }
+            decrement_group_summaries_for_items(tx, shard, &ids, now)?;
             Ok(())
         }
         QueueCommand::CohortClaim(c) => {
@@ -1728,9 +2355,7 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
             }
-            for g in groups_of(tx, shard, &c.item_ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
-            }
+            decrement_group_summaries_for_items(tx, shard, &ids, now)?;
             Ok(())
         }
         QueueCommand::RenewLease(c) => {
@@ -1763,13 +2388,20 @@ fn apply_command_sql(
             // UpdateFieldsPort, so a missing/ineligible row here is a no-op (commit has no rollback).
             let item_id = c.item_id.to_string();
             let row = st(tx.query_opt(
-                "SELECT fields FROM pqueue_items \
+                "SELECT fields,lifecycle_state,priority,priority_sort,not_before,eligible_since,payload \
+                 FROM pqueue_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
                 &[&t, &q, &item_id],
             ))?;
             let Some(row) = row else { return Ok(()) };
             let mut fields = fields_from_json(row.get::<_, String>(0))?;
+            let lifecycle_state: String = row.get(1);
+            let mut priority_json: Option<String> = row.get(2);
+            let mut priority_sort_key: Vec<u8> = row.get(3);
+            let mut not_before: Option<i64> = row.get(4);
+            let mut eligible_since: i64 = row.get(5);
+            let mut payload: Option<Vec<u8>> = row.get(6);
             for (k, op) in &c.field_ops {
                 match op {
                     Some(v) => {
@@ -1781,27 +2413,37 @@ fn apply_command_sql(
                 }
             }
             let fields_json = fields_to_json(&fields)?;
-            match &c.payload {
-                PayloadUpdate::Keep => {
-                    st(tx.execute(
-                        "UPDATE pqueue_items SET fields=$4, item_version=item_version+1, \
-                         updated_at=$5, last_command_sequence=$6 \
-                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
-                         AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
-                        &[&t, &q, &item_id, &fields_json, &now_n, &seqi],
-                    ))?;
-                }
-                PayloadUpdate::Set(p) => {
-                    let payload: Option<Vec<u8>> = p.as_ref().map(|b| b.to_vec());
-                    st(tx.execute(
-                        "UPDATE pqueue_items SET fields=$4, payload=$5, item_version=item_version+1, \
-                         updated_at=$6, last_command_sequence=$7 \
-                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
-                         AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
-                        &[&t, &q, &item_id, &fields_json, &payload, &now_n, &seqi],
-                    ))?;
-                }
+            if let PayloadUpdate::Set(next) = &c.payload {
+                payload = next.as_ref().map(|bytes| bytes.to_vec());
             }
+            let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
+                || matches!(c.set_not_before, ScheduleUpdate::Set(_));
+            let pending = lifecycle_state == "Pending";
+            let singleton = vec![item_id.clone()];
+            if pending && repricing {
+                decrement_group_summaries_for_items(tx, shard, &singleton, now)?;
+            }
+            if let ScheduleUpdate::Set(next) = &c.set_priority {
+                priority_json = next.as_ref().map(to_json).transpose()?;
+                let model = queues
+                    .get(shard)
+                    .ok_or(EngineError::NotFound)?
+                    .priority_model
+                    .clone();
+                priority_sort_key = elig_sort(next, &model);
+            }
+            if let ScheduleUpdate::Set(next) = &c.set_not_before {
+                not_before = (*next).map(ts_nanos);
+                eligible_since = not_before.unwrap_or(now_n).max(now_n);
+            }
+            st(tx.execute(
+                "UPDATE pqueue_items SET fields=$4,payload=$5,priority=$6, \
+                 priority_sort=$7,not_before=$8,eligible_since=$9,item_version=item_version+1, \
+                 updated_at=$10,last_command_sequence=$11 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                 AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
+                &[&t,&q,&item_id,&fields_json,&payload,&priority_json,
+                  &priority_sort_key,&not_before,&eligible_since,&now_n,&seqi],
+            ))?;
             // ADR-011: if a new entity document was supplied, re-index this item. Delete the
             // old rows first so the unique slot is freed before the conflict check fires.
             if let Some(ref doc) = c.set_entity_document {
@@ -1815,6 +2457,9 @@ fn apply_command_sql(
                     check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &new_keys, None)?;
                     insert_typed_index_rows(tx, &t, &q, typed_indexes, &item_id, &new_keys)?;
                 }
+            }
+            if pending && repricing {
+                increment_group_summaries_for_items(tx, shard, &singleton, now)?;
             }
             Ok(())
         }
@@ -1859,8 +2504,9 @@ fn apply_command_sql(
             let mut to_failed: Vec<String> = Vec::new();
             let mut to_pending: Vec<String> = Vec::new();
             let mut to_pending_rearm: Vec<String> = Vec::new();
-            let mut backoff: BTreeMap<i64, Vec<String>> = BTreeMap::new();
-            let mut rearm_schedule: BTreeMap<(Option<i64>, i64), Vec<String>> = BTreeMap::new();
+            let mut scheduled_ids = Vec::new();
+            let mut scheduled_not_before = Vec::new();
+            let mut scheduled_eligible_since = Vec::new();
             for o in &c.outcomes {
                 let id = o.item_id.to_string();
                 let computed_state = match o.kind {
@@ -1889,10 +2535,9 @@ fn apply_command_sql(
                     ItemState::Pending if matches!(o.kind, FinalizeKind::Rearm) => {
                         to_pending_rearm.push(id.clone());
                         let not_before = o.not_before.map(ts_nanos);
-                        rearm_schedule
-                            .entry((not_before, not_before.unwrap_or(now_n).max(now_n)))
-                            .or_default()
-                            .push(id.clone());
+                        scheduled_ids.push(id.clone());
+                        scheduled_not_before.push(not_before);
+                        scheduled_eligible_since.push(not_before.unwrap_or(now_n).max(now_n));
                     }
                     ItemState::Pending => to_pending.push(id.clone()),
                     ItemState::Leased => unreachable!("Finalize never targets Leased"),
@@ -1904,7 +2549,9 @@ fn apply_command_sql(
                     && new_state == ItemState::Pending
                     && let Some(nb) = o.not_before
                 {
-                    backoff.entry(ts_nanos(nb)).or_default().push(id.clone());
+                    scheduled_ids.push(id.clone());
+                    scheduled_not_before.push(Some(ts_nanos(nb)));
+                    scheduled_eligible_since.push(ts_nanos(nb));
                 }
                 token_ops.push(TokenOp::Clear(o.item_id));
             }
@@ -1945,24 +2592,18 @@ fn apply_command_sql(
                 now_n,
                 seqi,
             )?;
-            for (nb_n, ids) in &backoff {
+            if !scheduled_ids.is_empty() {
                 st(tx.execute(
-                    "UPDATE pqueue_items SET not_before=$4, eligible_since=$4 \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
-                    &[&t, &q, ids, nb_n],
+                    "WITH schedule(item_id,not_before,eligible_since) AS ( \
+                       SELECT * FROM unnest($3::text[],$4::bigint[],$5::bigint[]) \
+                     ) UPDATE pqueue_items i SET not_before=s.not_before,eligible_since=s.eligible_since \
+                       FROM schedule s WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=s.item_id",
+                    &[&t,&q,&scheduled_ids,&scheduled_not_before,&scheduled_eligible_since],
                 ))?;
             }
-            for ((not_before, eligible_since), ids) in &rearm_schedule {
-                st(tx.execute(
-                    "UPDATE pqueue_items SET not_before=$4, eligible_since=$5 \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
-                    &[&t, &q, ids, not_before, eligible_since],
-                ))?;
-            }
-            let ids: Vec<ItemId> = c.outcomes.iter().map(|o| o.item_id).collect();
-            for g in groups_of(tx, shard, &ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
-            }
+            let mut newly_pending = to_pending;
+            newly_pending.extend(to_pending_rearm);
+            increment_group_summaries_for_items(tx, shard, &newly_pending, now)?;
             Ok(())
         }
         QueueCommand::CohortFinalize(c) => {
@@ -2031,6 +2672,11 @@ fn apply_command_sql(
             let superseded_str = c.superseded_item_id.to_string();
             delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&superseded_str))?;
             st(tx.execute(
+                "DELETE FROM pqueue_group_due_pending \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                &[&t, &q, &superseded_str],
+            ))?;
+            st(tx.execute(
                 "UPDATE pqueue_items SET superseded=true, updated_at=$4, last_command_sequence=$5 \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
                 &[&t, &q, &c.superseded_item_id.to_string(), &now_n, &seqi],
@@ -2054,9 +2700,19 @@ fn apply_command_sql(
             {
                 groups.push(g.clone());
             }
-            for g in &groups {
-                refresh_group_summary(tx, shard, g, now)?;
-            }
+            refresh_group_summaries(tx, shard, &groups, now)?;
+            let replacement_id = c.replacement.item_id.to_string();
+            st(tx.execute(
+                "INSERT INTO pqueue_group_due_pending( \
+                   tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+                 SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq \
+                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                   AND lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL \
+                   AND not_before>$4 \
+                 ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET \
+                   group_key=EXCLUDED.group_key,due_at=EXCLUDED.due_at,created_seq=EXCLUDED.created_seq",
+                &[&t, &q, &replacement_id, &now_n],
+            ))?;
             Ok(())
         }
         QueueCommand::LeaseExpired(c) => {
@@ -2070,9 +2726,7 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(*id));
             }
-            for g in groups_of(tx, shard, &c.item_ids)? {
-                refresh_group_summary(tx, shard, &g, now)?;
-            }
+            increment_group_summaries_for_items(tx, shard, &ids, now)?;
             Ok(())
         }
         QueueCommand::CohortExpired(c) => {
@@ -2215,9 +2869,7 @@ fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(*id));
             }
-            for g in &groups {
-                refresh_group_summary(tx, shard, g, now)?;
-            }
+            refresh_group_summaries(tx, shard, &groups, now)?;
             Ok(())
         }
         QueueCommand::SetGates(c) => {
@@ -2393,125 +3045,6 @@ fn select_item_claim_sql(
 // row-lock the sqlite backend approximates with its process Mutex). Runs inside the claim transaction.
 // ---------------------------------------------------------------------------
 
-const GROUP_CANDIDATE_SAVEPOINT: &str = "pqueue_group_candidate";
-const GROUP_CANDIDATE_LOCK_SQL: &str = "SELECT group_key FROM pqueue_group_summary \
-    WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 FOR UPDATE SKIP LOCKED";
-
-/// Candidate groups for the queue, ordered by representative claim key (`rep_priority_sort,
-/// rep_created_at, rep_item_id`; `rep_progress_guard_sort` deferred/NULL). Discovery deliberately does
-/// not lock: each consumer locks one candidate at a time, inside a savepoint, so candidates that are
-/// contended or rejected do not leave transaction-lifetime locks behind. Same lagged-summary caveat as
-/// the sqlite backend (BQ-11c: a `not_before` crossing without a mutation is not yet reflected).
-fn candidate_groups(
-    tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-) -> EngineResult<Vec<GroupKey>> {
-    let (t, q) = parts(shard);
-    let rows = st(tx.query(
-        "SELECT group_key FROM pqueue_group_summary \
-         WHERE tenant_id=$1 AND queue_id=$2 AND oldest_eligible_at IS NOT NULL \
-         ORDER BY rep_priority_sort, rep_created_at, rep_item_id, group_key",
-        &[&t, &q],
-    ))?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let g: String = row.get(0);
-        out.push(GroupKey::new(g).map_err(|e| EngineError::Storage(e.to_string()))?);
-    }
-    Ok(out)
-}
-
-fn candidate_groups_for_claim(
-    tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-    now: UtcTimestamp,
-    compatibility: &ClaimCompatibility,
-) -> EngineResult<Vec<GroupKey>> {
-    if compatibility.metadata_equals.is_empty() {
-        return candidate_groups(tx, shard);
-    }
-    const PAGE_SIZE: i64 = 128;
-    let (tenant, queue) = parts(shard);
-    let now_n = ts_nanos(now);
-    let metadata_filter = metadata_to_json(&Metadata::from_entries(
-        compatibility.metadata_equals.clone(),
-    ))?;
-    let mut groups = Vec::new();
-    let mut offset = 0_i64;
-    loop {
-        let rows = st(tx.query(
-            "SELECT reps.group_key FROM (SELECT DISTINCT ON (group_key) \
-                 group_key,priority_sort,created_seq FROM pqueue_items \
-                 WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' \
-                 AND superseded=false AND cohort_size IS NULL AND group_key IS NOT NULL \
-                 AND (not_before IS NULL OR not_before<=$3) AND eligible_since IS NOT NULL \
-                 AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gate \
-                     ON gate.tenant_id=ig.tenant_id AND gate.queue_id=ig.queue_id \
-                     AND gate.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
-                     AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
-                 AND NOT EXISTS (SELECT 1 FROM jsonb_each($4::text::jsonb) AS wanted(key,value) \
-                     WHERE metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
-                 ORDER BY group_key,priority_sort,created_seq) reps \
-             JOIN pqueue_group_summary gs ON gs.tenant_id=$1 AND gs.queue_id=$2 \
-                 AND gs.group_key=reps.group_key \
-             ORDER BY reps.priority_sort,reps.created_seq,reps.group_key LIMIT $5 OFFSET $6",
-            &[
-                &tenant,
-                &queue,
-                &now_n,
-                &metadata_filter,
-                &PAGE_SIZE,
-                &offset,
-            ],
-        ))?;
-        let page_len = rows.len();
-        for row in rows {
-            let group: String = row.get(0);
-            let group =
-                GroupKey::new(group).map_err(|error| EngineError::Storage(error.to_string()))?;
-            if compatibility
-                .group_key
-                .as_ref()
-                .is_none_or(|required| required == &group)
-            {
-                groups.push(group);
-            }
-        }
-        if page_len < PAGE_SIZE as usize {
-            return Ok(groups);
-        }
-        offset += PAGE_SIZE;
-    }
-}
-
-fn begin_group_candidate(tx: &mut postgres::Transaction<'_>) -> EngineResult<()> {
-    st(tx.batch_execute(&format!("SAVEPOINT {GROUP_CANDIDATE_SAVEPOINT}")))
-}
-
-fn retain_group_candidate(tx: &mut postgres::Transaction<'_>) -> EngineResult<()> {
-    st(tx.batch_execute(&format!("RELEASE SAVEPOINT {GROUP_CANDIDATE_SAVEPOINT}")))
-}
-
-fn release_group_candidate(tx: &mut postgres::Transaction<'_>) -> EngineResult<()> {
-    st(tx.batch_execute(&format!(
-        "ROLLBACK TO SAVEPOINT {GROUP_CANDIDATE_SAVEPOINT}; \
-         RELEASE SAVEPOINT {GROUP_CANDIDATE_SAVEPOINT}"
-    )))
-}
-
-fn try_lock_group_candidate(
-    tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-    group: &GroupKey,
-) -> EngineResult<bool> {
-    let (tenant, queue) = parts(shard);
-    Ok(st(tx.query_opt(
-        GROUP_CANDIDATE_LOCK_SQL,
-        &[&tenant, &queue, &group.as_str()],
-    ))?
-    .is_some())
-}
-
 /// The live currently-eligible items of one group (re-read under the live predicate, FOR UPDATE so the
 /// whole locked group leases together — no SKIP LOCKED inside a locked group), capped at `limit`.
 struct GroupEligibility {
@@ -2541,20 +3074,6 @@ fn active_group_member_count(
     ))?;
     let count: i64 = row.get(0);
     usize::try_from(count).map_err(|error| EngineError::Storage(error.to_string()))
-}
-
-fn group_has_active_lease(
-    tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-    group: &GroupKey,
-) -> EngineResult<bool> {
-    let (tenant, queue) = parts(shard);
-    let row = st(tx.query_one(
-        "SELECT EXISTS(SELECT 1 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
-         AND group_key=$3 AND superseded=false AND cohort_size IS NULL AND lifecycle_state='Leased')",
-        &[&tenant, &queue, &group.as_str()],
-    ))?;
-    Ok(row.get(0))
 }
 
 fn eligible_group_member_count(
@@ -2593,45 +3112,6 @@ fn eligible_group_member_count(
     usize::try_from(count).map_err(|error| EngineError::Storage(error.to_string()))
 }
 
-fn group_eligible_items(
-    tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-    group: &GroupKey,
-    now: UtcTimestamp,
-    limit: usize,
-    compatibility: &ClaimCompatibility,
-) -> EngineResult<GroupEligibility> {
-    let (t, q) = parts(shard);
-    let now_n = ts_nanos(now);
-    let lim = limit as i64;
-    let metadata_filter = metadata_to_json(&Metadata::from_entries(
-        compatibility.metadata_equals.clone(),
-    ))?;
-    let rows = st(tx.query(
-        "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 \
-         AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NULL \
-         AND (not_before IS NULL OR not_before<=$4) AND eligible_since IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
-             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) \
-         AND NOT EXISTS (SELECT 1 FROM jsonb_each($6::text::jsonb) AS wanted(key,value) \
-             WHERE metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
-         ORDER BY priority_sort, created_seq LIMIT $5 FOR UPDATE",
-        &[&t, &q, &group.as_str(), &now_n, &lim, &metadata_filter],
-    ))?;
-    let mut out = Vec::with_capacity(rows.len());
-    let eligible_count = eligible_group_member_count(tx, shard, group, now, false, compatibility)?;
-    for row in rows {
-        let id: String = row.get(0);
-        out.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
-    }
-    Ok(GroupEligibility {
-        item_ids: out,
-        eligible_count,
-    })
-}
-
 /// `group_batching` selection (API-001 whole-eligible-group, `max_groups=N`): accumulate the oldest-N
 /// candidate groups' whole eligible sets in rep order, stopping when adding the next would exceed
 /// `max_items`. Fetches `max_items+1` per group so an oversized group (alone > `max_items`) is detected →
@@ -2644,41 +3124,84 @@ fn select_group_batching(
     max_items: usize,
     max_groups: u32,
     compatibility: &ClaimCompatibility,
+    include_future_summary_rows: bool,
 ) -> EngineResult<Vec<ItemId>> {
-    let groups = candidate_groups_for_claim(tx, shard, now, compatibility)?;
-    let mut acc = Vec::new();
-    let mut used = 0u32;
-    for group in groups {
-        if used >= max_groups {
+    let (tenant, queue) = parts(shard);
+    let now_n = ts_nanos(now);
+    let max_items_i = max_items as i64;
+    let per_group_limit = max_items_i.saturating_add(1);
+    let max_groups_i = i64::from(max_groups);
+    let required_group = compatibility.group_key.as_ref().map(GroupKey::as_str);
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let rows = st(tx.query(
+        "WITH candidate AS MATERIALIZED ( \
+           SELECT s.group_key,r.priority_sort AS rep_priority_sort,r.created_seq,r.item_id AS rep_item_id \
+           FROM pqueue_group_summary s JOIN LATERAL ( \
+             SELECT e.priority_sort,e.created_seq,e.item_id FROM pqueue_items e \
+             WHERE e.tenant_id=$1 AND e.queue_id=$2 AND e.group_key=s.group_key \
+               AND e.lifecycle_state='Pending' AND e.superseded=false AND e.cohort_size IS NULL \
+               AND (e.not_before IS NULL OR e.not_before<=$3) AND e.eligible_since IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                 ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+                 WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
+               AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) wanted(key,value) \
+                 WHERE e.metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
+             ORDER BY e.priority_sort,e.created_seq LIMIT 1 \
+           ) r ON true WHERE s.tenant_id=$1 AND s.queue_id=$2 \
+             AND (s.oldest_eligible_at IS NOT NULL OR $7) \
+             AND ($6::text IS NULL OR s.group_key=$6) \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=$1 \
+               AND leased.queue_id=$2 AND leased.group_key=s.group_key AND leased.superseded=false \
+               AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased') \
+           ORDER BY r.priority_sort,r.created_seq,r.item_id,s.group_key \
+           LIMIT $4 FOR UPDATE OF s SKIP LOCKED \
+         ), locked AS MATERIALIZED ( \
+           SELECT c.group_key,member.item_id,member.priority_sort,member.created_seq \
+           FROM candidate c JOIN pqueue_items member ON member.tenant_id=$1 AND member.queue_id=$2 \
+               AND member.group_key=c.group_key AND member.lifecycle_state='Pending' \
+               AND member.superseded=false AND member.cohort_size IS NULL \
+               AND (member.not_before IS NULL OR member.not_before<=$3) \
+               AND member.eligible_since IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                 ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+                 WHERE ig.tenant_id=member.tenant_id AND ig.queue_id=member.queue_id \
+                   AND ig.item_id=member.item_id) \
+               AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) wanted(key,value) \
+                 WHERE member.metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
+           ORDER BY c.rep_priority_sort,c.created_seq,c.rep_item_id,c.group_key, \
+                    member.priority_sort,member.created_seq,member.item_id \
+           LIMIT $8 FOR UPDATE OF member \
+         ), grouped AS ( \
+           SELECT c.group_key,c.rep_priority_sort,c.created_seq,c.rep_item_id, \
+             COUNT(l.item_id)::bigint AS item_count, \
+             array_agg(l.item_id ORDER BY l.priority_sort,l.created_seq) FILTER (WHERE l.item_id IS NOT NULL) AS item_ids \
+           FROM candidate c LEFT JOIN locked l USING(group_key) \
+           GROUP BY c.group_key,c.rep_priority_sort,c.created_seq,c.rep_item_id \
+         ) SELECT group_key,item_count,item_ids, \
+             (SUM(item_count) OVER (ORDER BY rep_priority_sort,created_seq,rep_item_id,group_key))::bigint AS running_count \
+           FROM grouped WHERE item_count>0 \
+           ORDER BY rep_priority_sort,created_seq,rep_item_id,group_key",
+        &[&tenant,&queue,&now_n,&max_groups_i,&metadata_filter,&required_group,
+          &include_future_summary_rows,&per_group_limit],
+    ))?;
+    let mut selected = Vec::new();
+    for row in rows {
+        let count: i64 = row.get(1);
+        if count > max_items_i {
+            return Err(EngineError::BatchTooLarge);
+        }
+        let running: i64 = row.get(3);
+        if running > max_items_i {
             break;
         }
-        begin_group_candidate(tx)?;
-        if !try_lock_group_candidate(tx, shard, &group)? {
-            release_group_candidate(tx)?;
-            continue;
+        let ids: Vec<String> = row.get(2);
+        for id in ids {
+            selected.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
         }
-        let elig = group_eligible_items(tx, shard, &group, now, max_items + 1, compatibility)?;
-        if group_has_active_lease(tx, shard, &group)? {
-            release_group_candidate(tx)?;
-            continue;
-        }
-        if elig.item_ids.is_empty() {
-            release_group_candidate(tx)?;
-            continue;
-        }
-        if elig.eligible_count > max_items {
-            release_group_candidate(tx)?;
-            return Err(EngineError::BatchTooLarge); // a single group alone exceeds the ceiling
-        }
-        if acc.len() + elig.item_ids.len() > max_items {
-            release_group_candidate(tx)?;
-            break;
-        }
-        acc.extend(elig.item_ids);
-        used += 1;
-        retain_group_candidate(tx)?;
     }
-    Ok(acc)
+    Ok(selected)
 }
 
 /// `same_group_key` selection: the single oldest eligible group, capped at `max_items` (partial allowed).
@@ -2688,28 +3211,53 @@ fn select_same_group(
     now: UtcTimestamp,
     max_items: usize,
     compatibility: &ClaimCompatibility,
+    include_future_summary_rows: bool,
 ) -> EngineResult<Vec<ItemId>> {
-    for group in candidate_groups_for_claim(tx, shard, now, compatibility)? {
-        if compatibility
-            .group_key
-            .as_ref()
-            .is_some_and(|required| required != &group)
-        {
-            continue;
-        }
-        begin_group_candidate(tx)?;
-        if !try_lock_group_candidate(tx, shard, &group)? {
-            release_group_candidate(tx)?;
-            continue;
-        }
-        let elig = group_eligible_items(tx, shard, &group, now, max_items, compatibility)?;
-        if !elig.item_ids.is_empty() {
-            retain_group_candidate(tx)?;
-            return Ok(elig.item_ids);
-        }
-        release_group_candidate(tx)?;
-    }
-    Ok(Vec::new())
+    let (tenant, queue) = parts(shard);
+    let now_n = ts_nanos(now);
+    let limit = max_items as i64;
+    let required_group = compatibility.group_key.as_ref().map(GroupKey::as_str);
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let rows = st(tx.query(
+        "WITH candidate AS MATERIALIZED ( \
+           SELECT s.group_key FROM pqueue_group_summary s JOIN LATERAL ( \
+             SELECT e.priority_sort,e.created_seq,e.item_id FROM pqueue_items e \
+             WHERE e.tenant_id=$1 AND e.queue_id=$2 AND e.group_key=s.group_key \
+               AND e.lifecycle_state='Pending' AND e.superseded=false AND e.cohort_size IS NULL \
+               AND (e.not_before IS NULL OR e.not_before<=$3) AND e.eligible_since IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                 ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+                 WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
+               AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) wanted(key,value) \
+                 WHERE e.metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
+             ORDER BY e.priority_sort,e.created_seq LIMIT 1 \
+           ) r ON true WHERE s.tenant_id=$1 AND s.queue_id=$2 \
+             AND (s.oldest_eligible_at IS NOT NULL OR $7) \
+             AND ($6::text IS NULL OR s.group_key=$6) \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=$1 \
+               AND leased.queue_id=$2 AND leased.group_key=s.group_key AND leased.superseded=false \
+               AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased') \
+           ORDER BY r.priority_sort,r.created_seq,r.item_id,s.group_key \
+           LIMIT 1 FOR UPDATE OF s SKIP LOCKED \
+         ) SELECT i.item_id FROM candidate c JOIN pqueue_items i ON i.tenant_id=$1 \
+           AND i.queue_id=$2 AND i.group_key=c.group_key WHERE i.lifecycle_state='Pending' \
+           AND i.superseded=false AND i.cohort_size IS NULL \
+           AND (i.not_before IS NULL OR i.not_before<=$3) AND i.eligible_since IS NOT NULL \
+           AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+             WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+           AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) wanted(key,value) \
+             WHERE i.metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
+           ORDER BY i.priority_sort,i.created_seq LIMIT $4 FOR UPDATE OF i",
+        &[&tenant,&queue,&now_n,&limit,&metadata_filter,&required_group,&include_future_summary_rows],
+    ))?;
+    rows.into_iter()
+        .map(|row| {
+            ItemId::new(row.get::<_, String>(0)).map_err(|e| EngineError::Storage(e.to_string()))
+        })
+        .collect()
 }
 
 /// `whole_cohort` selection (API-001 G6, all-or-nothing): the oldest COMPLETE cohort whose members are ALL
@@ -2856,6 +3404,9 @@ fn discover_active_scopes_sql(
     granularity: DiscoveryGranularity,
     now: UtcTimestamp,
 ) -> EngineResult<Vec<ActiveScope>> {
+    if !promote_due_group_summary_chunk(client, shard, now)? {
+        return Err(EngineError::Unavailable);
+    }
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     let rows = st(client.query(
@@ -3071,23 +3622,27 @@ fn live_items_sql(
 }
 
 fn metrics_sql(client: &mut Client, shard: &QueueKey) -> EngineResult<QueueMetrics> {
+    let ready: bool = st(client.query_one(
+        "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+         WHERE migration_name='queue_metrics_v2_counted' AND status='complete')",
+        &[],
+    ))?
+    .get(0);
+    if !ready {
+        return Err(EngineError::Unavailable);
+    }
     let (t, q) = parts(shard);
-    let rows = st(client.query(
-        "SELECT lifecycle_state, COUNT(*)::bigint FROM pqueue_items \
-         WHERE tenant_id=$1 AND queue_id=$2 AND superseded=false GROUP BY lifecycle_state",
+    let row = st(client.query_opt(
+        "SELECT pending,leased,complete,failed FROM pqueue_queue_metrics_v2 \
+         WHERE tenant_id=$1 AND queue_id=$2",
         &[&t, &q],
     ))?;
     let mut m = QueueMetrics::default();
-    for row in rows {
-        let state: String = row.get(0);
-        let count: i64 = row.get(1);
-        let count = count as u64;
-        match parse_state(&state)? {
-            ItemState::Pending => m.pending = count,
-            ItemState::Leased => m.leased = count,
-            ItemState::Complete => m.complete = count,
-            ItemState::Failed => m.failed = count,
-        }
+    if let Some(row) = row {
+        m.pending = row.get::<_, i64>(0) as u64;
+        m.leased = row.get::<_, i64>(1) as u64;
+        m.complete = row.get::<_, i64>(2) as u64;
+        m.failed = row.get::<_, i64>(3) as u64;
     }
     m.resident_terminal_count = m.complete + m.failed;
     Ok(m)
@@ -3099,41 +3654,179 @@ fn metrics_by_query_sql(
     shard: &QueueKey,
     request: MetricsByQueryRequest,
 ) -> EngineResult<QueueMetrics> {
-    let index_name = match request.index.as_deref() {
+    // An unconstrained metrics request is exactly the maintained queue-wide metric. Avoid turning it
+    // into an unbounded secondary-index aggregate.
+    if request.filters.is_empty() && request.index.is_none() {
+        return metrics_sql(client, shard);
+    }
+    let spec = match request.index.as_deref() {
         Some(name) => typed_indexes
             .iter()
             .find(|index| index.name == name)
-            .map(|index| index.name.clone())
             .ok_or(EngineError::Invalid("unknown secondary index"))?,
         None => typed_indexes
             .first()
-            .map(|index| index.name.clone())
             .ok_or(EngineError::Invalid("unknown secondary index"))?,
     };
+    // A declared but unconstrained index still means the entire queue. Validate the caller's handle
+    // above, then use the maintained queue-wide counter instead of scanning all side-index rows.
+    if request.filters.is_empty() {
+        return metrics_sql(client, shard);
+    }
+    let fields: Vec<(&str, &IndexType)> = match &spec.declaration {
+        IndexDeclaration::Single(field) => vec![(&field.field, &field.index_type)],
+        IndexDeclaration::Compound(compound) => compound
+            .fields
+            .iter()
+            .map(|field| (field.field.as_str(), &field.index_type))
+            .collect(),
+    };
+    let mut positioned: Vec<(usize, &QueryFilter, Vec<u8>)> = Vec::new();
+    for filter in &request.filters {
+        let Some((position, (_, index_type))) = fields
+            .iter()
+            .enumerate()
+            .find(|(_, (name, _))| *name == filter.field)
+        else {
+            return Err(EngineError::Invalid("unindexed-field"));
+        };
+        let value = match (&filter.value, *index_type) {
+            (TypedValue::String(value), IndexType::String) => {
+                serde_json::Value::String(value.clone())
+            }
+            (TypedValue::Integer(value), IndexType::Integer) => (*value).into(),
+            (TypedValue::Float(value), IndexType::Float) => serde_json::Number::from_f64(*value)
+                .map(serde_json::Value::Number)
+                .ok_or(EngineError::Invalid(
+                    "typed index value is not valid for declared type",
+                ))?,
+            (TypedValue::Bool(value), IndexType::Boolean) => (*value).into(),
+            (TypedValue::DateTime(value), IndexType::Datetime) => value.seconds.into(),
+            _ => {
+                return Err(EngineError::Invalid(
+                    "typed index value is not valid for declared type",
+                ));
+            }
+        };
+        let encoded = axon_esf::encode_index_value(&value, index_type).map_err(|_| {
+            EngineError::Invalid("typed index value is not valid for declared type")
+        })?;
+        positioned.push((position, filter, encoded));
+    }
+    positioned.sort_by_key(|(position, _, _)| *position);
+
+    fn framed(value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + value.len());
+        out.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        out.extend_from_slice(value);
+        out
+    }
+    fn prefix_successor(mut prefix: Vec<u8>) -> Option<Vec<u8>> {
+        for index in (0..prefix.len()).rev() {
+            if prefix[index] != u8::MAX {
+                prefix[index] += 1;
+                prefix.truncate(index + 1);
+                return Some(prefix);
+            }
+        }
+        None
+    }
+
     let (t, q) = parts(shard);
-    let rows = st(client.query(
-        "SELECT i.lifecycle_state, i.superseded, idx.index_key \
+    let mut sql = String::from(
+        "SELECT \
+           COUNT(*) FILTER (WHERE i.lifecycle_state='Pending')::bigint, \
+           COUNT(*) FILTER (WHERE i.lifecycle_state='Leased')::bigint, \
+           COUNT(*) FILTER (WHERE i.lifecycle_state='Complete')::bigint, \
+           COUNT(*) FILTER (WHERE i.lifecycle_state='Failed')::bigint \
          FROM pqueue_item_index idx \
          JOIN pqueue_items i \
            ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id AND i.item_id=idx.item_id \
-         WHERE idx.tenant_id=$1 AND idx.queue_id=$2 AND idx.index_name=$3",
-        &[&t, &q, &index_name],
-    ))?;
-    let mut records = Vec::with_capacity(rows.len());
-    for row in rows {
-        records.push((
-            parse_state(&row.get::<_, String>(0))?,
-            row.get::<_, bool>(1),
-            row.get::<_, Vec<u8>>(2),
+         WHERE idx.tenant_id=$1 AND idx.queue_id=$2 AND idx.index_name=$3 \
+           AND i.superseded=false",
+    );
+    let mut owned: Vec<Box<dyn ToSql + Sync>> = vec![
+        Box::new(t.to_owned()),
+        Box::new(q.to_owned()),
+        Box::new(spec.name.clone()),
+    ];
+    // A contiguous, unambiguous equality prefix is an optional whole-key narrowing optimization.
+    // Every filter is independently enforced through the normalized component index below, so later
+    // fields and multiple bounds on one field remain valid and index-backed.
+    let mut prefix_field_count = 0usize;
+    loop {
+        let matches = positioned
+            .iter()
+            .filter(|(position, filter, _)| {
+                *position == prefix_field_count && filter.op == FilterOp::Eq
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1
+            || positioned.iter().any(|(position, filter, _)| {
+                *position == prefix_field_count && filter.op != FilterOp::Eq
+            })
+        {
+            break;
+        }
+        prefix_field_count += 1;
+    }
+    let mut prefix = Vec::new();
+    for position in 0..prefix_field_count {
+        let (_, _, encoded) = positioned
+            .iter()
+            .find(|(candidate, filter, _)| *candidate == position && filter.op == FilterOp::Eq)
+            .expect("prefix fields were validated above");
+        prefix.extend(framed(encoded));
+    }
+    if !prefix.is_empty() {
+        owned.push(Box::new(prefix.clone()));
+        sql.push_str(&format!(" AND idx.index_key >= ${}", owned.len()));
+        if let Some(successor) = prefix_successor(prefix.clone()) {
+            owned.push(Box::new(successor));
+            sql.push_str(&format!(" AND idx.index_key < ${}", owned.len()));
+        }
+    }
+    for (filter_number, (position, filter, encoded)) in positioned.iter().enumerate() {
+        owned.push(Box::new(*position as i32));
+        let position_parameter = owned.len();
+        owned.push(Box::new(encoded.clone()));
+        let value_parameter = owned.len();
+        let operator = match filter.op {
+            FilterOp::Eq => "=",
+            FilterOp::Gte => ">=",
+            FilterOp::Gt => ">",
+            FilterOp::Lte => "<=",
+            FilterOp::Lt => "<",
+        };
+        // Each component predicate is a lookup/range over the normalized component index. This keeps
+        // later-field ranges indexable regardless of variable-length equality-prefix values.
+        sql.push_str(&format!(
+            " AND EXISTS (SELECT 1 FROM pqueue_item_index_component component_{filter_number} \
+             WHERE component_{filter_number}.tenant_id=idx.tenant_id \
+               AND component_{filter_number}.queue_id=idx.queue_id \
+               AND component_{filter_number}.index_name=idx.index_name \
+               AND component_{filter_number}.item_id=idx.item_id \
+               AND component_{filter_number}.component_position=${position_parameter} \
+               AND component_{filter_number}.component_value {operator} ${value_parameter})"
         ));
     }
-    pqueue_projection::filtered_lifecycle_metrics_by_index_key(
-        typed_indexes,
-        &request,
-        records
-            .iter()
-            .map(|(state, superseded, key)| (*state, *superseded, key.as_slice())),
-    )
+    if positioned.len() == fields.len() && prefix_field_count == fields.len() && !prefix.is_empty()
+    {
+        // A full-key equality is more selective than its equivalent prefix interval.
+        owned.push(Box::new(prefix));
+        sql.push_str(&format!(" AND idx.index_key = ${}", owned.len()));
+    }
+    let params: Vec<&(dyn ToSql + Sync)> = owned.iter().map(|value| value.as_ref()).collect();
+    let row = st(client.query_one(&sql, &params))?;
+    let mut metrics = QueueMetrics {
+        pending: row.get::<_, i64>(0) as u64,
+        leased: row.get::<_, i64>(1) as u64,
+        complete: row.get::<_, i64>(2) as u64,
+        failed: row.get::<_, i64>(3) as u64,
+        ..QueueMetrics::default()
+    };
+    metrics.resident_terminal_count = metrics.complete + metrics.failed;
+    Ok(metrics)
 }
 
 /// Lifecycle state + flags for a BATCH of items in ONE round-trip (was one SELECT per id), keyed by
@@ -3232,7 +3925,64 @@ pub struct PostgresRelationalBackend {
     counters: QueueCounters,
 }
 
+/// Progress returned by one online queue-metrics backfill batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MetricsMigrationProgress {
+    pub rows_processed: u64,
+    pub rows_backfilled: u64,
+    pub due_rows_backfilled: u64,
+    pub batches_completed: u64,
+    pub complete: bool,
+}
+
 impl PostgresRelationalBackend {
+    /// Apply the online index migration set required before opening an existing production schema.
+    /// Every statement is issued separately because PostgreSQL forbids `CREATE INDEX CONCURRENTLY`
+    /// inside a transaction block. This is an explicit operator action; normal startup only verifies.
+    pub fn apply_concurrent_migrations(url: &str) -> EngineResult<()> {
+        let mut client = connect(PostgresConnectConfig::new(url))?;
+        apply_concurrent_migrations(&mut client)
+    }
+
+    /// Schema-isolated variant of [`Self::apply_concurrent_migrations`].
+    pub fn apply_concurrent_migrations_in_schema(url: &str, schema: &str) -> EngineResult<()> {
+        if !schema
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(EngineError::Invalid("schema name must be [A-Za-z0-9_]"));
+        }
+        let mut client = connect(PostgresConnectConfig::new(url))?;
+        st(client.batch_execute(&format!("SET search_path TO {schema}")))?;
+        apply_concurrent_migrations(&mut client)
+    }
+
+    /// Run at most one bounded, transactionally resumable metrics-backfill batch.
+    pub fn migrate_metrics_batch(
+        url: &str,
+        batch_size: u32,
+    ) -> EngineResult<MetricsMigrationProgress> {
+        let mut client = connect(PostgresConnectConfig::new(url))?;
+        migrate_metrics_batch(&mut client, batch_size)
+    }
+
+    /// Schema-isolated variant of [`Self::migrate_metrics_batch`].
+    pub fn migrate_metrics_batch_in_schema(
+        url: &str,
+        schema: &str,
+        batch_size: u32,
+    ) -> EngineResult<MetricsMigrationProgress> {
+        if !schema
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(EngineError::Invalid("schema name must be [A-Za-z0-9_]"));
+        }
+        let mut client = connect(PostgresConnectConfig::new(url))?;
+        st(client.batch_execute(&format!("SET search_path TO {schema}")))?;
+        migrate_metrics_batch(&mut client, batch_size)
+    }
+
     /// Connect to `url` (default `search_path`), ensure the schema, and load the queue-def cache.
     pub fn connect(url: &str) -> EngineResult<Self> {
         let client = connect(PostgresConnectConfig::new(url))?;
@@ -3250,23 +4000,80 @@ impl PostgresRelationalBackend {
             return Err(EngineError::Invalid("schema name must be [A-Za-z0-9_]"));
         }
         let mut client = connect(PostgresConnectConfig::new(url))?;
-        st(client.batch_execute(&format!(
-            "CREATE SCHEMA IF NOT EXISTS {schema}; SET search_path TO {schema};"
-        )))?;
+        let schema_exists: bool = st(client.query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname=$1)",
+            &[&schema],
+        ))?
+        .get(0);
+        if !schema_exists {
+            st(client.batch_execute(&format!("CREATE SCHEMA {schema}")))?;
+        }
+        st(client.batch_execute(&format!("SET search_path TO {schema}")))?;
         Self::from_client(client)
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
-        st(client.batch_execute(RELATIONAL_SCHEMA))?;
-        st(client.batch_execute(
-            "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';\
-             ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;",
-        ))?;
-        st(client.batch_execute(
-            "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';",
-        ))?;
-        st(client.batch_execute(
-            "ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS cohort_id TEXT;\
+        let fresh: bool =
+            st(client.query_one("SELECT to_regclass('pqueue_items') IS NULL", &[]))?.get(0);
+        if !fresh {
+            let state_table_exists: bool = st(client.query_one(
+                "SELECT to_regclass('pqueue_metrics_migration_state') IS NOT NULL",
+                &[],
+            ))?
+            .get(0);
+            if !state_table_exists {
+                return Err(EngineError::Unavailable);
+            }
+            let ready: bool = st(client.query_one(
+                "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+                 WHERE migration_name='queue_metrics_v2_counted' AND status='complete')",
+                &[],
+            ))?
+            .get(0);
+            if !ready {
+                return Err(EngineError::Unavailable);
+            }
+            let maintenance_ready: bool = st(client.query_one(
+                "SELECT \
+                   to_regclass('pqueue_queue_metrics_v2') IS NOT NULL \
+                   AND to_regclass('pqueue_metrics_counted_item') IS NOT NULL \
+                   AND to_regclass('pqueue_group_due_pending') IS NOT NULL \
+                   AND to_regclass('pqueue_item_index_component') IS NOT NULL \
+                   AND to_regprocedure('pqueue_apply_metrics_delta()') IS NOT NULL \
+                   AND to_regprocedure('pqueue_index_components(bytea)') IS NOT NULL \
+                   AND to_regprocedure('pqueue_sync_index_components()') IS NOT NULL \
+                   AND EXISTS(SELECT 1 FROM pg_trigger \
+                     WHERE tgname='pqueue_items_metrics_delta' \
+                       AND tgrelid='pqueue_items'::regclass AND tgenabled IN ('O','A') \
+                       AND tgfoid=to_regprocedure('pqueue_apply_metrics_delta()') \
+                       AND pg_get_triggerdef(oid) LIKE \
+                         '%AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state, superseded, not_before, group_key%') \
+                   AND EXISTS(SELECT 1 FROM pg_trigger \
+                     WHERE tgname='pqueue_item_index_components_sync' \
+                       AND tgrelid='pqueue_item_index'::regclass AND tgenabled IN ('O','A') \
+                       AND tgfoid=to_regprocedure('pqueue_sync_index_components()') \
+                       AND pg_get_triggerdef(oid) LIKE \
+                         '%AFTER INSERT OR DELETE OR UPDATE OF index_key%')",
+                &[],
+            ))?
+            .get(0);
+            if !maintenance_ready {
+                return Err(EngineError::Unavailable);
+            }
+        }
+        if fresh {
+            st(client.batch_execute(RELATIONAL_SCHEMA))?;
+            st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
+            st(client.execute(
+                "INSERT INTO pqueue_metrics_migration_state(migration_name,status) \
+                 VALUES('queue_metrics_v2_counted','complete') ON CONFLICT(migration_name) DO NOTHING",
+                &[],
+            ))?;
+            st(client.batch_execute(
+                "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';\
+                 ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;\
+                 ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
+                 ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS cohort_id TEXT;\
              ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS member_count BIGINT NOT NULL DEFAULT 0;\
              ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'forming';\
              ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS cohort_created_at BIGINT;\
@@ -3287,7 +4094,9 @@ impl PostgresRelationalBackend {
              CREATE INDEX IF NOT EXISTS pqueue_cohorts_expiry_idx \
                ON pqueue_cohorts (tenant_id, queue_id, cohort_created_at) \
                WHERE state IN ('forming','complete');",
-        ))?;
+            ))?;
+        }
+        verify_group_summary_indexes(&mut client, fresh)?;
         let mut inner = Inner {
             client,
             queues: HashMap::new(),
@@ -3332,6 +4141,222 @@ impl PostgresRelationalBackend {
         self.node_id = node_id;
         self
     }
+}
+
+fn apply_concurrent_migrations(client: &mut Client) -> EngineResult<()> {
+    st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
+    for (_, ddl) in GROUP_SUMMARY_INDEX_MIGRATIONS {
+        st(client.batch_execute(ddl))?;
+    }
+    verify_group_summary_indexes(client, false)
+}
+
+fn migrate_metrics_batch(
+    client: &mut Client,
+    batch_size: u32,
+) -> EngineResult<MetricsMigrationProgress> {
+    if batch_size == 0 || batch_size > 100_000 {
+        return Err(EngineError::Invalid(
+            "metrics migration batch size must be 1..=100000",
+        ));
+    }
+    st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
+
+    // Initialization takes only a metadata/high-water lock window; it never scans or aggregates the table.
+    let exists: bool = st(client.query_one(
+        "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+         WHERE migration_name='queue_metrics_v2_counted')",
+        &[],
+    ))?
+    .get(0);
+    if !exists {
+        let mut tx = st(client.transaction())?;
+        st(tx.batch_execute("LOCK TABLE pqueue_items IN SHARE ROW EXCLUSIVE MODE"))?;
+        let initialized: bool = st(tx.query_one(
+            "SELECT EXISTS(SELECT 1 FROM pqueue_metrics_migration_state \
+             WHERE migration_name='queue_metrics_v2_counted')",
+            &[],
+        ))?
+        .get(0);
+        if !initialized {
+            let high = st(tx.query_opt(
+                "SELECT tenant_id,queue_id,item_id FROM pqueue_items \
+                 ORDER BY tenant_id DESC,queue_id DESC,item_id DESC LIMIT 1",
+                &[],
+            ))?;
+            match high {
+                Some(row) => {
+                    let high_t: String = row.get(0);
+                    let high_q: String = row.get(1);
+                    let high_i: String = row.get(2);
+                    st(tx.execute(
+                        "INSERT INTO pqueue_metrics_migration_state( \
+                           migration_name,status,high_tenant,high_queue,high_item_id) \
+                         VALUES('queue_metrics_v2_counted','active',$1,$2,$3)",
+                        &[&high_t, &high_q, &high_i],
+                    ))?;
+                }
+                None => {
+                    st(tx.execute(
+                        "INSERT INTO pqueue_metrics_migration_state(migration_name,status) \
+                         VALUES('queue_metrics_v2_counted','complete')",
+                        &[],
+                    ))?;
+                }
+            }
+        }
+        st(tx.commit())?;
+    }
+
+    let mut tx = st(client.transaction())?;
+    let state = st(tx.query_one(
+        "SELECT status,high_tenant,high_queue,high_item_id,last_tenant,last_queue,last_item_id, \
+                rows_backfilled,batches_completed,due_rows_backfilled \
+         FROM pqueue_metrics_migration_state WHERE migration_name='queue_metrics_v2_counted' FOR UPDATE",
+        &[],
+    ))?;
+    let status: String = state.get(0);
+    let prior_rows: i64 = state.get(7);
+    let prior_batches: i64 = state.get(8);
+    let prior_due_rows: i64 = state.get(9);
+    if status == "complete" {
+        st(tx.commit())?;
+        return Ok(MetricsMigrationProgress {
+            rows_processed: 0,
+            rows_backfilled: prior_rows as u64,
+            due_rows_backfilled: prior_due_rows as u64,
+            batches_completed: prior_batches as u64,
+            complete: true,
+        });
+    }
+    let high_t: String = state.get(1);
+    let high_q: String = state.get(2);
+    let high_i: String = state.get(3);
+    let last_t: Option<String> = state.get(4);
+    let last_q: Option<String> = state.get(5);
+    let last_i: Option<String> = state.get(6);
+    let rows = st(tx.query(
+        "SELECT tenant_id,queue_id,item_id,lifecycle_state,superseded,item_version \
+         FROM pqueue_items \
+         WHERE (tenant_id,queue_id,item_id) > ($1,$2,$3) \
+           AND (tenant_id,queue_id,item_id) <= ($4,$5,$6) \
+         ORDER BY tenant_id,queue_id,item_id LIMIT $7 FOR UPDATE",
+        &[
+            &last_t.as_deref().unwrap_or(""),
+            &last_q.as_deref().unwrap_or(""),
+            &last_i.as_deref().unwrap_or(""),
+            &high_t,
+            &high_q,
+            &high_i,
+            &(batch_size as i64),
+        ],
+    ))?;
+    let processed = rows.len() as i64;
+    let item_tenants: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+    let item_queues: Vec<String> = rows.iter().map(|row| row.get(1)).collect();
+    let item_ids: Vec<String> = rows.iter().map(|row| row.get(2)).collect();
+    let item_states: Vec<String> = rows.iter().map(|row| row.get(3)).collect();
+    let item_superseded: Vec<bool> = rows.iter().map(|row| row.get(4)).collect();
+    let item_versions: Vec<i64> = rows.iter().map(|row| row.get(5)).collect();
+    let newly_counted = if rows.is_empty() {
+        Vec::new()
+    } else {
+        st(tx.query(
+            "INSERT INTO pqueue_metrics_counted_item( \
+               tenant_id,queue_id,item_id,lifecycle_state,superseded,item_version) \
+             SELECT * FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::bool[],$6::bigint[]) \
+             ON CONFLICT(tenant_id,queue_id,item_id) DO NOTHING \
+             RETURNING tenant_id,queue_id,lifecycle_state,superseded",
+            &[&item_tenants,&item_queues,&item_ids,&item_states,&item_superseded,&item_versions],
+        ))?
+    };
+    let mut per_queue: HashMap<(String, String), [i64; 4]> = HashMap::new();
+    for row in &newly_counted {
+        if row.get::<_, bool>(3) {
+            continue;
+        }
+        let counts = per_queue.entry((row.get(0), row.get(1))).or_default();
+        match row.get::<_, String>(2).as_str() {
+            "Pending" => counts[0] += 1,
+            "Leased" => counts[1] += 1,
+            "Complete" => counts[2] += 1,
+            "Failed" => counts[3] += 1,
+            _ => return Err(EngineError::Storage("invalid lifecycle state".into())),
+        }
+    }
+    for ((tenant, queue), counts) in per_queue {
+        st(tx.execute(
+            "INSERT INTO pqueue_queue_metrics_v2(tenant_id,queue_id,pending,leased,complete,failed) \
+             VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(tenant_id,queue_id) DO UPDATE SET \
+               pending=pqueue_queue_metrics_v2.pending+EXCLUDED.pending, \
+               leased=pqueue_queue_metrics_v2.leased+EXCLUDED.leased, \
+               complete=pqueue_queue_metrics_v2.complete+EXCLUDED.complete, \
+               failed=pqueue_queue_metrics_v2.failed+EXCLUDED.failed",
+            &[
+                &tenant, &queue, &counts[0], &counts[1], &counts[2], &counts[3],
+            ],
+        ))?;
+    }
+    if !item_ids.is_empty() {
+        st(tx.execute(
+            "INSERT INTO pqueue_item_index_component( \
+               tenant_id,queue_id,index_name,item_id,component_position,component_value) \
+             SELECT idx.tenant_id,idx.queue_id,idx.index_name,idx.item_id, \
+                    component.component_position,component.component_value \
+             FROM unnest($1::text[],$2::text[],$3::text[]) selected(tenant_id,queue_id,item_id) \
+             JOIN pqueue_item_index idx USING(tenant_id,queue_id,item_id) \
+             CROSS JOIN LATERAL pqueue_index_components(idx.index_key) component \
+             ON CONFLICT(tenant_id,queue_id,index_name,item_id,component_position) \
+             DO UPDATE SET component_value=EXCLUDED.component_value",
+            &[&item_tenants, &item_queues, &item_ids],
+        ))?;
+    }
+    let due_rows = if item_ids.is_empty() {
+        0
+    } else {
+        st(tx.execute(
+            "INSERT INTO pqueue_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+             SELECT i.tenant_id,i.queue_id,i.item_id,i.group_key,i.not_before,i.created_seq \
+             FROM unnest($1::text[],$2::text[],$3::text[]) selected(tenant_id,queue_id,item_id) \
+             JOIN pqueue_items i USING(tenant_id,queue_id,item_id) \
+             LEFT JOIN pqueue_group_summary s ON s.tenant_id=i.tenant_id AND s.queue_id=i.queue_id \
+               AND s.group_key=i.group_key \
+             WHERE i.group_key IS NOT NULL AND i.lifecycle_state='Pending' \
+               AND i.superseded=false AND i.not_before IS NOT NULL \
+               AND (s.updated_at IS NULL OR i.not_before>s.updated_at) \
+             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET group_key=EXCLUDED.group_key, \
+               due_at=EXCLUDED.due_at,created_seq=EXCLUDED.created_seq",
+            &[&item_tenants, &item_queues, &item_ids],
+        ))? as i64
+    };
+    // A short page is the end-of-high-water sentinel because this transaction owns the cursor row and
+    // the SELECT is ordered and non-SKIP-LOCKED. Thus every call reads/locks at most `batch_size` rows.
+    let complete = processed < batch_size as i64;
+    let (next_t, next_q, next_i) = rows
+        .last()
+        .map(|row| {
+            (
+                row.get::<_, String>(0),
+                row.get::<_, String>(1),
+                row.get::<_, String>(2),
+            )
+        })
+        .unwrap_or((high_t, high_q, high_i));
+    st(tx.execute(
+        "UPDATE pqueue_metrics_migration_state SET status=$1,last_tenant=$2,last_queue=$3,last_item_id=$4, \
+           rows_backfilled=rows_backfilled+$5,due_rows_backfilled=due_rows_backfilled+$6, \
+           batches_completed=batches_completed+1,updated_at=clock_timestamp() \
+         WHERE migration_name='queue_metrics_v2_counted'",
+        &[&if complete { "complete" } else { "active" }, &next_t, &next_q, &next_i, &processed, &due_rows],
+    ))?;
+    st(tx.commit())?;
+    Ok(MetricsMigrationProgress {
+        rows_processed: processed as u64,
+        rows_backfilled: (prior_rows + processed) as u64,
+        due_rows_backfilled: (prior_due_rows + due_rows) as u64,
+        batches_completed: (prior_batches + 1) as u64,
+        complete,
+    })
 }
 
 // --- Typed raw commit -------------------------------------------------------------------------------
@@ -4036,6 +5061,15 @@ impl ClaimPort for PostgresRelationalBackend {
             if req.expected_epoch.is_some_and(|e| e != claim_epoch as u64) {
                 return Err(EngineError::EpochFenced);
             }
+            // Time-driven summary maintenance is fenced with the claim. An explicit selection-only
+            // eligibility_time must never advance durable summary state, so promotion uses wall-clock
+            // `now`; live candidate predicates below may still use `eligibility_at()`.
+            if !matches!(unit, ClaimUnit::Item)
+                && !promote_due_group_summary_chunk_in_tx(&mut tx, &req.shard, req.now)?
+            {
+                st(tx.commit())?;
+                return Err(EngineError::Unavailable);
+            }
             let seq = alloc_seq(&mut tx, &t, &q)?;
             let now_n = ts_nanos(req.now);
             // Due-ness is resolved at the caller-resolved eligibility epoch (`ClaimRequest::eligibility_at`),
@@ -4089,9 +5123,14 @@ impl ClaimPort for PostgresRelationalBackend {
                     token_ops.push(TokenOp::Set(item_id, req.lease_token.clone()));
                 }
                 // The CTE bypasses apply_command_sql's Claim arm, so refresh the claimed groups here.
-                for grp in groups_of(&mut tx, &req.shard, &claimed_ids)? {
-                    refresh_group_summary(&mut tx, &req.shard, &grp, req.now)?;
-                }
+                let claimed_id_strings: Vec<String> =
+                    claimed_ids.iter().map(ToString::to_string).collect();
+                decrement_group_summaries_for_items(
+                    &mut tx,
+                    &req.shard,
+                    &claimed_id_strings,
+                    req.now,
+                )?;
                 st(tx.commit())?;
                 apply_token_ops(live_tokens, token_ops);
                 return Ok(Claimed {
@@ -4118,6 +5157,7 @@ impl ClaimPort for PostgresRelationalBackend {
                         req.max_items,
                         max_groups,
                         &req.compatibility,
+                        req.eligibility_at() != req.now,
                     )?
                 }
                 ClaimUnit::SameGroupKey => select_same_group(
@@ -4126,6 +5166,7 @@ impl ClaimPort for PostgresRelationalBackend {
                     req.eligibility_at(),
                     req.max_items,
                     &req.compatibility,
+                    req.eligibility_at() != req.now,
                 )?,
                 ClaimUnit::WholeCohort => {
                     match select_whole_cohort(
@@ -4890,10 +5931,11 @@ impl ReclaimDriver for PostgresRelationalBackend {
             let rows = st(g.client.query(
                 "SELECT tenant_id, queue_id, item_id FROM pqueue_items \
                  WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
-                 AND lease_expires_at<$1 ORDER BY tenant_id, queue_id",
-                &[&now_n],
+                 AND cohort_size IS NULL AND fenced=false AND superseded=false \
+                 AND lease_expires_at<$1 ORDER BY lease_expires_at,tenant_id,queue_id,item_id LIMIT $2",
+                &[&now_n, &GLOBAL_EXPIRY_SWEEP_LIMIT],
             ))?;
-            let mut by_queue: Vec<(QueueKey, Vec<ItemId>)> = Vec::new();
+            let mut by_queue: BTreeMap<QueueKey, Vec<ItemId>> = BTreeMap::new();
             for row in rows {
                 let t: String = row.get(0);
                 let q: String = row.get(1);
@@ -4903,10 +5945,7 @@ impl ReclaimDriver for PostgresRelationalBackend {
                     QueueId::new(q).map_err(|e| EngineError::Storage(e.to_string()))?,
                 );
                 let id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
-                match by_queue.last_mut() {
-                    Some((k, ids)) if *k == key => ids.push(id),
-                    _ => by_queue.push((key, vec![id])),
-                }
+                by_queue.entry(key).or_default().push(id);
             }
             let mut report = TickReport::default();
             for (shard, ids) in by_queue {
@@ -5099,10 +6138,11 @@ fn all_expired_leases_sql(
     let rows = st(client.query(
         "SELECT tenant_id, queue_id, item_id FROM pqueue_items \
          WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
-         AND lease_expires_at<$1 ORDER BY tenant_id, queue_id",
-        &[&now_n],
+         AND cohort_size IS NULL AND fenced=false AND superseded=false \
+         AND lease_expires_at<$1 ORDER BY lease_expires_at,tenant_id,queue_id,item_id LIMIT $2",
+        &[&now_n, &GLOBAL_EXPIRY_SWEEP_LIMIT],
     ))?;
-    let mut by_queue: Vec<(QueueKey, Vec<ItemId>)> = Vec::new();
+    let mut by_queue: BTreeMap<QueueKey, Vec<ItemId>> = BTreeMap::new();
     for row in rows {
         let key = QueueKey::new(
             TenantId::new(row.get::<_, String>(0))
@@ -5112,12 +6152,9 @@ fn all_expired_leases_sql(
         );
         let id = ItemId::new(row.get::<_, String>(2))
             .map_err(|e| EngineError::Storage(e.to_string()))?;
-        match by_queue.last_mut() {
-            Some((k, ids)) if *k == key => ids.push(id),
-            _ => by_queue.push((key, vec![id])),
-        }
+        by_queue.entry(key).or_default().push(id);
     }
-    Ok(by_queue)
+    Ok(by_queue.into_iter().collect())
 }
 
 /// Terminal records that are past both the retention window and, for emit-enabled queues, the durable
@@ -5240,12 +6277,15 @@ impl PostgresRelational {
     }
 
     fn from_client(mut client: Client) -> EngineResult<Self> {
+        let fresh: bool =
+            st(client.query_one("SELECT to_regclass('pqueue_items') IS NULL", &[]))?.get(0);
         st(client.batch_execute(RELATIONAL_SCHEMA))?;
         st(client.batch_execute(
             "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';\
              ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
              ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;",
         ))?;
+        verify_group_summary_indexes(&mut client, fresh)?;
         let mut inner = Inner {
             client,
             queues: HashMap::new(),
@@ -5290,6 +6330,8 @@ impl PostgresRelational {
         items: &[PushItem],
         now: UtcTimestamp,
     ) -> EngineResult<()> {
+        #[cfg(test)]
+        reset_push_sql_probe(shard);
         let mut g = self.lock();
         let Inner { client, queues, .. } = &mut *g;
         let definition = queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
@@ -5300,9 +6342,10 @@ impl PostgresRelational {
             let mut item_ids = HashSet::new();
             let mut grouped = HashMap::<String, u64>::new();
             for item in items {
-                if !keys.insert(item.client_item_key.as_str().to_string())
-                    || !item_ids.insert(item.item_id.to_string())
-                {
+                if !keys.insert(item.client_item_key.as_str().to_string()) {
+                    return Err(EngineError::Conflict);
+                }
+                if !item_ids.insert(item.item_id.to_string()) {
                     return Err(EngineError::Conflict);
                 }
                 if item.cohort_size.is_some() && item.group_key.is_none() {
@@ -5311,30 +6354,56 @@ impl PostgresRelational {
                 if let Some(group) = &item.group_key {
                     *grouped.entry(group.as_str().to_string()).or_default() += 1;
                 }
-                let item_id = item.item_id.to_string();
-                let key = item.client_item_key.as_str();
-                let now_n = ts_nanos(now);
-                if st(tx.query_opt(
-                    "SELECT 1 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
-                     AND (item_id=$3 OR (client_item_key=$4 AND superseded=false)) \
-                     UNION ALL SELECT 1 FROM pqueue_item_key_retention WHERE tenant_id=$1 AND queue_id=$2 \
-                     AND client_item_key=$4 AND expires_at>$5 LIMIT 1",
-                    &[&t, &q, &item_id, &key, &now_n],
-                ))?.is_some() {
-                    return Err(EngineError::Conflict);
-                }
             }
-            for (group, added) in grouped {
-                let Some(max) = definition.max_eligible_group_size else {
-                    continue;
-                };
-                let row = st(tx.query_one(
-                    "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
-                     AND group_key=$3 AND lifecycle_state IN ('Pending','Leased') AND superseded=false",
-                    &[&t, &q, &group],
-                ))?;
-                let existing: i64 = row.get(0);
-                if (existing as u64).saturating_add(added) > max {
+
+            // One set-based conflict probe for the whole request. The former loop issued one query for
+            // every item (500 round trips in the E0 producer batch) even though both predicates are set
+            // membership checks. Database uniqueness remains the commit-time race authority.
+            let item_ids: Vec<String> = item_ids.into_iter().collect();
+            let keys: Vec<String> = keys.into_iter().collect();
+            let now_n = ts_nanos(now);
+            #[cfg(test)]
+            update_push_sql_probe(shard, |probe| probe.admission_conflict_queries += 1);
+            if st(tx.query_opt(
+                "SELECT 1 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                 AND (item_id=ANY($3) OR (client_item_key=ANY($4) AND superseded=false)) \
+                 UNION ALL SELECT 1 FROM pqueue_item_key_retention WHERE tenant_id=$1 AND queue_id=$2 \
+                 AND client_item_key=ANY($4) AND expires_at>$5 LIMIT 1",
+                &[&t, &q, &item_ids, &keys, &now_n],
+            ))?.is_some() {
+                return Err(EngineError::Conflict);
+            }
+
+            if let Some(max) = definition.max_eligible_group_size
+                && !grouped.is_empty()
+            {
+                let mut group_keys = Vec::with_capacity(grouped.len());
+                let mut probe_limits = Vec::with_capacity(grouped.len());
+                for (group, added) in &grouped {
+                    if *added > max {
+                        return Err(EngineError::Conflict);
+                    }
+                    group_keys.push(group.clone());
+                    // We only need to prove whether the cap is crossed. Reading at most the remaining
+                    // capacity plus one makes the decision exact while bounding touched-group work by
+                    // max_eligible_group_size (itself <= max_claim_batch_size by API-001 validation).
+                    probe_limits.push(max.saturating_sub(*added).saturating_add(1) as i64);
+                }
+                #[cfg(test)]
+                update_push_sql_probe(shard, |probe| probe.admission_group_queries += 1);
+                if st(tx.query_opt(
+                    "WITH wanted AS ( \
+                       SELECT * FROM unnest($3::text[],$4::bigint[]) AS w(group_key,probe_limit) \
+                     ) SELECT w.group_key FROM wanted w JOIN LATERAL ( \
+                       SELECT 1 FROM pqueue_items i WHERE i.tenant_id=$1 AND i.queue_id=$2 \
+                         AND i.group_key=w.group_key AND i.lifecycle_state IN ('Pending','Leased') \
+                         AND i.superseded=false LIMIT w.probe_limit \
+                     ) found ON true GROUP BY w.group_key,w.probe_limit \
+                     HAVING COUNT(*) >= w.probe_limit LIMIT 1",
+                    &[&t, &q, &group_keys, &probe_limits],
+                ))?
+                .is_some()
+                {
                     return Err(EngineError::Conflict);
                 }
             }
@@ -6065,6 +7134,12 @@ impl ProjectionStore for PostgresRelational {
             st(transaction.rollback())?;
             return Ok(RichClaimSelection::default());
         }
+        if !matches!(unit, ClaimUnit::Item)
+            && !promote_due_group_summary_chunk_in_tx(&mut transaction, shard, now)?
+        {
+            st(transaction.commit())?;
+            return Err(EngineError::Unavailable);
+        }
         let mut cohort_id = None;
         let item_ids = match unit {
             ClaimUnit::Item => return Err(EngineError::Unavailable),
@@ -6081,11 +7156,17 @@ impl ProjectionStore for PostgresRelational {
                     max_items,
                     max_groups,
                     compatibility,
+                    false,
                 )?
             }
-            ClaimUnit::SameGroupKey => {
-                select_same_group(&mut transaction, shard, now, max_items, compatibility)?
-            }
+            ClaimUnit::SameGroupKey => select_same_group(
+                &mut transaction,
+                shard,
+                now,
+                max_items,
+                compatibility,
+                false,
+            )?,
             ClaimUnit::WholeCohort => {
                 match select_whole_cohort(&mut transaction, shard, now, max_items, compatibility)? {
                     Some(selected) => {
@@ -6096,7 +7177,7 @@ impl ProjectionStore for PostgresRelational {
                 }
             }
         };
-        st(transaction.rollback())?;
+        st(transaction.commit())?;
         Ok(RichClaimSelection {
             item_ids,
             cohort_id,
@@ -6373,17 +7454,132 @@ mod sql_shape_tests {
     }
 
     #[test]
-    fn group_claim_locks_one_exact_candidate_at_a_time() {
-        assert!(GROUP_CANDIDATE_LOCK_SQL.contains("group_key=$3"));
-        assert!(GROUP_CANDIDATE_LOCK_SQL.contains("FOR UPDATE SKIP LOCKED"));
-        assert_eq!(
-            GROUP_CANDIDATE_LOCK_SQL
-                .match_indices("pqueue_group_summary")
-                .count(),
-            1,
-            "candidate acquisition must lock one exact summary row, not the discovery set"
-        );
-        assert_eq!(GROUP_CANDIDATE_SAVEPOINT, "pqueue_group_candidate");
+    fn group_claim_is_one_set_based_bounded_statement() {
+        let source = include_str!("relational.rs");
+        let claim_fn = source
+            .split("fn select_group_batching(")
+            .nth(1)
+            .unwrap()
+            .split("fn select_same_group(")
+            .next()
+            .unwrap();
+        assert!(claim_fn.contains("JOIN LATERAL"));
+        assert!(claim_fn.contains("LIMIT $4 FOR UPDATE OF s SKIP LOCKED"));
+        assert!(claim_fn.contains("LIMIT $8 FOR UPDATE OF member"));
+        assert!(!claim_fn.contains("JOIN LATERAL (SELECT member.item_id"));
+        assert!(claim_fn.contains("max_items_i.saturating_add(1)"));
+        assert!(claim_fn.contains("array_agg(l.item_id ORDER BY"));
+        assert!(claim_fn.contains("SUM(item_count) OVER"));
+    }
+
+    #[test]
+    fn scheduling_expiry_and_metrics_shapes_are_bounded() {
+        let source = include_str!("relational.rs");
+        assert!(source.contains("unnest($3::text[],$4::bigint[],$5::bigint[])"));
+        assert!(source.contains("pqueue_items_global_expired_lease_idx"));
+        assert!(source.contains("LIMIT $2\""));
+        let metrics_fn = source
+            .split("fn metrics_sql")
+            .nth(1)
+            .unwrap()
+            .split("fn metrics_by_query_sql")
+            .next()
+            .unwrap();
+        assert!(metrics_fn.contains("FROM pqueue_queue_metrics_v2"));
+        assert!(!metrics_fn.contains("COUNT(*)"));
+    }
+
+    #[test]
+    fn filtered_metrics_aggregate_in_sql_over_requested_index_bounds() {
+        let source = include_str!("relational.rs");
+        let metrics_fn = source
+            .split("fn metrics_by_query_sql")
+            .nth(1)
+            .unwrap()
+            .split("/// Lifecycle state + flags")
+            .next()
+            .unwrap();
+        assert!(metrics_fn.contains("COUNT(*) FILTER"));
+        assert!(metrics_fn.contains("idx.index_key >="));
+        assert!(metrics_fn.contains("FROM pqueue_item_index_component component_"));
+        assert!(metrics_fn.contains("component_position=$"));
+        assert!(metrics_fn.contains("component_value {operator} $"));
+        assert!(!metrics_fn.contains("filtered_lifecycle_metrics_by_index_key"));
+        assert!(!metrics_fn.contains("Vec::with_capacity(rows.len())"));
+        assert!(RELATIONAL_SCHEMA.contains("pqueue_item_index_key_idx"));
+        assert!(GROUP_SUMMARY_INDEX_MIGRATIONS.iter().any(|(name, ddl)| {
+            *name == "pqueue_item_index_component_lookup_idx"
+                && ddl.contains("component_position,component_value,item_id")
+        }));
+    }
+
+    #[test]
+    fn metrics_and_due_frontier_migration_is_bounded_resumable_and_observable() {
+        let source = include_str!("relational.rs");
+        let migration_fn = source
+            .split("fn migrate_metrics_batch(\n    client:")
+            .nth(1)
+            .unwrap()
+            .split("// --- Typed raw commit")
+            .next()
+            .unwrap();
+        assert!(migration_fn.contains("LIMIT $7 FOR UPDATE"));
+        assert!(migration_fn.contains("batch_size == 0 || batch_size > 100_000"));
+        assert!(migration_fn.contains("rows_backfilled=rows_backfilled+$5"));
+        assert!(migration_fn.contains("due_rows_backfilled=due_rows_backfilled+$6"));
+        assert!(migration_fn.contains("pqueue_metrics_counted_item"));
+        assert!(QUEUE_METRICS_MIGRATION.contains("new_counted := true"));
+        assert!(migration_fn.contains("FROM unnest($1::text[],$2::text[],$3::text[])"));
+        assert!(!migration_fn.contains("FROM pqueue_items WHERE superseded=false GROUP BY"));
+        assert!(!migration_fn.contains("DELETE FROM pqueue_queue_metrics_v2"));
+    }
+
+    #[test]
+    fn existing_schema_startup_is_read_only_until_migration_is_complete() {
+        let source = include_str!("relational.rs");
+        let constructor = source
+            .split("fn from_client(mut client: Client)")
+            .nth(1)
+            .unwrap()
+            .split("/// Restart recovery")
+            .next()
+            .unwrap();
+        let readiness = constructor
+            .find("if !fresh")
+            .expect("existing-schema readiness gate");
+        let first_ddl = constructor
+            .find("batch_execute(RELATIONAL_SCHEMA)")
+            .expect("fresh schema DDL");
+        assert!(readiness < first_ddl);
+        assert!(constructor[first_ddl..].starts_with("batch_execute(RELATIONAL_SCHEMA)"));
+        assert!(constructor.contains("if fresh {"));
+    }
+
+    #[test]
+    fn due_promotion_uses_only_the_bounded_durable_item_frontier() {
+        let source = include_str!("relational.rs");
+        let promotion = source
+            .split("fn promote_due_group_summary_chunk_in_tx(")
+            .nth(1)
+            .unwrap()
+            .split("fn promote_due_group_summary_chunk(")
+            .next()
+            .unwrap();
+        assert!(promotion.contains("FROM pqueue_group_due_pending"));
+        assert!(promotion.contains("DUE_PROMOTION_ITEM_LIMIT + 1"));
+        assert!(promotion.contains("take(DUE_PROMOTION_ITEM_LIMIT as usize)"));
+        assert!(promotion.contains("FROM relational_cursor"));
+        assert!(!promotion.contains("SKIP LOCKED"));
+        assert!(!promotion.contains("refresh_group_summaries"));
+        let increment = source
+            .split("fn increment_group_summaries_for_items(")
+            .nth(1)
+            .unwrap()
+            .split("fn decrement_group_summaries_for_items(")
+            .next()
+            .unwrap();
+        assert!(!increment.contains("prior_due"));
+        assert!(increment.contains("INSERT INTO pqueue_group_due_pending"));
     }
 
     #[test]
@@ -6456,6 +7652,48 @@ mod sql_shape_tests {
                 && RELATIONAL_SCHEMA.contains("WHERE is_unique = true"),
             "unique typed indexes must be protected by a database-level partial unique index"
         );
+    }
+
+    #[test]
+    fn push_summary_delta_is_batch_bounded_and_index_ddl_is_predeploy_only() {
+        let source = include_str!("relational.rs");
+        let increment = source
+            .split("fn increment_group_summaries_for_items")
+            .nth(1)
+            .unwrap()
+            .split("fn decrement_group_summaries_for_items")
+            .next()
+            .unwrap();
+        assert!(increment.contains("item_id=ANY($3)"));
+        assert!(increment.contains("FROM incoming GROUP BY group_key"));
+        assert!(
+            !increment.contains("group_key=ANY"),
+            "Push delta must never aggregate the resident inventory of touched groups"
+        );
+        let push_arm = source
+            .split("QueueCommand::Push(c) =>")
+            .nth(1)
+            .unwrap()
+            .split("QueueCommand::Claim(c) =>")
+            .next()
+            .unwrap();
+        assert!(push_arm.contains("increment_group_summaries_for_items"));
+        assert!(!push_arm.contains("refresh_group_summaries"));
+        assert!(
+            GROUP_SUMMARY_INDEX_MIGRATIONS
+                .iter()
+                .all(|(_, ddl)| ddl.contains("CREATE INDEX CONCURRENTLY"))
+        );
+        let verifier = source
+            .split("fn verify_group_summary_indexes")
+            .nth(1)
+            .unwrap()
+            .split("const COHORT_EXPIRY_SWEEP_LIMIT")
+            .next()
+            .unwrap();
+        assert!(!verifier.contains("advisory"));
+        assert!(!RELATIONAL_SCHEMA.contains("rep_created_seq"));
+        assert!(source.contains("verify_group_summary_indexes(&mut client, fresh)"));
     }
 }
 
@@ -6541,6 +7779,272 @@ mod gated_group_summary_tests {
     }
 
     #[test]
+    fn push_500_across_128_groups_has_constant_query_amplification() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (push_500_across_128_groups_has_constant_query_amplification) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_push_amp_{}", std::process::id());
+        let mut c = Client::connect(&url, NoTls).expect("connect");
+        c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(c);
+
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
+        let mut definition = qdef();
+        definition.tenant_id = TenantId::new("push-amp-tenant").unwrap();
+        definition.queue_id = QueueId::new("push-amp-queue").unwrap();
+        definition.max_push_batch_size = 1_000;
+        definition.max_claim_batch_size = 1_000;
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        block_on(b.create_queue(definition)).unwrap();
+
+        let items = (0..500)
+            .map(|i| PushSpec {
+                client_item_key: Some(ClientItemKey::new(format!("key-{i}")).unwrap()),
+                priority: Some(PriorityValue::Int64(i as i64)),
+                group_key: Some(GroupKey::new(format!("group-{}", i % 128)).unwrap()),
+                ..Default::default()
+            })
+            .collect();
+        let ids = block_on(b.push(&shard, items, ts(1), None)).unwrap();
+        assert_eq!(ids.len(), 500);
+
+        let probe = push_sql_probe(&shard);
+        assert_eq!(
+            probe,
+            PushSqlProbe {
+                admission_conflict_queries: 0,
+                admission_group_queries: 0,
+                group_summary_statements: 5,
+            },
+            "batch SQL amplification must be independent of item/group cardinality"
+        );
+        let mut inner = b.inner.lock().unwrap();
+        let (tenant, queue) = parts(&shard);
+        let row = inner
+            .client
+            .query_one(
+                "SELECT COUNT(*)::bigint, SUM(eligible_item_count)::bigint, \
+                 COUNT(*) FILTER (WHERE rep_item_id IS NOT NULL)::bigint \
+                 FROM pqueue_group_summary WHERE tenant_id=$1 AND queue_id=$2",
+                &[&tenant, &queue],
+            )
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 128);
+        assert_eq!(row.get::<_, i64>(1), 500);
+        assert_eq!(row.get::<_, i64>(2), 128);
+    }
+
+    #[test]
+    fn async_validate_500_items_uses_one_conflict_and_one_group_query() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (async_validate_500_items_uses_one_conflict_and_one_group_query) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_validate_amp_{}", std::process::id());
+        let mut c = Client::connect(&url, NoTls).expect("connect");
+        c.batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(c);
+
+        let store = PostgresRelational::connect_in_schema(&url, &schema).expect("connect");
+        let mut definition = qdef();
+        definition.max_push_batch_size = 1_000;
+        definition.max_eligible_group_size = Some(1_000);
+        let mut projection = store.clone();
+        ProjectionStore::ensure_shard(&mut projection, &definition).unwrap();
+        let items: Vec<PushItem> = (0..500)
+            .map(|i| PushItem {
+                client_item_key: ClientItemKey::new(format!("validate-key-{i}")).unwrap(),
+                item_id: ItemId::mint(0, 0, i + 1),
+                priority: Some(PriorityValue::Int64(i as i64)),
+                not_before: None,
+                group_key: Some(GroupKey::new(format!("group-{}", i % 128)).unwrap()),
+                max_attempts: 3,
+                payload: None,
+                fields: BTreeMap::new(),
+                metadata: Metadata::default(),
+                cohort_size: None,
+                gate_keys: Vec::new(),
+                entity_document: None,
+            })
+            .collect();
+
+        store.async_validate_push(&shard(), &items, ts(1)).unwrap();
+        assert_eq!(
+            push_sql_probe(&shard()),
+            PushSqlProbe {
+                admission_conflict_queries: 1,
+                admission_group_queries: 1,
+                group_summary_statements: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn existing_schema_requires_exact_predeployed_indexes() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (existing_schema_requires_exact_predeployed_indexes)"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_index_predeploy_{}", std::process::id());
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(admin);
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+
+        let (name, _) = GROUP_SUMMARY_INDEX_MIGRATIONS
+            .iter()
+            .find(|(name, _)| *name == "pqueue_items_group_active_idx")
+            .unwrap();
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!("SET search_path TO {schema}; DROP INDEX {name}"))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        drop(PostgresRelational::connect_in_schema(&url, &schema).unwrap());
+
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; DROP INDEX {name}; \
+                 CREATE INDEX {name} ON pqueue_items (tenant_id,queue_id,group_key)"
+            ))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelational::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+    }
+
+    #[test]
+    fn existing_schema_rejects_missing_maintenance_triggers() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (existing_schema_rejects_missing_maintenance_triggers)"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_trigger_ready_{}", std::process::id());
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(admin);
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; \
+                 DROP TRIGGER pqueue_items_metrics_delta ON pqueue_items"
+            ))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; \
+                 DROP TRIGGER pqueue_items_metrics_delta ON pqueue_items; \
+                 CREATE TRIGGER pqueue_items_metrics_delta \
+                   AFTER INSERT OR DELETE OR UPDATE OF lifecycle_state,superseded ON pqueue_items \
+                   FOR EACH ROW EXECUTE FUNCTION pqueue_apply_metrics_delta()"
+            ))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; \
+                 DROP TRIGGER pqueue_item_index_components_sync ON pqueue_item_index"
+            ))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; \
+                 ALTER TABLE pqueue_items DISABLE TRIGGER pqueue_items_metrics_delta"
+            ))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; \
+                 CREATE OR REPLACE FUNCTION wrong_component_trigger() RETURNS trigger AS $$ \
+                   BEGIN RETURN NEW; END $$ LANGUAGE plpgsql; \
+                 DROP TRIGGER pqueue_item_index_components_sync ON pqueue_item_index; \
+                 CREATE TRIGGER pqueue_item_index_components_sync AFTER INSERT ON pqueue_item_index \
+                   FOR EACH ROW EXECUTE FUNCTION wrong_component_trigger()"
+            ))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+
+        let mut admin = Client::connect(&url, NoTls).unwrap();
+        admin
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; DROP FUNCTION pqueue_index_components(bytea)"
+            ))
+            .unwrap();
+        drop(admin);
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        drop(PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap());
+    }
+
+    #[test]
     fn claim_refreshes_group_summary() {
         let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
             eprintln!(
@@ -6564,6 +8068,1143 @@ mod gated_group_summary_tests {
             group_count(&b),
             1,
             "claim must refresh pqueue_group_summary (leased item leaves the eligible count)"
+        );
+    }
+
+    #[test]
+    fn update_fields_reschedules_and_repairs_group_summary() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (update_fields_reschedules_and_repairs_group_summary)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_a8609c39_update_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(2),
+            ..qdef()
+        }))
+        .unwrap();
+        let ids =
+            block_on(backend.push(&shard(), vec![grouped(10), grouped(20)], ts(0), None)).unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            inner
+                .commit_command(
+                    &shard(),
+                    QueueCommand::UpdateFields(UpdateFieldsCommand {
+                        item_id: ids[0],
+                        field_ops: BTreeMap::new(),
+                        payload: PayloadUpdate::Keep,
+                        set_priority: ScheduleUpdate::Set(Some(PriorityValue::Int64(30))),
+                        set_not_before: ScheduleUpdate::Keep,
+                        set_entity_document: None,
+                    }),
+                    ts(1),
+                    None,
+                )
+                .unwrap();
+            inner
+                .commit_command(
+                    &shard(),
+                    QueueCommand::UpdateFields(UpdateFieldsCommand {
+                        item_id: ids[1],
+                        field_ops: BTreeMap::new(),
+                        payload: PayloadUpdate::Keep,
+                        set_priority: ScheduleUpdate::Keep,
+                        set_not_before: ScheduleUpdate::Set(Some(ts(100))),
+                        set_entity_document: None,
+                    }),
+                    ts(2),
+                    None,
+                )
+                .unwrap();
+            let row = inner
+                .client
+                .query_one(
+                    "SELECT eligible_item_count,rep_item_id,updated_at FROM pqueue_group_summary \
+                     WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
+                    &[],
+                )
+                .unwrap();
+            assert_eq!(row.get::<_, i64>(0), 1);
+            assert_eq!(row.get::<_, String>(1), ids[0].to_string());
+            assert_eq!(row.get::<_, i64>(2), 2_000_000_000);
+            inner
+                .commit_command(
+                    &shard(),
+                    QueueCommand::UpdateFields(UpdateFieldsCommand {
+                        item_id: ids[1],
+                        field_ops: BTreeMap::new(),
+                        payload: PayloadUpdate::Keep,
+                        set_priority: ScheduleUpdate::Keep,
+                        set_not_before: ScheduleUpdate::Set(Some(ts(1))),
+                        set_entity_document: None,
+                    }),
+                    ts(3),
+                    None,
+                )
+                .unwrap();
+            let rescheduled = inner
+                .client
+                .query_one(
+                    "SELECT not_before,eligible_since FROM pqueue_items \
+                     WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
+                    &[&ids[1].to_string()],
+                )
+                .unwrap();
+            assert_eq!(rescheduled.get::<_, i64>(0), 1_000_000_000);
+            assert_eq!(
+                rescheduled.get::<_, i64>(1),
+                3_000_000_000,
+                "rescheduling into the past must not backdate eligibility age"
+            );
+        }
+        let claimed = block_on(backend.claim(ClaimRequest {
+            eligibility_time: Some(ts(100)),
+            compatibility: ClaimCompatibility {
+                group_batching: Some(pqueue_engine::GroupBatching { max_groups: 1 }),
+                ..Default::default()
+            },
+            ..claim_req(2, 500, 2)
+        }))
+        .unwrap();
+        assert_eq!(claimed.items.len(), 2);
+        let updated_at: i64 = backend
+            .inner
+            .lock()
+            .unwrap()
+            .client
+            .query_one(
+                "SELECT updated_at FROM pqueue_group_summary WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            updated_at, 3_000_000_000,
+            "selection-only future time is not persisted"
+        );
+    }
+
+    #[test]
+    fn touched_group_push_absorbs_prior_due_rows() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!("POSTGRES RELATIONAL SKIPPED (touched_group_push_absorbs_prior_due_rows)");
+            return;
+        };
+        let schema = format!("pq_rel_due_push_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(b.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(5),
+            ..qdef()
+        }))
+        .unwrap();
+        let item = |priority, not_before| PushSpec {
+            priority: Some(PriorityValue::Int64(priority)),
+            group_key: Some(GroupKey::new("due-group").unwrap()),
+            not_before,
+            ..Default::default()
+        };
+        block_on(b.push(&shard(), vec![item(10, Some(ts(10)))], ts(0), None)).unwrap();
+        block_on(b.push(&shard(), vec![item(20, None)], ts(20), None)).unwrap();
+        let mut inner = b.inner.lock().unwrap();
+        assert!(promote_due_group_summary_chunk(&mut inner.client, &shard(), ts(20)).unwrap());
+        let row = inner
+            .client
+            .query_one(
+                "SELECT eligible_item_count,p.priority FROM pqueue_group_summary s \
+                 JOIN pqueue_items p ON p.tenant_id=s.tenant_id AND p.queue_id=s.queue_id \
+                   AND p.item_id=s.rep_item_id \
+                 WHERE s.tenant_id='t1' AND s.queue_id='q1' AND s.group_key='due-group'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 2);
+        assert_eq!(
+            row.get::<_, Option<String>>(1).as_deref(),
+            Some("{\"Int64\":10}")
+        );
+    }
+
+    #[test]
+    fn due_promotion_claims_new_leader_and_repairs_to_remaining_item() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (due_promotion_claims_new_leader_and_repairs_to_remaining_item)"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_due_claim_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(b.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(5),
+            ..qdef()
+        }))
+        .unwrap();
+        let item = |priority, not_before| PushSpec {
+            priority: Some(PriorityValue::Int64(priority)),
+            group_key: Some(GroupKey::new("due-group").unwrap()),
+            not_before,
+            ..Default::default()
+        };
+        block_on(b.push(
+            &shard(),
+            vec![item(10, Some(ts(10))), item(20, None)],
+            ts(0),
+            None,
+        ))
+        .unwrap();
+        let claimed = block_on(b.claim(ClaimRequest {
+            compatibility: ClaimCompatibility {
+                same_group_key: true,
+                ..Default::default()
+            },
+            ..claim_req(1, 500, 10)
+        }))
+        .unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        assert_eq!(claimed.items[0].priority, Some(PriorityValue::Int64(10)));
+        let mut inner = b.inner.lock().unwrap();
+        let row = inner
+            .client
+            .query_one(
+                "SELECT eligible_item_count,p.priority FROM pqueue_group_summary s \
+                 JOIN pqueue_items p ON p.tenant_id=s.tenant_id AND p.queue_id=s.queue_id \
+                   AND p.item_id=s.rep_item_id \
+                 WHERE s.tenant_id='t1' AND s.queue_id='q1' AND s.group_key='due-group'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 1);
+        assert_eq!(
+            row.get::<_, Option<String>>(1).as_deref(),
+            Some("{\"Int64\":20}")
+        );
+    }
+
+    #[test]
+    fn incomplete_due_chunk_returns_unavailable_before_selecting() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (incomplete_due_chunk_returns_unavailable_before_selecting)"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_due_chunk_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(b.create_queue(QueueDefinition {
+            max_push_batch_size: 200,
+            max_claim_batch_size: 200,
+            max_eligible_group_size: Some(5),
+            ..qdef()
+        }))
+        .unwrap();
+        let items = (0..129)
+            .map(|priority| PushSpec {
+                priority: Some(PriorityValue::Int64(priority)),
+                group_key: Some(GroupKey::new(format!("due-{priority:03}")).unwrap()),
+                not_before: Some(ts(10)),
+                ..Default::default()
+            })
+            .collect();
+        block_on(b.push(&shard(), items, ts(0), None)).unwrap();
+        let request = || ClaimRequest {
+            compatibility: ClaimCompatibility {
+                group_batching: Some(pqueue_engine::GroupBatching { max_groups: 1 }),
+                ..Default::default()
+            },
+            ..claim_req(5, 500, 10)
+        };
+        let mut unavailable = 0;
+        let claimed = loop {
+            match block_on(b.claim(request())) {
+                Err(EngineError::Unavailable) => unavailable += 1,
+                result => break result.unwrap(),
+            }
+        };
+        assert_eq!(
+            unavailable, 1,
+            "129 due items drain in bounded chunks of 128"
+        );
+        assert_eq!(claimed.items.len(), 1);
+        assert_eq!(claimed.items[0].priority, Some(PriorityValue::Int64(0)));
+    }
+
+    #[test]
+    fn online_metrics_migration_is_bounded_resumable_and_gates_startup() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (online_metrics_migration_is_bounded_resumable_and_gates_startup)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_metrics_migrate_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(qdef())).unwrap();
+        let items = (0..5)
+            .map(|priority| PushSpec {
+                priority: Some(PriorityValue::Int64(priority)),
+                group_key: (priority == 4).then(|| GroupKey::new("future").unwrap()),
+                not_before: (priority == 4).then(|| ts(100)),
+                ..Default::default()
+            })
+            .collect();
+        let existing_ids = block_on(backend.push(&shard(), items, ts(0), None)).unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            inner
+                .client
+                .batch_execute(
+                    "DELETE FROM pqueue_metrics_migration_state WHERE migration_name='queue_metrics_v2_counted'; \
+                     DROP TABLE pqueue_queue_metrics_v2; DELETE FROM pqueue_group_due_pending; \
+                     DELETE FROM pqueue_item_index_component; DELETE FROM pqueue_metrics_counted_item",
+                )
+                .unwrap();
+        }
+        drop(backend);
+
+        assert!(matches!(
+            PostgresRelationalBackend::connect_in_schema(&url, &schema),
+            Err(EngineError::Unavailable)
+        ));
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        let first =
+            PostgresRelationalBackend::migrate_metrics_batch_in_schema(&url, &schema, 2).unwrap();
+        assert_eq!((first.rows_processed, first.complete), (2, false));
+
+        // Block the final-page SELECT after it has acquired the migration-state lock. Insert a key
+        // behind the eventual cursor while that SELECT's snapshot is already established: the row is
+        // invisible to the page and must be counted exactly once by the live-insert marker path.
+        let mut holder_client = Client::connect(&url, NoTls).unwrap();
+        holder_client
+            .batch_execute(&format!("SET search_path TO {schema}"))
+            .unwrap();
+        let mut holder = holder_client.transaction().unwrap();
+        holder
+            .query_one(
+                "SELECT item_id FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+                 AND item_id=$1 FOR UPDATE",
+                &[&existing_ids[2].to_string()],
+            )
+            .unwrap();
+        let migration_url = url.clone();
+        let migration_schema = schema.clone();
+        let migrator = std::thread::spawn(move || {
+            PostgresRelationalBackend::migrate_metrics_batch_in_schema(
+                &migration_url,
+                &migration_schema,
+                10,
+            )
+            .unwrap()
+        });
+        let mut inserter = Client::connect(&url, NoTls).unwrap();
+        inserter
+            .batch_execute(&format!("SET search_path TO {schema}"))
+            .unwrap();
+        let mut observed_wait = false;
+        for _ in 0..100 {
+            let waiting: bool = inserter
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE wait_event_type='Lock' AND query LIKE \
+                       'SELECT tenant_id,queue_id,item_id,lifecycle_state,superseded,%')",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            if waiting {
+                observed_wait = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            observed_wait,
+            "migration SELECT must be blocked on the held final-page row"
+        );
+        inserter
+            .execute(
+                "INSERT INTO pqueue_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state, \
+                   priority_sort,not_before,eligible_since,group_key,fields,metadata,retry_count, \
+                   item_version,last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
+                 VALUES('t1','q1','10','late-during-migration','Pending',decode('00','hex'), \
+                   100000000000,100000000000,'rolling-future','{}','{}',0,1,0,0,0,false,false,3,1000)",
+                &[],
+            )
+            .unwrap();
+        holder.rollback().unwrap();
+        let final_page = migrator.join().unwrap();
+        assert_eq!((final_page.rows_processed, final_page.complete), (3, true));
+        assert_eq!(final_page.rows_backfilled, 5);
+        assert_eq!(final_page.due_rows_backfilled, 1);
+
+        let reopened = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        let mut inner = reopened.inner.lock().unwrap();
+        let row = inner
+            .client
+            .query_one(
+                "SELECT pending,leased,complete,failed FROM pqueue_queue_metrics_v2 \
+                 WHERE tenant_id='t1' AND queue_id='q1'",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 6);
+        assert_eq!(row.get::<_, i64>(1), 0);
+        assert_eq!(row.get::<_, i64>(2), 0);
+        assert_eq!(row.get::<_, i64>(3), 0);
+        assert_eq!(
+            inner
+                .client
+                .query_one("SELECT COUNT(*) FROM pqueue_group_due_pending", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            2
+        );
+        assert_eq!(
+            inner
+                .client
+                .query_one("SELECT COUNT(*) FROM pqueue_metrics_counted_item", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            6
+        );
+        inner
+            .client
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_marker_serializes_waiting_update_and_delete() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (migration_marker_serializes_waiting_update_and_delete)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_metrics_mutation_race_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(qdef())).unwrap();
+        let ids = block_on(backend.push(
+            &shard(),
+            (0..5).map(|_| PushSpec::default()).collect(),
+            ts(0),
+            None,
+        ))
+        .unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            inner
+                .client
+                .batch_execute(
+                    "DELETE FROM pqueue_metrics_migration_state; DROP TABLE pqueue_queue_metrics_v2; \
+                     DELETE FROM pqueue_metrics_counted_item",
+                )
+                .unwrap();
+        }
+        drop(backend);
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        let first =
+            PostgresRelationalBackend::migrate_metrics_batch_in_schema(&url, &schema, 2).unwrap();
+        assert_eq!((first.rows_processed, first.complete), (2, false));
+
+        let mut holder_client = Client::connect(&url, NoTls).unwrap();
+        holder_client
+            .batch_execute(&format!("SET search_path TO {schema}"))
+            .unwrap();
+        let mut holder = holder_client.transaction().unwrap();
+        holder
+            .query_one(
+                "SELECT item_id FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+                 AND item_id=$1 FOR UPDATE",
+                &[&ids[4].to_string()],
+            )
+            .unwrap();
+        let migration_url = url.clone();
+        let migration_schema = schema.clone();
+        let migrator = std::thread::spawn(move || {
+            PostgresRelationalBackend::migrate_metrics_batch_in_schema(
+                &migration_url,
+                &migration_schema,
+                10,
+            )
+            .unwrap()
+        });
+        let mut observer = Client::connect(&url, NoTls).unwrap();
+        for _ in 0..100 {
+            let waiting: bool = observer
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' \
+                     AND query LIKE 'SELECT tenant_id,queue_id,item_id,lifecycle_state,%')",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            if waiting {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let update_url = url.clone();
+        let update_schema = schema.clone();
+        let update_id = ids[2].to_string();
+        let updater = std::thread::spawn(move || {
+            let mut client = Client::connect(&update_url, NoTls).unwrap();
+            client
+                .batch_execute(&format!("SET search_path TO {update_schema}"))
+                .unwrap();
+            client
+                .execute(
+                    "UPDATE pqueue_items SET lifecycle_state='Complete',item_version=item_version+1 \
+                     WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
+                    &[&update_id],
+                )
+                .unwrap();
+        });
+        let delete_url = url.clone();
+        let delete_schema = schema.clone();
+        let delete_id = ids[3].to_string();
+        let deleter = std::thread::spawn(move || {
+            let mut client = Client::connect(&delete_url, NoTls).unwrap();
+            client
+                .batch_execute(&format!("SET search_path TO {delete_schema}"))
+                .unwrap();
+            client
+                .execute(
+                    "DELETE FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
+                    &[&delete_id],
+                )
+                .unwrap();
+        });
+        for _ in 0..100 {
+            let waiting: i64 = observer
+                .query_one(
+                    "SELECT COUNT(*) FROM pg_stat_activity WHERE wait_event_type='Lock' \
+                     AND (query LIKE 'UPDATE pqueue_items SET lifecycle_state=%' \
+                       OR query LIKE 'DELETE FROM pqueue_items WHERE tenant_id=%')",
+                    &[],
+                )
+                .unwrap()
+                .get(0);
+            if waiting >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        holder.rollback().unwrap();
+        assert!(migrator.join().unwrap().complete);
+        updater.join().unwrap();
+        deleter.join().unwrap();
+        let reopened = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        let metrics = block_on(reopened.metrics(&shard())).unwrap();
+        assert_eq!((metrics.pending, metrics.complete), (3, 1));
+        assert_eq!(
+            reopened
+                .inner
+                .lock()
+                .unwrap()
+                .client
+                .query_one("SELECT COUNT(*) FROM pqueue_metrics_counted_item", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            4
+        );
+    }
+
+    #[test]
+    fn migration_seeds_authority_without_double_counting_preexisting_counters() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (migration_seeds_authority_without_double_counting_preexisting_counters)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_metrics_upgrade_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(qdef())).unwrap();
+        block_on(backend.push(
+            &shard(),
+            (0..5).map(|_| PushSpec::default()).collect(),
+            ts(0),
+            None,
+        ))
+        .unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            inner
+                .client
+                .batch_execute(
+                    "DELETE FROM pqueue_metrics_migration_state; \
+                     DELETE FROM pqueue_metrics_counted_item; \
+                     DROP TABLE pqueue_queue_metrics_v2; \
+                     CREATE TABLE pqueue_queue_metrics( \
+                       tenant_id TEXT NOT NULL,queue_id TEXT NOT NULL,pending BIGINT NOT NULL, \
+                       leased BIGINT NOT NULL,complete BIGINT NOT NULL,failed BIGINT NOT NULL, \
+                       PRIMARY KEY(tenant_id,queue_id)); \
+                     INSERT INTO pqueue_queue_metrics VALUES('t1','q1',5,0,0,0)",
+                )
+                .unwrap();
+        }
+        drop(backend);
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        let first =
+            PostgresRelationalBackend::migrate_metrics_batch_in_schema(&url, &schema, 2).unwrap();
+        assert!(!first.complete);
+        // Re-running operator DDL mid-migration must preserve the v2 cursor and build generation.
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        loop {
+            let progress =
+                PostgresRelationalBackend::migrate_metrics_batch_in_schema(&url, &schema, 2)
+                    .unwrap();
+            if progress.complete {
+                break;
+            }
+        }
+        let reopened = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        let metrics = block_on(reopened.metrics(&shard())).unwrap();
+        assert_eq!(
+            metrics.pending, 5,
+            "the isolated v2 generation must ignore legacy counters"
+        );
+        let mut inner = reopened.inner.lock().unwrap();
+        assert_eq!(
+            inner
+                .client
+                .query_one("SELECT COUNT(*) FROM pqueue_metrics_counted_item", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            5
+        );
+        assert_eq!(
+            inner
+                .client
+                .query_one("SELECT pending FROM pqueue_queue_metrics", &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            5,
+            "legacy generation remains untouched until operators retire it"
+        );
+    }
+
+    #[test]
+    fn compound_later_field_metrics_range_uses_normalized_components() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (compound_later_field_metrics_range_uses_normalized_components)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_metrics_component_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        let mut definition = qdef();
+        definition.typed_indexes = vec![QueueIndex {
+            name: "by_kind_score".into(),
+            declaration: IndexDeclaration::Compound(axon_esf::CompoundIndexDef {
+                fields: vec![
+                    axon_esf::CompoundIndexField {
+                        field: "kind".into(),
+                        index_type: IndexType::String,
+                    },
+                    axon_esf::CompoundIndexField {
+                        field: "score".into(),
+                        index_type: IndexType::Integer,
+                    },
+                ],
+                unique: false,
+            }),
+        }];
+        block_on(backend.create_queue(definition)).unwrap();
+        let items = [("a", 5), ("a", 10), ("a", 20), ("b", 30)]
+            .into_iter()
+            .map(|(kind, score)| PushSpec {
+                entity: Some(serde_json::json!({"kind":kind,"score":score})),
+                ..Default::default()
+            })
+            .collect();
+        block_on(backend.push(&shard(), items, ts(0), None)).unwrap();
+        let metrics = block_on(pqueue_engine::HotProjectionQueryPort::metrics_by_query(
+            &backend,
+            &shard(),
+            MetricsByQueryRequest {
+                index: Some("by_kind_score".into()),
+                filters: vec![
+                    QueryFilter {
+                        field: "kind".into(),
+                        op: FilterOp::Eq,
+                        value: TypedValue::String("a".into()),
+                    },
+                    QueryFilter {
+                        field: "score".into(),
+                        op: FilterOp::Gte,
+                        value: TypedValue::Integer(10),
+                    },
+                ],
+            },
+        ))
+        .unwrap();
+        assert_eq!(metrics.pending, 2);
+        let later_field_only = block_on(pqueue_engine::HotProjectionQueryPort::metrics_by_query(
+            &backend,
+            &shard(),
+            MetricsByQueryRequest {
+                index: Some("by_kind_score".into()),
+                filters: vec![QueryFilter {
+                    field: "score".into(),
+                    op: FilterOp::Gte,
+                    value: TypedValue::Integer(10),
+                }],
+            },
+        ))
+        .unwrap();
+        assert_eq!(later_field_only.pending, 3);
+        let bounded_same_field = block_on(pqueue_engine::HotProjectionQueryPort::metrics_by_query(
+            &backend,
+            &shard(),
+            MetricsByQueryRequest {
+                index: Some("by_kind_score".into()),
+                filters: vec![
+                    QueryFilter {
+                        field: "score".into(),
+                        op: FilterOp::Gte,
+                        value: TypedValue::Integer(10),
+                    },
+                    QueryFilter {
+                        field: "score".into(),
+                        op: FilterOp::Lte,
+                        value: TypedValue::Integer(20),
+                    },
+                ],
+            },
+        ))
+        .unwrap();
+        assert_eq!(bounded_same_field.pending, 2);
+        let component_count: i64 = backend
+            .inner
+            .lock()
+            .unwrap()
+            .client
+            .query_one("SELECT COUNT(*) FROM pqueue_item_index_component", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(component_count, 8);
+    }
+
+    #[test]
+    fn future_grouped_replacement_moves_the_due_frontier() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (future_grouped_replacement_moves_the_due_frontier)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_replace_due_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(2),
+            ..qdef()
+        }))
+        .unwrap();
+        let key = ClientItemKey::new("replace-due").unwrap();
+        let first = block_on(backend.replace_if_pending(
+            &shard(),
+            &key,
+            Some(PriorityValue::Int64(2)),
+            Some(GroupKey::new("future").unwrap()),
+            Some(ts(10)),
+            None,
+            BTreeMap::new(),
+            Metadata::default(),
+            None,
+            ts(0),
+            None,
+        ))
+        .unwrap();
+        let first_id = match first {
+            UpsertOutcome::Inserted { item_id } => item_id,
+            other => panic!("expected insert, got {other:?}"),
+        };
+        let replaced = block_on(backend.replace_if_pending(
+            &shard(),
+            &key,
+            Some(PriorityValue::Int64(1)),
+            Some(GroupKey::new("future").unwrap()),
+            Some(ts(10)),
+            None,
+            BTreeMap::new(),
+            Metadata::default(),
+            None,
+            ts(1),
+            None,
+        ))
+        .unwrap();
+        let replacement_id = match replaced {
+            UpsertOutcome::Replaced {
+                new_item_id,
+                superseded_item_id,
+            } => {
+                assert_eq!(superseded_item_id, first_id);
+                new_item_id
+            }
+            other => panic!("expected replacement, got {other:?}"),
+        };
+        let frontier_ids: Vec<String> = backend
+            .inner
+            .lock()
+            .unwrap()
+            .client
+            .query(
+                "SELECT item_id FROM pqueue_group_due_pending ORDER BY item_id",
+                &[],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(frontier_ids, vec![replacement_id.to_string()]);
+        let claimed = block_on(backend.claim(ClaimRequest {
+            compatibility: ClaimCompatibility {
+                group_batching: Some(pqueue_engine::GroupBatching { max_groups: 1 }),
+                ..Default::default()
+            },
+            ..claim_req(2, 500, 10)
+        }))
+        .unwrap();
+        assert_eq!(claimed.items[0].item_id, replacement_id);
+    }
+
+    #[test]
+    fn million_due_items_in_one_hot_group_advance_in_bounded_chunks() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (million_due_items_in_one_hot_group_advance_in_bounded_chunks)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_a8609c39_hot_{}", std::process::id());
+        let mut client = Client::connect(&url, NoTls).unwrap();
+        client
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(client);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(1_000_000),
+            ..qdef()
+        }))
+        .unwrap();
+        let mut loader = Client::connect(&url, NoTls).unwrap();
+        loader
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; \
+                 ALTER TABLE pqueue_items DISABLE TRIGGER pqueue_items_metrics_delta; \
+                 INSERT INTO pqueue_items(tenant_id,queue_id,item_id,client_item_key,lifecycle_state, \
+                   priority_sort,not_before,eligible_since,group_key,fields,metadata,retry_count, \
+                   item_version,last_command_sequence,created_at,updated_at,fenced,superseded,max_attempts,created_seq) \
+                 SELECT 't1','q1','hot-'||g,'key-'||g,'Pending',decode('00','hex'),10000000000, \
+                   10000000000,'hot','{{}}','{{}}',0,1,0,0,0,false,false,3,g \
+                 FROM generate_series(1,1000000) g; \
+                 ALTER TABLE pqueue_items ENABLE TRIGGER pqueue_items_metrics_delta; \
+                 INSERT INTO pqueue_group_summary(tenant_id,queue_id,group_key,eligible_item_count,at_risk_count,updated_at) \
+                   VALUES('t1','q1','hot',0,0,0); \
+                 INSERT INTO pqueue_group_due_pending(tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+                   SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq FROM pqueue_items"
+            ))
+            .unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            assert!(!promote_due_group_summary_chunk(&mut inner.client, &shard(), ts(10)).unwrap());
+            assert!(!promote_due_group_summary_chunk(&mut inner.client, &shard(), ts(10)).unwrap());
+        }
+        let row = loader
+            .query_one(
+                "SELECT s.eligible_item_count,COUNT(p.item_id)::bigint \
+                 FROM pqueue_group_summary s CROSS JOIN pqueue_group_due_pending p \
+                 WHERE s.tenant_id='t1' AND s.queue_id='q1' AND s.group_key='hot' \
+                   AND p.tenant_id='t1' AND p.queue_id='q1' GROUP BY s.eligible_item_count",
+                &[],
+            )
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 256);
+        assert_eq!(row.get::<_, i64>(1), 1_000_000 - 256);
+        loader
+            .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+            .unwrap();
+    }
+
+    #[test]
+    fn grouped_lifecycle_is_exact_at_1_100_and_1000_items() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (grouped_lifecycle_is_exact_at_1_100_and_1000_items)"
+            );
+            return;
+        };
+        for size in [1usize, 100, 1_000] {
+            let schema = format!("pq_rel_lifecycle_{size}_{}", std::process::id());
+            let mut cleanup = Client::connect(&url, NoTls).unwrap();
+            cleanup
+                .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+                .unwrap();
+            drop(cleanup);
+            let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+            block_on(b.create_queue(QueueDefinition {
+                max_push_batch_size: size as u64,
+                max_claim_batch_size: size as u64,
+                max_eligible_group_size: Some(size as u64),
+                ..qdef()
+            }))
+            .unwrap();
+            let items = (0..size)
+                .map(|priority| PushSpec {
+                    priority: Some(PriorityValue::Int64(priority as i64)),
+                    group_key: Some(GroupKey::new("g").unwrap()),
+                    ..Default::default()
+                })
+                .collect();
+            reset_push_sql_probe(&shard());
+            let ids = block_on(b.push(&shard(), items, ts(0), None)).unwrap();
+            assert_eq!(ids.len(), size);
+            assert_eq!(group_count(&b), size as i64);
+            assert_eq!(push_sql_probe(&shard()).group_summary_statements, 5);
+            let claimed = block_on(b.claim(ClaimRequest {
+                compatibility: ClaimCompatibility {
+                    group_batching: Some(pqueue_engine::GroupBatching { max_groups: 1 }),
+                    ..Default::default()
+                },
+                ..claim_req(size, 500, 1)
+            }))
+            .unwrap();
+            assert_eq!(claimed.items.len(), size);
+            assert_eq!(group_count(&b), 0);
+            block_on(
+                b.finalize(
+                    &shard(),
+                    ids.into_iter()
+                        .map(|id| FinalizeOutcome::new(id, FinalizeKind::Complete))
+                        .collect(),
+                    ts(2),
+                    None,
+                ),
+            )
+            .unwrap();
+            let metrics = block_on(b.metrics(&shard())).unwrap();
+            assert_eq!(metrics.pending, 0);
+            assert_eq!(metrics.complete, size as u64);
+        }
+    }
+
+    #[test]
+    fn ungrouped_push_has_zero_summary_work() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!("POSTGRES RELATIONAL SKIPPED (ungrouped_push_has_zero_summary_work)");
+            return;
+        };
+        let schema = format!("pq_rel_ungrouped_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(b.create_queue(QueueDefinition {
+            max_push_batch_size: 1_000,
+            max_claim_batch_size: 1_000,
+            ..qdef()
+        }))
+        .unwrap();
+        reset_push_sql_probe(&shard());
+        block_on(b.push(&shard(), vec![PushSpec::default(); 1_000], ts(0), None)).unwrap();
+        assert_eq!(push_sql_probe(&shard()).group_summary_statements, 0);
+    }
+
+    #[test]
+    fn request_replay_and_failed_push_do_not_double_apply_summary_delta() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (request_replay_and_failed_push_do_not_double_apply_summary_delta)"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_summary_replay_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(b.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(5),
+            ..qdef()
+        }))
+        .unwrap();
+        let spec = PushSpec {
+            client_item_key: Some(ClientItemKey::new("stable-key").unwrap()),
+            priority: Some(PriorityValue::Int64(1)),
+            group_key: Some(GroupKey::new("g").unwrap()),
+            ..Default::default()
+        };
+        let request_id = RequestId::new("summary-replay").unwrap();
+        let first = block_on(b.push_with_request_id(
+            &shard(),
+            request_id.clone(),
+            vec![spec.clone()],
+            ts(0),
+            None,
+        ))
+        .unwrap();
+        let replay =
+            block_on(b.push_with_request_id(&shard(), request_id, vec![spec.clone()], ts(1), None))
+                .unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(group_count(&b), 1);
+        assert!(block_on(b.push(&shard(), vec![spec], ts(2), None)).is_err());
+        assert_eq!(
+            group_count(&b),
+            1,
+            "failed transaction must not apply a delta"
+        );
+    }
+
+    #[test]
+    fn bounded_group_queries_use_required_partial_indexes() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (bounded_group_queries_use_required_partial_indexes)"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_group_plan_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(b.create_queue(QueueDefinition {
+            max_push_batch_size: 1_000,
+            max_claim_batch_size: 1_000,
+            max_eligible_group_size: Some(1_000),
+            ..qdef()
+        }))
+        .unwrap();
+        let batch = |group: &'static str, not_before| {
+            (0..1_000)
+                .map(|priority| PushSpec {
+                    priority: Some(PriorityValue::Int64(priority)),
+                    group_key: Some(GroupKey::new(group).unwrap()),
+                    not_before,
+                    ..Default::default()
+                })
+                .collect()
+        };
+        block_on(b.push(&shard(), batch("g", None), ts(0), None)).unwrap();
+        block_on(b.push(&shard(), batch("future", Some(ts(10))), ts(0), None)).unwrap();
+        let mut inner = b.inner.lock().unwrap();
+        inner.client.batch_execute("ANALYZE pqueue_items").unwrap();
+        // This is an index-eligibility proof on a deliberately tiny fixture, not a planner-cost benchmark.
+        // Disabling seqscan prevents the small table from hiding whether each exact production predicate
+        // can use its required partial index; the separate capped query below proves the row-work bound.
+        inner
+            .client
+            .batch_execute("SET enable_seqscan=off")
+            .unwrap();
+        let explain = |client: &mut Client, sql: &str| -> String {
+            client
+                .query(&format!("EXPLAIN {sql}"), &[])
+                .unwrap()
+                .into_iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let active = explain(
+            &mut inner.client,
+            "SELECT 1 FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+             AND group_key='g' AND lifecycle_state IN ('Pending','Leased') \
+             AND superseded=false LIMIT 6",
+        );
+        assert!(active.contains("pqueue_items_group_active_idx"), "{active}");
+        let due = explain(
+            &mut inner.client,
+            "SELECT i.item_id FROM pqueue_items i JOIN pqueue_group_summary s \
+             ON s.tenant_id=i.tenant_id AND s.queue_id=i.queue_id AND s.group_key=i.group_key \
+             WHERE i.tenant_id='t1' AND i.queue_id='q1' AND i.lifecycle_state='Pending' \
+             AND i.superseded=false AND i.group_key IS NOT NULL AND i.not_before IS NOT NULL \
+             AND i.not_before>s.updated_at AND i.not_before<=10000000000 \
+             ORDER BY i.not_before,i.created_seq LIMIT 128",
+        );
+        assert!(due.contains("pqueue_items_group_due_idx"), "{due}");
+        let group_due = explain(
+            &mut inner.client,
+            "SELECT item_id FROM pqueue_items WHERE tenant_id='t1' AND queue_id='q1' \
+             AND group_key='future' AND lifecycle_state='Pending' AND superseded=false \
+             AND not_before IS NOT NULL AND not_before>0 AND not_before<=10000000000",
+        );
+        assert!(
+            group_due.contains("pqueue_items_group_due_idx"),
+            "{group_due}"
+        );
+        let bounded: i64 = inner
+            .client
+            .query_one(
+                "SELECT COUNT(*)::bigint FROM (SELECT item_id FROM pqueue_items \
+                 WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g' \
+                 AND lifecycle_state IN ('Pending','Leased') AND superseded=false LIMIT 6) capped",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            bounded, 6,
+            "admission probe reads only remaining capacity + 1"
         );
     }
 
@@ -6626,6 +9267,215 @@ mod gated_group_summary_tests {
     }
 
     #[test]
+    fn oversized_group_locks_only_max_items_plus_one() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (oversized_group_locks_only_max_items_plus_one)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_a8609c39_group_bound_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(QueueDefinition {
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: Some(100),
+            ..qdef()
+        }))
+        .unwrap();
+        let ids = block_on(
+            backend.push(
+                &shard(),
+                (0..100)
+                    .map(|priority| PushSpec {
+                        priority: Some(PriorityValue::Int64(priority)),
+                        group_key: Some(GroupKey::new("hot").unwrap()),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ts(0),
+                None,
+            ),
+        )
+        .unwrap();
+        let mut selector_client = Client::connect(&url, NoTls).unwrap();
+        selector_client
+            .batch_execute(&format!("SET search_path TO {schema}"))
+            .unwrap();
+        let mut selector = selector_client.transaction().unwrap();
+        let compatibility = ClaimCompatibility {
+            group_batching: Some(pqueue_engine::GroupBatching { max_groups: 1 }),
+            ..Default::default()
+        };
+        assert!(matches!(
+            select_group_batching(&mut selector, &shard(), ts(1), 2, 1, &compatibility, false,),
+            Err(EngineError::BatchTooLarge)
+        ));
+        let mut probe = Client::connect(&url, NoTls).unwrap();
+        probe
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; SET lock_timeout='250ms'"
+            ))
+            .unwrap();
+        assert_eq!(
+            probe
+                .execute(
+                    "UPDATE pqueue_items SET updated_at=updated_at+1 \
+                     WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
+                    &[&ids[3].to_string()],
+                )
+                .unwrap(),
+            1,
+            "the fourth item remains unlocked when max_items=2"
+        );
+        selector.rollback().unwrap();
+    }
+
+    #[test]
+    fn group_member_lock_budget_is_global_across_candidates() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (group_member_lock_budget_is_global_across_candidates)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_group_global_bound_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(QueueDefinition {
+            max_push_batch_size: 20,
+            max_claim_batch_size: 20,
+            max_eligible_group_size: Some(20),
+            ..qdef()
+        }))
+        .unwrap();
+        let ids = block_on(
+            backend.push(
+                &shard(),
+                (0..20)
+                    .map(|priority| PushSpec {
+                        priority: Some(PriorityValue::Int64(priority)),
+                        group_key: Some(GroupKey::new(format!("g{:02}", priority / 2)).unwrap()),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ts(0),
+                None,
+            ),
+        )
+        .unwrap();
+        let mut selector_client = Client::connect(&url, NoTls).unwrap();
+        selector_client
+            .batch_execute(&format!("SET search_path TO {schema}"))
+            .unwrap();
+        let mut selector = selector_client.transaction().unwrap();
+        let selected = select_group_batching(
+            &mut selector,
+            &shard(),
+            ts(1),
+            2,
+            10,
+            &ClaimCompatibility {
+                group_batching: Some(pqueue_engine::GroupBatching { max_groups: 10 }),
+                ..Default::default()
+            },
+            false,
+        )
+        .unwrap();
+        assert_eq!(selected.as_slice(), &ids[..2]);
+        let mut probe = Client::connect(&url, NoTls).unwrap();
+        probe
+            .batch_execute(&format!(
+                "SET search_path TO {schema}; SET lock_timeout='250ms'"
+            ))
+            .unwrap();
+        assert_eq!(
+            probe
+                .execute(
+                    "UPDATE pqueue_items SET updated_at=updated_at+1 \
+                     WHERE tenant_id='t1' AND queue_id='q1' AND item_id=$1",
+                    &[&ids[3].to_string()],
+                )
+                .unwrap(),
+            1,
+            "only two selected members plus one global sentinel may be locked"
+        );
+        selector.rollback().unwrap();
+    }
+
+    #[test]
+    fn group_batching_refills_past_metadata_mismatch_before_limit() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (group_batching_refills_past_metadata_mismatch_before_limit)"
+            );
+            return;
+        };
+        let schema = format!("pq_vec_a8609c39_refill_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).unwrap();
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+        drop(cleanup);
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(QueueDefinition {
+            max_eligible_group_size: Some(1),
+            ..qdef()
+        }))
+        .unwrap();
+        let mut mismatch = Metadata::new();
+        mismatch.insert("class", pqueue_core::MetadataValue::String("skip".into()));
+        let mut wanted = Metadata::new();
+        wanted.insert("class", pqueue_core::MetadataValue::String("wanted".into()));
+        block_on(backend.push(
+            &shard(),
+            vec![
+                PushSpec {
+                    priority: Some(PriorityValue::Int64(0)),
+                    group_key: Some(GroupKey::new("first").unwrap()),
+                    metadata: mismatch,
+                    ..Default::default()
+                },
+                PushSpec {
+                    priority: Some(PriorityValue::Int64(10)),
+                    group_key: Some(GroupKey::new("second").unwrap()),
+                    metadata: wanted,
+                    ..Default::default()
+                },
+            ],
+            ts(0),
+            None,
+        ))
+        .unwrap();
+        let claimed = block_on(backend.claim(ClaimRequest {
+            compatibility: ClaimCompatibility {
+                group_batching: Some(pqueue_engine::GroupBatching { max_groups: 1 }),
+                metadata_equals: BTreeMap::from([(
+                    "class".into(),
+                    pqueue_core::MetadataValue::String("wanted".into()),
+                )]),
+                ..Default::default()
+            },
+            ..claim_req(1, 100, 1)
+        }))
+        .unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        assert_eq!(
+            claimed.items[0].group_key.as_ref().unwrap().as_str(),
+            "second"
+        );
+    }
+
+    #[test]
     fn group_candidate_locks_are_scoped_and_scan_past_contention() {
         let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
             eprintln!(
@@ -6666,8 +9516,16 @@ mod gated_group_summary_tests {
         let mut selector_client = Client::connect(&url, NoTls).expect("selector connect");
         selector_client.batch_execute(&set_path).unwrap();
         let mut selector = selector_client.transaction().unwrap();
-        let selected =
-            select_group_batching(&mut selector, &shard(), ts(100), 10, 1, &compatibility).unwrap();
+        let selected = select_group_batching(
+            &mut selector,
+            &shard(),
+            ts(100),
+            10,
+            1,
+            &compatibility,
+            false,
+        )
+        .unwrap();
         assert_eq!(selected.len(), 1);
 
         let mut probe_client = Client::connect(&url, NoTls).expect("probe connect");
@@ -6713,8 +9571,16 @@ mod gated_group_summary_tests {
         let mut scanner_client = Client::connect(&url, NoTls).expect("scanner connect");
         scanner_client.batch_execute(&set_path).unwrap();
         let mut scanner = scanner_client.transaction().unwrap();
-        let scanned =
-            select_group_batching(&mut scanner, &shard(), ts(100), 10, 1, &compatibility).unwrap();
+        let scanned = select_group_batching(
+            &mut scanner,
+            &shard(),
+            ts(100),
+            10,
+            1,
+            &compatibility,
+            false,
+        )
+        .unwrap();
         assert_eq!(scanned.len(), 1);
         let scanned_id = scanned[0].to_string();
         let scanned_group: String = scanner
