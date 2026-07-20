@@ -23,15 +23,27 @@ pub const REQUIRED_BOUNDS_MS: [u64; 4] = [1, 5, 20, 100];
 pub const REQUIRED_TXN_ACS: [&str; 6] = [
     "AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-4", "AC-TXN-6", "AC-TXN-7",
 ];
-pub const E3_CONTRACT_SCHEMA_VERSION: u32 = 2;
+pub const E3_CONTRACT_SCHEMA_VERSION: u32 = 3;
 pub const FENCE_SUITE: &str = "segmented_object_log_commits_through_minio";
 pub const FENCE_PROFILE: &str = "minio_create_only_cas";
 pub const FENCE_MODE: &str = "create_only_put_if_absent";
-pub const NO_CAS_REASON: &str = "release_profile_requires_create_only_cas";
+pub const NO_CAS_REASON: &str = "postgres_pointer_transactional_epoch_cas_proven";
+pub const NO_CAS_STORE_PROFILE: &str = "object_store_without_conditional_write";
+pub const NO_CAS_MODE: &str = "postgres_transactional_manifest_pointer";
 pub const TRANSACTION_SUITE: &str = "external_transaction_contract_matrix_tests";
 pub const E3_PRODUCER_SUITE: &str = "performance_object_log_e3_live_tests";
 pub const E3_PRODUCER_COMMAND: &str = "scripts/perf/tp002-e3-minio.sh";
+pub const E3_INMEMORY_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
+pub const E3_SQLITE_PASS_BAR: &str = "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M SQLite projection rebuilt from durable snapshot high-water plus bounded tail; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
+
+pub fn expected_e3_pass_bar(profile: &str) -> Option<&'static str> {
+    match profile {
+        "object_log_inmemory_projection" => Some(E3_INMEMORY_PASS_BAR),
+        "object_log_sqlite_projection" => Some(E3_SQLITE_PASS_BAR),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +134,11 @@ pub struct E3FenceEvidenceRow {
     pub current_epoch_committed: bool,
     pub cas_mode: String,
     pub no_cas: NoCasDisposition,
+    pub no_cas_store_profile: String,
+    pub no_cas_mode: String,
+    pub no_cas_stale_epoch_rejected: bool,
+    pub no_cas_current_epoch_committed: bool,
+    pub no_cas_pointer_and_epoch_atomic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +146,58 @@ pub struct E3FenceObservation {
     pub source_revision: String,
     pub stale_epoch_rejected: bool,
     pub current_epoch_committed: bool,
+    pub no_cas_stale_epoch_rejected: bool,
+    pub no_cas_current_epoch_committed: bool,
+    pub no_cas_pointer_and_epoch_atomic: bool,
+}
+
+/// One executed TP-003 assertion at a concrete E3 profile and batching bound.
+/// Callers must supply observations from the governed suite; the builder only
+/// emits a passing authority when every assertion has actually passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct E3TransactionObservation {
+    pub source_revision: String,
+    pub profile: String,
+    pub bound_ms: u64,
+    pub ac: String,
+    pub backend: String,
+    pub assertions: Vec<String>,
+    pub recorded_at: String,
+    pub passed: bool,
+}
+
+pub fn build_e3_transaction_evidence_row(
+    observation: E3TransactionObservation,
+) -> Result<TransactionEvidenceRow, E3ContractError> {
+    if !valid_revision(&observation.source_revision)
+        || !REQUIRED_E3_PROFILES.contains(&observation.profile.as_str())
+        || !REQUIRED_BOUNDS_MS.contains(&observation.bound_ms)
+        || !REQUIRED_TXN_ACS.contains(&observation.ac.as_str())
+        || governed_backend(&observation.profile, &observation.ac)
+            != Some(observation.backend.as_str())
+        || observation.assertions.is_empty()
+        || observation.recorded_at.trim().is_empty()
+        || !observation.passed
+    {
+        return Err(E3ContractError(
+            "E3 transaction observation must be a passing, revision-bound governed profile/bound/AC assertion".into(),
+        ));
+    }
+    Ok(TransactionEvidenceRow {
+        suite: TRANSACTION_SUITE.into(),
+        spec: "TP-003 §3.10".into(),
+        ac: observation.ac,
+        backend: observation.backend,
+        result: "pass".into(),
+        detail: "executed E3 profile/bound transaction contract".into(),
+        assertions: observation.assertions,
+        recorded_at: observation.recorded_at,
+        source_revision: Some(observation.source_revision),
+        e3_profile: Some(observation.profile),
+        bound_ms: Some(observation.bound_ms),
+        latency_window_timing: Some("latency_window".into()),
+        request_id_timing: Some("force_sealed_config_independent".into()),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,7 +228,7 @@ pub fn build_e3_contract_manifest(
         ));
     }
     let no_cas = NoCasDisposition {
-        status: NoCasStatus::Excluded,
+        status: NoCasStatus::Proven,
         reason: NO_CAS_REASON.into(),
     };
     let entries = REQUIRED_E3_PROFILES
@@ -223,11 +292,16 @@ pub fn build_e3_fence_evidence(
         ));
     }
     Ok(E3FenceEvidenceRow {
-        schema_version: 1,
+        schema_version: 2,
         suite: FENCE_SUITE.into(),
         source_revision: observation.source_revision,
         store_profile: FENCE_PROFILE.into(),
-        result: if observation.stale_epoch_rejected && observation.current_epoch_committed {
+        result: if observation.stale_epoch_rejected
+            && observation.current_epoch_committed
+            && observation.no_cas_stale_epoch_rejected
+            && observation.no_cas_current_epoch_committed
+            && observation.no_cas_pointer_and_epoch_atomic
+        {
             "pass"
         } else {
             "fail"
@@ -237,9 +311,14 @@ pub fn build_e3_fence_evidence(
         current_epoch_committed: observation.current_epoch_committed,
         cas_mode: FENCE_MODE.into(),
         no_cas: NoCasDisposition {
-            status: NoCasStatus::Excluded,
+            status: NoCasStatus::Proven,
             reason: NO_CAS_REASON.into(),
         },
+        no_cas_store_profile: NO_CAS_STORE_PROFILE.into(),
+        no_cas_mode: NO_CAS_MODE.into(),
+        no_cas_stale_epoch_rejected: observation.no_cas_stale_epoch_rejected,
+        no_cas_current_epoch_committed: observation.no_cas_current_epoch_committed,
+        no_cas_pointer_and_epoch_atomic: observation.no_cas_pointer_and_epoch_atomic,
     })
 }
 
@@ -392,6 +471,7 @@ pub fn verify_e3_contract(
         &manifest.entries,
         &manifest.ac7_binding,
         &txn_rows,
+        &manifest.source_revision,
         fence.as_ref(),
         &mut errors,
     );
@@ -561,6 +641,11 @@ fn verify_e3_ledger(
                 "E3 ledger profile {profile} contains a non-portable quiet-host gate"
             )));
         }
+        if Some(row.pass_bar.as_str()) != expected_e3_pass_bar(profile) {
+            errors.push(E3ContractError(format!(
+                "E3 ledger profile {profile} must use the governed host-independent pass bar"
+            )));
+        }
         for bound in REQUIRED_BOUNDS_MS {
             require_value(
                 &row,
@@ -616,11 +701,35 @@ fn require_bounded_resources(row: &LedgerRow, prefix: &str, errors: &mut Vec<E3C
     let current = require_u64(row, &format!("{prefix}_buffer_current_bytes"), errors);
     let peak = require_u64(row, &format!("{prefix}_buffer_peak_bytes"), errors);
     let waiters = require_u64(row, &format!("{prefix}_pending_waiters"), errors);
+    let tasks = require_u64(row, &format!("{prefix}_task_count"), errors);
+    let task_limit = require_u64(row, &format!("{prefix}_task_limit"), errors);
+    let store_peak_key = if prefix == "recovery" {
+        format!("{prefix}_store_peak_in_flight")
+    } else {
+        format!("{prefix}_recorder_peak_in_flight")
+    };
+    let store_peak = require_u64(row, &store_peak_key, errors);
+    let store_limit = require_u64(row, &format!("{prefix}_store_in_flight_limit"), errors);
+    let object_page_limit = require_u64(row, &format!("{prefix}_object_page_limit"), errors);
+    let (governed_tasks, governed_store_limit) = if prefix == "recovery" {
+        (1, 1)
+    } else {
+        (384, 384)
+    };
     if current != Some(0)
         || waiters != Some(0)
         || peak
             .zip(configured)
             .is_none_or(|(peak, configured)| peak > configured)
+        || task_limit != Some(governed_tasks)
+        || tasks
+            .zip(task_limit)
+            .is_none_or(|(tasks, limit)| tasks == 0 || tasks > limit)
+        || store_limit != Some(governed_store_limit)
+        || store_peak
+            .zip(store_limit)
+            .is_none_or(|(peak, limit)| peak == 0 || peak > limit)
+        || object_page_limit != Some(1_000)
     {
         errors.push(E3ContractError(format!(
             "E3 ledger profile {} {prefix} violates bounded-resource accounting",
@@ -642,6 +751,20 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
         .and_then(serde_json::Value::as_array);
     let start = require_u64(row, "recovery_start_seq", errors);
     let tail = require_u64(row, "recovery_tail_replayed", errors);
+    let total = require_u64(row, "recovery_total_commands", errors);
+    let tail_budget = require_u64(row, "recovery_max_tail_budget", errors);
+    let snapshot_used = values
+        .get("recovery_snapshot_used")
+        .and_then(serde_json::Value::as_bool);
+    let mode_exact = if row.backend_profile == "object_log_sqlite_projection" {
+        snapshot_used == Some(true)
+            && start.is_some_and(|value| value > 0)
+            && tail
+                .zip(total)
+                .is_some_and(|(tail, total)| tail > 0 && tail < total)
+    } else {
+        snapshot_used == Some(false) && start == Some(0) && tail == total
+    };
     let progress_monotonic = samples.is_some_and(|samples| {
         samples.len() >= 2
             && samples.windows(2).all(|pair| {
@@ -658,13 +781,44 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
     });
     if before.is_none()
         || before != after
+        || before.is_some_and(|digest| {
+            let Some(hex) = digest.strip_prefix("fnv1a128:") else {
+                return true;
+            };
+            hex.len() != 32 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        || values
+            .get("recovery_state_digest_algorithm")
+            .and_then(serde_json::Value::as_str)
+            != Some("fnv1a128+disk-unique-id-index")
+        || require_u64(row, "recovery_resident", errors) != Some(10_000_000)
+        || require_u64(row, "recovery_command_count", errors) != Some(10_000)
+        || require_u64(row, "recovery_pending_after", errors) != Some(10_000_000)
+        || require_u64(row, "recovery_load_task_count", errors) != Some(8)
+        || require_u64(row, "recovery_load_task_limit", errors) != Some(8)
+        || require_u64(row, "recovery_replay_command_page_limit", errors) != Some(256)
+        || require_u64(row, "recovery_peak_replay_commands_buffered", errors)
+            .is_none_or(|peak| peak == 0 || peak > 256)
+        || require_u64(row, "recovery_peak_manifest_objects_buffered", errors)
+            .is_none_or(|peak| peak == 0 || peak > 1_000)
+        || values.get("recovery_progress_source")
+            != Some(&serde_json::json!("production_replay_pages"))
+        || values.get("recovery_resource_source")
+            != Some(&serde_json::json!("production_recovery_stats"))
         || require_u64(row, "recovery_verified_items", errors) != Some(10_000_000)
         || require_u64(row, "recovery_missing_items", errors) != Some(0)
         || require_u64(row, "recovery_duplicate_items", errors) != Some(0)
+        || require_u64(row, "recovery_invalid_items", errors) != Some(0)
         || require_u64(row, "recovery_queue_count", errors) != Some(1)
         || require_u64(row, "recovery_verification_chunk_items", errors)
             .is_none_or(|chunk| chunk == 0 || chunk > 512)
         || !progress_monotonic
+        || !mode_exact
+        || tail
+            .zip(tail_budget)
+            .is_none_or(|(tail, budget)| tail > budget)
+        || tail_budget != Some(1_000_000)
+        || values.get("recovery_bar_met") != Some(&serde_json::Value::Bool(true))
     {
         errors.push(E3ContractError(format!(
             "E3 ledger profile {} does not prove exact streaming 10M recovery with monotonic replay progress",
@@ -772,6 +926,7 @@ fn verify_entries(
     entries: &[E3ContractEntry],
     ac7_binding: &Ac7Binding,
     rows: &[TransactionEvidenceRow],
+    revision: &str,
     fence: Option<&E3FenceEvidenceRow>,
     errors: &mut Vec<E3ContractError>,
 ) {
@@ -834,11 +989,20 @@ fn verify_entries(
             }
             let candidates: Vec<_> = rows
                 .iter()
-                .filter(|row| row.ac == authority.ac && row.backend == authority.backend)
+                .filter(|row| {
+                    row.ac == authority.ac
+                        && row.backend == authority.backend
+                        && row.source_revision.as_deref() == Some(revision)
+                        && row.e3_profile.as_deref() == Some(entry.profile.as_str())
+                        && row.bound_ms == Some(entry.bound_ms)
+                        && row.latency_window_timing.as_deref() == Some("latency_window")
+                        && row.request_id_timing.as_deref()
+                            == Some("force_sealed_config_independent")
+                })
                 .collect();
             if candidates.len() != 1 {
                 errors.push(E3ContractError(format!(
-                    "{context}: {} requires exactly one TP-003 row for backend {:?}, found {}",
+                    "{context}: {} requires exactly one revision/profile/bound/timing-bound TP-003 row for backend {:?}, found {}",
                     authority.ac,
                     authority.backend,
                     candidates.len()
@@ -868,6 +1032,14 @@ fn verify_entries(
                 )));
             }
         }
+    }
+    let expected_rows =
+        REQUIRED_E3_PROFILES.len() * REQUIRED_BOUNDS_MS.len() * REQUIRED_TXN_ACS.len();
+    if rows.len() != expected_rows {
+        errors.push(E3ContractError(format!(
+            "E3 transaction evidence requires exactly {expected_rows} profile/bound/AC rows, found {}",
+            rows.len()
+        )));
     }
     for profile in REQUIRED_E3_PROFILES {
         for bound in REQUIRED_BOUNDS_MS {
@@ -943,7 +1115,7 @@ fn verify_fence(
             return None;
         }
     };
-    if row.schema_version != 1
+    if row.schema_version != 2
         || row.suite != FENCE_SUITE
         || row.source_revision != revision
         || row.store_profile != FENCE_PROFILE
@@ -951,11 +1123,16 @@ fn verify_fence(
         || !row.stale_epoch_rejected
         || !row.current_epoch_committed
         || row.cas_mode != FENCE_MODE
-        || row.no_cas.status != NoCasStatus::Excluded
+        || row.no_cas.status != NoCasStatus::Proven
         || row.no_cas.reason != NO_CAS_REASON
+        || row.no_cas_store_profile != NO_CAS_STORE_PROFILE
+        || row.no_cas_mode != NO_CAS_MODE
+        || !row.no_cas_stale_epoch_rejected
+        || !row.no_cas_current_epoch_committed
+        || !row.no_cas_pointer_and_epoch_atomic
     {
         errors.push(E3ContractError(format!(
-            "fencing evidence {} does not prove stale rejection/current commit under the release CAS profile with the authorized no-CAS exclusion",
+            "fencing evidence {} does not prove stale rejection/current commit under both release CAS and Postgres transactional-pointer no-CAS profiles",
             path.display()
         )));
         None

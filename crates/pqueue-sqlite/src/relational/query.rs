@@ -682,6 +682,50 @@ pub(crate) fn peek_sql(
     Ok(out)
 }
 
+pub(crate) fn peek_page_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    after: Option<ItemId>,
+    limit: usize,
+) -> EngineResult<Vec<ItemView>> {
+    let (tenant, queue) = parts(shard);
+    let sql = if after.is_some() {
+        "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+           AND (priority_sort, created_seq, item_id) > (SELECT priority_sort, created_seq, item_id \
+             FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3) \
+         ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
+    } else {
+        "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+         ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
+    };
+    let mut stmt = st(conn.prepare(sql))?;
+    let after = after.map(|item| item.to_string());
+    let rows = st(
+        stmt.query_map(params![tenant, queue, after, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        }),
+    )?;
+    let mut out = Vec::with_capacity(limit);
+    for row in rows {
+        let (id, key, priority, version) = st(row)?;
+        out.push(ItemView {
+            item_id: ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))?,
+            client_item_key: ClientItemKey::new(key)
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            priority: parse_priority(priority)?,
+            item_version: version as u64,
+        });
+    }
+    Ok(out)
+}
+
 /// BQ-14e active-scope discovery: roll up `pqueue_group_summary` into ranked [`ActiveScope`]s. Each group
 /// that currently holds eligible work (`oldest_eligible_at IS NOT NULL`) becomes one source scope, ordered
 /// owner-local oldest-first (smallest `oldest_eligible_at` = most-aged group, group-key tiebreak for

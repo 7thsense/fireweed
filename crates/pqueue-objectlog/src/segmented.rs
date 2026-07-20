@@ -59,6 +59,111 @@ use pqueue_engine::sequenced_metadata::{
     RetainedAddress,
 };
 
+/// Maximum number of object keys requested in one S3 `ListObjectsV2` page.
+/// This is a protocol bound, independent of the queue's durable object count.
+pub const S3_LIST_PAGE_MAX_KEYS: usize = 1_000;
+pub const RECOVERY_COMMAND_PAGE_LIMIT: usize = 256;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecoveryReadPageStats {
+    pub command_limit: usize,
+    pub commands_returned: usize,
+    pub peak_manifest_objects_buffered: usize,
+    pub manifest_object_page_limit: usize,
+}
+
+/// Transactional authority for stores that cannot conditionally update a manifest pointer.
+/// Implementations atomically compare the pointer version and update both the head and assignment epoch.
+pub trait ManifestPointerStore: Send + Sync {
+    fn read(&self, pointer_key: &str) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>>;
+    fn compare_and_swap(
+        &self,
+        pointer_key: &str,
+        expected_version: Option<u64>,
+        value: &ManifestHeadBlob,
+    ) -> EngineResult<bool>;
+}
+
+/// Blob-store adapter for the TD-004 no-CAS mode. Immutable bodies remain in object storage; manifest-head
+/// publication is routed through a transactional pointer authority (Postgres in production).
+pub struct PointerFencedBlobStore {
+    objects: Arc<dyn BlobStore>,
+    pointers: Arc<dyn ManifestPointerStore>,
+}
+
+impl PointerFencedBlobStore {
+    pub fn new(objects: Arc<dyn BlobStore>, pointers: Arc<dyn ManifestPointerStore>) -> Self {
+        Self { objects, pointers }
+    }
+}
+
+impl BlobStore for PointerFencedBlobStore {
+    fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+        self.objects.put(key, body)
+    }
+
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        match self.objects.get(key)? {
+            Some(existing) => Ok(existing == body),
+            None => {
+                self.objects.put(key, body)?;
+                Ok(true)
+            }
+        }
+    }
+
+    fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+        self.objects.get(key)
+    }
+
+    fn delete(&self, key: &str) -> EngineResult<bool> {
+        self.objects.delete(key)
+    }
+
+    fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+        self.objects.list(prefix)
+    }
+
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> EngineResult<Vec<String>> {
+        self.objects.list_page(prefix, start_after, limit)
+    }
+
+    fn backend_kind(&self) -> crate::object_store_observability::BlobBackendKind {
+        self.objects.backend_kind()
+    }
+
+    fn read_manifest_head(
+        &self,
+        prefix: &str,
+    ) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
+        self.pointers.read(prefix)
+    }
+
+    fn update_manifest_head_if_version(
+        &self,
+        prefix: &str,
+        expected_version: Option<u64>,
+        value: &ManifestHeadBlob,
+    ) -> EngineResult<bool> {
+        let won = self
+            .pointers
+            .compare_and_swap(prefix, expected_version, value)?;
+        if won {
+            let version = expected_version.map_or(0, |version| version + 1);
+            self.objects.put(
+                &format!("{prefix}{version:020}.json"),
+                &serde_json::to_vec(value).map_err(store_err)?,
+            )?;
+        }
+        Ok(won)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Object-store seam (the minimal S3 surface the substrate needs)
 // ---------------------------------------------------------------------------
@@ -4019,6 +4124,163 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.read_from_limited(shard, from_seq, usize::MAX)
     }
 
+    /// Production recovery page. Unlike [`Self::read_from`], this never materializes the complete
+    /// manifest or command tail: fixed-index manifests are enumerated through bounded object pages and
+    /// authoritative candidate chains retain only the earliest command-bearing entries needed for one
+    /// command page.
+    pub fn read_recovery_page(
+        &self,
+        shard: &QueueKey,
+        from_seq: u64,
+    ) -> EngineResult<(
+        Vec<(CommandPosition, CommandEnvelope)>,
+        RecoveryReadPageStats,
+    )> {
+        use std::collections::VecDeque;
+
+        if self.branch_uncommitted(shard)? {
+            return Ok((Vec::new(), RecoveryReadPageStats::default()));
+        }
+        let horizon = self.visible_manifest_deletion_watermark(shard)?;
+        self.fail_closed_below_floor(shard, from_seq, horizon)?;
+        let head = self.read_authoritative_head(shard)?;
+        let legacy_end = head
+            .as_ref()
+            .map(|head| head.value.legacy_next_manifest_index)
+            .unwrap_or(u64::MAX);
+        let is_committed_branch = self.store_get(&branch_metadata_key(shard))?.is_some();
+        let mut out = Vec::with_capacity(RECOVERY_COMMAND_PAGE_LIMIT);
+        let mut peak_objects = 0usize;
+
+        let prefix = Self::manifest_prefix(shard);
+        let mut cursor = horizon.map(|index| Self::manifest_key(shard, index));
+        loop {
+            let keys = self
+                .store
+                .list_page(&prefix, cursor.as_deref(), S3_LIST_PAGE_MAX_KEYS)?;
+            peak_objects = peak_objects.max(keys.len());
+            let page_full = keys.len() == S3_LIST_PAGE_MAX_KEYS;
+            let next = keys.last().cloned();
+            for key in keys {
+                let index = parse_manifest_index_from_key(&key)
+                    .ok_or_else(|| EngineError::Storage(format!("invalid manifest key {key}")))?;
+                if index >= legacy_end {
+                    continue;
+                }
+                let Some(bytes) = self.store_get(&key)? else {
+                    return Err(EngineError::Conflict);
+                };
+                let entry: ManifestEntry = self.decode_manifest_json(&key, &bytes, Some(index))?;
+                self.append_recovery_entry(shard, &entry, from_seq, is_committed_branch, &mut out)?;
+                if out.len() == RECOVERY_COMMAND_PAGE_LIMIT {
+                    break;
+                }
+            }
+            if out.len() == RECOVERY_COMMAND_PAGE_LIMIT || !page_full {
+                break;
+            }
+            cursor = next;
+        }
+
+        if out.len() < RECOVERY_COMMAND_PAGE_LIMIT {
+            if let Some(head) = head {
+                let live_start_index = horizon
+                    .map(|index| index.saturating_add(1))
+                    .unwrap_or(head.value.legacy_next_manifest_index)
+                    .max(head.value.legacy_next_manifest_index);
+                let mut remaining = head
+                    .value
+                    .next_manifest_index
+                    .saturating_sub(live_start_index);
+                let mut cursor = head.value.tail_candidate_key;
+                let mut earliest = VecDeque::with_capacity(RECOVERY_COMMAND_PAGE_LIMIT);
+                while remaining > 0 {
+                    let Some(key) = cursor else {
+                        return Err(EngineError::Conflict);
+                    };
+                    let Some(bytes) = self.store_get(&key)? else {
+                        return Err(EngineError::Conflict);
+                    };
+                    let candidate: ManifestCandidate =
+                        self.decode_manifest_json(&key, &bytes, manifest_index_from_any_key(&key))?;
+                    cursor = candidate.previous_candidate_key.clone();
+                    let entry = candidate.entry;
+                    if !entry.fence
+                        && !Self::is_reclaimed_manifest_marker(&entry)
+                        && entry.segment_key.is_some()
+                        && Self::visible_last_seq(&entry) >= from_seq
+                    {
+                        earliest.push_front(entry);
+                        if earliest.len() > RECOVERY_COMMAND_PAGE_LIMIT {
+                            earliest.pop_back();
+                        }
+                    }
+                    remaining -= 1;
+                }
+                peak_objects = peak_objects.max(earliest.len());
+                for entry in earliest {
+                    self.append_recovery_entry(
+                        shard,
+                        &entry,
+                        from_seq,
+                        is_committed_branch,
+                        &mut out,
+                    )?;
+                    if out.len() == RECOVERY_COMMAND_PAGE_LIMIT {
+                        break;
+                    }
+                }
+            }
+        }
+        let stats = RecoveryReadPageStats {
+            command_limit: RECOVERY_COMMAND_PAGE_LIMIT,
+            commands_returned: out.len(),
+            peak_manifest_objects_buffered: peak_objects,
+            manifest_object_page_limit: S3_LIST_PAGE_MAX_KEYS,
+        };
+        Ok((out, stats))
+    }
+
+    fn append_recovery_entry(
+        &self,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+        from_seq: u64,
+        is_committed_branch: bool,
+        out: &mut Vec<(CommandPosition, CommandEnvelope)>,
+    ) -> EngineResult<()> {
+        if entry.fence || Self::is_reclaimed_manifest_marker(entry) {
+            return Ok(());
+        }
+        let visible_last_seq = Self::visible_last_seq(entry);
+        if visible_last_seq < from_seq {
+            return Ok(());
+        }
+        let Some(seg_key) = entry.segment_key.as_ref() else {
+            return Ok(());
+        };
+        self.validate_live_segment_locator(shard, entry, seg_key, is_committed_branch)?;
+        let bytes = self
+            .store_get(seg_key)?
+            .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
+        let (epoch, first_seq, commands) =
+            self.decode_manifest_segment(entry, seg_key, &bytes, is_committed_branch)?;
+        for (index, envelope) in commands.into_iter().enumerate() {
+            let sequence = first_seq + index as u64;
+            if sequence < from_seq || sequence > visible_last_seq {
+                continue;
+            }
+            out.push((
+                CommandPosition::new(shard.clone(), epoch, sequence),
+                envelope,
+            ));
+            if out.len() == RECOVERY_COMMAND_PAGE_LIMIT {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Like [`Self::read_from`], but stops fetching/parsing segment objects as soon as `limit` commands have
     /// been returned. The `LogStore` adapter uses this for recovery paging; without it, each page would
     /// deserialize the entire remaining tail and then truncate in memory.
@@ -7441,7 +7703,10 @@ impl BlobStore for S3BlobStore {
         let mut query = vec![
             ("list-type".to_string(), "2".to_string()),
             ("prefix".to_string(), prefix.to_string()),
-            ("max-keys".to_string(), limit.min(1000).to_string()),
+            (
+                "max-keys".to_string(),
+                limit.min(S3_LIST_PAGE_MAX_KEYS).to_string(),
+            ),
         ];
         if let Some(cursor) = start_after {
             query.push(("start-after".to_string(), cursor.to_string()));
@@ -8073,6 +8338,70 @@ mod manifest_deletion_watermark_tests {
                 )
             })
             .collect()
+    }
+
+    #[derive(Default)]
+    struct TransactionalPointer {
+        heads: Mutex<BTreeMap<String, VersionedHead<ManifestHeadBlob>>>,
+    }
+
+    impl ManifestPointerStore for TransactionalPointer {
+        fn read(&self, key: &str) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
+            Ok(self.heads.lock().unwrap().get(key).cloned())
+        }
+
+        fn compare_and_swap(
+            &self,
+            key: &str,
+            expected_version: Option<u64>,
+            value: &ManifestHeadBlob,
+        ) -> EngineResult<bool> {
+            let mut heads = self.heads.lock().unwrap();
+            let actual = heads.get(key).map(|head| head.version);
+            if actual != expected_version {
+                return Ok(false);
+            }
+            heads.insert(
+                key.to_owned(),
+                VersionedHead {
+                    version: expected_version.map_or(0, |version| version + 1),
+                    value: value.clone(),
+                },
+            );
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn postgres_pointer_fallback_atomically_fences_stale_epoch_without_blob_cas() {
+        let objects: Arc<dyn BlobStore> = Arc::new(InMemoryBlobStore::new());
+        let pointers = Arc::new(TransactionalPointer::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let owner_a = SegmentedObjectLog::open(
+            PointerFencedBlobStore::new(objects.clone(), pointers.clone()),
+            cfg,
+        );
+        owner_a.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(owner_a.fence_epoch(&shard, 0, 1).unwrap(), 0);
+        owner_a.enqueue(&shard, &pushes(2), 0, 2).unwrap();
+        owner_a.seal(&shard, 0, 3).unwrap();
+
+        let owner_b =
+            SegmentedObjectLog::open(PointerFencedBlobStore::new(objects, pointers.clone()), cfg);
+        owner_b.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(owner_b.acquire_epoch(&shard, 4).unwrap(), 1);
+        owner_b.enqueue(&shard, &pushes(1), 1, 5).unwrap();
+        owner_b.seal(&shard, 1, 6).unwrap();
+
+        owner_a.enqueue(&shard, &pushes(1), 0, 7).unwrap();
+        assert_eq!(owner_a.seal(&shard, 0, 8), Err(EngineError::EpochFenced));
+        let heads = pointers.heads.lock().unwrap();
+        assert_eq!(heads.len(), 1);
+        let head = heads.values().next().unwrap();
+        assert_eq!(head.value.current_epoch, 1);
+        drop(heads);
+        assert_eq!(owner_b.read_all(&shard).unwrap().len(), 3);
     }
 
     fn expire_as_owner<S: BlobStore>(

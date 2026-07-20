@@ -23,6 +23,21 @@ grep -q "worktree must be clean before release measurement" "$OUTPUT"
 rm -f "$DIRTY_SENTINEL"
 : >"$OUTPUT"
 set +e
+PQUEUE_E3_RESIDENT=9999999 \
+PQUEUE_E3_MINIO_CONTAINER=fake-minio \
+PQUEUE_S3_TEST_ENDPOINT=http://127.0.0.2:9000 \
+"$REPO_ROOT/scripts/perf/tp002-e3-minio.sh" >"$OUTPUT" 2>&1
+STATUS=$?
+set -e
+if [ "$STATUS" -ne 2 ]; then
+  echo "expected noncanonical-shape rejection exit 2, got $STATUS" >&2
+  cat "$OUTPUT" >&2
+  exit 1
+fi
+grep -q "release requires resident=10000000" "$OUTPUT"
+
+: >"$OUTPUT"
+set +e
 PATH="$REPO_ROOT/scripts/perf/tests/fixtures:$PATH" \
 PQUEUE_E3_DRIFT_SENTINEL="$DRIFT_SENTINEL" \
 PQUEUE_E3_MINIO_CONTAINER=fake-minio \

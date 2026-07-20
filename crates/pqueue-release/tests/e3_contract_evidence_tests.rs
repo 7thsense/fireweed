@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_release::e3_contract::{
-    E3FenceObservation, build_e3_contract_manifest, build_e3_fence_evidence, verify_e3_contract,
+    E3FenceObservation, E3TransactionObservation, build_e3_contract_manifest,
+    build_e3_fence_evidence, build_e3_transaction_evidence_row, verify_e3_contract,
     write_e3_contract, write_e3_fence_evidence,
 };
 
@@ -63,7 +64,7 @@ fn accepts_all_profiles_bounds_transaction_authorities_and_fence() {
     let fixture = Fixture::new();
     let summary = verify_e3_contract(&fixture.manifest(), REVISION).unwrap();
     assert_eq!(summary.entries, 8);
-    assert_eq!(summary.transaction_rows, 9);
+    assert_eq!(summary.transaction_rows, 48);
     assert_eq!(summary.cost_rows, 8);
 }
 
@@ -82,7 +83,7 @@ fn production_generator_builds_and_semantically_verifies_the_full_matrix() {
     let summary = verify_e3_contract(&generated, REVISION).unwrap();
     assert_eq!(
         (summary.entries, summary.transaction_rows, summary.cost_rows),
-        (8, 9, 8)
+        (8, 48, 8)
     );
 }
 
@@ -112,6 +113,43 @@ fn rejects_marker_only_recovery_and_recorder_controls() {
 }
 
 #[test]
+fn rejects_unbounded_cardinality_dependent_work_and_inexact_recovery_state() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path)
+        .unwrap()
+        .replacen(
+            "\"bound_1ms_task_limit\":384",
+            "\"bound_1ms_task_limit\":10000000",
+            1,
+        )
+        .replacen(
+            "\"recovery_object_page_limit\":1000",
+            "\"recovery_object_page_limit\":10000000",
+            1,
+        )
+        .replacen(
+            "\"recovery_invalid_items\":0",
+            "\"recovery_invalid_items\":1",
+            1,
+        )
+        .replacen(
+            "\"recovery_progress_source\":\"production_replay_pages\"",
+            "\"recovery_progress_source\":\"synthetic_endpoints\"",
+            1,
+        )
+        .replacen(
+            "\"recovery_max_tail_budget\":1000000",
+            "\"recovery_max_tail_budget\":10000000",
+            1,
+        );
+    fs::write(path, body).unwrap();
+    let errors = fixture.errors();
+    assert!(errors.contains("bounded-resource accounting"), "{errors}");
+    assert!(errors.contains("exact streaming 10M recovery"), "{errors}");
+}
+
+#[test]
 fn rejects_missing_profile() {
     let fixture = Fixture::new();
     fixture.mutate_json("contract.json", |value| {
@@ -133,7 +171,7 @@ fn rejects_legacy_contract_without_explicit_fence_and_timing_links() {
     fixture.mutate_json("contract.json", |value| {
         value["schema_version"] = serde_json::json!(1);
     });
-    assert!(fixture.errors().contains("expected 2"));
+    assert!(fixture.errors().contains("expected 3"));
 }
 
 #[test]
@@ -302,6 +340,23 @@ fn rejects_missing_or_false_portable_gate_markers_and_quiet_host_text() {
     );
 }
 
+#[test]
+fn rejects_host_speed_pass_bar_even_when_portable_markers_are_forged_true() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; 10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate",
+        "finish within 30 seconds on this host",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("must use the governed host-independent pass bar")
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn rejects_symlink_authority_and_writer_target() {
@@ -324,6 +379,9 @@ fn rejects_symlink_authority_and_writer_target() {
         source_revision: REVISION.into(),
         stale_epoch_rejected: true,
         current_epoch_committed: true,
+        no_cas_stale_epoch_rejected: true,
+        no_cas_current_epoch_committed: true,
+        no_cas_pointer_and_epoch_atomic: true,
     })
     .unwrap();
     assert!(write_e3_fence_evidence(&output, &row).is_err());
@@ -381,9 +439,13 @@ fn rejects_unproven_manifest_fence_or_fallback() {
 
     let fixture = Fixture::new();
     fixture.mutate_json("fencing.json", |value| {
-        value["no_cas"] = serde_json::json!({"status":"proven","reason":"fallback worked"});
+        value["no_cas_pointer_and_epoch_atomic"] = serde_json::json!(false);
     });
-    assert!(fixture.errors().contains("authorized no-CAS exclusion"));
+    assert!(
+        fixture
+            .errors()
+            .contains("Postgres transactional-pointer no-CAS")
+    );
 }
 
 #[test]
@@ -392,17 +454,90 @@ fn fence_builder_fails_closed_and_emits_typed_release_profile() {
         source_revision: "0123456789abcdef0123456789abcdef01234567".into(),
         stale_epoch_rejected: true,
         current_epoch_committed: true,
+        no_cas_stale_epoch_rejected: true,
+        no_cas_current_epoch_committed: true,
+        no_cas_pointer_and_epoch_atomic: true,
     })
     .unwrap();
     assert_eq!(row.result, "pass");
     assert_eq!(row.store_profile, "minio_create_only_cas");
+    assert!(row.no_cas_pointer_and_epoch_atomic);
 
     assert!(
         build_e3_fence_evidence(E3FenceObservation {
             source_revision: "not-a-revision".into(),
             stale_epoch_rejected: true,
             current_epoch_committed: true,
+            no_cas_stale_epoch_rejected: true,
+            no_cas_current_epoch_committed: true,
+            no_cas_pointer_and_epoch_atomic: true,
         })
         .is_err()
     );
+}
+
+#[test]
+fn transaction_builder_requires_executed_exact_revision_profile_bound_and_ac() {
+    let observation = E3TransactionObservation {
+        source_revision: REVISION.into(),
+        profile: "object_log_inmemory_projection".into(),
+        bound_ms: 20,
+        ac: "AC-TXN-7".into(),
+        backend: "objectlog(force-seal|group-commit)".into(),
+        assertions: vec!["request id replay and latency-window group commit passed".into()],
+        recorded_at: "2026-07-20T00:00:00Z".into(),
+        passed: true,
+    };
+    let row = build_e3_transaction_evidence_row(observation.clone()).unwrap();
+    assert_eq!(row.source_revision.as_deref(), Some(REVISION));
+    assert_eq!(
+        row.e3_profile.as_deref(),
+        Some("object_log_inmemory_projection")
+    );
+    assert_eq!(row.bound_ms, Some(20));
+    assert_eq!(row.latency_window_timing.as_deref(), Some("latency_window"));
+    assert_eq!(
+        row.request_id_timing.as_deref(),
+        Some("force_sealed_config_independent")
+    );
+
+    for invalid in [
+        E3TransactionObservation {
+            passed: false,
+            ..observation.clone()
+        },
+        E3TransactionObservation {
+            bound_ms: 21,
+            ..observation.clone()
+        },
+        E3TransactionObservation {
+            source_revision: "fixture".into(),
+            ..observation.clone()
+        },
+        E3TransactionObservation {
+            backend: "generic".into(),
+            ..observation
+        },
+    ] {
+        assert!(build_e3_transaction_evidence_row(invalid).is_err());
+    }
+}
+
+#[test]
+fn rejects_generic_transaction_row_reused_through_manifest() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("tp003.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"e3_profile\":\"object_log_inmemory_projection\",\"bound_ms\":1",
+        "\"e3_profile\":\"object_log_inmemory_projection\",\"bound_ms\":5",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    let errors = fixture.errors();
+    assert!(
+        errors.contains("profile=object_log_inmemory_projection bound=1ms"),
+        "{errors}"
+    );
+    assert!(errors.contains("found 0"), "{errors}");
+    assert!(errors.contains("found 2"), "{errors}");
 }

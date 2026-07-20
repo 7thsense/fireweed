@@ -29,7 +29,8 @@ use pqueue_engine::{
     validate_gate_push,
 };
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultHook, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
+    BlobStore, FaultHook, LocalFsBlobStore, ManifestPointerStore, PointerFencedBlobStore,
+    SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use pqueue_objectlog::{
     LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands_for_format,
@@ -41,7 +42,7 @@ use tokio::sync::oneshot;
 /// Per-queue recovery telemetry recorded by the snapshot-tail reopen path (bead pqueue-8a76daad). Exposed so
 /// a test (and an operator-facing log line) can prove recovery resumed from the persisted high-water rather
 /// than replaying the full genesis log.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryStats {
     /// The object-log sequence recovery began replaying at — the projection's persisted high-water
     /// (`relational_cursor.next_seq`). `0` means a full-genesis replay (no valid snapshot).
@@ -50,6 +51,30 @@ pub struct RecoveryStats {
     pub tail_replayed: u64,
     /// Whether a durable snapshot/high-water short-circuited the genesis replay (`start_seq > 0`).
     pub snapshot_used: bool,
+    /// Hard command-page limit used by production replay.
+    pub replay_command_page_limit: u64,
+    /// Largest command page actually materialized.
+    pub peak_replay_commands_buffered: u64,
+    /// Largest manifest-object page actually materialized.
+    pub peak_manifest_objects_buffered: u64,
+    /// Hard manifest-object page limit used by production replay.
+    pub manifest_object_page_limit: u64,
+    /// Recovery replay workers. Replay is deliberately synchronous per queue.
+    pub replay_worker_tasks: u64,
+    /// Bounded, measured replay high-water samples captured after applied pages.
+    pub replay_progress_samples: Vec<u64>,
+}
+
+fn record_replay_progress(samples: &mut Vec<u64>, sequence: u64) {
+    const MAX_SAMPLES: usize = 64;
+    if samples.last().copied() == Some(sequence) {
+        return;
+    }
+    if samples.len() < MAX_SAMPLES {
+        samples.push(sequence);
+    } else if let Some(last) = samples.last_mut() {
+        *last = sequence;
+    }
 }
 
 /// Default recovery-window budget: the max object-log tail (commands) a normal reopen is expected to replay
@@ -207,7 +232,7 @@ impl ObjectLogSqliteBackend {
             .lock()
             .expect("recovery stats poisoned")
             .get(shard)
-            .copied()
+            .cloned()
     }
 
     fn next_envelope(
@@ -303,6 +328,7 @@ impl ObjectLogSqliteBackend {
                     start_seq,
                     tail_replayed,
                     snapshot_used,
+                    ..RecoveryStats::default()
                 },
             );
         Ok(())
@@ -874,6 +900,16 @@ fn system_now_ms() -> i64 {
 }
 
 impl SegmentedObjectLogSqliteBackend {
+    /// Bounded page of authoritative pending order, exposed for release recovery verification.
+    pub fn recovery_order_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<pqueue_engine::ItemView>> {
+        self.projection.peek_page(shard, after, limit)
+    }
+
     /// Install the deterministic object-log fault seam used by ownership/fencing conformance tests.
     pub fn set_object_log_fault_hook(&self, hook: Option<Arc<dyn FaultHook>>) {
         self.log.set_fault_hook(hook);
@@ -926,6 +962,20 @@ impl SegmentedObjectLogSqliteBackend {
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
             writer_format: config.writer_format(),
         })
+    }
+
+    /// Open over a no-CAS object store with a transactional manifest-pointer authority.
+    pub fn open_with_manifest_pointer(
+        store: Arc<dyn BlobStore>,
+        pointers: Arc<dyn ManifestPointerStore>,
+        projection_path: &str,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
+        Self::open_with_blob_store(
+            Arc::new(PointerFencedBlobStore::new(store, pointers)),
+            projection_path,
+            config,
+        )
     }
 
     /// A snapshot of the measured group-commit segment/object counters (segments sealed, objects PUT,
@@ -983,7 +1033,7 @@ impl SegmentedObjectLogSqliteBackend {
             .lock()
             .expect("recovery stats poisoned")
             .get(shard)
-            .copied()
+            .cloned()
     }
 
     /// Spawn the background flusher that seals each queue's latency-due segment (the latency seal trigger).
@@ -1284,18 +1334,35 @@ impl SegmentedObjectLogSqliteBackend {
             .as_ref()
             .map(|position| position.sequence + 1)
             .unwrap_or(0);
-        let entries = self.log.read_from(shard, start_seq)?;
-        let tail_replayed = entries.len() as u64;
-        if !entries.is_empty() {
+        let mut next_seq = start_seq;
+        let mut tail_replayed = 0u64;
+        let mut peak_replay_commands_buffered = 0u64;
+        let mut peak_manifest_objects_buffered = 0u64;
+        let mut replay_progress_samples = vec![start_seq];
+        loop {
+            let (entries, page_stats) = self.log.read_recovery_page(shard, next_seq)?;
+            if entries.is_empty() {
+                break;
+            }
+            peak_replay_commands_buffered = peak_replay_commands_buffered.max(entries.len() as u64);
+            peak_manifest_objects_buffered = peak_manifest_objects_buffered
+                .max(page_stats.peak_manifest_objects_buffered as u64);
             for (_pos, env) in &entries {
                 for id in &env.item_ids {
                     self.counters.observe(shard, *id);
                 }
             }
             let positions: Vec<CommandPosition> = entries.iter().map(|(p, _)| p.clone()).collect();
-            let envelopes: Vec<CommandEnvelope> = entries.iter().map(|(_, e)| e.clone()).collect();
+            let envelopes: Vec<CommandEnvelope> =
+                entries.into_iter().map(|(_, envelope)| envelope).collect();
             self.projection
                 .apply_committed_batch(&positions, &envelopes)?;
+            tail_replayed = tail_replayed.saturating_add(positions.len() as u64);
+            next_seq = positions
+                .last()
+                .map(|position| position.sequence.saturating_add(1))
+                .unwrap_or(next_seq);
+            record_replay_progress(&mut replay_progress_samples, next_seq);
         }
         if tail_replayed > self.recovery_max_tail {
             eprintln!(
@@ -1315,6 +1382,14 @@ impl SegmentedObjectLogSqliteBackend {
                     start_seq,
                     tail_replayed,
                     snapshot_used,
+                    replay_command_page_limit:
+                        pqueue_objectlog::segmented::RECOVERY_COMMAND_PAGE_LIMIT as u64,
+                    peak_replay_commands_buffered,
+                    peak_manifest_objects_buffered,
+                    manifest_object_page_limit: pqueue_objectlog::segmented::S3_LIST_PAGE_MAX_KEYS
+                        as u64,
+                    replay_worker_tasks: 1,
+                    replay_progress_samples,
                 },
             );
         Ok(())
@@ -1836,6 +1911,20 @@ pub struct SegmentedObjectLogInMemoryBackend {
 }
 
 impl SegmentedObjectLogInMemoryBackend {
+    /// Bounded page of authoritative pending order, exposed for release recovery verification.
+    pub fn recovery_order_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<pqueue_engine::ItemView>> {
+        let projection = self.projection_for(shard)?;
+        Ok(projection
+            .lock()
+            .expect("segmented inmemory projection poisoned")
+            .peek_page(after, limit))
+    }
+
     /// Install the deterministic object-log fault seam used by blocking/fencing conformance tests.
     pub fn set_object_log_fault_hook(&self, hook: Option<Arc<dyn FaultHook>>) {
         self.log.set_fault_hook(hook);
@@ -1879,6 +1968,18 @@ impl SegmentedObjectLogInMemoryBackend {
         })
     }
 
+    /// Open over a no-CAS object store with a transactional manifest-pointer authority.
+    pub fn open_with_manifest_pointer(
+        store: Arc<dyn BlobStore>,
+        pointers: Arc<dyn ManifestPointerStore>,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
+        Self::open_with_blob_store(
+            Arc::new(PointerFencedBlobStore::new(store, pointers)),
+            config,
+        )
+    }
+
     /// A snapshot of the measured group-commit segment/object counters (segments sealed, objects PUT,
     /// commands committed, per-segment batch sizes) for the in-memory projection variant.
     pub fn segment_counters(&self) -> SegmentCounters {
@@ -1893,7 +1994,7 @@ impl SegmentedObjectLogInMemoryBackend {
             .lock()
             .expect("inmemory recovery stats poisoned")
             .get(shard)
-            .copied()
+            .cloned()
     }
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
@@ -2209,19 +2310,44 @@ impl SegmentedObjectLogInMemoryBackend {
         &self,
         shard: &QueueKey,
         proj: &Arc<Mutex<ProjectionData>>,
-    ) -> EngineResult<u64> {
-        let entries = self.log.read_all(shard)?;
-        if entries.is_empty() {
-            return Ok(0);
-        }
-        let mut p = proj.lock().expect("segmented inmemory projection poisoned");
-        for (_pos, env) in &entries {
-            for id in &env.item_ids {
-                self.counters.observe(shard, *id);
+    ) -> EngineResult<RecoveryStats> {
+        let mut next_seq = 0u64;
+        let mut replayed = 0u64;
+        let mut peak_replay_commands_buffered = 0u64;
+        let mut peak_manifest_objects_buffered = 0u64;
+        let mut replay_progress_samples = vec![0];
+        loop {
+            let (entries, page_stats) = self.log.read_recovery_page(shard, next_seq)?;
+            if entries.is_empty() {
+                break;
             }
-            p.apply_command(&env.command)?;
+            peak_replay_commands_buffered = peak_replay_commands_buffered.max(entries.len() as u64);
+            peak_manifest_objects_buffered = peak_manifest_objects_buffered
+                .max(page_stats.peak_manifest_objects_buffered as u64);
+            let mut p = proj.lock().expect("segmented inmemory projection poisoned");
+            for (position, envelope) in entries {
+                for id in &envelope.item_ids {
+                    self.counters.observe(shard, *id);
+                }
+                p.apply_command(&envelope.command)?;
+                replayed = replayed.saturating_add(1);
+                next_seq = position.sequence.saturating_add(1);
+            }
+            drop(p);
+            record_replay_progress(&mut replay_progress_samples, next_seq);
         }
-        Ok(entries.len() as u64)
+        Ok(RecoveryStats {
+            start_seq: 0,
+            tail_replayed: replayed,
+            snapshot_used: false,
+            replay_command_page_limit: pqueue_objectlog::segmented::RECOVERY_COMMAND_PAGE_LIMIT
+                as u64,
+            peak_replay_commands_buffered,
+            peak_manifest_objects_buffered,
+            manifest_object_page_limit: pqueue_objectlog::segmented::S3_LIST_PAGE_MAX_KEYS as u64,
+            replay_worker_tasks: 1,
+            replay_progress_samples,
+        })
     }
 
     async fn require_leased(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<()> {
@@ -2288,18 +2414,11 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
             let epoch = self.log.current_epoch(&key).unwrap_or(0);
             self.set_epoch(&key, epoch);
             let _ = self.coord_for(&key);
-            let replayed = self.replay_queue(&key, &proj)?;
+            let recovery_stats = self.replay_queue(&key, &proj)?;
             self.recovery_stats
                 .lock()
                 .expect("inmemory recovery stats poisoned")
-                .insert(
-                    key,
-                    RecoveryStats {
-                        start_seq: 0,
-                        tail_replayed: replayed,
-                        snapshot_used: false,
-                    },
-                );
+                .insert(key, recovery_stats);
             Ok(CreateQueueOutcome {
                 created: true,
                 definition,
@@ -2358,7 +2477,7 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
                 )
                 .with_typed_indexes(&definition.typed_indexes),
             ));
-            let replayed = self.replay_queue(shard, &projection)?;
+            let recovery_stats = self.replay_queue(shard, &projection)?;
             self.projections
                 .lock()
                 .expect("segmented inmemory projections poisoned")
@@ -2366,14 +2485,7 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
             self.recovery_stats
                 .lock()
                 .expect("inmemory recovery stats poisoned")
-                .insert(
-                    shard.clone(),
-                    RecoveryStats {
-                        start_seq: 0,
-                        tail_replayed: replayed,
-                        snapshot_used: false,
-                    },
-                );
+                .insert(shard.clone(), recovery_stats);
             Ok(())
         })();
         std::future::ready(result)
@@ -3124,7 +3236,7 @@ mod recovery_tests {
         let tmp = TmpDir::new("seg-inmemory-replay");
         let def = queue_def("t", "inmemory-q");
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-        const N: usize = 25;
+        const N: usize = 300;
 
         {
             let backend =
@@ -3143,14 +3255,38 @@ mod recovery_tests {
             SegmentedObjectLogInMemoryBackend::open(tmp.object_root(), seal_each_config()).unwrap();
         reopened.create_queue(def).await.unwrap();
         assert_eq!(reopened.metrics(&shard).await.unwrap().pending, N as u64);
+        let stats = reopened.recovery_stats(&shard).unwrap();
         assert_eq!(
-            reopened.recovery_stats(&shard),
-            Some(RecoveryStats {
-                start_seq: 0,
-                tail_replayed: N as u64,
-                snapshot_used: false,
-            })
+            (stats.start_seq, stats.tail_replayed, stats.snapshot_used),
+            (0, N as u64, false)
         );
+        assert!(stats.peak_replay_commands_buffered <= stats.replay_command_page_limit);
+        assert_eq!(
+            stats.peak_replay_commands_buffered,
+            stats.replay_command_page_limit
+        );
+        assert!(stats.peak_manifest_objects_buffered <= stats.manifest_object_page_limit);
+        assert!(
+            stats
+                .replay_progress_samples
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        );
+        assert!(stats.replay_progress_samples.len() >= 3);
+        let mut ordered = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = reopened.recovery_order_page(&shard, cursor, 64).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(page.len() <= 64);
+            cursor = page.last().map(|item| item.item_id);
+            ordered.extend(page.into_iter().map(|item| item.client_item_key));
+        }
+        assert_eq!(ordered.len(), N);
+        assert_eq!(ordered.first().unwrap().as_str(), "0");
+        assert_eq!(ordered.last().unwrap().as_str(), "299");
     }
 
     /// AC (crash-consistency): a reopen where the projection high-water LAGS the durable object-log head
@@ -3222,6 +3358,13 @@ mod recovery_tests {
                 b2.metrics(&shard).await.unwrap().pending,
                 (COMMITTED + EXTRA) as u64
             );
+            let first_order_page = b2.recovery_order_page(&shard, None, 7).unwrap();
+            let second_order_page = b2
+                .recovery_order_page(&shard, first_order_page.last().map(|item| item.item_id), 7)
+                .unwrap();
+            assert_eq!(first_order_page.len(), 7);
+            assert_eq!(second_order_page.len(), 7);
+            assert_ne!(first_order_page[6].item_id, second_order_page[0].item_id);
         }
 
         // Second reopen: the projection is now caught up — no double-apply, nothing replayed.
@@ -3300,14 +3443,13 @@ mod recovery_tests {
         )
         .unwrap();
         recovered.create_queue(def.clone()).await.unwrap();
+        let stats = recovered.recovery_stats(&shard).unwrap();
         assert_eq!(
-            recovered.recovery_stats(&shard),
-            Some(RecoveryStats {
-                start_seq: APPLIED as u64,
-                tail_replayed: 2,
-                snapshot_used: true,
-            })
+            (stats.start_seq, stats.tail_replayed, stats.snapshot_used),
+            (APPLIED as u64, 2, true)
         );
+        assert!(stats.peak_replay_commands_buffered <= stats.replay_command_page_limit);
+        assert!(stats.peak_manifest_objects_buffered <= stats.manifest_object_page_limit);
         assert_eq!(recovered.metrics(&shard).await.unwrap().pending, 5);
         drop(recovered);
 

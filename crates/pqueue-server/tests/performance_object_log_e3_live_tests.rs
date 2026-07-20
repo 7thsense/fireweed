@@ -66,11 +66,20 @@ use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, Pu
 use pqueue_objectlog::object_store_observability::{
     BlobBackendKind, BlobMetricsRecorder, BlobPhysicalTotals, InstrumentedBlobStore,
 };
-use pqueue_objectlog::segmented::{BlobStore, S3BlobStore, SegmentConfig, SegmentCounters};
-use pqueue_server::{SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend};
+use pqueue_objectlog::segmented::{
+    BlobStore, FaultCutPoint, S3_LIST_PAGE_MAX_KEYS, S3BlobStore, SegmentConfig, SegmentCounters,
+};
+use pqueue_server::{
+    RecoveryStats, SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,
+};
 
 /// The release resident shape: the full TP-002 E3 10M-item snapshot-tail recovery measurement.
 const RELEASE_RESIDENT: u64 = 10_000_000;
+const RELEASE_ACK_PUSHES: u64 = 100_000;
+const RELEASE_ACK_CONCURRENCY: u64 = 384;
+const RELEASE_LOAD_BATCH: u64 = 1_000;
+const RELEASE_LOAD_CONCURRENCY: u64 = 8;
+const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
 
 const E3_BOUND_CONFIGS: [BoundConfig; 4] = [
     BoundConfig {
@@ -246,6 +255,10 @@ struct ResourceBounds {
     waiters: u64,
     recorder_in_flight: u64,
     recorder_peak_in_flight: u64,
+    task_count: u64,
+    task_limit: u64,
+    store_in_flight_limit: u64,
+    object_page_limit: u64,
 }
 
 trait E3Flusher {
@@ -298,6 +311,14 @@ fn projection_path(label: &str) -> String {
         .to_string()
 }
 
+fn copy_sqlite_projection(source: &str, destination: &str) {
+    let connection =
+        rusqlite::Connection::open(source).expect("open SQLite projection control source");
+    connection
+        .execute("VACUUM INTO ?1", [destination])
+        .expect("create transactionally consistent SQLite projection control");
+}
+
 /// One bound measurement inside one backend-profile run.
 struct AckResult {
     label: &'static str,
@@ -347,6 +368,10 @@ trait E3Backend:
 {
     fn snapshot_segment_counters(&self) -> SegmentCounters;
     fn resource_bounds(&self) -> ResourceBounds;
+    fn set_recovery_tail_fault(
+        &self,
+        hook: Option<Arc<dyn pqueue_objectlog::segmented::FaultHook>>,
+    );
 }
 
 impl E3Backend for SegmentedObjectLogSqliteBackend {
@@ -363,6 +388,13 @@ impl E3Backend for SegmentedObjectLogSqliteBackend {
             waiters: snapshot.waiters as u64,
             ..ResourceBounds::default()
         }
+    }
+
+    fn set_recovery_tail_fault(
+        &self,
+        hook: Option<Arc<dyn pqueue_objectlog::segmented::FaultHook>>,
+    ) {
+        self.set_object_log_fault_hook(hook);
     }
 }
 
@@ -381,25 +413,75 @@ impl E3Backend for SegmentedObjectLogInMemoryBackend {
             ..ResourceBounds::default()
         }
     }
+
+    fn set_recovery_tail_fault(
+        &self,
+        hook: Option<Arc<dyn pqueue_objectlog::segmented::FaultHook>>,
+    ) {
+        self.set_object_log_fault_hook(hook);
+    }
+}
+
+struct CommitBeforeApplyCrash {
+    struck: std::sync::atomic::AtomicBool,
+}
+
+impl pqueue_objectlog::segmented::FaultHook for CommitBeforeApplyCrash {
+    fn fault_point(&self, cut: FaultCutPoint) -> pqueue_engine::EngineResult<()> {
+        if cut == FaultCutPoint::AfterManifestBeforeAck && !self.struck.swap(true, Ordering::SeqCst)
+        {
+            return Err(EngineError::Storage(
+                "E3 deterministic crash after manifest commit".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 trait E3RecoveryProbe {
-    fn recovery_probe(&self, shard: &QueueKey, total_commands: u64) -> (u64, u64, bool);
+    fn recovery_probe(&self, shard: &QueueKey) -> Option<RecoveryStats>;
 }
 
 impl E3RecoveryProbe for SegmentedObjectLogSqliteBackend {
-    fn recovery_probe(&self, shard: &QueueKey, _total_commands: u64) -> (u64, u64, bool) {
+    fn recovery_probe(&self, shard: &QueueKey) -> Option<RecoveryStats> {
         self.recovery_stats(shard)
-            .map(|stats| (stats.start_seq, stats.tail_replayed, stats.snapshot_used))
-            .unwrap_or((0, u64::MAX, false))
     }
 }
 
 impl E3RecoveryProbe for SegmentedObjectLogInMemoryBackend {
-    fn recovery_probe(&self, shard: &QueueKey, _total_commands: u64) -> (u64, u64, bool) {
+    fn recovery_probe(&self, shard: &QueueKey) -> Option<RecoveryStats> {
         self.recovery_stats(shard)
-            .map(|stats| (stats.start_seq, stats.tail_replayed, stats.snapshot_used))
-            .unwrap_or((u64::MAX, u64::MAX, true))
+    }
+}
+
+trait E3OrderProbe {
+    fn recovery_order_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<pqueue_core::ItemId>,
+        limit: usize,
+    ) -> pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>>;
+}
+
+impl E3OrderProbe for SegmentedObjectLogSqliteBackend {
+    fn recovery_order_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<pqueue_core::ItemId>,
+        limit: usize,
+    ) -> pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>> {
+        SegmentedObjectLogSqliteBackend::recovery_order_page(self, shard, after, limit)
+    }
+}
+
+impl E3OrderProbe for SegmentedObjectLogInMemoryBackend {
+    fn recovery_order_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<pqueue_core::ItemId>,
+        limit: usize,
+    ) -> pqueue_engine::EngineResult<Vec<pqueue_engine::ItemView>> {
+        SegmentedObjectLogInMemoryBackend::recovery_order_page(self, shard, after, limit)
     }
 }
 
@@ -459,6 +541,7 @@ where
             lat
         }));
     }
+    let task_count = handles.len() as u64;
     let mut latencies = Vec::with_capacity(pushes as usize);
     for h in handles {
         latencies.extend(h.await.expect("ack task joined"));
@@ -471,6 +554,10 @@ where
     let mut resource_bounds = backend.resource_bounds();
     resource_bounds.recorder_in_flight = snapshot.in_flight;
     resource_bounds.recorder_peak_in_flight = snapshot.peak_in_flight;
+    resource_bounds.task_count = task_count;
+    resource_bounds.task_limit = RELEASE_ACK_CONCURRENCY;
+    resource_bounds.store_in_flight_limit = RELEASE_ACK_CONCURRENCY;
+    resource_bounds.object_page_limit = STORE_OBJECT_PAGE_LIMIT;
     let store_operations = snapshot.delta(&store_baseline).physical_totals().into();
     let _ = std::fs::remove_file(&proj);
     AckArm {
@@ -533,7 +620,10 @@ where
         && enabled.resource_bounds.waiters == 0
         && enabled.resource_bounds.peak_bytes <= enabled.resource_bounds.configured_global_bytes
         && enabled.resource_bounds.recorder_in_flight == 0
-        && enabled.resource_bounds.recorder_peak_in_flight <= concurrency;
+        && enabled.resource_bounds.recorder_peak_in_flight
+            <= enabled.resource_bounds.store_in_flight_limit
+        && enabled.resource_bounds.task_count <= enabled.resource_bounds.task_limit
+        && enabled.resource_bounds.object_page_limit == STORE_OBJECT_PAGE_LIMIT;
     let load_shape_met = c.commands_committed >= pushes
         && c.segments_sealed > 0
         && c.objects_put > 0
@@ -573,6 +663,7 @@ where
 struct RecoveryResult {
     resident: u64,
     load_batch: u64,
+    load_task_count: u64,
     command_count: u64,
     total_commands: u64,
     start_seq: u64,
@@ -588,6 +679,9 @@ struct RecoveryResult {
     duplicate_items: u64,
     invalid_items: u64,
     replay_progress_samples: Vec<u64>,
+    replay_command_page_limit: u64,
+    peak_replay_commands_buffered: u64,
+    peak_manifest_objects_buffered: u64,
     verification_chunk_items: u64,
     queue_count: u64,
     resource_bounds: ResourceBounds,
@@ -636,7 +730,7 @@ struct StateFingerprint {
 /// Verify the complete resident state without materializing another resident-sized collection. The
 /// deterministic client-key stream is queried in bounded chunks; every full live view contributes to a
 /// stable digest, while XOR/sum identity accumulators detect duplicate identities independently of count.
-async fn fingerprint_state<B: ProjectionRead>(
+async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
     backend: &B,
     shard: &QueueKey,
     resident: u64,
@@ -647,7 +741,11 @@ async fn fingerprint_state<B: ProjectionRead>(
     let mut missing = 0u64;
     let mut id_xor = 0u64;
     let mut id_sum = 0u64;
-    let mut identity_bits = vec![0u64; resident.div_ceil(64) as usize];
+    let identity_path = projection_path("recovery-identity-index");
+    let mut identity_db = rusqlite::Connection::open(&identity_path).unwrap();
+    identity_db
+        .execute_batch("PRAGMA journal_mode=OFF; CREATE TABLE seen_ids (id INTEGER PRIMARY KEY)")
+        .unwrap();
     let mut identity_domain = None;
     let mut duplicates = 0u64;
     let mut invalid = 0u64;
@@ -659,6 +757,7 @@ async fn fingerprint_state<B: ProjectionRead>(
             .collect::<Vec<_>>();
         let views = backend.live_items(shard, &keys).await.unwrap();
         assert_eq!(views.len(), keys.len(), "live_items preserves input shape");
+        let tx = identity_db.transaction().unwrap();
         for (index, (key, view)) in keys.iter().zip(views).enumerate() {
             let ordinal = start + index as u64;
             let Some(view) = view else {
@@ -670,6 +769,10 @@ async fn fingerprint_state<B: ProjectionRead>(
             if view.client_item_key != *key
                 || view.item_version != 1
                 || view.lifecycle_state != ItemState::Pending
+                || view.priority.is_some()
+                || view.group_key.is_some()
+                || view.not_before.is_some()
+                || view.attempt_count != 0
                 || view.payload.as_deref() != Some(expected_payload.as_bytes())
                 || !view.fields.is_empty()
             {
@@ -681,17 +784,14 @@ async fn fingerprint_state<B: ProjectionRead>(
             if identity_domain.get_or_insert(domain) != &domain {
                 duplicates += 1;
             } else {
-                let counter = u64::from(view.item_id.counter());
-                if counter >= resident {
+                let inserted = tx
+                    .execute(
+                        "INSERT OR IGNORE INTO seen_ids(id) VALUES (?1)",
+                        [view.item_id.as_u64() as i64],
+                    )
+                    .unwrap();
+                if inserted != 1 {
                     duplicates += 1;
-                } else {
-                    let bit = counter;
-                    let word = &mut identity_bits[(bit / 64) as usize];
-                    let mask = 1u64 << (bit % 64);
-                    if *word & mask != 0 {
-                        duplicates += 1;
-                    }
-                    *word |= mask;
                 }
             }
             digest.update(&ordinal.to_le_bytes());
@@ -699,6 +799,10 @@ async fn fingerprint_state<B: ProjectionRead>(
             digest.update(&view.item_id.as_u64().to_le_bytes());
             digest.update(&view.item_version.to_le_bytes());
             digest.update(format!("{:?}", view.lifecycle_state).as_bytes());
+            digest.update(&serde_json::to_vec(&view.priority).unwrap());
+            digest.update(&serde_json::to_vec(&view.group_key).unwrap());
+            digest.update(&serde_json::to_vec(&view.not_before).unwrap());
+            digest.update(&view.attempt_count.to_le_bytes());
             digest.update(view.client_item_key.as_str().as_bytes());
             digest.update(view.payload.as_deref().unwrap_or_default());
             for (field, value) in view.fields {
@@ -706,10 +810,44 @@ async fn fingerprint_state<B: ProjectionRead>(
                 digest.update(&value);
             }
         }
+        tx.commit().unwrap();
         start = end;
     }
+    let unique_ids: u64 = identity_db
+        .query_row("SELECT COUNT(*) FROM seen_ids", [], |row| row.get(0))
+        .unwrap();
+    if unique_ids != verified {
+        duplicates = duplicates.saturating_add(verified.abs_diff(unique_ids));
+    }
+    drop(identity_db);
+    let _ = std::fs::remove_file(identity_path);
     digest.update(&id_xor.to_le_bytes());
     digest.update(&id_sum.to_le_bytes());
+    let mut order_offset = 0usize;
+    let mut order_cursor = None;
+    while order_offset < resident as usize {
+        let page = backend
+            .recovery_order_page(shard, order_cursor, chunk_items as usize)
+            .unwrap();
+        if page.is_empty() {
+            invalid = invalid.saturating_add((resident as usize - order_offset) as u64);
+            break;
+        }
+        for (index, item) in page.iter().enumerate() {
+            let ordinal = order_offset + index;
+            if item.client_item_key.as_str() != format!("i{ordinal}") {
+                invalid += 1;
+            }
+            digest.update(b"authoritative-order");
+            digest.update(&(ordinal as u64).to_le_bytes());
+            digest.update(&item.item_id.as_u64().to_le_bytes());
+            digest.update(item.client_item_key.as_str().as_bytes());
+            digest.update(&serde_json::to_vec(&item.priority).unwrap());
+            digest.update(&item.item_version.to_le_bytes());
+        }
+        order_cursor = page.last().map(|item| item.item_id);
+        order_offset += page.len();
+    }
     StateFingerprint {
         digest: digest.finish(),
         verified,
@@ -746,13 +884,14 @@ async fn run_recovery<B, F>(
     open: F,
 ) -> RecoveryResult
 where
-    B: E3Backend + E3RecoveryProbe,
+    B: E3Backend + E3RecoveryProbe + E3OrderProbe,
     F: Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
     let qid = format!("e3rec-{profile}-{}", std::process::id());
     let def = qdef("e3", &qid);
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let proj = projection_path(&format!("recovery-{profile}"));
+    let control_proj = projection_path(&format!("recovery-control-{profile}"));
     // A large byte target + a generous latency cap so the bulk load seals FEW, LARGE segments: concurrent
     // loaders fill the 8 MiB buffer fast (size-triggered seals), and the 10 s cap means even a load stall
     // produces only a handful of latency-sealed segments. This keeps the per-queue manifest small (the seal
@@ -763,7 +902,12 @@ where
     let (store, recorder) = s3.instrumented_store(true);
     let verification_chunk_items = env_u64("PQUEUE_E3_VERIFY_CHUNK_ITEMS", 512).clamp(1, 512);
 
-    let (command_count, total_commands, pending_loaded, state_before) = {
+    let load_resident = if requires_snapshot {
+        resident.saturating_sub(1)
+    } else {
+        resident
+    };
+    let (command_count, load_task_count, total_commands, pending_loaded, baseline_state) = {
         let backend = Arc::new(open(store.clone(), &proj, cfg).expect("open backend for load"));
         backend
             .create_queue(def.clone())
@@ -772,14 +916,14 @@ where
         let flusher = backend.spawn_background_flusher();
 
         // Concurrent loaders, each owning a disjoint id range, co-buffer into shared group-commit segments.
-        let share = resident.div_ceil(load_concurrency);
+        let share = load_resident.div_ceil(load_concurrency);
         let mut handles = Vec::new();
         for w in 0..load_concurrency {
             let start = w * share;
             if start >= resident {
                 break;
             }
-            let end = (start + share).min(resident);
+            let end = (start + share).min(load_resident);
             let backend = backend.clone();
             let shard = shard.clone();
             handles.push(tokio::spawn(async move {
@@ -800,6 +944,7 @@ where
                 commands
             }));
         }
+        let load_task_count = handles.len() as u64;
         let mut command_count = 0u64;
         for h in handles {
             command_count += h.await.expect("load task joined");
@@ -810,22 +955,78 @@ where
         let deadline = Instant::now() + std::time::Duration::from_secs(30);
         loop {
             let pending = backend.metrics(&shard).await.unwrap().pending;
-            if pending >= resident || Instant::now() >= deadline {
+            if pending >= load_resident || Instant::now() >= deadline {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         flusher.abort();
-        let total_commands = backend.snapshot_segment_counters().commands_committed;
         let pending = backend.metrics(&shard).await.unwrap().pending;
-        let state =
-            fingerprint_state(backend.as_ref(), &shard, resident, verification_chunk_items).await;
-        (command_count, total_commands, pending, state)
+        let baseline_state = if requires_snapshot {
+            copy_sqlite_projection(&proj, &control_proj);
+            let hook = Arc::new(CommitBeforeApplyCrash {
+                struck: std::sync::atomic::AtomicBool::new(false),
+            });
+            backend.set_recovery_tail_fault(Some(hook.clone()));
+            let tail_flusher = backend.spawn_background_flusher();
+            let final_key = format!("i{}", resident - 1);
+            let tail_result = backend
+                .push(
+                    &shard,
+                    vec![keyed_spec(
+                        &final_key,
+                        Some(ClientItemKey::new(final_key.clone()).unwrap()),
+                    )],
+                    ts(),
+                    None,
+                )
+                .await;
+            tail_flusher.abort();
+            backend.set_recovery_tail_fault(None);
+            assert!(hook.struck.load(Ordering::SeqCst));
+            assert!(
+                tail_result.is_err(),
+                "crash seam must suppress the ack/apply"
+            );
+            None
+        } else {
+            Some(
+                fingerprint_state(backend.as_ref(), &shard, resident, verification_chunk_items)
+                    .await,
+            )
+        };
+        let total_commands = backend.snapshot_segment_counters().commands_committed;
+        (
+            command_count + u64::from(requires_snapshot),
+            load_task_count,
+            total_commands,
+            pending,
+            baseline_state,
+        )
     };
     assert_eq!(
-        pending_loaded, resident,
-        "every loaded item must be materialized + durable before the snapshot"
+        pending_loaded, load_resident,
+        "caught-up projection must stop immediately before the deterministic crash tail"
     );
+    let state_before = if requires_snapshot {
+        let control = Arc::new(
+            open(store.clone(), &control_proj, cfg).expect("open copied snapshot control"),
+        );
+        control
+            .create_queue(def.clone())
+            .await
+            .expect("recover copied snapshot control");
+        let stats = control
+            .recovery_probe(&shard)
+            .expect("control recovery telemetry");
+        assert!(stats.snapshot_used && stats.tail_replayed > 0);
+        let state =
+            fingerprint_state(control.as_ref(), &shard, resident, verification_chunk_items).await;
+        drop(control);
+        state
+    } else {
+        baseline_state.expect("in-memory exact pre-recovery control")
+    };
     let recovery_baseline = recorder.snapshot();
 
     // Reopen on the same bucket and (for SQLite) the same durable projection path.
@@ -846,17 +1047,21 @@ where
     )
     .await;
     let recovery_max_tail = env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000);
-    let (start_seq, tail_replayed, snapshot_used) = backend2.recovery_probe(&shard, total_commands);
+    let recovery_stats = backend2
+        .recovery_probe(&shard)
+        .expect("production recovery telemetry");
+    let start_seq = recovery_stats.start_seq;
+    let tail_replayed = recovery_stats.tail_replayed;
+    let snapshot_used = recovery_stats.snapshot_used;
 
     // SQLite must prove snapshot-bounded replay. The ephemeral in-memory projection must prove the opposite
     // exact contract: a full durable-log replay, still bounded by the same command budget.
     let mode_met = if requires_snapshot {
-        snapshot_used && start_seq > 0 && tail_replayed < total_commands
+        snapshot_used && start_seq > 0 && tail_replayed > 0 && tail_replayed < total_commands
     } else {
         !snapshot_used && start_seq == 0 && tail_replayed == total_commands
     };
-    let mut replay_progress_samples = vec![start_seq];
-    replay_progress_samples.push(start_seq.saturating_add(tail_replayed));
+    let replay_progress_samples = recovery_stats.replay_progress_samples.clone();
     let replay_progress_monotonic = replay_progress_samples
         .windows(2)
         .all(|pair| pair[0] <= pair[1]);
@@ -873,10 +1078,20 @@ where
     let mut resource_bounds = backend2.resource_bounds();
     resource_bounds.recorder_in_flight = snapshot.in_flight;
     resource_bounds.recorder_peak_in_flight = snapshot.peak_in_flight;
+    resource_bounds.task_count = recovery_stats.replay_worker_tasks;
+    resource_bounds.task_limit = recovery_stats.replay_worker_tasks;
+    resource_bounds.store_in_flight_limit = 1;
+    resource_bounds.object_page_limit = recovery_stats.manifest_object_page_limit;
     let resources_met = resource_bounds.current_bytes == 0
         && resource_bounds.waiters == 0
         && resource_bounds.peak_bytes <= resource_bounds.configured_global_bytes
-        && resource_bounds.recorder_in_flight == 0;
+        && resource_bounds.recorder_in_flight == 0
+        && resource_bounds.recorder_peak_in_flight <= resource_bounds.store_in_flight_limit
+        && resource_bounds.task_count <= resource_bounds.task_limit
+        && recovery_stats.peak_replay_commands_buffered <= recovery_stats.replay_command_page_limit
+        && recovery_stats.peak_manifest_objects_buffered
+            <= recovery_stats.manifest_object_page_limit
+        && resource_bounds.object_page_limit == STORE_OBJECT_PAGE_LIMIT;
     let bar_met = mode_met
         && tail_replayed <= recovery_max_tail
         && pending_after == resident
@@ -885,10 +1100,12 @@ where
         && resources_met;
 
     let _ = std::fs::remove_file(&proj);
+    let _ = std::fs::remove_file(&control_proj);
 
     RecoveryResult {
         resident,
         load_batch,
+        load_task_count,
         command_count,
         total_commands,
         start_seq,
@@ -904,6 +1121,9 @@ where
         duplicate_items: state_after.duplicates,
         invalid_items: state_after.invalid,
         replay_progress_samples,
+        replay_command_page_limit: recovery_stats.replay_command_page_limit,
+        peak_replay_commands_buffered: recovery_stats.peak_replay_commands_buffered,
+        peak_manifest_objects_buffered: recovery_stats.peak_manifest_objects_buffered,
         verification_chunk_items,
         queue_count: 1,
         resource_bounds,
@@ -925,7 +1145,7 @@ async fn run_profile_run<B, F>(
     open: F,
 ) -> ProfileRun
 where
-    B: E3Backend + E3RecoveryProbe,
+    B: E3Backend + E3RecoveryProbe + E3OrderProbe,
     F: Copy + Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
     let started = Instant::now();
@@ -1047,6 +1267,7 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                     let mode_met = if spec.requires_snapshot {
                         recovery.snapshot_used
                             && recovery.start_seq > 0
+                            && recovery.tail_replayed > 0
                             && recovery.tail_replayed < recovery.total_commands
                     } else {
                         !recovery.snapshot_used
@@ -1155,7 +1376,7 @@ fn profile_row(
             );
             values.insert(
                 "recovery_state_digest_algorithm".into(),
-                serde_json::json!("fnv1a128+identity-domain-bitset"),
+                serde_json::json!("fnv1a128+disk-unique-id-index"),
             );
             values.insert(
                 "recovery_state_digest_before".into(),
@@ -1186,6 +1407,14 @@ fn profile_row(
                 serde_json::json!(recovery.replay_progress_samples),
             );
             values.insert(
+                "recovery_progress_source".into(),
+                serde_json::json!("production_replay_pages"),
+            );
+            values.insert(
+                "recovery_resource_source".into(),
+                serde_json::json!("production_recovery_stats"),
+            );
+            values.insert(
                 "recovery_verification_chunk_items".into(),
                 serde_json::json!(recovery.verification_chunk_items),
             );
@@ -1208,6 +1437,46 @@ fn profile_row(
             values.insert(
                 "recovery_pending_waiters".into(),
                 serde_json::json!(recovery.resource_bounds.waiters),
+            );
+            values.insert(
+                "recovery_replay_command_page_limit".into(),
+                serde_json::json!(recovery.replay_command_page_limit),
+            );
+            values.insert(
+                "recovery_peak_replay_commands_buffered".into(),
+                serde_json::json!(recovery.peak_replay_commands_buffered),
+            );
+            values.insert(
+                "recovery_peak_manifest_objects_buffered".into(),
+                serde_json::json!(recovery.peak_manifest_objects_buffered),
+            );
+            values.insert(
+                "recovery_load_task_count".into(),
+                serde_json::json!(recovery.load_task_count),
+            );
+            values.insert(
+                "recovery_load_task_limit".into(),
+                serde_json::json!(RELEASE_LOAD_CONCURRENCY),
+            );
+            values.insert(
+                "recovery_task_count".into(),
+                serde_json::json!(recovery.resource_bounds.task_count),
+            );
+            values.insert(
+                "recovery_task_limit".into(),
+                serde_json::json!(recovery.resource_bounds.task_limit),
+            );
+            values.insert(
+                "recovery_store_peak_in_flight".into(),
+                serde_json::json!(recovery.resource_bounds.recorder_peak_in_flight),
+            );
+            values.insert(
+                "recovery_store_in_flight_limit".into(),
+                serde_json::json!(recovery.resource_bounds.store_in_flight_limit),
+            );
+            values.insert(
+                "recovery_object_page_limit".into(),
+                serde_json::json!(recovery.resource_bounds.object_page_limit),
             );
             values.insert(
                 "recovery_store_put_requests".into(),
@@ -1339,6 +1608,22 @@ fn profile_row(
             serde_json::json!(result.resource_bounds.recorder_peak_in_flight),
         );
         values.insert(
+            format!("{prefix}_task_count"),
+            serde_json::json!(result.resource_bounds.task_count),
+        );
+        values.insert(
+            format!("{prefix}_task_limit"),
+            serde_json::json!(result.resource_bounds.task_limit),
+        );
+        values.insert(
+            format!("{prefix}_store_in_flight_limit"),
+            serde_json::json!(result.resource_bounds.store_in_flight_limit),
+        );
+        values.insert(
+            format!("{prefix}_object_page_limit"),
+            serde_json::json!(result.resource_bounds.object_page_limit),
+        );
+        values.insert(
             format!("{prefix}_throughput_progress_met"),
             serde_json::json!(result.throughput_progress_met),
         );
@@ -1371,11 +1656,6 @@ fn profile_row(
             serde_json::json!(result.bar_met),
         );
     }
-    let recovery_contract = if profile_run.backend_profile == "object_log_sqlite_projection" {
-        "10M SQLite projection rebuilt from durable snapshot high-water plus bounded tail"
-    } else {
-        "10M ephemeral in-memory projection rebuilt by exact bounded durable-log genesis replay"
-    };
     let storage_topology = std::env::var("PQUEUE_E3_STORAGE_TOPOLOGY").unwrap_or_else(|_| {
         "operator-provided live S3-compatible endpoint; storage medium not declared".into()
     });
@@ -1405,9 +1685,11 @@ fn profile_row(
         exit_status: 0,
         ac_ids: vec![],
         inv_ids: vec![],
-        pass_bar: format!(
-            "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; {recovery_contract}; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate"
-        ),
+        pass_bar: pqueue_release::e3_contract::expected_e3_pass_bar(
+            profile_run.backend_profile,
+        )
+        .expect("governed E3 profile")
+        .into(),
         evidence_tier: tier,
         measurements: pqueue_release::Measurements {
             tp002_evidence_ids: vec!["E3".into()],
@@ -1451,6 +1733,7 @@ async fn performance_object_log_e3_live_tests() {
     let load_batch = env_u64("PQUEUE_E3_LOAD_BATCH", 1_000).max(1);
     let ack_pushes = env_u64("PQUEUE_E3_ACK_PUSHES", 100_000).max(1);
     let ack_concurrency = env_u64("PQUEUE_E3_ACK_CONCURRENCY", 384).max(1);
+    let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
     let release_shape = resident >= RELEASE_RESIDENT;
     let require_bars = perf_env && release_shape;
     if require_bars {
@@ -1470,6 +1753,15 @@ async fn performance_object_log_e3_live_tests() {
             std::env::var("PQUEUE_E3_STORAGE_DURABILITY_CLAIM").as_deref(),
             Ok("excluded"),
             "tmpfs evidence must exclude object-store host durability/restart claims"
+        );
+        assert_eq!(resident, RELEASE_RESIDENT);
+        assert_eq!(load_batch, RELEASE_LOAD_BATCH);
+        assert_eq!(ack_pushes, RELEASE_ACK_PUSHES);
+        assert_eq!(ack_concurrency, RELEASE_ACK_CONCURRENCY);
+        assert_eq!(load_concurrency, RELEASE_LOAD_CONCURRENCY);
+        assert_eq!(
+            env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000),
+            1_000_000
         );
     }
 
@@ -1666,6 +1958,10 @@ fn synthetic_ack(
             waiters: 0,
             recorder_in_flight: 0,
             recorder_peak_in_flight: 1,
+            task_count: 8,
+            task_limit: RELEASE_ACK_CONCURRENCY,
+            store_in_flight_limit: RELEASE_ACK_CONCURRENCY,
+            object_page_limit: STORE_OBJECT_PAGE_LIMIT,
         },
         commands_committed: 2,
         mean_batch: 2.0,
@@ -1689,6 +1985,7 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
     RecoveryResult {
         resident: 10_000_000,
         load_batch: 1_000,
+        load_task_count: RELEASE_LOAD_CONCURRENCY,
         command_count: 10,
         total_commands: 100,
         start_seq: if requires_snapshot { 10 } else { 0 },
@@ -1704,6 +2001,9 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
         duplicate_items: 0,
         invalid_items: 0,
         replay_progress_samples: vec![0, 100],
+        replay_command_page_limit: 256,
+        peak_replay_commands_buffered: 100,
+        peak_manifest_objects_buffered: 1,
         verification_chunk_items: 512,
         queue_count: 1,
         resource_bounds: ResourceBounds {
@@ -1713,6 +2013,10 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
             waiters: 0,
             recorder_in_flight: 0,
             recorder_peak_in_flight: 1,
+            task_count: 1,
+            task_limit: 1,
+            store_in_flight_limit: 1,
+            object_page_limit: STORE_OBJECT_PAGE_LIMIT,
         },
         store_operations: StoreOperations {
             puts: 20,

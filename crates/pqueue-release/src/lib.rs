@@ -2338,7 +2338,7 @@ pub mod cost {
     }
 
     /// Measured object-log counts the cost scales to a billion commands. The headline fixture uses the REAL
-    /// E3 numbers from `docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl`; the production-fill
+    /// E3 numbers from the current governed release ledger; the production-fill
     /// constructors model segments filled to their byte target (the E3 segments were latency-bound and small,
     /// which OVER-states PUT cost — see [`Self::e3_size_dominant`]).
     #[derive(Debug, Clone, PartialEq)]
@@ -2359,6 +2359,8 @@ pub mod cost {
         pub list_requests: f64,
         /// DELETE requests observed through the live blob-store seam.
         pub delete_requests: f64,
+        pub request_bytes: f64,
+        pub response_bytes: f64,
         /// Projection-specific rebuild mode proven by the source row.
         pub recovery_mode: RecoveryMode,
         /// Durable commands represented by the measured 10M recovery run.
@@ -2367,6 +2369,8 @@ pub mod cost {
         pub recovery_get_requests: f64,
         pub recovery_list_requests: f64,
         pub recovery_delete_requests: f64,
+        pub recovery_request_bytes: f64,
+        pub recovery_response_bytes: f64,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2390,12 +2394,16 @@ pub mod cost {
                 get_requests: 0.0,
                 list_requests: 0.0,
                 delete_requests: 0.0,
+                request_bytes: 0.0,
+                response_bytes: 0.0,
                 recovery_mode: RecoveryMode::SnapshotTail,
                 recovery_commands: 0.0,
                 recovery_put_requests: 0.0,
                 recovery_get_requests: 0.0,
                 recovery_list_requests: 0.0,
                 recovery_delete_requests: 0.0,
+                recovery_request_bytes: 0.0,
+                recovery_response_bytes: 0.0,
             }
         }
 
@@ -2411,12 +2419,16 @@ pub mod cost {
                 get_requests: 0.0,
                 list_requests: 0.0,
                 delete_requests: 0.0,
+                request_bytes: 0.0,
+                response_bytes: 0.0,
                 recovery_mode: RecoveryMode::SnapshotTail,
                 recovery_commands: 0.0,
                 recovery_put_requests: 0.0,
                 recovery_get_requests: 0.0,
                 recovery_list_requests: 0.0,
                 recovery_delete_requests: 0.0,
+                recovery_request_bytes: 0.0,
+                recovery_response_bytes: 0.0,
             }
         }
 
@@ -2440,12 +2452,16 @@ pub mod cost {
                 get_requests: 0.0,
                 list_requests: 0.0,
                 delete_requests: 0.0,
+                request_bytes: 0.0,
+                response_bytes: 0.0,
                 recovery_mode: RecoveryMode::SnapshotTail,
                 recovery_commands: 0.0,
                 recovery_put_requests: 0.0,
                 recovery_get_requests: 0.0,
                 recovery_list_requests: 0.0,
                 recovery_delete_requests: 0.0,
+                recovery_request_bytes: 0.0,
+                recovery_response_bytes: 0.0,
             }
         }
 
@@ -2611,10 +2627,14 @@ pub mod cost {
             let recovery_gets = value_u64(row, "recovery_store_get_requests", &mut errors);
             let recovery_lists = value_u64(row, "recovery_store_list_requests", &mut errors);
             let recovery_deletes = value_u64(row, "recovery_store_delete_requests", &mut errors);
+            let recovery_request_bytes =
+                value_u64(row, "recovery_store_request_bytes", &mut errors);
+            let recovery_response_bytes =
+                value_u64(row, "recovery_store_response_bytes", &mut errors);
             let recovery_mode_ok = if profile == "object_log_sqlite_projection" {
                 snapshot
                     && start.is_some_and(|value| value > 0)
-                    && tail.zip(total).is_some_and(|(t, n)| t < n)
+                    && tail.zip(total).is_some_and(|(t, n)| t > 0 && t < n)
             } else {
                 !snapshot && start == Some(0) && tail.zip(total).is_some_and(|(t, n)| t == n)
             };
@@ -2637,22 +2657,54 @@ pub mod cost {
                 let lists = value_u64(row, &format!("{prefix}_store_list_requests"), &mut errors);
                 let deletes =
                     value_u64(row, &format!("{prefix}_store_delete_requests"), &mut errors);
-                let Some((commands, objects, segments, puts, gets, lists, deletes)) = commands
+                let request_bytes =
+                    value_u64(row, &format!("{prefix}_store_request_bytes"), &mut errors);
+                let response_bytes =
+                    value_u64(row, &format!("{prefix}_store_response_bytes"), &mut errors);
+                let Some((
+                    commands,
+                    objects,
+                    segments,
+                    puts,
+                    gets,
+                    lists,
+                    deletes,
+                    request_bytes,
+                    response_bytes,
+                )) = commands
                     .zip(objects)
                     .zip(segments)
                     .zip(puts)
                     .zip(gets)
                     .zip(lists)
                     .zip(deletes)
+                    .zip(request_bytes)
+                    .zip(response_bytes)
                     .map(
-                        |((((((commands, objects), segments), puts), gets), lists), deletes)| {
-                            (commands, objects, segments, puts, gets, lists, deletes)
+                        |(
+                            (
+                                ((((((commands, objects), segments), puts), gets), lists), deletes),
+                                request_bytes,
+                            ),
+                            response_bytes,
+                        )| {
+                            (
+                                commands,
+                                objects,
+                                segments,
+                                puts,
+                                gets,
+                                lists,
+                                deletes,
+                                request_bytes,
+                                response_bytes,
+                            )
                         },
                     )
                 else {
                     continue;
                 };
-                if commands == 0 || segments == 0 || puts == 0 {
+                if commands == 0 || segments == 0 || puts == 0 || request_bytes == 0 {
                     errors.push(format!(
                         "profile {profile} bound {bound} has empty measured counters"
                     ));
@@ -2670,6 +2722,8 @@ pub mod cost {
                         get_requests: gets as f64,
                         list_requests: lists as f64,
                         delete_requests: deletes as f64,
+                        request_bytes: request_bytes as f64,
+                        response_bytes: response_bytes as f64,
                         recovery_mode: if profile == "object_log_sqlite_projection" {
                             RecoveryMode::SnapshotTail
                         } else {
@@ -2680,6 +2734,8 @@ pub mod cost {
                         recovery_get_requests: recovery_gets.unwrap_or(0) as f64,
                         recovery_list_requests: recovery_lists.unwrap_or(0) as f64,
                         recovery_delete_requests: recovery_deletes.unwrap_or(0) as f64,
+                        recovery_request_bytes: recovery_request_bytes.unwrap_or(0) as f64,
+                        recovery_response_bytes: recovery_response_bytes.unwrap_or(0) as f64,
                     },
                     source_command: row.command.clone(),
                     source_environment: row.environment.clone(),
@@ -3135,6 +3191,12 @@ pub mod cost {
                 let get_requests = per_billion(input.counts.get_requests);
                 let list_requests = per_billion(input.counts.list_requests);
                 let delete_requests = per_billion(input.counts.delete_requests);
+                let request_bytes = per_billion(input.counts.request_bytes);
+                let response_bytes = per_billion(input.counts.response_bytes);
+                let total_request_bytes = request_bytes
+                    + input.counts.recovery_request_bytes * w.recoveries_per_window;
+                let total_response_bytes = response_bytes
+                    + input.counts.recovery_response_bytes * w.recoveries_per_window;
                 let values = BTreeMap::from([
                     ("bars_met".into(), serde_json::json!(true)),
                     ("cost_model".into(), serde_json::json!(true)),
@@ -3151,17 +3213,25 @@ pub mod cost {
                     ("measured_store_get_requests".into(), serde_json::json!(input.counts.get_requests as u64)),
                     ("measured_store_list_requests".into(), serde_json::json!(input.counts.list_requests as u64)),
                     ("measured_store_delete_requests".into(), serde_json::json!(input.counts.delete_requests as u64)),
+                    ("measured_store_request_bytes".into(), serde_json::json!(input.counts.request_bytes as u64)),
+                    ("measured_store_response_bytes".into(), serde_json::json!(input.counts.response_bytes as u64)),
                     ("recovery_mode".into(), serde_json::json!(match input.counts.recovery_mode { RecoveryMode::SnapshotTail => "snapshot_tail", RecoveryMode::FullGenesis => "full_genesis" })),
                     ("measured_recovery_commands".into(), serde_json::json!(input.counts.recovery_commands as u64)),
                     ("measured_recovery_put_requests".into(), serde_json::json!(input.counts.recovery_put_requests as u64)),
                     ("measured_recovery_get_requests".into(), serde_json::json!(input.counts.recovery_get_requests as u64)),
                     ("measured_recovery_list_requests".into(), serde_json::json!(input.counts.recovery_list_requests as u64)),
                     ("measured_recovery_delete_requests".into(), serde_json::json!(input.counts.recovery_delete_requests as u64)),
+                    ("measured_recovery_request_bytes".into(), serde_json::json!(input.counts.recovery_request_bytes as u64)),
+                    ("measured_recovery_response_bytes".into(), serde_json::json!(input.counts.recovery_response_bytes as u64)),
                     ("steady_state_put_requests_per_billion".into(), serde_json::json!(round2(put_requests))),
                     ("put_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.put_requests))),
                     ("steady_state_get_requests_per_billion".into(), serde_json::json!(round2(get_requests))),
                     ("steady_state_list_requests_per_billion".into(), serde_json::json!(round2(list_requests))),
                     ("steady_state_delete_requests_per_billion".into(), serde_json::json!(round2(delete_requests))),
+                    ("steady_state_request_bytes_per_billion".into(), serde_json::json!(round2(request_bytes))),
+                    ("steady_state_response_bytes_per_billion".into(), serde_json::json!(round2(response_bytes))),
+                    ("request_bytes_per_billion".into(), serde_json::json!(round2(total_request_bytes))),
+                    ("response_bytes_per_billion".into(), serde_json::json!(round2(total_response_bytes))),
                     ("get_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.get_requests))),
                     ("list_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.list_requests))),
                     ("delete_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.delete_requests))),
@@ -3267,6 +3337,13 @@ pub mod cost {
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0)
                     == 0
+                || row
+                    .measurements
+                    .values
+                    .get("measured_store_request_bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+                    == 0
             {
                 errors.push(format!(
                     "{} {bound} missing measured-counter linkage",
@@ -3367,11 +3444,15 @@ pub mod cost {
                 "measured_store_get_requests",
                 "measured_store_list_requests",
                 "measured_store_delete_requests",
+                "measured_store_request_bytes",
+                "measured_store_response_bytes",
                 "measured_recovery_commands",
                 "measured_recovery_put_requests",
                 "measured_recovery_get_requests",
                 "measured_recovery_list_requests",
                 "measured_recovery_delete_requests",
+                "measured_recovery_request_bytes",
+                "measured_recovery_response_bytes",
             ];
             let measured = required
                 .iter()
@@ -3393,12 +3474,16 @@ pub mod cost {
                 get_requests: measured[4].unwrap(),
                 list_requests: measured[5].unwrap(),
                 delete_requests: measured[6].unwrap(),
+                request_bytes: measured[7].unwrap(),
+                response_bytes: measured[8].unwrap(),
                 recovery_mode: recovery_mode.unwrap(),
-                recovery_commands: measured[7].unwrap(),
-                recovery_put_requests: measured[8].unwrap(),
-                recovery_get_requests: measured[9].unwrap(),
-                recovery_list_requests: measured[10].unwrap(),
-                recovery_delete_requests: measured[11].unwrap(),
+                recovery_commands: measured[9].unwrap(),
+                recovery_put_requests: measured[10].unwrap(),
+                recovery_get_requests: measured[11].unwrap(),
+                recovery_list_requests: measured[12].unwrap(),
+                recovery_delete_requests: measured[13].unwrap(),
+                recovery_request_bytes: measured[14].unwrap(),
+                recovery_response_bytes: measured[15].unwrap(),
             };
             let comparison = compute_comparison(&counts, &workload, &prices);
             let expected = [
@@ -3432,6 +3517,26 @@ pub mod cost {
                 ),
             ];
             for (key, expected_value) in expected {
+                if number(row, key).is_none_or(|actual| (actual - expected_value).abs() > 0.011) {
+                    errors.push(format!(
+                        "{} {bound} derived {key} does not recompute",
+                        row.backend_profile
+                    ));
+                }
+            }
+            let per_billion = |value: f64| value / counts.commands * BILLION;
+            for (key, expected_value) in [
+                (
+                    "request_bytes_per_billion",
+                    per_billion(counts.request_bytes)
+                        + counts.recovery_request_bytes * workload.recoveries_per_window,
+                ),
+                (
+                    "response_bytes_per_billion",
+                    per_billion(counts.response_bytes)
+                        + counts.recovery_response_bytes * workload.recoveries_per_window,
+                ),
+            ] {
                 if number(row, key).is_none_or(|actual| (actual - expected_value).abs() > 0.011) {
                     errors.push(format!(
                         "{} {bound} derived {key} does not recompute",
@@ -3684,11 +3789,11 @@ pub mod cost {
                 ("recovery_snapshot_used".into(), serde_json::json!(sqlite)),
                 (
                     "recovery_start_seq".into(),
-                    serde_json::json!(if sqlite { 100 } else { 0 }),
+                    serde_json::json!(if sqlite { 99 } else { 0 }),
                 ),
                 (
                     "recovery_tail_replayed".into(),
-                    serde_json::json!(if sqlite { 0 } else { 100 }),
+                    serde_json::json!(if sqlite { 1 } else { 100 }),
                 ),
                 ("recovery_total_commands".into(), serde_json::json!(100)),
                 ("recovery_store_put_requests".into(), serde_json::json!(1)),
@@ -3697,6 +3802,14 @@ pub mod cost {
                 (
                     "recovery_store_delete_requests".into(),
                     serde_json::json!(0),
+                ),
+                (
+                    "recovery_store_request_bytes".into(),
+                    serde_json::json!(100),
+                ),
+                (
+                    "recovery_store_response_bytes".into(),
+                    serde_json::json!(10_000),
                 ),
             ]);
             for bound in E3_BOUNDS {
@@ -3723,6 +3836,14 @@ pub mod cost {
                 values.insert(
                     format!("{prefix}_store_delete_requests"),
                     serde_json::json!(0),
+                );
+                values.insert(
+                    format!("{prefix}_store_request_bytes"),
+                    serde_json::json!(100_000),
+                );
+                values.insert(
+                    format!("{prefix}_store_response_bytes"),
+                    serde_json::json!(10_000),
                 );
             }
             LedgerRow {

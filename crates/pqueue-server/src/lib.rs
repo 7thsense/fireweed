@@ -52,8 +52,8 @@ pub use change_record_sink::{
     emit_change_record_tick, spawn_change_record_emitter,
 };
 pub use object_log_sqlite::{
-    DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend,
-    SegmentedObjectLogSqliteBackend,
+    DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, RecoveryStats,
+    SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,
 };
 #[cfg(feature = "turso-projection")]
 pub use object_log_turso::ObjectLogTursoBackend;

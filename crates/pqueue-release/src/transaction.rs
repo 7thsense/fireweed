@@ -4,12 +4,12 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const REQUIRED_PROFILES: [&str; 2] = ["postgres/sqlite", "postgres/postgres"];
 pub const REQUIRED_ACS: [&str; 4] = ["AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-6"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TransactionEvidenceRow {
     pub suite: String,
@@ -20,6 +20,18 @@ pub struct TransactionEvidenceRow {
     pub detail: String,
     pub assertions: Vec<String>,
     pub recorded_at: String,
+    /// E3 release rows bind the observation to the exact source under test.
+    /// Older standalone TP-003 evidence does not carry the E3 matrix dimensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub e3_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_window_timing: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id_timing: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

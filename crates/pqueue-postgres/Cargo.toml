@@ -16,6 +16,7 @@ path = "src/lib.rs"
 pqueue-core = { path = "../pqueue-core" }
 pqueue-engine = { path = "../pqueue-engine" }
 pqueue-projection = { path = "../pqueue-projection" }
+pqueue-objectlog = { path = "../pqueue-objectlog" }
 axon-esf.workspace = true
 postgres = "0.19"
 native-tls = { version = "0.2", optional = true }

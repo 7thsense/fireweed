@@ -21,6 +21,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound::{Excluded, Unbounded};
 
 mod compose_impls;
 pub use compose_impls::{AsyncInMemoryProjection, AsyncMemoryLog, InMemoryProjection, MemoryLog};
@@ -422,6 +423,32 @@ impl EligibilityIndex {
         match self {
             Self::Compact(compact) => compact.iter().take(limit).map(|(_, item)| *item).collect(),
             Self::Rich(rich) => rich.iter().take(limit).map(|key| key.item).collect(),
+        }
+    }
+
+    fn ordered_items_after(
+        &self,
+        after: Option<&ItemRecord>,
+        model: &PriorityModel,
+        limit: usize,
+    ) -> Vec<ItemId> {
+        match self {
+            Self::Compact(compact) => match after {
+                Some(record) => compact
+                    .range((Excluded(&(record.created_seq, record.item_id)), Unbounded))
+                    .take(limit)
+                    .map(|(_, item)| *item)
+                    .collect(),
+                None => compact.iter().take(limit).map(|(_, item)| *item).collect(),
+            },
+            Self::Rich(rich) => match after {
+                Some(record) => rich
+                    .range((Excluded(&elig_key(record, model)), Unbounded))
+                    .take(limit)
+                    .map(|key| key.item)
+                    .collect(),
+                None => rich.iter().take(limit).map(|key| key.item).collect(),
+            },
         }
     }
 }
@@ -2208,6 +2235,24 @@ impl ProjectionData {
             }
         }
         out
+    }
+
+    /// Bounded page of the authoritative pending order, used by recovery verification without
+    /// materializing resident cardinality.
+    pub fn peek_page(&self, after: Option<ItemId>, limit: usize) -> Vec<ItemView> {
+        let after = after.and_then(|item| self.items.get(&item));
+        self.eligible
+            .ordered_items_after(after, &self.priority_model, limit)
+            .into_iter()
+            .filter_map(|item| self.items.get(&item))
+            .filter(|record| record.state == ItemState::Pending && !record.superseded)
+            .map(|record| ItemView {
+                item_id: record.item_id,
+                client_item_key: record.client_item_key(),
+                priority: record.priority.clone(),
+                item_version: record.item_version,
+            })
+            .collect()
     }
 
     /// `ProjectionRead::pending` — the in-flight (leased) items.

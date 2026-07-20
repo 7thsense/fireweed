@@ -1090,7 +1090,8 @@ impl<S: BlobStore> BlobStore for InstrumentedBlobStore<S> {
             BlobOperation::ReadManifestHead,
             BlobObjectClass::from_key(prefix),
             || {
-                crate::segmented::read_manifest_head_via(self, prefix)
+                self.inner
+                    .read_manifest_head(prefix)
                     .map_err(|error| ClassifiedBlobError::fallback(self, error))
                     .map(|value| (value, Outcome::success(1, 0, 0)))
             },
@@ -1107,7 +1108,8 @@ impl<S: BlobStore> BlobStore for InstrumentedBlobStore<S> {
             BlobOperation::UpdateManifestHead,
             BlobObjectClass::from_key(prefix),
             || {
-                crate::segmented::update_manifest_head_via(self, prefix, expected_version, value)
+                self.inner
+                    .update_manifest_head_if_version(prefix, expected_version, value)
                     .map_err(|error| ClassifiedBlobError::fallback(self, error))
                     .map(|updated| {
                         let result = if updated {

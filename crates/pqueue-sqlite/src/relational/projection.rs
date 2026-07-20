@@ -47,6 +47,16 @@ pub struct SqliteProjectionStore {
 }
 
 impl SqliteProjectionStore {
+    /// Bounded page of the authoritative pending order for recovery verification.
+    pub fn peek_page(
+        &self,
+        shard: &QueueKey,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<Vec<ItemView>> {
+        peek_page_sql(&self.lock().conn, shard, after, limit)
+    }
+
     pub(crate) fn purge_items_validate(
         &self,
         shard: &QueueKey,

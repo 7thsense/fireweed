@@ -1715,3 +1715,5 @@ impl HistoricalProjectionRead for PostgresBackend {
         query(&as_of)
     }
 }
+mod manifest_pointer;
+pub use manifest_pointer::PostgresManifestPointer;

@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "suite": "segmented_object_log_commits_through_minio",
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
   "store_profile": "minio_create_only_cas",
@@ -8,7 +8,12 @@
   "current_epoch_committed": true,
   "cas_mode": "create_only_put_if_absent",
   "no_cas": {
-    "status": "excluded",
-    "reason": "release_profile_requires_create_only_cas"
-  }
+    "status": "proven",
+    "reason": "postgres_pointer_transactional_epoch_cas_proven"
+  },
+  "no_cas_store_profile": "object_store_without_conditional_write",
+  "no_cas_mode": "postgres_transactional_manifest_pointer",
+  "no_cas_stale_epoch_rejected": true,
+  "no_cas_current_epoch_committed": true,
+  "no_cas_pointer_and_epoch_atomic": true
 }
