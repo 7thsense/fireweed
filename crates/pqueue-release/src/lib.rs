@@ -22,6 +22,137 @@ pub mod e2_failover;
 pub mod e3_contract;
 pub mod transaction;
 
+/// Portable TP-002 E0/E1 evidence validation. Wall-clock rates and latency
+/// percentiles are retained as capacity observations, but never decide this
+/// contract.
+pub mod single_deployment {
+    use super::{LedgerRow, verify_ledger};
+    use std::path::Path;
+
+    fn true_value(row: &LedgerRow, key: &str) -> bool {
+        row.measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+
+    fn u64_value(row: &LedgerRow, key: &str) -> Option<u64> {
+        row.measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+    }
+
+    fn nonportable(text: &str) -> bool {
+        let text = text.to_ascii_lowercase();
+        [
+            "quiet host",
+            "quiet-host",
+            "idle host",
+            "items/s >=",
+            "throughput >=",
+            "latency <=",
+            "p95 <",
+            "p99 <",
+            "sub-second",
+        ]
+        .iter()
+        .any(|needle| text.contains(needle))
+    }
+
+    pub fn validate_row(row: &LedgerRow, id: &str, revision: &str) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if !matches!(id, "E0" | "E1") {
+            errors.push("id must be E0 or E1".into());
+        }
+        if row.suite != "performance_single_deployment_baseline_tests" {
+            errors.push("suite must be performance_single_deployment_baseline_tests".into());
+        }
+        if row.backend_profile != "postgres_native" {
+            errors.push("backend must be postgres_native".into());
+        }
+        if row.scale != "release" || row.evidence_tier != "release" {
+            errors.push("row must be release tier and scale".into());
+        }
+        if row.measurements.tp002_evidence_ids.as_slice() != [id] {
+            errors.push(format!("row must carry exactly {id}"));
+        }
+        if nonportable(&format!("{} {}", row.environment, row.pass_bar)) {
+            errors.push("authority text contains a nonportable host-speed gate".into());
+        }
+        for key in [
+            "bars_met",
+            "portable_gate",
+            "wall_clock_capacity_only",
+            "exact_outcomes",
+            "monotonic_progress",
+            "bounded_resources",
+        ] {
+            if !true_value(row, key) {
+                errors.push(format!("{key} must be true"));
+            }
+        }
+        for key in ["quiet_host_required", "host_speed_gate"] {
+            if row
+                .measurements
+                .values
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            {
+                errors.push(format!("{key} must be false"));
+            }
+        }
+        if row
+            .measurements
+            .values
+            .get("source_revision")
+            .and_then(serde_json::Value::as_str)
+            != Some(revision)
+        {
+            errors.push("source_revision does not match expected revision".into());
+        }
+        if u64_value(row, "resident_backlog") != Some(10_000_000) {
+            errors.push("resident_backlog must equal 10000000".into());
+        }
+        if u64_value(row, "lost_items") != Some(0) || u64_value(row, "duplicate_claims") != Some(0)
+        {
+            errors.push("lost_items and duplicate_claims must be zero".into());
+        }
+        if id == "E0" {
+            if u64_value(row, "accepted_items") != Some(10_000_000)
+                || u64_value(row, "claimed_items") != Some(10_000_000)
+                || u64_value(row, "finalized_items") != Some(10_000_000)
+            {
+                errors
+                    .push("E0 exact accepted/claimed/finalized counts must equal 10000000".into());
+            }
+        } else if row.measurements.values.get("batch_sizes")
+            != Some(&serde_json::json!([1, 100, 1000]))
+        {
+            errors.push("E1 batch_sizes must equal [1,100,1000]".into());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub fn verify_file(path: &Path, id: &str, revision: &str) -> Result<(), Vec<String>> {
+        verify_ledger(path, true).map_err(|es| es.into_iter().map(|e| e.0).collect::<Vec<_>>())?;
+        let body = std::fs::read_to_string(path).map_err(|e| vec![e.to_string()])?;
+        let mut lines = body.lines().filter(|line| !line.trim().is_empty());
+        let line = lines.next().ok_or_else(|| vec!["ledger is empty".into()])?;
+        if lines.next().is_some() {
+            return Err(vec!["ledger must contain exactly one row".into()]);
+        }
+        let row = serde_json::from_str(line).map_err(|e| vec![e.to_string()])?;
+        validate_row(&row, id, revision)
+    }
+}
+
 /// One verification-ledger row: a single measured release-evidence run.
 ///
 /// Every field is required (a row that fails to deserialize is rejected by the verifier). `measurements`
@@ -467,6 +598,43 @@ fn release_authority_errors(id: &str, row: &LedgerRow, raw_row: &serde_json::Val
         Some(value) => errors.push(format!("bars_met must be boolean true, got {value}")),
         None => errors.push("bars_met is required and must be boolean true".into()),
     }
+    if matches!(id, "E0" | "E1") {
+        let text = format!("{} {}", row.environment, row.pass_bar).to_ascii_lowercase();
+        let values = &row.measurements.values;
+        let portable = values
+            .get("portable_gate")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && values
+                .get("wall_clock_capacity_only")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && values
+                .get("quiet_host_required")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && values
+                .get("host_speed_gate")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false);
+        let nonportable_text = [
+            "quiet host",
+            "quiet-host",
+            "idle host",
+            "items/s >=",
+            "throughput >=",
+            "p95 <",
+            "p99 <",
+            "sub-second",
+        ]
+        .iter()
+        .any(|needle| text.contains(needle));
+        if !portable || nonportable_text {
+            errors.push(format!(
+                "{id} authority does not satisfy the portable semantic contract"
+            ));
+        }
+    }
     let profile_allowed = match id {
         "E0" | "E1" => row.backend_profile == "postgres_native",
         "E2" => row.backend_profile == e2::RELEASE_BACKEND_PROFILE,
@@ -568,6 +736,7 @@ pub mod e2 {
     /// generator's `TuningMeta` wire type (identical field names + serde shape).
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct E2Tuning {
+        pub source_revision: String,
         pub segment_max_latency_ms: u64,
         pub segment_target_bytes: usize,
         pub worker_threads_per_node: usize,
@@ -613,6 +782,74 @@ pub mod e2 {
     /// than one node ⇒ bar (4) fails.
     pub fn expected_one_owner_confirmations(owners: usize, queues_per_owner: usize) -> usize {
         owners * queues_per_owner * owners.saturating_sub(1)
+    }
+
+    /// Validate the cross-owner E2 authority independently of density and
+    /// failover/routing authorities.
+    pub fn validate_release_row(row: &LedgerRow, revision: &str) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        let values = &row.measurements.values;
+        let bool_value = |key: &str| values.get(key).and_then(serde_json::Value::as_bool);
+        let u64_value = |key: &str| values.get(key).and_then(serde_json::Value::as_u64);
+        let positive = |key: &str| {
+            values
+                .get(key)
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|v| v.is_finite() && v > 0.0)
+        };
+        if row.suite != "performance_multi_node_object_log_e2_kind" {
+            errors.push("unexpected E2 scale suite".into());
+        }
+        if row.backend_profile != RELEASE_BACKEND_PROFILE {
+            errors.push("unexpected E2 release backend".into());
+        }
+        if row.scale != "release" || row.evidence_tier != "release" {
+            errors.push("E2 scale row must be release tier and scale".into());
+        }
+        if row.measurements.tp002_evidence_ids.as_slice() != ["E2"] {
+            errors.push("E2 scale row must carry exactly E2".into());
+        }
+        for key in ["bars_met", "portable_gate", "wall_clock_capacity_only"] {
+            if bool_value(key) != Some(true) {
+                errors.push(format!("{key} must be true"));
+            }
+        }
+        for key in ["quiet_host_required", "host_speed_gate"] {
+            if bool_value(key) != Some(false) {
+                errors.push(format!("{key} must be false"));
+            }
+        }
+        if values
+            .get("source_revision")
+            .and_then(serde_json::Value::as_str)
+            != Some(revision)
+        {
+            errors.push("source_revision does not match expected revision".into());
+        }
+        for key in [
+            "owners_2_ingest_aggregate_per_s",
+            "owners_4_ingest_aggregate_per_s",
+            "owners_8_ingest_aggregate_per_s",
+            "owners_2_claim_finalize_aggregate_per_s",
+            "owners_4_claim_finalize_aggregate_per_s",
+            "owners_8_claim_finalize_aggregate_per_s",
+            "worst_ingest_per_queue_per_s",
+            "worst_claim_finalize_per_queue_per_s",
+        ] {
+            if !positive(key) {
+                errors.push(format!("{key} must be finite and positive"));
+            }
+        }
+        let queues = u64_value("queues_per_owner").unwrap_or(0);
+        let expected = expected_one_owner_confirmations(8, queues as usize) as u64;
+        if queues == 0 || u64_value("one_owner_per_queue_confirmations") != Some(expected) {
+            errors.push("one-owner-per-queue confirmation count is not exact".into());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Judge the four E2 release bars from the MEASURED scale points. Pure: no IO, no process exit.
@@ -815,6 +1052,10 @@ pub mod e2 {
             ("sweep".to_string(), serde_json::json!(tuning.sweep)),
             ("cores".to_string(), serde_json::json!(tuning.cores)),
             ("bars_met".to_string(), serde_json::json!(verdict.bars_met)),
+            (
+                "source_revision".to_string(),
+                serde_json::json!(tuning.source_revision),
+            ),
         ]);
 
         LedgerRow {

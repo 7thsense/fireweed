@@ -264,8 +264,8 @@ main() {
       continue
     fi
     local tuning
-    tuning=$(printf '{"segment_max_latency_ms":%d,"segment_target_bytes":%d,"worker_threads_per_node":%d,"server_cpu_limit":"%s","server_cpu_request":"%s","loadgen_cpu_limit":"%s","cores":%d,"kind_node_image":"%s","sweep":%d}' \
-      "$SEG_LATENCY_MS" "$SEG_TARGET_BYTES" "$WORKER_THREADS" "$SERVER_CPU_LIMIT" "$SERVER_CPU_REQUEST" "$LOADGEN_CPU_LIMIT" "$CORES" "$NODE_IMAGE" "$sweep")
+    tuning=$(printf '{"source_revision":"%s","segment_max_latency_ms":%d,"segment_target_bytes":%d,"worker_threads_per_node":%d,"server_cpu_limit":"%s","server_cpu_request":"%s","loadgen_cpu_limit":"%s","cores":%d,"kind_node_image":"%s","sweep":%d}' \
+      "$(git -C "$REPO_ROOT" rev-parse HEAD)" "$SEG_LATENCY_MS" "$SEG_TARGET_BYTES" "$WORKER_THREADS" "$SERVER_CPU_LIMIT" "$SERVER_CPU_REQUEST" "$LOADGEN_CPU_LIMIT" "$CORES" "$NODE_IMAGE" "$sweep")
     local erc=0
     "$LOADGEN_BIN" emit-row \
       --result "$WORKDIR/s${sweep}-k2.json" \

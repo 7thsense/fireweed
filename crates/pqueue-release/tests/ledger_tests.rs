@@ -119,6 +119,15 @@ fn release_row(id: &str) -> LedgerRow {
     row.measurements
         .values
         .insert("bars_met".into(), serde_json::json!(true));
+    if matches!(id, "E0" | "E1") {
+        row.measurements.values.extend([
+            ("portable_gate".into(), serde_json::json!(true)),
+            ("wall_clock_capacity_only".into(), serde_json::json!(true)),
+            ("quiet_host_required".into(), serde_json::json!(false)),
+            ("host_speed_gate".into(), serde_json::json!(false)),
+        ]);
+        row.pass_bar = "portable correctness, progress, and bounded resources".into();
+    }
     row
 }
 

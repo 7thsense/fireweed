@@ -605,6 +605,7 @@ fn e2_point(
 
 fn e2_tuning() -> pqueue_release::e2::E2Tuning {
     pqueue_release::e2::E2Tuning {
+        source_revision: "0123456789abcdef0123456789abcdef01234567".into(),
         segment_max_latency_ms: 1,
         segment_target_bytes: 262_144,
         worker_threads_per_node: 2,

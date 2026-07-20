@@ -106,12 +106,12 @@ line_of() {
 release_gate="${SCRIPT_DIR}/release-gate.sh"
 release_workflow="${REPO_ROOT}/.github/workflows/release.yml"
 smoke_line="$(line_of '--require-smoke-evidence E2,E3' "${release_gate}")"
-governed_line="$(line_of 'governed-release-evidence-gate.sh' "${release_gate}")"
+governed_line="$(line_of 'verify-governed-release-composite.sh' "${release_gate}")"
 [[ -n "${smoke_line}" && -n "${governed_line}" && "${smoke_line}" -lt "${governed_line}" ]] ||
     fail "release gate must run fresh smoke before governed semantic verification"
 
 workflow_smoke_line="$(line_of 'bash scripts/ci/release-gate.sh' "${release_workflow}")"
-workflow_exact_line="$(line_of '--mode exact-tag' "${release_workflow}")"
+workflow_exact_line="$(line_of '--bin pqueue-verify-evidence-attestation' "${release_workflow}")"
 [[ -n "${workflow_smoke_line}" && -n "${workflow_exact_line}" && "${workflow_smoke_line}" -lt "${workflow_exact_line}" ]] ||
     fail "release workflow must run fresh smoke before exact-tag governed verification"
 # shellcheck disable=SC2016 # Literal GitHub expression under test.
