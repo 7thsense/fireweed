@@ -63,6 +63,7 @@ use pqueue_engine::sequenced_metadata::{
 /// This is a protocol bound, independent of the queue's durable object count.
 pub const S3_LIST_PAGE_MAX_KEYS: usize = 1_000;
 pub const RECOVERY_COMMAND_PAGE_LIMIT: usize = 256;
+const RECOVERY_INDEX_FANOUT: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecoveryReadPageStats {
@@ -70,6 +71,9 @@ pub struct RecoveryReadPageStats {
     pub commands_returned: usize,
     pub peak_manifest_objects_buffered: usize,
     pub manifest_object_page_limit: usize,
+    pub recovery_index_node_visits: usize,
+    pub recovery_index_entries_visited: usize,
+    pub bounded_authority_index: bool,
 }
 
 /// Transactional authority for stores that cannot conditionally update a manifest pointer.
@@ -86,15 +90,63 @@ pub trait ManifestPointerStore: Send + Sync {
 }
 
 /// Blob-store adapter for the TD-004 no-CAS mode. Immutable bodies remain in object storage; manifest-head
-/// publication is routed through a transactional pointer authority (Postgres in production).
+/// publication is routed through a transactional pointer authority (Postgres in production). Numeric head
+/// objects are compatibility/maintenance mirrors only: recovery and fencing read Postgres authority, and a
+/// missing mirror can be reconstructed after restart with [`Self::repair_current_manifest_mirror`].
 pub struct PointerFencedBlobStore {
     objects: Arc<dyn BlobStore>,
     pointers: Arc<dyn ManifestPointerStore>,
+    mirror_debt: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
 impl PointerFencedBlobStore {
     pub fn new(objects: Arc<dyn BlobStore>, pointers: Arc<dyn ManifestPointerStore>) -> Self {
-        Self { objects, pointers }
+        Self {
+            objects,
+            pointers,
+            mirror_debt: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn needs_transactional_create(key: &str) -> bool {
+        key.contains("/manifest_head/")
+            || key.ends_with("authority_protocol_v1")
+            || key.ends_with("authority_initialized_v1")
+    }
+
+    pub fn pending_manifest_mirrors(&self) -> usize {
+        self.mirror_debt.lock().expect("mirror debt poisoned").len()
+    }
+
+    pub fn repair_manifest_mirrors(&self) -> EngineResult<usize> {
+        let pending = self
+            .mirror_debt
+            .lock()
+            .expect("mirror debt poisoned")
+            .clone();
+        let mut repaired = 0;
+        for (key, body) in pending {
+            self.objects.put(&key, &body)?;
+            self.mirror_debt
+                .lock()
+                .expect("mirror debt poisoned")
+                .remove(&key);
+            repaired += 1;
+        }
+        Ok(repaired)
+    }
+
+    /// Rebuild the optional compatibility mirror from Postgres authority after a process restart. Recovery
+    /// and fencing never depend on this mirror; they read the transactional pointer directly.
+    pub fn repair_current_manifest_mirror(&self, prefix: &str) -> EngineResult<bool> {
+        let Some(head) = self.pointers.read(prefix)? else {
+            return Ok(false);
+        };
+        self.objects.put(
+            &format!("{prefix}{:020}.json", head.version),
+            &serde_json::to_vec(&head.value).map_err(store_err)?,
+        )?;
+        Ok(true)
     }
 }
 
@@ -104,6 +156,9 @@ impl BlobStore for PointerFencedBlobStore {
     }
 
     fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        if !Self::needs_transactional_create(key) {
+            return self.objects.put_if_absent(key, body);
+        }
         let digest = hex_lower(&Sha256::digest(body));
         if !self.pointers.claim_immutable(key, &digest)? {
             return Ok(false);
@@ -150,20 +205,7 @@ impl BlobStore for PointerFencedBlobStore {
         &self,
         prefix: &str,
     ) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
-        let head = self.pointers.read(prefix)?;
-        if let Some(head) = &head {
-            self.objects
-                .put(
-                    &format!("{prefix}{:020}.json", head.version),
-                    &serde_json::to_vec(&head.value).map_err(store_err)?,
-                )
-                .map_err(|error| {
-                    EngineError::Storage(format!(
-                        "manifest pointer committed but object mirror incomplete; retry repairs it: {error}"
-                    ))
-                })?;
-        }
-        Ok(head)
+        self.pointers.read(prefix)
     }
 
     fn update_manifest_head_if_version(
@@ -177,16 +219,14 @@ impl BlobStore for PointerFencedBlobStore {
             .compare_and_swap(prefix, expected_version, value)?;
         if won {
             let version = expected_version.map_or(0, |version| version + 1);
-            self.objects
-                .put(
-                    &format!("{prefix}{version:020}.json"),
-                    &serde_json::to_vec(value).map_err(store_err)?,
-                )
-                .map_err(|error| {
-                    EngineError::Storage(format!(
-                        "manifest pointer committed but object mirror incomplete; retry repairs it: {error}"
-                    ))
-                })?;
+            let key = format!("{prefix}{version:020}.json");
+            let body = serde_json::to_vec(value).map_err(store_err)?;
+            if self.objects.put(&key, &body).is_err() {
+                self.mirror_debt
+                    .lock()
+                    .expect("mirror debt poisoned")
+                    .insert(key, body);
+            }
         }
         Ok(won)
     }
@@ -1343,7 +1383,7 @@ enum ManifestEntryKind {
     Reclaimed,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Clone)]
 struct ManifestEntry {
     index: u64,
     epoch: u64,
@@ -1591,6 +1631,60 @@ struct ManifestCandidate {
     entry: ManifestEntry,
     previous_candidate_key: Option<String>,
     expected_head_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RecoveryIndexEntry {
+    manifest_index: u64,
+    first_seq: u64,
+    visible_last_seq: u64,
+    candidate_key: String,
+    entry: ManifestEntry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RecoveryIndexChild {
+    key: String,
+    min_index: u64,
+    max_index: u64,
+    min_seq: u64,
+    max_visible_last_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RecoveryIndexNode {
+    Leaf { entries: Vec<RecoveryIndexEntry> },
+    Internal { children: Vec<RecoveryIndexChild> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RecoveryIndexRoot {
+    schema_version: u32,
+    root: RecoveryIndexChild,
+    height: u8,
+    entry_count: u64,
+}
+
+#[derive(Clone)]
+struct RecoveryCursorFrame {
+    children: Vec<RecoveryIndexChild>,
+    next_child: usize,
+    child_height: u8,
+}
+
+#[derive(Clone)]
+pub struct RecoveryCursor {
+    shard: QueueKey,
+    from_seq: u64,
+    captured_head_version: Option<u64>,
+    root: Option<RecoveryIndexRoot>,
+    frames: Vec<RecoveryCursorFrame>,
+    leaf: Vec<RecoveryIndexEntry>,
+    leaf_offset: usize,
+    initialized: bool,
+    finished: bool,
+    legacy_fallback: bool,
 }
 
 /// Private proof that every address in the contiguous prefix is safe for deletion-watermark publication.
@@ -2228,6 +2322,261 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         format!("{}manifest_candidates/", shard_prefix(shard))
     }
 
+    fn recovery_index_prefix(shard: &QueueKey) -> String {
+        format!("{}recovery_index/v1/", shard_prefix(shard))
+    }
+
+    fn recovery_index_child(
+        key: String,
+        node: &RecoveryIndexNode,
+    ) -> EngineResult<RecoveryIndexChild> {
+        let (min_index, max_index, min_seq, max_visible_last_seq) = match node {
+            RecoveryIndexNode::Leaf { entries } => {
+                let first = entries.first().ok_or(EngineError::Conflict)?;
+                let last = entries.last().ok_or(EngineError::Conflict)?;
+                (
+                    first.manifest_index,
+                    last.manifest_index,
+                    first.first_seq,
+                    entries
+                        .iter()
+                        .map(|entry| entry.visible_last_seq)
+                        .max()
+                        .ok_or(EngineError::Conflict)?,
+                )
+            }
+            RecoveryIndexNode::Internal { children } => {
+                let first = children.first().ok_or(EngineError::Conflict)?;
+                let last = children.last().ok_or(EngineError::Conflict)?;
+                (
+                    first.min_index,
+                    last.max_index,
+                    first.min_seq,
+                    children
+                        .iter()
+                        .map(|child| child.max_visible_last_seq)
+                        .max()
+                        .ok_or(EngineError::Conflict)?,
+                )
+            }
+        };
+        Ok(RecoveryIndexChild {
+            key,
+            min_index,
+            max_index,
+            min_seq,
+            max_visible_last_seq,
+        })
+    }
+
+    fn put_recovery_index_node(
+        &self,
+        shard: &QueueKey,
+        node: &RecoveryIndexNode,
+    ) -> EngineResult<RecoveryIndexChild> {
+        let body = to_json(node)?;
+        let digest = hex_lower(&Sha256::digest(&body));
+        let key = format!("{}{digest}.json", Self::recovery_index_prefix(shard));
+        let _ = self.store_put_if_absent(&key, &body, true)?;
+        Self::recovery_index_child(key, node)
+    }
+
+    fn load_recovery_index_node(
+        &self,
+        child: &RecoveryIndexChild,
+    ) -> EngineResult<RecoveryIndexNode> {
+        let bytes = self.store_get(&child.key)?.ok_or(EngineError::Conflict)?;
+        let expected = child
+            .key
+            .rsplit('/')
+            .next()
+            .and_then(|name| name.strip_suffix(".json"))
+            .ok_or(EngineError::Conflict)?;
+        if hex_lower(&Sha256::digest(&bytes)) != expected {
+            return Err(EngineError::Conflict);
+        }
+        let node: RecoveryIndexNode = serde_json::from_slice(&bytes).map_err(store_err)?;
+        let actual = Self::recovery_index_child(child.key.clone(), &node)?;
+        if &actual != child {
+            return Err(EngineError::Conflict);
+        }
+        match &node {
+            RecoveryIndexNode::Leaf { entries } => {
+                if entries.is_empty()
+                    || entries.len() > RECOVERY_INDEX_FANOUT
+                    || entries.windows(2).any(|pair| {
+                        pair[0].manifest_index >= pair[1].manifest_index
+                            || pair[0].visible_last_seq > pair[1].visible_last_seq
+                    })
+                {
+                    return Err(EngineError::Conflict);
+                }
+            }
+            RecoveryIndexNode::Internal { children } => {
+                if children.is_empty()
+                    || children.len() > RECOVERY_INDEX_FANOUT
+                    || children
+                        .windows(2)
+                        .any(|pair| pair[0].max_index >= pair[1].min_index)
+                {
+                    return Err(EngineError::Conflict);
+                }
+            }
+        }
+        Ok(node)
+    }
+
+    fn append_recovery_index_at(
+        &self,
+        shard: &QueueKey,
+        child: &RecoveryIndexChild,
+        height: u8,
+        entry: RecoveryIndexEntry,
+    ) -> EngineResult<Vec<RecoveryIndexChild>> {
+        let node = self.load_recovery_index_node(child)?;
+        match (height, node) {
+            (0, RecoveryIndexNode::Leaf { mut entries }) => {
+                if entries
+                    .last()
+                    .is_some_and(|last| last.manifest_index >= entry.manifest_index)
+                {
+                    return Err(EngineError::Conflict);
+                }
+                if entries.len() < RECOVERY_INDEX_FANOUT {
+                    entries.push(entry);
+                    Ok(vec![self.put_recovery_index_node(
+                        shard,
+                        &RecoveryIndexNode::Leaf { entries },
+                    )?])
+                } else {
+                    Ok(vec![
+                        child.clone(),
+                        self.put_recovery_index_node(
+                            shard,
+                            &RecoveryIndexNode::Leaf {
+                                entries: vec![entry],
+                            },
+                        )?,
+                    ])
+                }
+            }
+            (level, RecoveryIndexNode::Internal { mut children }) if level > 0 => {
+                let last = children.last().cloned().ok_or(EngineError::Conflict)?;
+                let replacements = self.append_recovery_index_at(shard, &last, level - 1, entry)?;
+                if replacements.len() == 1 {
+                    *children.last_mut().ok_or(EngineError::Conflict)? = replacements[0].clone();
+                } else if children.len() < RECOVERY_INDEX_FANOUT {
+                    children.extend(replacements.into_iter().skip(1));
+                } else {
+                    return Ok(vec![
+                        child.clone(),
+                        self.put_recovery_index_node(
+                            shard,
+                            &RecoveryIndexNode::Internal {
+                                children: replacements.into_iter().skip(1).collect(),
+                            },
+                        )?,
+                    ]);
+                }
+                Ok(vec![self.put_recovery_index_node(
+                    shard,
+                    &RecoveryIndexNode::Internal { children },
+                )?])
+            }
+            _ => Err(EngineError::Conflict),
+        }
+    }
+
+    fn append_recovery_index(
+        &self,
+        shard: &QueueKey,
+        root: Option<RecoveryIndexRoot>,
+        index_entry: RecoveryIndexEntry,
+    ) -> EngineResult<RecoveryIndexRoot> {
+        let Some(mut root) = root else {
+            let child = self.put_recovery_index_node(
+                shard,
+                &RecoveryIndexNode::Leaf {
+                    entries: vec![index_entry],
+                },
+            )?;
+            return Ok(RecoveryIndexRoot {
+                schema_version: 1,
+                root: child,
+                height: 0,
+                entry_count: 1,
+            });
+        };
+        if root.schema_version != 1 || root.root.max_index >= index_entry.manifest_index {
+            return Err(EngineError::Conflict);
+        }
+        let children =
+            self.append_recovery_index_at(shard, &root.root, root.height, index_entry)?;
+        root.root = if children.len() == 1 {
+            children[0].clone()
+        } else {
+            root.height = root.height.checked_add(1).ok_or(EngineError::Conflict)?;
+            self.put_recovery_index_node(shard, &RecoveryIndexNode::Internal { children })?
+        };
+        root.entry_count = root
+            .entry_count
+            .checked_add(1)
+            .ok_or(EngineError::Conflict)?;
+        Ok(root)
+    }
+
+    fn recovery_index_with_compat_backfill(
+        &self,
+        shard: &QueueKey,
+        head: &VersionedHead<ManifestHeadBlob>,
+        candidate_key: &str,
+        entry: &ManifestEntry,
+    ) -> EngineResult<RecoveryIndexRoot> {
+        let mut root = head.value.recovery_index.clone();
+        if root.is_none() && head.value.next_manifest_index > head.value.legacy_next_manifest_index
+        {
+            let mut reversed = Vec::new();
+            let mut cursor = head.value.tail_candidate_key.clone();
+            let mut remaining = head
+                .value
+                .next_manifest_index
+                .saturating_sub(head.value.legacy_next_manifest_index);
+            while remaining > 0 {
+                let key = cursor.ok_or(EngineError::Conflict)?;
+                let bytes = self.store_get(&key)?.ok_or(EngineError::Conflict)?;
+                let candidate: ManifestCandidate =
+                    serde_json::from_slice(&bytes).map_err(store_err)?;
+                cursor = candidate.previous_candidate_key.clone();
+                reversed.push((key, candidate.entry));
+                remaining -= 1;
+            }
+            for (key, old_entry) in reversed.into_iter().rev() {
+                root = Some(self.append_recovery_index(
+                    shard,
+                    root,
+                    RecoveryIndexEntry {
+                        manifest_index: old_entry.index,
+                        first_seq: old_entry.first_seq,
+                        visible_last_seq: Self::visible_last_seq(&old_entry),
+                        candidate_key: key,
+                        entry: old_entry,
+                    },
+                )?);
+            }
+        }
+        self.append_recovery_index(
+            shard,
+            root,
+            RecoveryIndexEntry {
+                manifest_index: entry.index,
+                first_seq: entry.first_seq,
+                visible_last_seq: Self::visible_last_seq(entry),
+                candidate_key: candidate_key.to_owned(),
+                entry: entry.clone(),
+            },
+        )
+    }
+
     fn manifest_key(shard: &QueueKey, index: u64) -> String {
         format!("{}{index:020}.json", Self::manifest_prefix(shard))
     }
@@ -2338,6 +2687,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         } else {
             Self::visible_last_seq(entry) + 1
         };
+        // All immutable recovery-index nodes are durable before the same fenced head CAS that makes the
+        // candidate authoritative. A crash or CAS loser can therefore leave only unreachable content-addressed
+        // nodes; a committed head can never name a missing, post-CAS index update.
+        let recovery_index =
+            self.recovery_index_with_compat_backfill(shard, head, &candidate_key, entry)?;
         let next_head = ManifestHeadBlob {
             current_epoch: entry.epoch,
             next_seq,
@@ -2347,6 +2701,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 .or(head.value.retention_floor_through),
             tail_candidate_key: Some(candidate_key),
             legacy_next_manifest_index: head.value.legacy_next_manifest_index,
+            recovery_index: Some(recovery_index),
         };
         let won = self.store.update_manifest_head_if_version(
             &Self::authoritative_head_prefix(shard),
@@ -3353,6 +3708,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                             retention_floor_through: None,
                             tail_candidate_key: None,
                             legacy_next_manifest_index: next_index,
+                            recovery_index: None,
                         },
                     )
                 }
@@ -4206,6 +4562,198 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         self.read_from_limited(shard, from_seq, usize::MAX)
     }
 
+    /// Capture one immutable authority-head recovery snapshot. Indexed authority heads use a content-addressed
+    /// forward tree and never LIST or rescan the reverse candidate chain. Pre-index/legacy heads are marked as
+    /// an explicit compatibility fallback and cannot substantiate bounded recovery evidence.
+    pub fn open_recovery_cursor(
+        &self,
+        shard: &QueueKey,
+        from_seq: u64,
+    ) -> EngineResult<RecoveryCursor> {
+        if self.branch_uncommitted(shard)? {
+            return Ok(RecoveryCursor {
+                shard: shard.clone(),
+                from_seq,
+                captured_head_version: None,
+                root: None,
+                frames: Vec::new(),
+                leaf: Vec::new(),
+                leaf_offset: 0,
+                initialized: true,
+                finished: true,
+                legacy_fallback: false,
+            });
+        }
+        let horizon = self.visible_manifest_deletion_watermark(shard)?;
+        self.fail_closed_below_floor(shard, from_seq, horizon)?;
+        let head = self.read_authoritative_head(shard)?;
+        let legacy_fallback = head.as_ref().is_none_or(|head| {
+            head.value.legacy_next_manifest_index > 0
+                || (head.value.next_manifest_index > 0 && head.value.recovery_index.is_none())
+        });
+        Ok(RecoveryCursor {
+            shard: shard.clone(),
+            from_seq,
+            captured_head_version: head.as_ref().map(|head| head.version),
+            root: head.and_then(|head| head.value.recovery_index),
+            frames: Vec::new(),
+            leaf: Vec::new(),
+            leaf_offset: 0,
+            initialized: false,
+            finished: false,
+            legacy_fallback,
+        })
+    }
+
+    fn descend_recovery_cursor(
+        &self,
+        cursor: &mut RecoveryCursor,
+        mut child: RecoveryIndexChild,
+        mut height: u8,
+        seek_seq: Option<u64>,
+        stats: &mut RecoveryReadPageStats,
+    ) -> EngineResult<()> {
+        loop {
+            let node = self.load_recovery_index_node(&child)?;
+            stats.recovery_index_node_visits += 1;
+            match (height, node) {
+                (0, RecoveryIndexNode::Leaf { entries }) => {
+                    cursor.leaf_offset = seek_seq.map_or(0, |sequence| {
+                        entries.partition_point(|entry| entry.visible_last_seq < sequence)
+                    });
+                    cursor.leaf = entries;
+                    return Ok(());
+                }
+                (level, RecoveryIndexNode::Internal { children }) if level > 0 => {
+                    let selected = seek_seq
+                        .and_then(|sequence| {
+                            children
+                                .iter()
+                                .position(|candidate| candidate.max_visible_last_seq >= sequence)
+                        })
+                        .unwrap_or(0);
+                    if selected >= children.len() {
+                        cursor.finished = true;
+                        return Ok(());
+                    }
+                    child = children[selected].clone();
+                    cursor.frames.push(RecoveryCursorFrame {
+                        children,
+                        next_child: selected + 1,
+                        child_height: level - 1,
+                    });
+                    height = level - 1;
+                }
+                _ => return Err(EngineError::Conflict),
+            }
+        }
+    }
+
+    fn advance_recovery_cursor_leaf(
+        &self,
+        cursor: &mut RecoveryCursor,
+        stats: &mut RecoveryReadPageStats,
+    ) -> EngineResult<bool> {
+        while let Some(mut frame) = cursor.frames.pop() {
+            if frame.next_child >= frame.children.len() {
+                continue;
+            }
+            let child = frame.children[frame.next_child].clone();
+            frame.next_child += 1;
+            let child_height = frame.child_height;
+            cursor.frames.push(frame);
+            self.descend_recovery_cursor(cursor, child, child_height, None, stats)?;
+            return Ok(true);
+        }
+        cursor.finished = true;
+        Ok(false)
+    }
+
+    pub fn read_recovery_cursor_page(
+        &self,
+        cursor: &mut RecoveryCursor,
+    ) -> EngineResult<(
+        Vec<(CommandPosition, CommandEnvelope)>,
+        RecoveryReadPageStats,
+    )> {
+        if cursor.legacy_fallback {
+            let (entries, mut stats) = self.read_recovery_page(&cursor.shard, cursor.from_seq)?;
+            stats.bounded_authority_index = false;
+            if let Some(last) = entries.last() {
+                cursor.from_seq = last.0.sequence.saturating_add(1);
+            } else {
+                cursor.finished = true;
+            }
+            return Ok((entries, stats));
+        }
+        let mut stats = RecoveryReadPageStats {
+            command_limit: RECOVERY_COMMAND_PAGE_LIMIT,
+            manifest_object_page_limit: S3_LIST_PAGE_MAX_KEYS,
+            bounded_authority_index: true,
+            ..RecoveryReadPageStats::default()
+        };
+        if cursor.finished {
+            return Ok((Vec::new(), stats));
+        }
+        if !cursor.initialized {
+            cursor.initialized = true;
+            let Some(root) = cursor.root.clone() else {
+                cursor.finished = true;
+                return Ok((Vec::new(), stats));
+            };
+            if root.schema_version != 1 {
+                return Err(EngineError::Conflict);
+            }
+            self.descend_recovery_cursor(
+                cursor,
+                root.root,
+                root.height,
+                Some(cursor.from_seq),
+                &mut stats,
+            )?;
+        }
+        let is_committed_branch = self
+            .store_get(&branch_metadata_key(&cursor.shard))?
+            .is_some();
+        let mut out = Vec::with_capacity(RECOVERY_COMMAND_PAGE_LIMIT);
+        while out.len() < RECOVERY_COMMAND_PAGE_LIMIT && !cursor.finished {
+            if cursor.leaf_offset >= cursor.leaf.len() {
+                if !self.advance_recovery_cursor_leaf(cursor, &mut stats)? {
+                    break;
+                }
+                continue;
+            }
+            let indexed = cursor.leaf[cursor.leaf_offset].clone();
+            stats.recovery_index_entries_visited += 1;
+            if indexed.manifest_index != indexed.entry.index
+                || indexed.first_seq != indexed.entry.first_seq
+                || indexed.visible_last_seq != Self::visible_last_seq(&indexed.entry)
+            {
+                return Err(EngineError::Conflict);
+            }
+            self.append_recovery_entry(
+                &cursor.shard,
+                &indexed.entry,
+                cursor.from_seq,
+                is_committed_branch,
+                &mut out,
+            )?;
+            if let Some(last) = out.last() {
+                cursor.from_seq = last.0.sequence.saturating_add(1);
+            }
+            if cursor.from_seq > indexed.visible_last_seq
+                || indexed.entry.fence
+                || Self::is_reclaimed_manifest_marker(&indexed.entry)
+            {
+                cursor.leaf_offset += 1;
+            }
+        }
+        stats.commands_returned = out.len();
+        stats.peak_manifest_objects_buffered = cursor.leaf.len().min(RECOVERY_INDEX_FANOUT);
+        let _snapshot_version = cursor.captured_head_version;
+        Ok((out, stats))
+    }
+
     /// Production recovery page. Unlike [`Self::read_from`], this never materializes the complete
     /// manifest or command tail: fixed-index manifests are enumerated through bounded object pages and
     /// authoritative candidate chains retain only the earliest command-bearing entries needed for one
@@ -4319,6 +4867,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             commands_returned: out.len(),
             peak_manifest_objects_buffered: peak_objects,
             manifest_object_page_limit: S3_LIST_PAGE_MAX_KEYS,
+            recovery_index_node_visits: 0,
+            recovery_index_entries_visited: 0,
+            bounded_authority_index: false,
         };
         Ok((out, stats))
     }
@@ -7248,6 +7799,9 @@ pub struct ManifestHeadBlob {
     /// Entries below this index belong to the immutable legacy manifest base captured at migration.
     #[serde(default)]
     pub legacy_next_manifest_index: u64,
+    /// Immutable forward recovery index selected by the same fenced head CAS as the candidate-chain tail.
+    #[serde(default)]
+    pub recovery_index: Option<RecoveryIndexRoot>,
 }
 
 /// The latest versioned manifest head object together with the opaque version token.
@@ -8510,7 +9064,7 @@ mod manifest_deletion_watermark_tests {
     }
 
     #[test]
-    fn pointer_commit_unknown_and_immutable_claim_are_retry_repairable() {
+    fn pointer_authority_survives_optional_mirror_failure_and_restart_repairs() {
         let objects = Arc::new(FailNextPutStore::new());
         let pointers = Arc::new(TransactionalPointer::default());
         let adapter = PointerFencedBlobStore::new(objects.clone(), pointers.clone());
@@ -8521,17 +9075,32 @@ mod manifest_deletion_watermark_tests {
             retention_floor_through: None,
             tail_candidate_key: Some("candidate".into()),
             legacy_next_manifest_index: 0,
+            recovery_index: None,
         };
         objects.fail_next.store(true, AtomicOrdering::SeqCst);
-        let error = adapter
-            .update_manifest_head_if_version("authority/", None, &head)
-            .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("committed but object mirror incomplete")
+            adapter
+                .update_manifest_head_if_version("authority/", None, &head)
+                .unwrap()
         );
         assert_eq!(pointers.read("authority/").unwrap().unwrap().value, head);
+        assert_eq!(adapter.pending_manifest_mirrors(), 1);
+        // A fresh process has no volatile debt record but still reads authority entirely from Postgres and
+        // can reconstruct the optional numeric compatibility mirror from that durable row.
+        let restarted = PointerFencedBlobStore::new(objects.clone(), pointers.clone());
+        assert_eq!(
+            restarted
+                .read_manifest_head("authority/")
+                .unwrap()
+                .unwrap()
+                .value,
+            head
+        );
+        assert!(
+            restarted
+                .repair_current_manifest_mirror("authority/")
+                .unwrap()
+        );
         assert_eq!(
             adapter
                 .read_manifest_head("authority/")
@@ -8546,11 +9115,12 @@ mod manifest_deletion_watermark_tests {
                 .unwrap()
         );
 
+        let marker = "t/a/q/b/manifest_head/00000000000000000001.json";
         objects.fail_next.store(true, AtomicOrdering::SeqCst);
-        assert!(adapter.put_if_absent("immutable/key", b"one").is_err());
-        assert!(adapter.put_if_absent("immutable/key", b"one").unwrap());
-        assert!(!adapter.put_if_absent("immutable/key", b"two").unwrap());
-        assert_eq!(objects.get("immutable/key").unwrap().unwrap(), b"one");
+        assert!(adapter.put_if_absent(marker, b"one").is_err());
+        assert!(adapter.put_if_absent(marker, b"one").unwrap());
+        assert!(!adapter.put_if_absent(marker, b"two").unwrap());
+        assert_eq!(objects.get(marker).unwrap().unwrap(), b"one");
     }
 
     #[test]
@@ -8583,6 +9153,71 @@ mod manifest_deletion_watermark_tests {
         assert_eq!(head.value.current_epoch, 1);
         drop(heads);
         assert_eq!(owner_b.read_all(&shard).unwrap().len(), 3);
+    }
+
+    fn indexed_recovery_work(command_count: u64) -> (usize, usize) {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store, cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        for sequence in 0..command_count {
+            log.enqueue(&shard, &pushes(1), 0, sequence as i64 + 1)
+                .unwrap();
+            log.seal(&shard, 0, sequence as i64 + 1).unwrap();
+        }
+
+        // Capture a stable root, then publish one more segment. The captured scan must exclude it while a
+        // subsequent scan includes it, proving the cursor is a true authority-head snapshot.
+        let mut cursor = log.open_recovery_cursor(&shard, 0).unwrap();
+        log.enqueue(&shard, &pushes(1), 0, command_count as i64 + 2)
+            .unwrap();
+        log.seal(&shard, 0, command_count as i64 + 2).unwrap();
+
+        let mut sequences = Vec::new();
+        let mut node_visits = 0usize;
+        let mut entry_visits = 0usize;
+        loop {
+            let (page, stats) = log.read_recovery_cursor_page(&mut cursor).unwrap();
+            assert!(stats.bounded_authority_index);
+            assert!(stats.recovery_index_node_visits <= 16);
+            assert!(stats.recovery_index_entries_visited <= RECOVERY_COMMAND_PAGE_LIMIT);
+            assert!(stats.peak_manifest_objects_buffered <= RECOVERY_INDEX_FANOUT);
+            node_visits += stats.recovery_index_node_visits;
+            entry_visits += stats.recovery_index_entries_visited;
+            if page.is_empty() {
+                break;
+            }
+            sequences.extend(page.into_iter().map(|(position, _)| position.sequence));
+        }
+        assert_eq!(sequences, (0..command_count).collect::<Vec<_>>());
+        assert_eq!(entry_visits, command_count as usize);
+
+        let mut latest = log.open_recovery_cursor(&shard, 0).unwrap();
+        let mut latest_count = 0usize;
+        loop {
+            let (page, _) = log.read_recovery_cursor_page(&mut latest).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            latest_count += page.len();
+        }
+        assert_eq!(latest_count, command_count as usize + 1);
+        (node_visits, entry_visits)
+    }
+
+    #[test]
+    fn forward_recovery_index_is_snapshot_exact_bounded_and_near_linear() {
+        let (small_nodes, small_entries) = indexed_recovery_work(1_024);
+        let (large_nodes, large_entries) = indexed_recovery_work(2_048);
+        assert_eq!(small_entries, 1_024);
+        assert_eq!(large_entries, 2_048);
+        assert!(
+            large_nodes <= small_nodes.saturating_mul(3).saturating_add(16),
+            "doubling one-command segments must remain near-linear: small={small_nodes}, large={large_nodes}"
+        );
+        assert!(large_nodes < large_entries / 8);
     }
 
     fn expire_as_owner<S: BlobStore>(
@@ -9313,6 +9948,7 @@ mod manifest_deletion_watermark_tests {
                     retention_floor_through: None,
                     tail_candidate_key: None,
                     legacy_next_manifest_index: 2,
+                    recovery_index: None,
                 };
                 store
                     .inner

@@ -63,6 +63,9 @@ pub struct RecoveryStats {
     pub replay_worker_tasks: u64,
     /// Bounded, measured replay high-water samples captured after applied pages.
     pub replay_progress_samples: Vec<u64>,
+    pub recovery_index_node_visits: u64,
+    pub recovery_index_entries_visited: u64,
+    pub bounded_authority_index: bool,
 }
 
 fn record_replay_progress(samples: &mut Vec<u64>, sequence: u64) {
@@ -1352,15 +1355,24 @@ impl SegmentedObjectLogSqliteBackend {
         let mut tail_replayed = 0u64;
         let mut peak_replay_commands_buffered = 0u64;
         let mut peak_manifest_objects_buffered = 0u64;
+        let mut recovery_index_node_visits = 0u64;
+        let mut recovery_index_entries_visited = 0u64;
+        let mut bounded_authority_index = true;
         let mut replay_progress_samples = vec![start_seq];
+        let mut recovery_cursor = self.log.open_recovery_cursor(shard, start_seq)?;
         loop {
-            let (entries, page_stats) = self.log.read_recovery_page(shard, next_seq)?;
+            let (entries, page_stats) = self.log.read_recovery_cursor_page(&mut recovery_cursor)?;
             if entries.is_empty() {
                 break;
             }
             peak_replay_commands_buffered = peak_replay_commands_buffered.max(entries.len() as u64);
             peak_manifest_objects_buffered = peak_manifest_objects_buffered
                 .max(page_stats.peak_manifest_objects_buffered as u64);
+            recovery_index_node_visits = recovery_index_node_visits
+                .saturating_add(page_stats.recovery_index_node_visits as u64);
+            recovery_index_entries_visited = recovery_index_entries_visited
+                .saturating_add(page_stats.recovery_index_entries_visited as u64);
+            bounded_authority_index &= page_stats.bounded_authority_index;
             for (_pos, env) in &entries {
                 for id in &env.item_ids {
                     self.counters.observe(shard, *id);
@@ -1404,6 +1416,9 @@ impl SegmentedObjectLogSqliteBackend {
                         as u64,
                     replay_worker_tasks: 1,
                     replay_progress_samples,
+                    recovery_index_node_visits,
+                    recovery_index_entries_visited,
+                    bounded_authority_index,
                 },
             );
         Ok(())
@@ -2342,15 +2357,24 @@ impl SegmentedObjectLogInMemoryBackend {
         let mut replayed = 0u64;
         let mut peak_replay_commands_buffered = 0u64;
         let mut peak_manifest_objects_buffered = 0u64;
+        let mut recovery_index_node_visits = 0u64;
+        let mut recovery_index_entries_visited = 0u64;
+        let mut bounded_authority_index = true;
         let mut replay_progress_samples = vec![0];
+        let mut recovery_cursor = self.log.open_recovery_cursor(shard, 0)?;
         loop {
-            let (entries, page_stats) = self.log.read_recovery_page(shard, next_seq)?;
+            let (entries, page_stats) = self.log.read_recovery_cursor_page(&mut recovery_cursor)?;
             if entries.is_empty() {
                 break;
             }
             peak_replay_commands_buffered = peak_replay_commands_buffered.max(entries.len() as u64);
             peak_manifest_objects_buffered = peak_manifest_objects_buffered
                 .max(page_stats.peak_manifest_objects_buffered as u64);
+            recovery_index_node_visits = recovery_index_node_visits
+                .saturating_add(page_stats.recovery_index_node_visits as u64);
+            recovery_index_entries_visited = recovery_index_entries_visited
+                .saturating_add(page_stats.recovery_index_entries_visited as u64);
+            bounded_authority_index &= page_stats.bounded_authority_index;
             let mut p = proj.lock().expect("segmented inmemory projection poisoned");
             for (position, envelope) in entries {
                 for id in &envelope.item_ids {
@@ -2374,6 +2398,9 @@ impl SegmentedObjectLogInMemoryBackend {
             manifest_object_page_limit: pqueue_objectlog::segmented::S3_LIST_PAGE_MAX_KEYS as u64,
             replay_worker_tasks: 1,
             replay_progress_samples,
+            recovery_index_node_visits,
+            recovery_index_entries_visited,
+            bounded_authority_index,
         })
     }
 

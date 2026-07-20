@@ -3898,6 +3898,7 @@ fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::A
         retention_floor_through: None,
         tail_candidate_key: None,
         legacy_next_manifest_index: 0,
+        recovery_index: None,
     };
     assert!(
         store.read_manifest_head(&prefix).unwrap().is_none(),
@@ -3932,6 +3933,7 @@ fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::A
         retention_floor_through: Some(0),
         tail_candidate_key: None,
         legacy_next_manifest_index: 0,
+        recovery_index: None,
     };
     let winner_b = ManifestHeadBlob {
         current_epoch: 2,
@@ -3940,6 +3942,7 @@ fn assert_manifest_head_cas_contract<S: BlobStore + 'static>(store: std::sync::A
         retention_floor_through: Some(1),
         tail_candidate_key: None,
         legacy_next_manifest_index: 0,
+        recovery_index: None,
     };
     let store_a = store.clone();
     let store_b = store.clone();

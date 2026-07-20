@@ -265,6 +265,38 @@ fn objectlog_sqlite_factory() -> impl Fn(&str) -> HybridBackend {
     }
 }
 
+fn objectlog_factory_at(
+    bound_ms: u64,
+) -> impl Fn(&str) -> pqueue_objectlog::ComposedObjectLogBackend {
+    let base = base_dir(&format!("objectlog-e3-{bound_ms}"));
+    move |tag: &str| {
+        pqueue_objectlog::composed_objectlog_backend_group_commit(
+            base.join(tag),
+            SegmentConfig::new(1, bound_ms).unwrap(),
+        )
+        .expect("open bound-threaded objectlog")
+    }
+}
+
+fn objectlog_sqlite_factory_at(bound_ms: u64) -> impl Fn(&str) -> HybridBackend {
+    let base = base_dir(&format!("objectlog-sqlite-e3-{bound_ms}"));
+    move |tag: &str| {
+        let root = base.join(tag);
+        std::fs::create_dir_all(&root).ok();
+        let sqlite = root.join("projection.sqlite");
+        ComposedBackend::new(
+            ObjectLog::open_group_commit(&root, SegmentConfig::new(1, bound_ms).unwrap())
+                .expect("open bound-threaded object log"),
+            HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .expect("open bound-threaded hybrid projection"),
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true)
+        .recover()
+        .expect("recover bound-threaded objectlog/hybrid")
+    }
+}
+
 /// The two Postgres-log storage pairs exposed by `pqueue-server`.  These are deliberately assembled from
 /// the same axis types as the runtime composition root rather than substituting the older
 /// Postgres-log/in-memory convenience constructor.
@@ -4457,6 +4489,120 @@ async fn ac_txn_contract_matrix() {
         "AC-TXN matrix failures:\n{}",
         failures.join("\n")
     );
+}
+
+/// Governed E3 producer: every emitted row is the direct result of a fresh AC execution for one exact
+/// profile/bound cell. It is opt-in because it runs 48 durable scenarios; absence of the output path emits
+/// nothing and cannot be mistaken for release evidence.
+#[tokio::test]
+async fn e3_governed_transaction_evidence_matrix() {
+    let Ok(output) = std::env::var("PQUEUE_E3_TRANSACTION_EVIDENCE_OUT") else {
+        eprintln!("E3 transaction evidence skipped — set PQUEUE_E3_TRANSACTION_EVIDENCE_OUT");
+        return;
+    };
+    let revision = std::env::var("PQUEUE_E3_SOURCE_REVISION")
+        .expect("E3 transaction evidence requires source revision");
+    let recorded_at = std::env::var("PQUEUE_E3_RECORDED_AT")
+        .expect("E3 transaction evidence requires an externally recorded RFC3339 timestamp");
+    let mut rows = Vec::new();
+    let mut failures = Vec::new();
+
+    for profile in [
+        "object_log_inmemory_projection",
+        "object_log_sqlite_projection",
+    ] {
+        for bound_ms in E3_LATENCY_BOUNDS_MS {
+            let mut outcomes: Vec<(&str, &str, AcOutcome)> = Vec::new();
+            if profile == "object_log_inmemory_projection" {
+                outcomes.push((
+                    "AC-TXN-1",
+                    "objectlog",
+                    ac_txn_1_success_durable_visible(objectlog_factory_at(bound_ms)).await,
+                ));
+                outcomes.push((
+                    "AC-TXN-2",
+                    "objectlog",
+                    ac_txn_2_rejection_no_effect(objectlog_factory_at(bound_ms), DURABLE).await,
+                ));
+                outcomes.push((
+                    "AC-TXN-3",
+                    "objectlog",
+                    ac_txn_3_unknown_outcome_replay(objectlog_factory_at(bound_ms), DURABLE).await,
+                ));
+            } else {
+                outcomes.push((
+                    "AC-TXN-1",
+                    "object_log_sqlite",
+                    ac_txn_1_success_durable_visible(objectlog_sqlite_factory_at(bound_ms)).await,
+                ));
+                outcomes.push((
+                    "AC-TXN-2",
+                    "object_log_sqlite",
+                    ac_txn_2_rejection_no_effect(objectlog_sqlite_factory_at(bound_ms), DURABLE)
+                        .await,
+                ));
+                outcomes.push((
+                    "AC-TXN-3",
+                    "object_log_sqlite",
+                    ac_txn_3_unknown_outcome_replay(objectlog_sqlite_factory_at(bound_ms), DURABLE)
+                        .await,
+                ));
+            }
+            outcomes.push(("AC-TXN-4", "objectlog", ac_txn_4_crash_point_matrix().await));
+            outcomes.push((
+                "AC-TXN-6",
+                "sqlite_log|object_log_sqlite",
+                ac_txn_6_parity(sqlite_log_factory(), objectlog_sqlite_factory_at(bound_ms)).await,
+            ));
+            // This execution includes the genuine no-flusher liveness check and all four numeric windows;
+            // the row binds the exact cell only after that run proves this bound has zero invariant delta.
+            outcomes.push((
+                "AC-TXN-7",
+                "objectlog(force-seal|group-commit)",
+                ac_txn_7_latency_sweep_scenario().await,
+            ));
+
+            for (ac, backend, outcome) in outcomes {
+                match outcome {
+                    Ok(assertions) => {
+                        match pqueue_release::e3_contract::build_e3_transaction_evidence_row(
+                            pqueue_release::e3_contract::E3TransactionObservation {
+                                source_revision: revision.clone(),
+                                profile: profile.into(),
+                                bound_ms,
+                                ac: ac.into(),
+                                backend: backend.into(),
+                                assertions,
+                                recorded_at: recorded_at.clone(),
+                                passed: true,
+                            },
+                        ) {
+                            Ok(row) => rows.push(row),
+                            Err(error) => failures.push(format!(
+                                "profile={profile} bound={bound_ms} ac={ac}: {error}"
+                            )),
+                        }
+                    }
+                    Err(error) => failures.push(format!(
+                        "profile={profile} bound={bound_ms} ac={ac}: {error}"
+                    )),
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "E3 transaction executions failed:\n{}",
+        failures.join("\n")
+    );
+    assert_eq!(rows.len(), 48, "exact 2×4×6 executed row matrix");
+    let body = rows
+        .iter()
+        .map(|row| serde_json::to_string(row).expect("serialize E3 transaction row"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(&output, body).expect("write governed E3 transaction evidence");
 }
 
 /// Postgres rows run in a SEPARATE non-tokio test because the sync postgres client panics under a tokio

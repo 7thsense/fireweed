@@ -1566,6 +1566,7 @@ mod tests {
             retention_floor_through: None,
             tail_candidate_key: None,
             legacy_next_manifest_index: 0,
+            recovery_index: None,
         }
     }
 

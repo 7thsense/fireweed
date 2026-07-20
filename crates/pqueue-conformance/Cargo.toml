@@ -24,6 +24,7 @@ pqueue-memory = { path = "../pqueue-memory" }
 pqueue-objectlog = { path = "../pqueue-objectlog" }
 pqueue-sqlite = { path = "../pqueue-sqlite" }
 pqueue-postgres = { path = "../pqueue-postgres" }
+pqueue-release = { path = "../pqueue-release" }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 futures = "0.3"

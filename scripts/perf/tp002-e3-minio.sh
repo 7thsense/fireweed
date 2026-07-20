@@ -33,6 +33,8 @@ fi
 : "${PQUEUE_E3_MINIO_CONTAINER:?set PQUEUE_E3_MINIO_CONTAINER to the fresh MinIO container name}"
 : "${PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL:?set the Postgres DSN used for the executed no-CAS pointer fence proof}"
 : "${PQUEUE_E3_FENCE_EVIDENCE_OUT:?set the output path for source-bound fencing.json evidence}"
+: "${PQUEUE_E3_TRANSACTION_EVIDENCE_OUT:?set the output path for the executed 48-row TP-003 matrix}"
+PQUEUE_E3_RECORDED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 MINIO_IP=$(docker inspect "$PQUEUE_E3_MINIO_CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 MINIO_TMPFS=$(docker inspect "$PQUEUE_E3_MINIO_CONTAINER" --format '{{index .HostConfig.Tmpfs "/data"}}')
@@ -46,6 +48,17 @@ case ",$MINIO_TMPFS," in
 esac
 
 set +e
+PQUEUE_E3_SOURCE_REVISION="$SOURCE_REVISION" \
+PQUEUE_E3_RECORDED_AT="$PQUEUE_E3_RECORDED_AT" \
+PQUEUE_E3_TRANSACTION_EVIDENCE_OUT="$PQUEUE_E3_TRANSACTION_EVIDENCE_OUT" \
+cargo test -p pqueue-conformance --release --test external_transaction_contract_matrix_tests \
+  e3_governed_transaction_evidence_matrix -- --nocapture
+TXN_STATUS=$?
+if [ "$TXN_STATUS" -ne 0 ]; then
+  set -e
+  exit "$TXN_STATUS"
+fi
+
 PQUEUE_PERF_ENV=${PQUEUE_PERF_ENV:-1} \
 PQUEUE_E3_RESIDENT="$PQUEUE_E3_RESIDENT" \
 PQUEUE_E3_LOAD_BATCH="$PQUEUE_E3_LOAD_BATCH" \
