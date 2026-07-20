@@ -197,7 +197,6 @@ CREATE TABLE IF NOT EXISTS pqueue_group_summary (
     rep_progress_guard_sort BYTEA,
     rep_priority_sort BYTEA,
     rep_created_at BIGINT,
-    rep_created_seq BIGINT,
     rep_item_id TEXT,
     eligible_item_count BIGINT NOT NULL DEFAULT 0,
     at_risk_count BIGINT NOT NULL DEFAULT 0,
@@ -310,10 +309,16 @@ const GROUP_SUMMARY_INDEX_MIGRATIONS: &[(&str, &str)] = &[
          WHERE lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL",
     ),
     (
+        "pqueue_items_group_active_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_group_active_idx \
+         ON pqueue_items (tenant_id,queue_id,group_key,item_id) \
+         WHERE lifecycle_state IN ('Pending','Leased') AND superseded=false AND group_key IS NOT NULL",
+    ),
+    (
         "pqueue_group_summary_claim_rank_idx",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_claim_rank_idx \
          ON pqueue_group_summary \
-            (tenant_id,queue_id,rep_priority_sort,rep_created_seq,rep_item_id,group_key) \
+            (tenant_id,queue_id,rep_priority_sort,rep_item_id,group_key) \
          WHERE oldest_eligible_at IS NOT NULL",
     ),
     (
@@ -353,19 +358,6 @@ fn migrate_group_summary_schema(client: &mut Client) -> EngineResult<()> {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let migration = (|| {
-        st(client.batch_execute(
-            "ALTER TABLE pqueue_group_summary ADD COLUMN IF NOT EXISTS rep_created_seq BIGINT;",
-        ))?;
-        // Upgrade existing summaries before the rank index can use the new authoritative FIFO tiebreak.
-        // One indexed item lookup per summary row; empty/future-only groups intentionally remain NULL.
-        st(client.execute(
-            "UPDATE pqueue_group_summary s SET rep_created_seq=( \
-               SELECT i.created_seq FROM pqueue_items i \
-               WHERE i.tenant_id=s.tenant_id AND i.queue_id=s.queue_id AND i.item_id=s.rep_item_id \
-               LIMIT 1) \
-             WHERE s.rep_created_seq IS NULL AND s.rep_item_id IS NOT NULL",
-            &[],
-        ))?;
         // Large-table indexes are rollout-safe concurrent migrations rather than blocking CREATE INDEX
         // statements inside RELATIONAL_SCHEMA. An interrupted invalid index is dropped and rebuilt.
         for (name, ddl) in GROUP_SUMMARY_INDEX_MIGRATIONS {
@@ -1402,30 +1394,20 @@ fn refresh_group_summary(
          ORDER BY priority_sort, created_seq LIMIT 1",
         &[&t, &q, &group_key.as_str(), &now_n],
     ))?;
-    let (rep_psort, rep_created, rep_created_seq, rep_item): (
-        Option<Vec<u8>>,
-        Option<i64>,
-        Option<i64>,
-        Option<String>,
-    ) = match rep {
-        Some(row) => (
-            Some(row.get(0)),
-            Some(row.get(1)),
-            Some(row.get(2)),
-            Some(row.get(3)),
-        ),
-        None => (None, None, None, None),
-    };
+    let (rep_psort, rep_created, rep_item): (Option<Vec<u8>>, Option<i64>, Option<String>) =
+        match rep {
+            Some(row) => (Some(row.get(0)), Some(row.get(1)), Some(row.get(3))),
+            None => (None, None, None),
+        };
     st(tx.execute(
         "INSERT INTO pqueue_group_summary \
          (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
-          rep_created_at,rep_created_seq,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
-         VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,$8,$9,0,$10) \
+          rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+         VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,$8,0,$9) \
          ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
           oldest_eligible_at=EXCLUDED.oldest_eligible_at, \
           rep_progress_guard_sort=EXCLUDED.rep_progress_guard_sort, \
           rep_priority_sort=EXCLUDED.rep_priority_sort, rep_created_at=EXCLUDED.rep_created_at, \
-          rep_created_seq=EXCLUDED.rep_created_seq, \
           rep_item_id=EXCLUDED.rep_item_id, eligible_item_count=EXCLUDED.eligible_item_count, \
           at_risk_count=EXCLUDED.at_risk_count, updated_at=EXCLUDED.updated_at",
         &[
@@ -1435,7 +1417,6 @@ fn refresh_group_summary(
             &oldest,
             &rep_psort,
             &rep_created,
-            &rep_created_seq,
             &rep_item,
             &count,
             &now_n,
@@ -1481,8 +1462,8 @@ fn refresh_group_summaries(
          ) \
          INSERT INTO pqueue_group_summary \
            (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort, \
-            rep_created_at,rep_created_seq,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
-         SELECT $1,$2,r.group_key,a.oldest,NULL,p.priority_sort,p.created_at,p.created_seq,p.item_id, \
+            rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+         SELECT $1,$2,r.group_key,a.oldest,NULL,p.priority_sort,p.created_at,p.item_id, \
                 COALESCE(a.item_count,0),0,$4 \
          FROM requested r LEFT JOIN aggregated a USING (group_key) \
                           LEFT JOIN representative p USING (group_key) \
@@ -1490,7 +1471,6 @@ fn refresh_group_summaries(
            oldest_eligible_at=EXCLUDED.oldest_eligible_at, \
            rep_progress_guard_sort=EXCLUDED.rep_progress_guard_sort, \
            rep_priority_sort=EXCLUDED.rep_priority_sort, rep_created_at=EXCLUDED.rep_created_at, \
-           rep_created_seq=EXCLUDED.rep_created_seq, \
            rep_item_id=EXCLUDED.rep_item_id, eligible_item_count=EXCLUDED.eligible_item_count, \
            at_risk_count=EXCLUDED.at_risk_count, updated_at=EXCLUDED.updated_at",
         &[&t, &q, &groups, &now_n],
@@ -1512,7 +1492,7 @@ fn increment_group_summaries_for_items(
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     #[cfg(test)]
-    update_push_sql_probe(shard, |probe| probe.group_summary_statements += 1);
+    update_push_sql_probe(shard, |probe| probe.group_summary_statements += 2);
     st(tx.execute(
         "WITH wanted AS ( \
            SELECT DISTINCT group_key FROM pqueue_items \
@@ -1531,36 +1511,39 @@ fn increment_group_summaries_for_items(
          ) \
          INSERT INTO pqueue_group_summary \
            (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort, \
-            rep_created_at,rep_created_seq,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
-         SELECT $1,$2,w.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.created_seq,r.item_id, \
+            rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+         SELECT $1,$2,w.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id, \
                 COALESCE(a.item_count,0),0,$4 FROM wanted w \
                 LEFT JOIN aggregated a USING (group_key) LEFT JOIN representative r USING (group_key) \
          ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
            oldest_eligible_at=CASE \
              WHEN pqueue_group_summary.oldest_eligible_at IS NULL THEN EXCLUDED.oldest_eligible_at \
              ELSE LEAST(pqueue_group_summary.oldest_eligible_at,EXCLUDED.oldest_eligible_at) END, \
-           rep_priority_sort=CASE WHEN pqueue_group_summary.rep_priority_sort IS NULL OR \
-             (EXCLUDED.rep_priority_sort,EXCLUDED.rep_created_seq,EXCLUDED.rep_item_id) < \
-             (pqueue_group_summary.rep_priority_sort,pqueue_group_summary.rep_created_seq, \
-              pqueue_group_summary.rep_item_id) THEN EXCLUDED.rep_priority_sort \
-             ELSE pqueue_group_summary.rep_priority_sort END, \
-           rep_created_at=CASE WHEN pqueue_group_summary.rep_priority_sort IS NULL OR \
-             (EXCLUDED.rep_priority_sort,EXCLUDED.rep_created_seq,EXCLUDED.rep_item_id) < \
-             (pqueue_group_summary.rep_priority_sort,pqueue_group_summary.rep_created_seq, \
-              pqueue_group_summary.rep_item_id) THEN EXCLUDED.rep_created_at \
-             ELSE pqueue_group_summary.rep_created_at END, \
-           rep_created_seq=CASE WHEN pqueue_group_summary.rep_priority_sort IS NULL OR \
-             (EXCLUDED.rep_priority_sort,EXCLUDED.rep_created_seq,EXCLUDED.rep_item_id) < \
-             (pqueue_group_summary.rep_priority_sort,pqueue_group_summary.rep_created_seq, \
-              pqueue_group_summary.rep_item_id) THEN EXCLUDED.rep_created_seq \
-             ELSE pqueue_group_summary.rep_created_seq END, \
-           rep_item_id=CASE WHEN pqueue_group_summary.rep_priority_sort IS NULL OR \
-             (EXCLUDED.rep_priority_sort,EXCLUDED.rep_created_seq,EXCLUDED.rep_item_id) < \
-             (pqueue_group_summary.rep_priority_sort,pqueue_group_summary.rep_created_seq, \
-              pqueue_group_summary.rep_item_id) THEN EXCLUDED.rep_item_id \
-             ELSE pqueue_group_summary.rep_item_id END, \
            eligible_item_count=pqueue_group_summary.eligible_item_count+EXCLUDED.eligible_item_count, \
            at_risk_count=0,updated_at=EXCLUDED.updated_at",
+        &[&t, &q, &item_ids, &now_n],
+    ))?;
+    // The existing representative's authoritative FIFO tiebreak lives on its item row. Keeping it out of
+    // the summary schema makes this update rolling-version safe: old and new writers share the same rank
+    // authority, and a nullable duplicated created-sequence column cannot corrupt mixed-version ordering.
+    st(tx.execute(
+        "WITH representative AS ( \
+           SELECT DISTINCT ON (group_key) group_key,priority_sort,created_at,created_seq,item_id \
+           FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) \
+             AND group_key IS NOT NULL AND lifecycle_state='Pending' AND superseded=false \
+             AND (not_before IS NULL OR not_before<=$4) \
+           ORDER BY group_key,priority_sort,created_seq \
+         ), winning AS ( \
+           SELECT r.* FROM representative r JOIN pqueue_group_summary s \
+             ON s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=r.group_key \
+           LEFT JOIN pqueue_items old ON old.tenant_id=s.tenant_id AND old.queue_id=s.queue_id \
+             AND old.item_id=s.rep_item_id \
+           WHERE s.rep_item_id IS NULL OR old.item_id IS NULL OR \
+             (r.priority_sort,r.created_seq,r.item_id) < \
+             (s.rep_priority_sort,old.created_seq,s.rep_item_id) \
+         ) UPDATE pqueue_group_summary s SET rep_priority_sort=w.priority_sort, \
+             rep_created_at=w.created_at,rep_item_id=w.item_id \
+           FROM winning w WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=w.group_key",
         &[&t, &q, &item_ids, &now_n],
     ))?;
     Ok(())
@@ -1615,7 +1598,6 @@ fn decrement_group_summaries_for_items(
            rep_priority_sort=CASE WHEN r.rep_removed THEN r.priority_sort \
                                   ELSE s.rep_priority_sort END, \
            rep_created_at=CASE WHEN r.rep_removed THEN r.created_at ELSE s.rep_created_at END, \
-           rep_created_seq=CASE WHEN r.rep_removed THEN r.created_seq ELSE s.rep_created_seq END, \
            rep_item_id=CASE WHEN r.rep_removed THEN r.item_id ELSE s.rep_item_id END, \
            at_risk_count=0,updated_at=$4 \
          FROM repaired r WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.group_key=r.group_key",
@@ -2702,7 +2684,7 @@ const GROUP_CANDIDATE_LOCK_SQL: &str = "SELECT group_key FROM pqueue_group_summa
     WHERE tenant_id=$1 AND queue_id=$2 AND group_key=$3 FOR UPDATE SKIP LOCKED";
 
 /// Candidate groups for the queue, ordered by representative claim key (`rep_priority_sort,
-/// rep_created_seq, rep_item_id`; `rep_progress_guard_sort` deferred/NULL). Discovery deliberately does
+/// representative item created_seq, rep_item_id`; `rep_progress_guard_sort` deferred/NULL). Discovery deliberately does
 /// not lock: each consumer locks one candidate at a time, inside a savepoint, so candidates that are
 /// contended or rejected do not leave transaction-lifetime locks behind. Same lagged-summary caveat as
 /// the sqlite backend (BQ-11c: a `not_before` crossing without a mutation is not yet reflected).
@@ -2712,9 +2694,11 @@ fn candidate_groups(
 ) -> EngineResult<Vec<GroupKey>> {
     let (t, q) = parts(shard);
     let rows = st(tx.query(
-        "SELECT group_key FROM pqueue_group_summary \
-         WHERE tenant_id=$1 AND queue_id=$2 AND oldest_eligible_at IS NOT NULL \
-         ORDER BY rep_priority_sort, rep_created_seq, rep_item_id, group_key",
+        "SELECT s.group_key FROM pqueue_group_summary s \
+         JOIN pqueue_items r ON r.tenant_id=s.tenant_id AND r.queue_id=s.queue_id \
+           AND r.item_id=s.rep_item_id \
+         WHERE s.tenant_id=$1 AND s.queue_id=$2 AND s.oldest_eligible_at IS NOT NULL \
+         ORDER BY s.rep_priority_sort, r.created_seq, s.rep_item_id, s.group_key",
         &[&t, &q],
     ))?;
     let mut out = Vec::with_capacity(rows.len());
@@ -5648,30 +5632,34 @@ impl PostgresRelational {
             if let Some(max) = definition.max_eligible_group_size
                 && !grouped.is_empty()
             {
-                let group_keys: Vec<String> = grouped.keys().cloned().collect();
-                #[cfg(test)]
-                update_push_sql_probe(shard, |probe| probe.admission_group_queries += 1);
-                let rows = st(tx.query(
-                    "SELECT group_key, COUNT(*)::bigint FROM pqueue_items \
-                     WHERE tenant_id=$1 AND queue_id=$2 AND group_key=ANY($3) \
-                     AND lifecycle_state IN ('Pending','Leased') AND superseded=false \
-                     GROUP BY group_key",
-                    &[&t, &q, &group_keys],
-                ))?;
-                let existing: HashMap<String, u64> = rows
-                    .into_iter()
-                    .map(|row| (row.get(0), row.get::<_, i64>(1) as u64))
-                    .collect();
+                let mut group_keys = Vec::with_capacity(grouped.len());
+                let mut probe_limits = Vec::with_capacity(grouped.len());
                 for (group, added) in &grouped {
-                    if existing
-                        .get(group)
-                        .copied()
-                        .unwrap_or_default()
-                        .saturating_add(*added)
-                        > max
-                    {
+                    if *added > max {
                         return Err(EngineError::Conflict);
                     }
+                    group_keys.push(group.clone());
+                    // We only need to prove whether the cap is crossed. Reading at most the remaining
+                    // capacity plus one makes the decision exact while bounding touched-group work by
+                    // max_eligible_group_size (itself <= max_claim_batch_size by API-001 validation).
+                    probe_limits.push(max.saturating_sub(*added).saturating_add(1) as i64);
+                }
+                #[cfg(test)]
+                update_push_sql_probe(shard, |probe| probe.admission_group_queries += 1);
+                if st(tx.query_opt(
+                    "WITH wanted AS ( \
+                       SELECT * FROM unnest($3::text[],$4::bigint[]) AS w(group_key,probe_limit) \
+                     ) SELECT w.group_key FROM wanted w JOIN LATERAL ( \
+                       SELECT 1 FROM pqueue_items i WHERE i.tenant_id=$1 AND i.queue_id=$2 \
+                         AND i.group_key=w.group_key AND i.lifecycle_state IN ('Pending','Leased') \
+                         AND i.superseded=false LIMIT w.probe_limit \
+                     ) found ON true GROUP BY w.group_key,w.probe_limit \
+                     HAVING COUNT(*) >= w.probe_limit LIMIT 1",
+                    &[&t, &q, &group_keys, &probe_limits],
+                ))?
+                .is_some()
+                {
+                    return Err(EngineError::Conflict);
                 }
             }
             maintain_typed_indexes_on_insert(&mut tx, &t, &q, &definition.typed_indexes, items)?;
@@ -7016,106 +7004,6 @@ mod gated_group_summary_tests {
                 group_summary_statements: 0,
             }
         );
-    }
-
-    #[test]
-    fn reconnect_upgrades_rep_created_seq_and_concurrent_indexes() {
-        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
-            eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (reconnect_upgrades_rep_created_seq_and_concurrent_indexes) — set PQUEUE_PG_TEST_URL"
-            );
-            return;
-        };
-        let schema = format!("pq_rel_summary_upgrade_{}", std::process::id());
-        let mut admin = Client::connect(&url, NoTls).expect("connect");
-        admin
-            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
-            .expect("drop schema");
-        drop(admin);
-
-        let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
-        block_on(b.create_queue(qdef())).unwrap();
-        block_on(b.push(&shard(), vec![grouped(10)], ts(0), None)).unwrap();
-        drop(b);
-
-        let mut old = Client::connect(&url, NoTls).expect("connect old schema");
-        old.batch_execute(&format!(
-            "SET search_path TO {schema}; \
-             ALTER TABLE pqueue_group_summary DROP COLUMN rep_created_seq CASCADE"
-        ))
-        .expect("simulate pre-column schema");
-        drop(old);
-
-        let reopened =
-            PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("upgrade");
-        let mut inner = reopened.inner.lock().unwrap();
-        let rep_created_seq: Option<i64> = inner
-            .client
-            .query_one(
-                "SELECT rep_created_seq FROM pqueue_group_summary \
-                 WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
-                &[],
-            )
-            .unwrap()
-            .get(0);
-        assert!(
-            rep_created_seq.is_some(),
-            "representative FIFO tiebreak backfilled"
-        );
-        for (name, _) in GROUP_SUMMARY_INDEX_MIGRATIONS {
-            let valid: bool = inner
-                .client
-                .query_one(
-                    "SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid \
-                     WHERE c.oid=to_regclass($1)",
-                    &[name],
-                )
-                .unwrap()
-                .get(0);
-            assert!(valid, "{name} must be valid after reconnect migration");
-        }
-        drop(inner);
-        drop(reopened);
-
-        let mut old = Client::connect(&url, NoTls).expect("connect old schema again");
-        old.batch_execute(&format!(
-            "SET search_path TO {schema}; \
-             ALTER TABLE pqueue_group_summary DROP COLUMN rep_created_seq CASCADE"
-        ))
-        .expect("simulate old schema for composed constructor");
-        drop(old);
-
-        let reopened = PostgresRelational::connect_in_schema(&url, &schema)
-            .expect("upgrade composed relational constructor");
-        let mut inner = reopened.inner.lock().unwrap();
-        let rep_created_seq: Option<i64> = inner
-            .client
-            .query_one(
-                "SELECT rep_created_seq FROM pqueue_group_summary \
-                 WHERE tenant_id='t1' AND queue_id='q1' AND group_key='g'",
-                &[],
-            )
-            .unwrap()
-            .get(0);
-        assert!(
-            rep_created_seq.is_some(),
-            "composed constructor backfills representative FIFO tiebreak"
-        );
-        for (name, _) in GROUP_SUMMARY_INDEX_MIGRATIONS {
-            let valid: bool = inner
-                .client
-                .query_one(
-                    "SELECT i.indisvalid FROM pg_class c JOIN pg_index i ON i.indexrelid=c.oid \
-                     WHERE c.oid=to_regclass($1)",
-                    &[name],
-                )
-                .unwrap()
-                .get(0);
-            assert!(
-                valid,
-                "{name} must be valid after composed reconnect migration"
-            );
-        }
     }
 
     #[test]
