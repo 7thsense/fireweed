@@ -16,6 +16,27 @@ fn portable(id: &str) -> LedgerRow {
         ("bounded_resources".into(), serde_json::json!(true)),
         ("source_revision".into(), serde_json::json!(REV)),
         ("checkout_revision".into(), serde_json::json!(REV)),
+        ("checkout_root".into(), serde_json::json!("/src/pqueue")),
+        ("checkout_clean".into(), serde_json::json!(true)),
+        ("source_root_explicit".into(), serde_json::json!(true)),
+        (
+            "producer_ingest_completion_per_s".into(),
+            serde_json::json!(1000.0),
+        ),
+        (
+            "claimant_finalize_completion_per_s".into(),
+            serde_json::json!(900.0),
+        ),
+        ("producer_completion_ms".into(), serde_json::json!(10_000)),
+        ("claimant_completion_ms".into(), serde_json::json!(11_000)),
+        (
+            "producer_completion_timing".into(),
+            serde_json::json!("sum of successful push operation durations"),
+        ),
+        (
+            "claimant_completion_timing".into(),
+            serde_json::json!("sum of successful claim and finalize operation durations"),
+        ),
         ("resident_set_items".into(), serde_json::json!(10_000_000)),
         (
             "retained_terminal_items".into(),
@@ -178,6 +199,16 @@ fn portable(id: &str) -> LedgerRow {
             ("finalized_items".into(), serde_json::json!(10_000_000)),
         ]);
     } else {
+        for operation in ["push", "update_window", "claim", "finalize"] {
+            for batch_size in [1, 100, 1_000] {
+                for percentile in ["p50", "p95", "p99"] {
+                    values.insert(
+                        format!("{operation}_b{batch_size}_{percentile}_ms"),
+                        serde_json::json!(1.0),
+                    );
+                }
+            }
+        }
         for key in [
             "push_batch_sizes",
             "update_window_sizes",
@@ -322,6 +353,17 @@ fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
         ("progress_bound_violations", serde_json::json!(1)),
         ("cursor_samples", serde_json::json!([1, 3, 2])),
         ("checkout_revision", serde_json::json!("wrong")),
+        ("checkout_clean", serde_json::json!(false)),
+        ("source_root_explicit", serde_json::json!(false)),
+        ("producer_ingest_completion_per_s", serde_json::json!(0.0)),
+        (
+            "claimant_finalize_completion_per_s",
+            serde_json::json!("fast"),
+        ),
+        (
+            "producer_completion_timing",
+            serde_json::json!("whole thread elapsed"),
+        ),
         ("identity_bijection", serde_json::json!(false)),
         ("identity_counter_max", serde_json::json!(9_999_999)),
         ("configured_concurrency", serde_json::json!(1)),
@@ -358,6 +400,9 @@ fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
     }
 
     for (key, value) in [
+        ("push_b1_p50_ms", serde_json::json!(0.0)),
+        ("update_window_b100_p95_ms", serde_json::json!("slow")),
+        ("finalize_b1000_p99_ms", serde_json::Value::Null),
         ("oversize_push_rejected", serde_json::json!(false)),
         ("update_window_sizes", serde_json::json!([1, 100])),
         ("probe_claimed_items", serde_json::json!(1100)),

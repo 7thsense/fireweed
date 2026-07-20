@@ -44,6 +44,14 @@ pub mod single_deployment {
             .and_then(serde_json::Value::as_u64)
     }
 
+    fn positive_finite_value(row: &LedgerRow, key: &str) -> bool {
+        row.measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .is_some_and(|value| value.is_finite() && value > 0.0)
+    }
+
     fn u64_array(row: &LedgerRow, key: &str) -> Option<Vec<u64>> {
         row.measurements
             .values
@@ -243,6 +251,26 @@ pub mod single_deployment {
                 ));
             }
         }
+        for (key, expected) in [
+            (
+                "producer_completion_timing",
+                "sum of successful push operation durations",
+            ),
+            (
+                "claimant_completion_timing",
+                "sum of successful claim and finalize operation durations",
+            ),
+        ] {
+            if row
+                .measurements
+                .values
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                != Some(expected)
+            {
+                errors.push(format!("{key} must identify its distinct operation timing"));
+            }
+        }
         let snapshots = row
             .measurements
             .values
@@ -376,6 +404,29 @@ pub mod single_deployment {
             errors
                 .push("checkout_revision does not match the exact verified source revision".into());
         }
+        if !true_value(row, "checkout_clean")
+            || !true_value(row, "source_root_explicit")
+            || row
+                .measurements
+                .values
+                .get("checkout_root")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            errors.push("release evidence requires an exact clean producing checkout root".into());
+        }
+        for key in [
+            "producer_ingest_completion_per_s",
+            "claimant_finalize_completion_per_s",
+            "producer_completion_ms",
+            "claimant_completion_ms",
+        ] {
+            if !positive_finite_value(row, key) {
+                errors.push(format!(
+                    "{key} must be a finite positive capacity observation"
+                ));
+            }
+        }
         if u64_value(row, "resident_set_items") != Some(10_000_000)
             || u64_value(row, "retained_terminal_items") != Some(10_000_000)
         {
@@ -438,6 +489,18 @@ pub mod single_deployment {
                     .push("E0 exact accepted/claimed/finalized counts must equal 10000000".into());
             }
         } else {
+            for operation in ["push", "update_window", "claim", "finalize"] {
+                for batch_size in [1, 100, 1_000] {
+                    for percentile in ["p50", "p95", "p99"] {
+                        let key = format!("{operation}_b{batch_size}_{percentile}_ms");
+                        if !positive_finite_value(row, &key) {
+                            errors.push(format!(
+                                "{key} must be a finite positive capacity observation"
+                            ));
+                        }
+                    }
+                }
+            }
             let configured_max = u64_value(row, "configured_max_batch_size");
             if configured_max != Some(1_000)
                 || u64_value(row, "persisted_max_push_batch_size") != configured_max
@@ -547,9 +610,9 @@ pub struct LedgerRow {
     pub pass_bar: String,
     /// Evidence tier: `release` (counts toward the headline E0–E3 requirement) or `smoke` (an in-process or
     /// reduced-scale run — recorded and strict-validated for visibility, but NOT accepted as headline
-    /// evidence by the gate). Absent → `release` (a row is release evidence unless it says otherwise; the
-    /// new in-process suites set `smoke` explicitly). The gate's required-evidence assertion only counts
-    /// `tp002_evidence_ids` from non-smoke rows.
+    /// evidence by the gate). The serde default preserves legacy deserialization compatibility, but an
+    /// absent tier is non-authoritative and strict verification rejects it. Headline evidence requires an
+    /// explicit, exact `release` tier.
     #[serde(default = "default_tier")]
     pub evidence_tier: String,
     /// Measured values + the TP-002 evidence ids substantiated.
@@ -678,7 +741,18 @@ pub fn verify_ledger(path: &Path, strict: bool) -> Result<LedgerSummary, Vec<Led
         if line.trim().is_empty() {
             continue;
         }
-        let row: LedgerRow = match serde_json::from_str(&line) {
+        let raw: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(e) => {
+                errors.push(LedgerError(format!("line {lineno}: malformed row: {e}")));
+                continue;
+            }
+        };
+        let explicit_tier = raw
+            .get("evidence_tier")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let row: LedgerRow = match serde_json::from_value(raw) {
             Ok(r) => r,
             Err(e) => {
                 errors.push(LedgerError(format!("line {lineno}: malformed row: {e}")));
@@ -689,12 +763,18 @@ pub fn verify_ledger(path: &Path, strict: bool) -> Result<LedgerSummary, Vec<Led
         // Only RELEASE-tier rows count toward the headline E0–E3 requirement; smoke-tier rows are recorded
         // separately so an in-process/reduced-scale run can never satisfy a release-evidence gate.
         let ids = row.measurements.tp002_evidence_ids.iter().cloned();
-        if row.evidence_tier == "smoke" {
-            summary.smoke_evidence_ids.extend(ids);
-        } else {
-            summary.evidence_ids.extend(ids);
+        match explicit_tier.as_deref() {
+            Some("release") => summary.evidence_ids.extend(ids),
+            Some("smoke") => summary.smoke_evidence_ids.extend(ids),
+            _ => {}
         }
         if strict {
+            if !matches!(explicit_tier.as_deref(), Some("release" | "smoke")) {
+                errors.push(LedgerError(format!(
+                    "line {lineno} ({}): evidence_tier must be explicitly release or smoke",
+                    row.suite
+                )));
+            }
             for e in strict_row_errors(&row) {
                 errors.push(LedgerError(format!("line {lineno} ({}): {e}", row.suite)));
             }
@@ -713,6 +793,9 @@ pub fn verify_ledger(path: &Path, strict: bool) -> Result<LedgerSummary, Vec<Led
 /// Strict-mode acceptability checks for a single row.
 fn strict_row_errors(row: &LedgerRow) -> Vec<String> {
     let mut e = Vec::new();
+    if !matches!(row.evidence_tier.as_str(), "release" | "smoke") {
+        e.push("evidence_tier must be release or smoke".into());
+    }
     if row.exit_status != 0 {
         e.push(format!(
             "exit_status {} != 0 (a failed run is not evidence)",

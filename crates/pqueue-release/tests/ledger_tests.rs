@@ -72,6 +72,24 @@ fn strict_validation_fails_a_failed_run_row() {
 }
 
 #[test]
+fn strict_rejects_missing_and_unknown_evidence_tiers() {
+    let path = tmp_ledger("strict-tier");
+    let mut unknown = row("tier", 0, &["E0"]);
+    unknown.evidence_tier = "gold".into();
+    std::fs::write(&path, format!("{}\n", unknown.to_jsonl())).unwrap();
+    assert!(verify_ledger(&path, true).is_err());
+
+    let mut raw = serde_json::to_value(row("tier", 0, &["E0"])).unwrap();
+    raw.as_object_mut().unwrap().remove("evidence_tier");
+    std::fs::write(&path, format!("{}\n", raw)).unwrap();
+    assert!(verify_ledger(&path, true).is_err());
+    let compatibility = verify_ledger(&path, false).unwrap();
+    assert!(compatibility.evidence_ids.is_empty());
+    assert!(compatibility.smoke_evidence_ids.is_empty());
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn malformed_line_is_rejected() {
     let path = tmp_ledger("malformed");
     std::fs::write(&path, b"{not valid json}\n").unwrap();
@@ -277,7 +295,7 @@ fn release_manifest_rejects_smoke_unknown_tier_and_non_release_scale() {
         (
             "unknown-tier",
             ("evidence_tier", "gold"),
-            "evidence_tier must be explicitly and exactly \"release\"",
+            "evidence_tier must be explicitly release or smoke",
         ),
         (
             "wrong-scale",
@@ -311,7 +329,7 @@ fn release_manifest_rejects_smoke_unknown_tier_and_non_release_scale() {
     assert!(errors.iter().any(|error| {
         error
             .0
-            .contains("evidence_tier must be explicitly and exactly \"release\"")
+            .contains("evidence_tier must be explicitly release or smoke")
     }));
     std::fs::remove_dir_all(dir).unwrap();
 }

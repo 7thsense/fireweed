@@ -540,13 +540,41 @@ fn fresh_schema() -> String {
     )
 }
 
-fn checkout_revision() -> String {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .expect("resolve checkout revision");
-    assert!(output.status.success(), "git rev-parse HEAD must succeed");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+fn checkout_provenance() -> (String, String, bool) {
+    let explicit_root = std::env::var_os("PQUEUE_SOURCE_ROOT").map(std::path::PathBuf::from);
+    let probe_dir = explicit_root
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().expect("resolve current directory"));
+    let probe_dir = probe_dir
+        .canonicalize()
+        .expect("canonicalize PQUEUE_SOURCE_ROOT");
+    let run = |directory: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(args)
+            .output()
+            .expect("run git provenance command");
+        assert!(
+            output.status.success(),
+            "git provenance command must succeed"
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let root = run(&probe_dir, &["rev-parse", "--show-toplevel"]);
+    let root_path = std::path::Path::new(&root).canonicalize().unwrap();
+    if explicit_root.is_some() {
+        assert_eq!(
+            root_path, probe_dir,
+            "PQUEUE_SOURCE_ROOT must be the producing repository root"
+        );
+    }
+    let revision = run(&root_path, &["rev-parse", "HEAD"]);
+    let status = run(
+        &root_path,
+        &["status", "--porcelain=v1", "--untracked-files=normal"],
+    );
+    (root, revision, status.is_empty())
 }
 
 fn sk(tenant: &str, queue: &str) -> QueueKey {
@@ -675,6 +703,7 @@ struct ProducerResult {
     group_counts: Vec<u64>,
     priority_counts: BTreeMap<String, u64>,
     push_batches: u64,
+    push_operation_ns: u64,
 }
 
 struct ConsumerResult {
@@ -698,6 +727,7 @@ struct ConsumerResult {
     discovery_nonempty_count: u64,
     claim_batches: u64,
     finalize_batches: u64,
+    claim_finalize_operation_ns: u64,
 }
 
 #[test]
@@ -752,7 +782,6 @@ fn performance_single_deployment_baseline_tests() {
 
         // E0: two independent production connections and worker loops overlap naturally. The bounded
         // accepted-but-not-yet-claimed map is also the identity/timestamp authority for progress.
-        let t_e0 = Instant::now();
         let pending = Arc::new(Mutex::new(HashMap::<ItemId, (Instant, Instant)>::new()));
         let pending_peak = Arc::new(AtomicU64::new(0));
         let producer_done = Arc::new(AtomicBool::new(false));
@@ -784,6 +813,7 @@ fn performance_single_deployment_baseline_tests() {
                         group_counts: vec![0; GROUP_CARDINALITY as usize],
                         priority_counts: BTreeMap::new(),
                         push_batches: 0,
+                        push_operation_ns: 0,
                     };
                     while result.accepted < resident {
                         let n = (resident - result.accepted).min(load_batch);
@@ -796,6 +826,8 @@ fn performance_single_deployment_baseline_tests() {
                             &operations,
                         ));
                         let accept_completed = Instant::now();
+                        result.push_operation_ns +=
+                            accept_completed.duration_since(accept_started).as_nanos() as u64;
                         {
                             let mut map = pending.lock().unwrap();
                             for id in &ids {
@@ -886,6 +918,7 @@ fn performance_single_deployment_baseline_tests() {
                         discovery_nonempty_count: 0,
                         claim_batches: 0,
                         finalize_batches: 0,
+                        claim_finalize_operation_ns: 0,
                     };
                     let sample_stride = resident.clamp(1, 100_000);
                     let mut next_scope_sample = 0;
@@ -922,6 +955,8 @@ fn performance_single_deployment_baseline_tests() {
                             let _ = signal_rx.recv_timeout(std::time::Duration::from_millis(10));
                             continue;
                         }
+                        result.claim_finalize_operation_ns +=
+                            claim_completed.duration_since(claim_started).as_nanos() as u64;
                         result.claim_batches += 1;
                         for id in &ids {
                             let identity_deadline = Instant::now()
@@ -978,7 +1013,10 @@ fn performance_single_deployment_baseline_tests() {
                             }
                         }
                         result.claimed += ids.len() as u64;
+                        let finalize_started = Instant::now();
                         futures::executor::block_on(finalize(&pq, &shard, &ids, &operations));
+                        result.claim_finalize_operation_ns +=
+                            finalize_started.elapsed().as_nanos() as u64;
                         result.finalized += ids.len() as u64;
                         result.finalize_batches += 1;
                         if result.finalized.is_multiple_of(100_000) || result.finalized == resident
@@ -1039,9 +1077,13 @@ fn performance_single_deployment_baseline_tests() {
         let mut finalized_samples = consumer_result.finalized_samples;
         let mut cursor_samples = consumer_result.cursor_samples;
         let oldest_eligible_age_samples_ms = consumer_result.oldest_eligible_age_samples_ms;
-        let e0_elapsed = t_e0.elapsed().as_secs_f64();
-        let pipeline_accepted_per_s = accepted as f64 / e0_elapsed;
-        let pipeline_finalized_per_s = finalized as f64 / e0_elapsed;
+        let producer_ingest_completion_per_s =
+            accepted as f64 / (producer_result.push_operation_ns as f64 / 1_000_000_000.0);
+        let claimant_finalize_completion_per_s = finalized as f64
+            / (consumer_result.claim_finalize_operation_ns as f64 / 1_000_000_000.0);
+        let producer_completion_ms = producer_result.push_operation_ns as f64 / 1_000_000.0;
+        let claimant_completion_ms =
+            consumer_result.claim_finalize_operation_ns as f64 / 1_000_000.0;
         let checkpoint = pq.metrics(&shard).await.unwrap();
         finalized_samples.push(finalized);
         cursor_samples.push(pq.current_position(&shard).await.unwrap().sequence);
@@ -1304,11 +1346,16 @@ fn performance_single_deployment_baseline_tests() {
         );
 
         // ----- Percentiles -----
+        let mut p50 = std::collections::BTreeMap::new();
         let mut p95 = std::collections::BTreeMap::new();
         let mut p99 = std::collections::BTreeMap::new();
         let mut worst_p99 = 0.0f64;
         for (k, v) in lat.iter_mut() {
             worst_p99 = worst_p99.max(pct(v, 0.99));
+            p50.insert(
+                k.replace("_ms", "_p50_ms"),
+                (pct(v, 0.50) * 1000.0).round() / 1000.0,
+            );
             p95.insert(
                 k.replace("_ms", "_p95_ms"),
                 (pct(v, 0.95) * 1000.0).round() / 1000.0,
@@ -1325,8 +1372,10 @@ fn performance_single_deployment_baseline_tests() {
             && batch_sizes == [1, 100, CONFIGURED_MAX_BATCH_SIZE]
             && batch_sizes.last() == Some(&CONFIGURED_MAX_BATCH_SIZE);
         let source_revision = std::env::var("PQUEUE_SOURCE_REVISION").unwrap_or_default();
-        let checkout_revision = checkout_revision();
-        let revision_bound = source_revision == checkout_revision;
+        let (checkout_root, checkout_revision, checkout_clean) = checkout_provenance();
+        let source_root_explicit = std::env::var_os("PQUEUE_SOURCE_ROOT").is_some();
+        let revision_bound =
+            source_revision == checkout_revision && checkout_clean && source_root_explicit;
         let topology_declared = caps.explicitly_declared
             && [
                 "PQUEUE_PG_INSTANCE_CLASS",
@@ -1382,16 +1431,16 @@ fn performance_single_deployment_baseline_tests() {
             "\nTP-002 E0/E1 postgres_native single-deployment baseline (resident={resident}, perf_env={perf_env}):"
         );
         println!(
-            "  E0 pipeline accepted : {pipeline_accepted_per_s:.0} items/s (reference {FLOOR_ITEMS_PER_SEC:.0}) -> {}",
-            if pipeline_accepted_per_s >= FLOOR_ITEMS_PER_SEC {
+            "  E0 producer ingest complete : {producer_ingest_completion_per_s:.0} items/s (reference {FLOOR_ITEMS_PER_SEC:.0}) -> {}",
+            if producer_ingest_completion_per_s >= FLOOR_ITEMS_PER_SEC {
                 "PASS"
             } else {
                 "UNDER"
             }
         );
         println!(
-            "  E0 pipeline finalized: {pipeline_finalized_per_s:.0} items/s -> {}",
-            if pipeline_finalized_per_s >= FLOOR_ITEMS_PER_SEC {
+            "  E0 claimant finalize complete: {claimant_finalize_completion_per_s:.0} items/s -> {}",
+            if claimant_finalize_completion_per_s >= FLOOR_ITEMS_PER_SEC {
                 "PASS"
             } else {
                 "UNDER"
@@ -1429,12 +1478,28 @@ fn performance_single_deployment_baseline_tests() {
 
         let mut e0_vals = std::collections::BTreeMap::from([
             (
-                "pipeline_accepted_per_s".to_string(),
-                serde_json::json!(pipeline_accepted_per_s.round()),
+                "producer_ingest_completion_per_s".to_string(),
+                serde_json::json!(producer_ingest_completion_per_s),
             ),
             (
-                "pipeline_finalized_per_s".to_string(),
-                serde_json::json!(pipeline_finalized_per_s.round()),
+                "claimant_finalize_completion_per_s".to_string(),
+                serde_json::json!(claimant_finalize_completion_per_s),
+            ),
+            (
+                "producer_completion_ms".to_string(),
+                serde_json::json!(producer_completion_ms),
+            ),
+            (
+                "claimant_completion_ms".to_string(),
+                serde_json::json!(claimant_completion_ms),
+            ),
+            (
+                "producer_completion_timing".to_string(),
+                serde_json::json!("sum of successful push operation durations"),
+            ),
+            (
+                "claimant_completion_timing".to_string(),
+                serde_json::json!("sum of successful claim and finalize operation durations"),
             ),
             (
                 "resident_set_items".to_string(),
@@ -1463,6 +1528,18 @@ fn performance_single_deployment_baseline_tests() {
             (
                 "checkout_revision".to_string(),
                 serde_json::json!(checkout_revision),
+            ),
+            (
+                "checkout_root".to_string(),
+                serde_json::json!(checkout_root),
+            ),
+            (
+                "checkout_clean".to_string(),
+                serde_json::json!(checkout_clean),
+            ),
+            (
+                "source_root_explicit".to_string(),
+                serde_json::json!(source_root_explicit),
             ),
             ("accepted_items".to_string(), serde_json::json!(accepted)),
             ("claimed_items".to_string(), serde_json::json!(claimed)),
@@ -1568,9 +1645,33 @@ fn performance_single_deployment_baseline_tests() {
 
         let mut e1_vals: std::collections::BTreeMap<String, serde_json::Value> =
             std::collections::BTreeMap::new();
-        for (k, v) in p95.iter().chain(p99.iter()) {
+        for (k, v) in p50.iter().chain(p95.iter()).chain(p99.iter()) {
             e1_vals.insert(k.clone(), serde_json::json!(v));
         }
+        e1_vals.insert(
+            "producer_ingest_completion_per_s".into(),
+            serde_json::json!(producer_ingest_completion_per_s),
+        );
+        e1_vals.insert(
+            "claimant_finalize_completion_per_s".into(),
+            serde_json::json!(claimant_finalize_completion_per_s),
+        );
+        e1_vals.insert(
+            "producer_completion_ms".into(),
+            serde_json::json!(producer_completion_ms),
+        );
+        e1_vals.insert(
+            "claimant_completion_ms".into(),
+            serde_json::json!(claimant_completion_ms),
+        );
+        e1_vals.insert(
+            "producer_completion_timing".into(),
+            serde_json::json!("sum of successful push operation durations"),
+        );
+        e1_vals.insert(
+            "claimant_completion_timing".into(),
+            serde_json::json!("sum of successful claim and finalize operation durations"),
+        );
         e1_vals.insert("resident_set_items".into(), serde_json::json!(resident));
         e1_vals.insert(
             "retained_terminal_items".into(),
@@ -1618,6 +1719,12 @@ fn performance_single_deployment_baseline_tests() {
         e1_vals.insert(
             "checkout_revision".into(),
             serde_json::json!(checkout_revision),
+        );
+        e1_vals.insert("checkout_root".into(), serde_json::json!(checkout_root));
+        e1_vals.insert("checkout_clean".into(), serde_json::json!(checkout_clean));
+        e1_vals.insert(
+            "source_root_explicit".into(),
+            serde_json::json!(source_root_explicit),
         );
         e1_vals.insert(
             "push_batch_sizes".into(),
