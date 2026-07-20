@@ -316,6 +316,35 @@ assert_generated_bootstrap_contract() {
     rm -f "$rendered"
 }
 
+assert_hybrid_strict_schema_exclusion() {
+    local output
+    output="$(mktemp)"
+
+    if helm template pqueue-hybrid-strict "$CHART_DIR" \
+        --set storage.log.backend=objectlog \
+        --set storage.projection.backend=hybrid-strict >"$output" 2>&1; then
+        err "objectlog/hybrid-strict unexpectedly rendered; the profile is runtime-only and must remain outside the chart schema"
+        cat "$output" >&2
+        rm -f "$output"
+        exit 1
+    fi
+
+    # Helm 3 and Helm 4 format schema failures differently. Require the exact
+    # path and allowed enum from either formatter so a schema expansion, a
+    # template-time rejection, or an unrelated render failure cannot satisfy
+    # this public-support boundary.
+    local helm4_error="- at '/storage/projection/backend': value must be one of 'inmemory', 'sqlite', 'hybrid', 'hybrid-async', 'postgres'"
+    local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "inmemory", "sqlite", "hybrid", "hybrid-async", "postgres"'
+    if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
+        err "objectlog/hybrid-strict did not fail with the exact projection enum-exclusion error"
+        cat "$output" >&2
+        rm -f "$output"
+        exit 1
+    fi
+
+    rm -f "$output"
+}
+
 assert_combination_contract() {
     local combination="$1"
     local rendered="$2"
@@ -349,6 +378,9 @@ main() {
 
     echo "--- generated bootstrap inventory contract ---"
     assert_generated_bootstrap_contract
+
+    echo "--- objectlog/hybrid-strict chart exclusion contract ---"
+    assert_hybrid_strict_schema_exclusion
 
     echo "--- local profile fail-closed contract ---"
     local scaled_local

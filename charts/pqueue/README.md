@@ -18,6 +18,11 @@ Projection backend:
 - `hybrid-async`
 - `postgres`
 
+`hybrid-strict` is intentionally not a chart value. The server retains an
+experimental `PQUEUE_PROJECTION_BACKEND=hybrid-strict` env/direct-config path,
+but it is not chart-selectable or production-supported. Helm schema validation
+must reject attempts to set `storage.projection.backend=hybrid-strict`.
+
 The current `pqueue-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
 `objectlog/inmemory`, `objectlog/sqlite`, `objectlog/hybrid`, and
 `objectlog/hybrid-async` unconditionally. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool

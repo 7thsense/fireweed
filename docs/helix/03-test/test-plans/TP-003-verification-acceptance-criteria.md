@@ -22,7 +22,7 @@ ddx:
     - tp-governing-test-traceability
     - tp-scale-substantiation
   review:
-    self_hash: 6d3ebd44a41784009a425580189619661bdb5620ba831c5f1952ca2b61bcc888
+    self_hash: d726a7a901d02af34d992042834d1f054944ca4c5f64cb265a3c08bd601f5bdb
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
@@ -35,15 +35,15 @@ ddx:
       api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
       api-operator-repair-contract: 92d0dae8debf7fc9ac68fae06fdbe6d9a330f2914a58329c046331da9d5b4c6e
       prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-object-log-turso-projection: 0626539eb10dced9b304c0fc48cb292d4ed25dd49e5c474b87829caec9384488
+      td-object-log-turso-projection: 9c045968448df308e833826e1acbebfff88811c9f10d519dc05b6fb398f50e71
       td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
       td-resp-wire-adapter: d33d11d4e7e087384828e3ca3289d4f0b7bb6aefd88a4245ddb7f441f0706bc6
-      td-s3-object-log-sqlite-projection-mode: a88fb07f8275de066ab5f7a65f815e2da511774a164a20b464ebabf0a6e9d369
+      td-s3-object-log-sqlite-projection-mode: ec22ad6a2a2f16f8164253f0f8c321ae5e33f24f250daf6a7aadcc016340acbd
       td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
       td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
       tp-governing-test-traceability: 8ecccaec72a8214b0e3f1a411cc6d642a096398e09c4c0b90d19ad4f3cebb094
-      tp-scale-substantiation: 8d4b9a39799bd01ceb6007fd17832590e7af854bae5092894579b3bcb660d842
-    reviewed_at: "2026-07-19T03:37:52Z"
+      tp-scale-substantiation: f22ca60c926403fbb83ae37a54150507296929660ed8bfcea4bcae85f9f37798
+    reviewed_at: "2026-07-19T23:16:56Z"
 ---
 
 # Test Plan: TP-003 Verification and Acceptance Criteria
@@ -387,7 +387,20 @@ must rerun the exact 0.7 compatibility probe before the version pin changes.
 
 These gates are mandatory before `PQUEUE_PROJECTION_BACKEND=hybrid-strict` or
 `PQUEUE_PROJECTION_BACKEND=hybrid-async` can be advertised outside experimental
-builds.
+builds. The 2026-07-19 deployment decision defers public
+`objectlog/hybrid-strict` support: runtime wiring remains experimental
+env/direct-config-only and authorization to implement chart or evidence work is
+not a declaration of support. Reconsideration requires fresh governed evidence
+for AC-HYB-1 through AC-HYB-6, chart/PVC/operator support, live-`kind`
+install/restart/readback, release/tag binding, and closed fencing plus TP-002
+E2/E3 prerequisites on one release candidate revision.
+
+For that future evidence, AC-HYB-5 and AC-HYB-6 must use portable under-load
+comparisons and exact recovery invariants. Absolute wall-clock observations may
+report capacity for a declared topology, but quiet-host or fixed host-speed
+thresholds cannot decide support across hosts. Until those rows are revised and
+fresh evidence is recorded against the governed revision, their current numeric
+latency bounds are not a public-support gate.
 
 | AC | Setup | Assertion | Pass bar |
 |----|-------|-----------|----------|

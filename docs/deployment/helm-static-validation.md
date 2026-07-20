@@ -10,6 +10,13 @@ The chart storage contract is expressed as axes:
 - `storage.projection.backend`: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or `postgres`
 - `storage.controlPlane.backend`: `inprocess` or `postgres`
 
+`objectlog/hybrid-strict` is not part of the chart contract or public support
+surface. The server retains an experimental env/direct-config-only runtime path,
+but the chart schema intentionally excludes `hybrid-strict`. The gate contains
+a named negative assertion that requires Helm to reject that value at
+`/storage/projection/backend` with the exact allowed enum; an unrelated render
+failure cannot satisfy the assertion.
+
 `hybrid` is the projection value for the normative `objectlog/hybrid` contract:
 the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid`, uses
 `PQUEUE_SQLITE_PROJECTION_PATH`, applies SQLite first and then memory, and must
@@ -38,8 +45,9 @@ SQLite projections pod-local via `emptyDir` rather than a shared RWO PVC.
 The chart fails closed if a local object-log profile is scaled beyond one
 replica.
 
-The gate runs `helm lint --strict`, renders checked-in CI values for selected
-axis combinations, asserts the rendered environment variables, and validates the
+The gate first proves the `hybrid-strict` schema exclusion, then runs
+`helm lint --strict`, renders checked-in CI values for selected axis
+combinations, asserts the rendered environment variables, and validates the
 manifests with `kubeconform`.
 
 ```sh
