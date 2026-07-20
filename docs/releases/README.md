@@ -37,9 +37,11 @@ dispatches the E0/E1, E2 cross-owner, exact-profile density, failover/routing,
 and E3 semantic validators.
 
 The E3 handoff is deliberately a directory hook (`--e3-source-dir`). The
-strengthened E3 producer owns that directory and its `e3-contract.json`; the
-stager does not reconstruct or weaken it. After staging, the release producer
-adds `attestation.json`, using `pqueue_release::attestation::digest_path`, then
+strengthened E3 producer owns the measured ledger, TP-003 rows, and fencing
+evidence in that directory; the stager invokes `pqueue-build-e3-contract` to
+recompute cost rows and build the exact-revision contract without weakening it.
+When tag and review timestamps are supplied, the stager adds and verifies
+`attestation.json`, using `pqueue_release::attestation::digest_path`, then
 archives the directory as `<exact-head>.tar.gz` plus its SHA-256 sidecar. The
 tag workflow explicitly acquires that archive before installing toolchains or
 starting heavy validation. A fresh checkout never assumes untracked `target/`
@@ -51,5 +53,8 @@ bash scripts/release/build-governed-evidence-bundle.sh \
   --source-dir target/tp002-producer-output \
   --e3-source-dir target/tp002-e3-producer-output \
   --out target/tp002-release \
-  --revision "$revision"
+  --revision "$revision" \
+  --tag vX.Y.Z \
+  --produced-at 2026-07-20T00:00:00Z \
+  --reviewed-at 2026-07-20T00:05:00Z
 ```
