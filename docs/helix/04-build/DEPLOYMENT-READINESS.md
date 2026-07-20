@@ -9,15 +9,15 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: a5bc77bb3caf55efa12ebbd5c3513278de3791f7034189034b8c9afe270e4639
+    self_hash: 490871303329604f1034f3c745859b600dbfe2940488a0b4afdf73b4b78f7056
     deps:
-      build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
+      build-implementation-plan: 4ddbeab6da535522d8253e3ce6018c89b901556e2e179453df6de86b3c02363e
       td-postgres-native-reference-mode: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
-      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
-    reviewed_at: "2026-07-20T00:59:35Z"
+      tp-scale-substantiation: e0ca180cb81c98e7c451341f1ea912bf152ac2c75d422a3b315516fc9f8ee7d3
+      tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
+    reviewed_at: "2026-07-20T20:03:42Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -146,8 +146,8 @@ Release readiness requires:
   `ac_txn_contract_matrix_postgres_storage_pairs` plus
   `ac_txn_6_postgres_storage_pair_parity` with `PQUEUE_PG_TEST_URL` set, so the
   exact `postgres/sqlite` and `postgres/postgres` rows cannot pass by skip. Each
-  job deletes both tracked JSONL outputs before the tests, requires both
-  regenerated files to be non-empty, and only then invokes the verifier; stale
+  job deletes both tracked JSONL outputs, reruns the tests, asserts that both
+  regenerated files are non-empty, and only then invokes the verifier. Stale
   repository evidence cannot satisfy the live proof step.
 - `pqueue-verify-transaction-evidence` consumes the two exact-pair JSONL files
   and requires AC-TXN-1/2/3/6 for both profiles. Missing, duplicate, failed,
@@ -228,6 +228,9 @@ Release evidence must record:
 - command, exit status, environment variables, storage combination, scale, seed,
   and ledger paths for source and deployment validation;
 - TP-002 E0-E3 source-backed evidence references;
+- each E0/E1 queue's declared positive `progress_bound_ms`, the persisted
+  queue-definition value read back from the release candidate, and zero
+  accepted-to-claim or discovery-age violations of that declaration;
 - TP-003 external transaction-contract evidence for the exact storage
   combinations claimed by the release;
 - configured object-log commit-latency bound values and measured latency/cost
@@ -241,22 +244,24 @@ The tag workflow has two independent TP-002 lanes, and both are mandatory:
 
 1. `scripts/ci/release-gate.sh` generates a clean smoke ledger and requires fresh
    smoke-tier E2 and E3 rows. It then validates the exact E0-E3 authority files
-   listed by `target/tp002-release/manifest.json` and validates
-   `target/tp002-release/e3-contract.json` against the checked-out source
+   listed by `target/tp002-release/composite-contract.json`, including
+   `target/tp002-release/e3/e3-contract.json`, against the checked-out source
    revision. These exact-commit outputs are staged by the evidence producers;
    they cannot be checked into the commit whose SHA they bind.
-2. The release workflow reruns the governed verifier in `exact-tag` mode with
-   `target/tp002-release/attestation.json`, the resolved release tag,
-   and `GITHUB_SHA`. The tag must resolve to that exact checked-out commit, and
-   every attested evidence/input digest must match.
+2. The release workflow verifies `target/tp002-release/attestation.json` with
+   the resolved release tag and `GITHUB_SHA`. The tag must resolve to that exact
+   checked-out commit, and every attested evidence/input digest must match.
 
 The governed lane never scans `docs/perf/evidence` or the staging directory.
 TP-003 transaction JSONL may coexist there but is not a TP-002 `LedgerRow`; an unlisted E0-E3 row cannot
 replace a missing manifest authority. Missing, duplicate, malformed, smoke-tier,
-wrong-profile, false-bar, revision-mismatched, or unattested authorities fail
+wrong-profile, false-bar, revision-mismatched, or unattested composite authorities fail
 closed. The E3 contract additionally requires explicit portable-gate markers and
 rejects quiet-host or absolute machine-speed release criteria; wall-clock
-measurements are capacity observations only.
+measurements are capacity observations only. A configured `progress_bound_ms`
+remains a queue liveness contract: eligible work must make logical progress
+within that configured bound under load. It is not a benchmark of host speed,
+and slow absolute throughput or latency alone cannot fail a release.
 
 ## Managed Postgres Boundary
 

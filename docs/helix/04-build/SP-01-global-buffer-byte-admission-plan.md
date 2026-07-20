@@ -13,7 +13,7 @@ ddx:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       build-slatedb-pattern-adoption-roadmap: 55aa54bb9ccb2fe1d905655831b26e3676590c1a88528bba4d9349f63572ad54
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
-    reviewed_at: "2026-07-20T00:01:30Z"
+    reviewed_at: "2026-07-20T20:00:41Z"
 ---
 
 # Implementation Plan: SP-01 Global Buffer Byte Admission

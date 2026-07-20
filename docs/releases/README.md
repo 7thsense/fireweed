@@ -12,17 +12,18 @@ same commit's not-yet-computed SHA. The composite names separate E0, E1, E2
 cross-owner, E2 density, E2 failover/routing, and E3 authorities. No directory
 scan or generic `bars_met=true` row can satisfy a missing semantic authority.
 
-The tag workflow then runs the governed gate in `exact-tag` mode with
-`target/tp002-release/attestation.json`. It verifies that the
-resolved tag points to `GITHUB_SHA`, that the attestation names that same tag and
-commit, and that all evidence and input digests match before packaging or
-publication begins.
+The tag workflow then verifies `target/tp002-release/attestation.json`. It
+verifies that the resolved tag points to `GITHUB_SHA`, that the attestation
+names that same tag and commit, and that all evidence and input digests match
+before packaging or publication begins.
 
 The governed E3 authority is portable across hosts: exact command/recovery
 counts, progress, bounded resources, batching, and same-run comparisons are
 release criteria. Quiet-host requirements and absolute throughput or latency
 thresholds are rejected. Wall-clock results may be reported for capacity
-planning, but they do not decide the release verdict.
+planning, but they do not decide the release verdict. The configured
+`progress_bound_ms` is different: it is the queue's logical liveness contract
+under load, not a host-performance bar, and remains release-significant.
 
 Versioned files in this directory describe already-cut releases. This file
 defines the gate applied to future tags.

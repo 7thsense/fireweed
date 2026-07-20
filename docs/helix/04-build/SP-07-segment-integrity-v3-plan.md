@@ -12,7 +12,7 @@ ddx:
       build-sp02-deterministic-storage-simulation: b25a30432dff7ec1d44e7c1951d3d0552937636ed43582e1a26b549e560571e5
       build-sp03-sequenced-metadata-boundary: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
-    reviewed_at: "2026-07-20T00:01:31Z"
+    reviewed_at: "2026-07-20T20:00:41Z"
 ---
 
 # Implementation Plan: SP-07 Segment Integrity Version 3
