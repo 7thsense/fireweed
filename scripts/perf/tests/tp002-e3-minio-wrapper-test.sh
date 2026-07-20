@@ -5,7 +5,9 @@ REPO_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 DIRTY_SENTINEL="$REPO_ROOT/.e3-wrapper-dirty-test-$$"
 DRIFT_SENTINEL="$REPO_ROOT/.e3-wrapper-drift-test-$$"
 OUTPUT=$(mktemp)
-trap 'rm -f "$DIRTY_SENTINEL" "$DRIFT_SENTINEL" "$OUTPUT"' EXIT
+FENCE_OUTPUT=$(mktemp)
+TRANSACTION_OUTPUT=$(mktemp)
+trap 'rm -f "$DIRTY_SENTINEL" "$DRIFT_SENTINEL" "$OUTPUT" "$FENCE_OUTPUT" "$TRANSACTION_OUTPUT"' EXIT
 
 touch "$DIRTY_SENTINEL"
 set +e
@@ -41,6 +43,9 @@ set +e
 PATH="$REPO_ROOT/scripts/perf/tests/fixtures:$PATH" \
 PQUEUE_E3_DRIFT_SENTINEL="$DRIFT_SENTINEL" \
 PQUEUE_E3_MINIO_CONTAINER=fake-minio \
+PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL=postgres://test.invalid/e3 \
+PQUEUE_E3_FENCE_EVIDENCE_OUT="$FENCE_OUTPUT" \
+PQUEUE_E3_TRANSACTION_EVIDENCE_OUT="$TRANSACTION_OUTPUT" \
 PQUEUE_S3_TEST_ENDPOINT=http://127.0.0.2:9000 \
 "$REPO_ROOT/scripts/perf/tp002-e3-minio.sh" >"$OUTPUT" 2>&1
 STATUS=$?
