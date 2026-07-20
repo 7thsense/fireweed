@@ -375,6 +375,20 @@ fn scheduled_action_typed_indexes() -> Vec<QueueIndex> {
                 unique: false,
             }),
         ),
+        // Dense base population for sparse bucket NULL complements.  Every field is constrained by
+        // engagement_probability_request; unlike the scheduled ordering index, it has no nullable
+        // unconstrained suffix.
+        typed_index(
+            "by_action_type_base",
+            IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    compound_field("tenant_id", IndexType::String),
+                    compound_field("run_id", IndexType::String),
+                    compound_field("action_type", IndexType::String),
+                ],
+                unique: false,
+            }),
+        ),
         typed_index(
             "by_recycling",
             IndexDeclaration::Compound(CompoundIndexDef {

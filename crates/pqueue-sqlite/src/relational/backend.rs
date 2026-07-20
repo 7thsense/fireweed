@@ -283,6 +283,29 @@ fn resolving_query_index<'a>(
         ))
 }
 
+fn resolving_bucket_base_index<'a>(
+    definition: &'a QueueDefinition,
+    preferred: &'a pqueue_core::QueueIndex,
+    filters: &[pqueue_core::QueryFilter],
+) -> EngineResult<&'a pqueue_core::QueueIndex> {
+    std::iter::once(preferred)
+        .chain(
+            definition
+                .typed_indexes
+                .iter()
+                .filter(|candidate| candidate.name != preferred.name),
+        )
+        .find(|candidate| {
+            hot_query_shape(candidate, filters).is_ok()
+                && index_fields(candidate)
+                    .iter()
+                    .all(|(field, _)| filters.iter().any(|filter| filter.field == *field))
+        })
+        .ok_or(EngineError::Invalid(
+            "no declared index covers the bucket base population",
+        ))
+}
+
 fn entity_matches_filters(
     entity: &JsonValue,
     filters: &[pqueue_core::QueryFilter],
@@ -2416,7 +2439,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             if !matches!(index_type, IndexType::Integer | IndexType::Float) {
                 return Err(EngineError::Invalid("unsupported bucket field"));
             }
-            let scan_spec = resolving_query_index(&definition, spec, &request.filters)?;
+            let scan_spec = resolving_bucket_base_index(&definition, spec, &request.filters)?;
             let mut counts = vec![0_u64; request.buckets.len()];
             let mut null_count = 0_u64;
             // Resolve the authoritative base population through a dense-enough declared predicate
@@ -3875,6 +3898,30 @@ mod hot_query_sql_tests {
                 .count,
             1
         );
+        assert!(matches!(
+            backend
+                .declared_bucket_segment(
+                    &shard,
+                    DeclaredBucketSegmentRequest {
+                        index: Some("by_score".into()),
+                        filters: vec![],
+                        field: "score".into(),
+                        buckets: vec![pqueue_core::BucketRule {
+                            label: "half".into(),
+                            exact: Some(0.5),
+                            gt: None,
+                            gte: None,
+                            lt: None,
+                            lte: None,
+                        }],
+                        null_bucket_label: "missing".into(),
+                    },
+                )
+                .await,
+            Err(EngineError::Invalid(
+                "no declared index covers the bucket base population"
+            ))
+        ));
     }
 
     #[test]
