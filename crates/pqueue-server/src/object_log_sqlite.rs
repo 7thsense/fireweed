@@ -103,23 +103,77 @@ pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 const RECOVERY_MAINTENANCE_QUEUE_PAGE: usize = 8;
 const RECOVERY_MAINTENANCE_PIN_PAGE: usize = 64;
 const RECOVERY_MAINTENANCE_GC_BATCH_PAGE: usize = 8;
+const SEGMENT_FLUSH_QUEUE_PAGE: usize = 4;
 
-fn register_maintenance_shard(shards: &Mutex<Vec<QueueKey>>, shard: &QueueKey) {
-    let mut shards = shards.lock().expect("maintenance shards poisoned");
-    if !shards.contains(shard) {
-        shards.push(shard.clone());
+/// O(1)-average keyed queue registration plus a stable insertion-order ring for bounded maintenance.
+///
+/// Queues are never removed from these backends, so a persistent numeric cursor can safely walk the ring
+/// without rebuilding or rotating a full active-queue snapshot. Registration performs one hash lookup;
+/// each caller chooses a fixed page size and clones only that page.
+struct QueueRegistry<V> {
+    entries: HashMap<QueueKey, V>,
+    order: Vec<QueueKey>,
+}
+
+impl<V> Default for QueueRegistry<V> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+        }
     }
 }
 
-fn maintenance_shard_page(shards: &Mutex<Vec<QueueKey>>, cursor: &AtomicUsize) -> Vec<QueueKey> {
-    let shards = shards.lock().expect("maintenance shards poisoned");
-    if shards.is_empty() {
-        return Vec::new();
+impl<V: Clone> QueueRegistry<V> {
+    fn get_or_insert_with(&mut self, shard: &QueueKey, create: impl FnOnce() -> V) -> V {
+        match self.entries.entry(shard.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                self.order.push(shard.clone());
+                entry.insert(create()).clone()
+            }
+        }
     }
-    let count = shards.len().min(RECOVERY_MAINTENANCE_QUEUE_PAGE);
-    let start = cursor.fetch_add(count, Ordering::Relaxed) % shards.len();
-    (0..count)
-        .map(|offset| shards[(start + offset) % shards.len()].clone())
+
+    fn page(&self, cursor: &AtomicUsize, limit: usize) -> Vec<(QueueKey, V)> {
+        if self.order.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let count = self.order.len().min(limit);
+        let start = cursor.fetch_add(count, Ordering::Relaxed) % self.order.len();
+        (0..count)
+            .map(|offset| {
+                let key = self.order[(start + offset) % self.order.len()].clone();
+                let value = self
+                    .entries
+                    .get(&key)
+                    .expect("queue registry order and keyed entries diverged")
+                    .clone();
+                (key, value)
+            })
+            .collect()
+    }
+}
+
+fn registered_queue_page<V: Clone>(
+    registry: &Mutex<QueueRegistry<V>>,
+    cursor: &AtomicUsize,
+    limit: usize,
+) -> Vec<(QueueKey, V)> {
+    registry
+        .lock()
+        .expect("queue registry poisoned")
+        .page(cursor, limit)
+}
+
+fn registered_queue_key_page<V: Clone>(
+    registry: &Mutex<QueueRegistry<V>>,
+    cursor: &AtomicUsize,
+    limit: usize,
+) -> Vec<QueueKey> {
+    registered_queue_page(registry, cursor, limit)
+        .into_iter()
+        .map(|(key, _)| key)
         .collect()
 }
 
@@ -895,8 +949,7 @@ pub struct SegmentedObjectLogSqliteBackend {
     /// Cached current `assignment_epoch` per queue (avoids a manifest read on the hot push path and feeds
     /// the flusher's seal). Authoritative epoch still lives in the manifest; this only mirrors it.
     epochs: Mutex<HashMap<QueueKey, u64>>,
-    coords: Mutex<HashMap<QueueKey, Arc<ShardCoord>>>,
-    maintenance_shards: Mutex<Vec<QueueKey>>,
+    registry: Mutex<QueueRegistry<Arc<ShardCoord>>>,
     maintenance_cursor: AtomicUsize,
     maintenance_executor: BoundedBlockingExecutor,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
@@ -983,8 +1036,7 @@ impl SegmentedObjectLogSqliteBackend {
             queues: Mutex::new(HashMap::new()),
             schemas: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
-            coords: Mutex::new(HashMap::new()),
-            maintenance_shards: Mutex::new(Vec::new()),
+            registry: Mutex::new(QueueRegistry::default()),
             maintenance_cursor: AtomicUsize::new(0),
             maintenance_executor: BoundedBlockingExecutor::new(1)?,
             mutate_locks: Mutex::new(HashMap::new()),
@@ -1103,9 +1155,10 @@ impl SegmentedObjectLogSqliteBackend {
     }
 
     fn coord_for(&self, shard: &QueueKey) -> Arc<ShardCoord> {
-        let mut g = self.coords.lock().expect("segmented coords poisoned");
-        g.entry(shard.clone())
-            .or_insert_with(|| {
+        self.registry
+            .lock()
+            .expect("segmented queue registry poisoned")
+            .get_or_insert_with(shard, || {
                 Arc::new(ShardCoord {
                     state: tokio::sync::Mutex::new(CoordState {
                         pending: Vec::new(),
@@ -1114,7 +1167,6 @@ impl SegmentedObjectLogSqliteBackend {
                     }),
                 })
             })
-            .clone()
     }
 
     fn mutate_lock_for(&self, shard: &QueueKey) -> Arc<tokio::sync::Mutex<()>> {
@@ -1317,18 +1369,8 @@ impl SegmentedObjectLogSqliteBackend {
                     admission,
                 );
             }
-            let mut shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
-                this.coords
-                    .lock()
-                    .expect("segmented coords poisoned")
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            };
-            if !shards.is_empty() {
-                let start = this.flush_cursor.fetch_add(1, Ordering::Relaxed) % shards.len();
-                shards.rotate_left(start);
-            }
+            let shards =
+                registered_queue_page(&this.registry, &this.flush_cursor, SEGMENT_FLUSH_QUEUE_PAGE);
             let now_ms = system_now_ms();
             for (shard, coord) in shards {
                 let Ok(slot) = this.flush_slots.clone().try_acquire_owned() else {
@@ -1537,7 +1579,6 @@ impl ControlPlaneStore for SegmentedObjectLogSqliteBackend {
                 .lock()
                 .expect("segmented queues poisoned")
                 .insert(key.clone(), definition);
-            register_maintenance_shard(&self.maintenance_shards, &key);
             let compiled_schema = compile_queue_schema(&outcome.definition)?;
             if let Some(cs) = compiled_schema {
                 self.schemas
@@ -1897,7 +1938,11 @@ impl ReclaimDriver for SegmentedObjectLogSqliteBackend {
         &self,
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        let shards = maintenance_shard_page(&self.maintenance_shards, &self.maintenance_cursor);
+        let shards = registered_queue_key_page(
+            &self.registry,
+            &self.maintenance_cursor,
+            RECOVERY_MAINTENANCE_QUEUE_PAGE,
+        );
         let log = Arc::clone(&self.log);
         let executor = self.maintenance_executor.clone();
         async move {
@@ -2005,8 +2050,7 @@ pub struct SegmentedObjectLogInMemoryBackend {
     /// push path to reject invalid entity documents before counter reservation or durable append.
     schemas: Mutex<HashMap<QueueKey, Arc<CompiledSchema>>>,
     epochs: Mutex<HashMap<QueueKey, u64>>,
-    coords: Mutex<HashMap<QueueKey, Arc<ShardCoord>>>,
-    maintenance_shards: Mutex<Vec<QueueKey>>,
+    registry: Mutex<QueueRegistry<Arc<ShardCoord>>>,
     maintenance_cursor: AtomicUsize,
     maintenance_executor: BoundedBlockingExecutor,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
@@ -2068,8 +2112,7 @@ impl SegmentedObjectLogInMemoryBackend {
             queues: Mutex::new(HashMap::new()),
             schemas: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
-            coords: Mutex::new(HashMap::new()),
-            maintenance_shards: Mutex::new(Vec::new()),
+            registry: Mutex::new(QueueRegistry::default()),
             maintenance_cursor: AtomicUsize::new(0),
             maintenance_executor: BoundedBlockingExecutor::new(1)?,
             mutate_locks: Mutex::new(HashMap::new()),
@@ -2183,9 +2226,10 @@ impl SegmentedObjectLogInMemoryBackend {
     }
 
     fn coord_for(&self, shard: &QueueKey) -> Arc<ShardCoord> {
-        let mut g = self.coords.lock().expect("segmented coords poisoned");
-        g.entry(shard.clone())
-            .or_insert_with(|| {
+        self.registry
+            .lock()
+            .expect("segmented queue registry poisoned")
+            .get_or_insert_with(shard, || {
                 Arc::new(ShardCoord {
                     state: tokio::sync::Mutex::new(CoordState {
                         pending: Vec::new(),
@@ -2194,7 +2238,6 @@ impl SegmentedObjectLogInMemoryBackend {
                     }),
                 })
             })
-            .clone()
     }
 
     fn mutate_lock_for(&self, shard: &QueueKey) -> Arc<tokio::sync::Mutex<()>> {
@@ -2393,18 +2436,8 @@ impl SegmentedObjectLogInMemoryBackend {
                     admission,
                 );
             }
-            let mut shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
-                this.coords
-                    .lock()
-                    .expect("segmented coords poisoned")
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            };
-            if !shards.is_empty() {
-                let start = this.flush_cursor.fetch_add(1, Ordering::Relaxed) % shards.len();
-                shards.rotate_left(start);
-            }
+            let shards =
+                registered_queue_page(&this.registry, &this.flush_cursor, SEGMENT_FLUSH_QUEUE_PAGE);
             let now_ms = system_now_ms();
             for (shard, coord) in shards {
                 let Ok(slot) = this.flush_slots.clone().try_acquire_owned() else {
@@ -2578,7 +2611,6 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
                 .lock()
                 .expect("segmented queues poisoned")
                 .insert(key.clone(), definition.clone());
-            register_maintenance_shard(&self.maintenance_shards, &key);
             let compiled_schema = compile_queue_schema(&definition)?;
             if let Some(cs) = compiled_schema {
                 self.schemas
@@ -2975,7 +3007,11 @@ impl ReclaimDriver for SegmentedObjectLogInMemoryBackend {
         &self,
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        let shards = maintenance_shard_page(&self.maintenance_shards, &self.maintenance_cursor);
+        let shards = registered_queue_key_page(
+            &self.registry,
+            &self.maintenance_cursor,
+            RECOVERY_MAINTENANCE_QUEUE_PAGE,
+        );
         let log = Arc::clone(&self.log);
         let executor = self.maintenance_executor.clone();
         async move {
@@ -3110,6 +3146,64 @@ mod recovery_tests {
     use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, ReclaimDriver};
     use pqueue_objectlog::segmented::InMemoryBlobStore;
     use serde_json::json;
+
+    fn registry_key(index: usize) -> QueueKey {
+        QueueKey::new(
+            TenantId::new("registry-test").unwrap(),
+            QueueId::new(format!("q-{index}")).unwrap(),
+        )
+    }
+
+    #[test]
+    fn queue_registry_registration_is_unique_and_keeps_original_value() {
+        let mut registry = QueueRegistry::default();
+        let key = registry_key(7);
+
+        assert_eq!(registry.get_or_insert_with(&key, || 11), 11);
+        assert_eq!(registry.get_or_insert_with(&key, || 99), 11);
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.order, vec![key]);
+    }
+
+    #[test]
+    fn queue_registry_pages_are_stable_fair_and_bounded() {
+        const QUEUES: usize = 12;
+        const PAGE: usize = 4;
+        let mut registry = QueueRegistry::default();
+        for index in 0..QUEUES {
+            let key = registry_key(index);
+            registry.get_or_insert_with(&key, || index);
+        }
+        let cursor = AtomicUsize::new(0);
+        let mut visited = Vec::new();
+        for _ in 0..(QUEUES / PAGE) {
+            let page = registry.page(&cursor, PAGE);
+            assert_eq!(page.len(), PAGE);
+            visited.extend(page.into_iter().map(|(key, _)| key));
+        }
+        assert_eq!(visited, registry.order);
+        assert_eq!(registry.page(&cursor, PAGE)[0].0, registry.order[0]);
+    }
+
+    #[test]
+    fn queue_registry_large_cardinality_still_materializes_only_one_fixed_page() {
+        const QUEUES: usize = 100_000;
+        let mut registry = QueueRegistry::default();
+        for index in 0..QUEUES {
+            let key = registry_key(index);
+            registry.get_or_insert_with(&key, || index);
+        }
+        assert_eq!(registry.entries.len(), QUEUES);
+        assert_eq!(registry.order.len(), QUEUES);
+
+        let cursor = AtomicUsize::new(QUEUES - 2);
+        let page = registry.page(&cursor, SEGMENT_FLUSH_QUEUE_PAGE);
+        assert_eq!(page.len(), SEGMENT_FLUSH_QUEUE_PAGE);
+        assert_eq!(page[0].1, QUEUES - 2);
+        assert_eq!(page[1].1, QUEUES - 1);
+        assert_eq!(page[2].1, 0);
+        assert_eq!(page[3].1, 1);
+    }
 
     /// A unique scratch directory under the system temp dir, removed on drop.
     struct TmpDir {

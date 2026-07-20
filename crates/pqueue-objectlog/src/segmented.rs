@@ -63,6 +63,9 @@ use pqueue_engine::sequenced_metadata::{
 /// This is a protocol bound, independent of the queue's durable object count.
 pub const S3_LIST_PAGE_MAX_KEYS: usize = 1_000;
 pub const RECOVERY_COMMAND_PAGE_LIMIT: usize = 256;
+/// Recovery readers renew this safety lease before each page. Expiry is a retry boundary, never a host
+/// performance verdict: a paused reader fails closed and restarts instead of touching reclaimed nodes.
+pub const RECOVERY_PIN_LEASE_MS: i64 = 300_000;
 const RECOVERY_INDEX_FANOUT: usize = 64;
 // Height 10 covers every possible `u64` manifest index at fanout 64 while placing a hard, history-independent
 // bound on the immutable-node reads and recursion performed by append and recovery.
@@ -469,6 +472,8 @@ pub trait BlobStore: Send + Sync {
 
     /// Return at most `limit` keys after an optional exclusive cursor. Remote stores override this with a
     /// single bounded LIST request so maintenance work cannot accidentally enumerate an unbounded prefix.
+    /// Completed PUTs must be visible to subsequent LISTs: recovery-pin renewal publishes its successor
+    /// before retiring its predecessor, and GC relies on that strong read-after-write ordering.
     fn list_page(
         &self,
         prefix: &str,
@@ -644,6 +649,14 @@ fn publication_attempt_id() -> EngineResult<String> {
         EngineError::Storage(format!("manifest candidate entropy unavailable: {error}"))
     })?;
     Ok(hex_lower(&entropy))
+}
+
+fn system_time_ms() -> EngineResult<i64> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| EngineError::Storage(format!("system clock before unix epoch: {error}")))?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| EngineError::Storage("system clock overflow".into()))
 }
 
 /// Share one store between several owners (e.g. two competing epoch holders) — delegates through the `Arc`.
@@ -1722,16 +1735,27 @@ pub struct RecoveryCursor {
 struct RecoveryRootPin {
     store: Arc<dyn BlobStore>,
     key: String,
+    owner: String,
+    version: u64,
+    root: Option<RecoveryIndexRoot>,
+    cursor_id: String,
+    generation: u64,
+    expires_at_ms: i64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RecoveryRootPinRecord {
     owner: String,
     version: u64,
-    /// Assignment epoch captured from the same authoritative head as `version`. Maintenance may only
-    /// discard a crash-left pin after a later durable head has strictly fenced this epoch.
+    /// Legacy field retained only for forward/backward decoding. Assignment fencing is not reader-death
+    /// proof and is never used to reclaim a pin.
     #[serde(default)]
     authority_epoch: Option<u64>,
+    /// Renewable reader lease. Legacy records without an expiry fail closed and are never auto-reaped.
+    #[serde(default)]
+    expires_at_ms: Option<i64>,
+    #[serde(default)]
+    generation: u64,
     root: Option<RecoveryIndexRoot>,
 }
 
@@ -4821,24 +4845,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(reaped)
     }
 
-    /// Bounded production cleanup for pins left behind by a crashed reader. A strictly newer durable
-    /// assignment epoch is the liveness proof: readers captured under an older epoch are fenced and can no
-    /// longer authorize work. Legacy pins without an epoch and pins at/currently beyond the durable epoch
-    /// fail closed and remain in place.
-    pub fn reap_recovery_pins_fenced_bounded(
+    /// Bounded production cleanup for expired reader leases. Expiry is a safety/retry protocol, not a
+    /// throughput threshold: every page renews first, and a cursor that missed its lease fails closed before
+    /// any node access. Legacy pins without an expiry remain until explicit proven-dead-owner cleanup.
+    pub fn reap_recovery_pins_expired_bounded(
         &self,
         shard: &QueueKey,
+        now_ms: i64,
         limit: usize,
     ) -> EngineResult<usize> {
         if limit == 0 || limit > S3_LIST_PAGE_MAX_KEYS {
             return Err(EngineError::Invalid(
-                "bounded fenced pin reap requires 1..=1000",
+                "bounded expired pin reap requires 1..=1000",
             ));
         }
-        let current_epoch = self
-            .read_authoritative_head(shard)?
-            .map(|head| head.value.current_epoch)
-            .unwrap_or(0);
         let prefix = Self::recovery_pin_prefix(shard);
         let mut reaped = 0;
         for key in self.store.list_page(&prefix, None, limit)? {
@@ -4846,15 +4866,23 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 continue;
             };
             let pin: RecoveryRootPinRecord = serde_json::from_slice(&bytes).map_err(store_err)?;
-            if pin
-                .authority_epoch
-                .is_some_and(|pin_epoch| pin_epoch < current_epoch)
-            {
+            if pin.expires_at_ms.is_some_and(|expiry| expiry <= now_ms) {
                 let _ = self.store.delete(&key)?;
                 reaped += 1;
             }
         }
         Ok(reaped)
+    }
+
+    /// Compatibility entrypoint for older maintenance callers. Despite the historical name, assignment
+    /// fencing is deliberately ignored; only an expired renewable reader lease is eligible.
+    #[doc(hidden)]
+    pub fn reap_recovery_pins_fenced_bounded(
+        &self,
+        shard: &QueueKey,
+        limit: usize,
+    ) -> EngineResult<usize> {
+        self.reap_recovery_pins_expired_bounded(shard, system_time_ms()?, limit)
     }
 
     fn has_recovery_pin_at_or_before(&self, shard: &QueueKey, version: u64) -> EngineResult<bool> {
@@ -4958,29 +4986,109 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if observed.value.recovery_index.is_none() {
                 return Ok((head, None));
             }
+            let observed_version = observed.version;
+            let observed_epoch = observed.value.current_epoch;
+            let root = observed.value.recovery_index.clone();
+            let now_ms = system_time_ms()?;
+            let expires_at_ms = now_ms
+                .checked_add(RECOVERY_PIN_LEASE_MS)
+                .ok_or_else(|| EngineError::Storage("recovery pin lease overflow".into()))?;
+            let cursor_id = publication_attempt_id()?;
+            let generation = 0;
             let key = format!(
-                "{}v{:020}/{}.json",
+                "{}v{:020}/{cursor_id}-g{generation:020}.json",
                 Self::recovery_pin_prefix(shard),
-                observed.version,
-                publication_attempt_id()?
+                observed_version,
             );
+            let owner = self.recovery_pin_owner()?.to_owned();
             let body = to_json(&RecoveryRootPinRecord {
-                owner: self.recovery_pin_owner()?.to_owned(),
-                version: observed.version,
-                authority_epoch: Some(observed.value.current_epoch),
-                root: observed.value.recovery_index.clone(),
+                owner: owner.clone(),
+                version: observed_version,
+                authority_epoch: Some(observed_epoch),
+                expires_at_ms: Some(expires_at_ms),
+                generation,
+                root: root.clone(),
             })?;
             if !self.store.put_if_absent(&key, &body)? {
                 continue;
             }
             let confirmed = self.read_authoritative_head(shard)?;
-            if confirmed.as_ref().map(|head| head.version) == Some(observed.version) {
+            if confirmed.as_ref().map(|head| head.version) == Some(observed_version) {
                 let store: Arc<dyn BlobStore> = self.store.clone();
-                return Ok((head, Some(RecoveryRootPin { store, key })));
+                return Ok((
+                    head,
+                    Some(RecoveryRootPin {
+                        store,
+                        key,
+                        owner,
+                        version: observed_version,
+                        root,
+                        cursor_id,
+                        generation,
+                        expires_at_ms,
+                    }),
+                ));
             }
             let _ = self.store.delete(&key)?;
         }
         Err(EngineError::Conflict)
+    }
+
+    fn refresh_recovery_root_pin(&self, pin: &mut RecoveryRootPin) -> EngineResult<()> {
+        let now_ms = system_time_ms()?;
+        if now_ms >= pin.expires_at_ms {
+            return Err(EngineError::Unavailable);
+        }
+        let generation = pin.generation.checked_add(1).ok_or(EngineError::Conflict)?;
+        let expires_at_ms = now_ms
+            .checked_add(RECOVERY_PIN_LEASE_MS)
+            .ok_or_else(|| EngineError::Storage("recovery pin lease overflow".into()))?;
+        let prefix = pin
+            .key
+            .split_once("recovery_pins/v1/")
+            .map(|(base, _)| format!("{base}recovery_pins/v1/"))
+            .ok_or(EngineError::Conflict)?;
+        let next_key = format!(
+            "{prefix}v{:020}/{}-g{generation:020}.json",
+            pin.version, pin.cursor_id
+        );
+        let next_body = to_json(&RecoveryRootPinRecord {
+            owner: pin.owner.clone(),
+            version: pin.version,
+            authority_epoch: None,
+            expires_at_ms: Some(expires_at_ms),
+            generation,
+            root: pin.root.clone(),
+        })?;
+        if !self.store.put_if_absent(&next_key, &next_body)? {
+            return Err(EngineError::Conflict);
+        }
+
+        // Publish the successor first. If the old lease vanished before publication completed, fail closed;
+        // the successor still protects the root until this cleanup delete completes.
+        let old = self.store_get(&pin.key)?;
+        let old_matches = old
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<RecoveryRootPinRecord>(bytes).ok())
+            .is_some_and(|record| {
+                record.owner == pin.owner
+                    && record.version == pin.version
+                    && record.generation == pin.generation
+                    && record.expires_at_ms == Some(pin.expires_at_ms)
+                    && record.root == pin.root
+            });
+        if !old_matches {
+            let _ = self.store.delete(&next_key)?;
+            return Err(EngineError::Unavailable);
+        }
+        let _ = self.store.delete(&pin.key)?;
+        if self.store_get(&next_key)?.is_none() {
+            return Err(EngineError::Unavailable);
+        }
+        pin.key = next_key;
+        pin.generation = generation;
+        pin.expires_at_ms = expires_at_ms;
+        Ok(())
     }
 
     fn descend_recovery_cursor(
@@ -5056,6 +5164,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Vec<(CommandPosition, CommandEnvelope)>,
         RecoveryReadPageStats,
     )> {
+        if !cursor.finished
+            && let Some(pin) = cursor._root_pin.as_mut()
+        {
+            self.refresh_recovery_root_pin(pin)?;
+        }
         if cursor.legacy_fallback {
             let (entries, mut stats) = self.read_recovery_page(&cursor.shard, cursor.from_seq)?;
             stats.bounded_authority_index = false;
@@ -9798,6 +9911,88 @@ mod manifest_deletion_watermark_tests {
                 .is_empty(),
             "bounded maintenance must reap every deferred batch after the pin drops"
         );
+    }
+
+    #[test]
+    fn live_recovery_pin_renews_and_reads_across_assignment_fence() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        for sequence in 0..8 {
+            log.enqueue(&shard, &pushes(1), 0, sequence + 1).unwrap();
+            log.seal(&shard, 0, sequence + 1).unwrap();
+        }
+        let mut cursor = log.open_recovery_cursor(&shard, 0).unwrap();
+        let initial_key = cursor._root_pin.as_ref().unwrap().key.clone();
+
+        assert_eq!(log.acquire_epoch(&shard, 20).unwrap(), 1);
+        let (page, _) = log.read_recovery_cursor_page(&mut cursor).unwrap();
+        assert_eq!(
+            page.into_iter()
+                .map(|(position, _)| position.sequence)
+                .collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+        let renewed = cursor._root_pin.as_ref().unwrap();
+        assert_eq!(renewed.generation, 1);
+        assert_ne!(renewed.key, initial_key);
+        assert!(store.get(&initial_key).unwrap().is_none());
+        assert!(store.get(&renewed.key).unwrap().is_some());
+        assert_eq!(
+            log.reap_recovery_pins_expired_bounded(&shard, system_time_ms().unwrap(), 64)
+                .unwrap(),
+            0,
+            "assignment fencing alone never invalidates a live reader lease"
+        );
+    }
+
+    #[test]
+    fn expired_recovery_cursor_fails_before_node_read_and_never_resurrects() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        log.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+        log.seal(&shard, 0, 1).unwrap();
+        let mut cursor = log.open_recovery_cursor(&shard, 0).unwrap();
+        let pin = cursor._root_pin.as_mut().unwrap();
+        let expired_at = system_time_ms().unwrap().saturating_sub(1);
+        pin.expires_at_ms = expired_at;
+        let pin_key = pin.key.clone();
+        let mut record: RecoveryRootPinRecord =
+            serde_json::from_slice(&store.get(&pin_key).unwrap().unwrap()).unwrap();
+        record.expires_at_ms = Some(expired_at);
+        store.put(&pin_key, &to_json(&record).unwrap()).unwrap();
+
+        let gets_before = log.counters().get_count;
+        assert!(matches!(
+            log.read_recovery_cursor_page(&mut cursor),
+            Err(EngineError::Unavailable)
+        ));
+        assert_eq!(
+            log.counters().get_count,
+            gets_before,
+            "expired cursors fail before pin or recovery-index GETs"
+        );
+        let pins = store
+            .list(&SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_pin_prefix(&shard))
+            .unwrap();
+        assert_eq!(pins, vec![pin_key.clone()], "no successor was resurrected");
+        assert_eq!(
+            log.reap_recovery_pins_expired_bounded(&shard, expired_at, 64)
+                .unwrap(),
+            1
+        );
+        assert!(store.get(&pin_key).unwrap().is_none());
+        assert!(matches!(
+            log.read_recovery_cursor_page(&mut cursor),
+            Err(EngineError::Unavailable)
+        ));
     }
 
     #[test]
