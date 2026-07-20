@@ -239,6 +239,14 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
             .expect("backend present until drop")
             .clone()
     }
+
+    /// Declared fixed worker/connection count. Queue creation never changes this value.
+    pub fn pool_size(&self) -> usize {
+        self.inner
+            .as_ref()
+            .expect("backend present until drop")
+            .len()
+    }
     fn dispatch<T, F, Fut>(
         &self,
         queue: QueueKey,

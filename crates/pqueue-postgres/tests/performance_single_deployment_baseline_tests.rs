@@ -1520,7 +1520,10 @@ fn performance_single_deployment_baseline_tests() {
             );
         }
 
-        // ----- Emit E0 + E1 ledger rows from the REAL measured values -----
+        // ----- Emit legacy overlap diagnostics + E1 ledger rows from the REAL measured values -----
+        // This test constructs separate relational backend instances and therefore MUST NOT qualify E0.
+        // The one-instance production-wrapper E0 proof lives in
+        // `pqueue-server/tests/postgres_native.rs::postgres_native_one_instance_pool_progresses_other_queue_during_pg_sleep`.
         // RELEASE-tier only when a perf env actually met the bar; otherwise SMOKE (recorded, gate-visible, but
         // never satisfies a release E0/E1 requirement). A failing/non-perf run is honest evidence, not fake.
         let env_note = format!(
@@ -1572,7 +1575,15 @@ fn performance_single_deployment_baseline_tests() {
                 "retained_terminal_items".to_string(),
                 serde_json::json!(checkpoint.resident_terminal_count),
             ),
-            ("bars_met".to_string(), serde_json::json!(e0_pass)),
+            ("bars_met".to_string(), serde_json::json!(false)),
+            (
+                "one_instance_production_wrapper".to_string(),
+                serde_json::json!(false),
+            ),
+            (
+                "superseded_by".to_string(),
+                serde_json::json!("pqueue-server postgres_native one-instance pool E0"),
+            ),
             ("portable_gate".to_string(), serde_json::json!(true)),
             ("quiet_host_required".to_string(), serde_json::json!(false)),
             ("host_speed_gate".to_string(), serde_json::json!(false)),
@@ -1706,10 +1717,10 @@ fn performance_single_deployment_baseline_tests() {
                 exit_status: 0,
                 ac_ids: vec![],
                 inv_ids: vec![],
-                pass_bar: "E0: exact accepted/claimed/finalized outcomes, monotonic progress, and bounded shared resources under concurrent load; rates are capacity observations only".into(),
-                evidence_tier: tier(e0_pass),
+                pass_bar: "Legacy separate-backend overlap diagnostic only; cannot satisfy E0. E0 requires the one-instance production wrapper.".into(),
+                evidence_tier: "smoke".into(),
                 measurements: pqueue_release::Measurements {
-                    tp002_evidence_ids: vec!["E0".into()],
+                    tp002_evidence_ids: vec![],
                     values: e0_vals,
                 },
             },
