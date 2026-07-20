@@ -113,13 +113,68 @@ fn batch_renewal_handles_1000_queues_in_one_call() {
             });
         }
 
-        let outcomes = cp.renew_queue_leases(&renewals, ts(1)).unwrap();
-        assert_eq!(outcomes.len(), 1_000);
-        assert!(outcomes.iter().all(|outcome| matches!(
-            outcome,
-            LeaseRenewalOutcome::Renewed(lease)
-                if lease.assignment_epoch == 1 && lease.lease_expires_at == Some(ts(16))
-        )));
+        for size in [1, 100, 1_000] {
+            let before = cp.diagnostics();
+            let outcomes = cp.renew_queue_leases(&renewals[..size], ts(1)).unwrap();
+            let after = cp.diagnostics();
+            assert_eq!(outcomes.len(), size);
+            assert!(outcomes.iter().all(|outcome| matches!(
+                outcome,
+                LeaseRenewalOutcome::Renewed(lease)
+                    if lease.assignment_epoch == 1 && lease.lease_expires_at == Some(ts(16))
+            )));
+            assert_eq!(after.batch_renewal_calls - before.batch_renewal_calls, 1);
+            assert_eq!(
+                after.batch_renewal_transactions - before.batch_renewal_transactions,
+                1,
+                "{size} renewals use one transaction"
+            );
+            assert_eq!(
+                after.batch_renewal_statements - before.batch_renewal_statements,
+                1,
+                "{size} renewals use one SQL statement"
+            );
+            assert_eq!(after.connections, 1);
+        }
+    });
+}
+
+#[test]
+fn batch_resolution_is_one_statement_and_orders_present_and_missing_rows() {
+    with_cp("batch_resolution", |cp| {
+        let a = owner("resolve-a");
+        let b = owner("resolve-b");
+        cp.register_owner(&a, ts(0)).unwrap();
+        cp.register_owner(&b, ts(0)).unwrap();
+        let present = qk("resolve-present");
+        let missing = qk("resolve-missing");
+        cp.acquire_queue_lease(&present, &a, ts(0)).unwrap();
+        cp.confirm_queue_lease_fence(&present, &a, 1, ts(0))
+            .unwrap();
+        let before = cp.diagnostics();
+        let outcomes = cp
+            .resolve_queue_owners(&[missing.clone(), present.clone()], ts(1))
+            .unwrap();
+        let after = cp.diagnostics();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].assignment_epoch, None);
+        assert_eq!(outcomes[0].active_owner, None);
+        assert_eq!(outcomes[1].assignment_epoch, Some(1));
+        assert_eq!(outcomes[1].active_owner.as_ref(), Some(&a));
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.target_owner.is_some())
+        );
+        assert_eq!(
+            after.batch_resolution_calls - before.batch_resolution_calls,
+            1
+        );
+        assert_eq!(
+            after.batch_resolution_statements - before.batch_resolution_statements,
+            1
+        );
+        assert_eq!(after.connections, 1);
     });
 }
 

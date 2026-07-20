@@ -18,6 +18,7 @@
 //! row. A stale owner is therefore fenced by one durable epoch value before the new owner serves.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use postgres::Client;
 use pqueue_core::{OwnerId, UtcTimestamp};
@@ -161,14 +162,20 @@ SELECT i.ord,
 "#;
 
 const BATCH_RESOLVE_SQL: &str = r#"
-WITH input AS MATERIALIZED (
+WITH live AS MATERIALIZED (
+    SELECT COALESCE(array_agg(owner_id ORDER BY owner_id), ARRAY[]::text[]) AS owners
+      FROM pqueue_workers
+     WHERE heartbeat_at > $3
+), input AS MATERIALIZED (
     SELECT tenant, queue, ord
     FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS i(tenant, queue, ord)
 )
 SELECT i.ord, q.state, q.active_owner_id, q.target_owner_id,
-       q.assignment_epoch, q.lease_expires_at
+       q.assignment_epoch, q.lease_expires_at,
+       CASE WHEN i.ord = 1 THEN live.owners END
   FROM input i
   LEFT JOIN pqueue_queue_owner q ON q.tenant = i.tenant AND q.queue = i.queue
+ CROSS JOIN live
  ORDER BY i.ord
 "#;
 
@@ -291,6 +298,23 @@ fn bind_storage_epoch_if_present(
 pub struct PostgresControlPlane {
     config: ControlPlaneConfig,
     inner: Mutex<Client>,
+    batch_renewal_calls: AtomicU64,
+    batch_renewal_transactions: AtomicU64,
+    batch_renewal_statements: AtomicU64,
+    batch_resolution_calls: AtomicU64,
+    batch_resolution_statements: AtomicU64,
+}
+
+/// Structural amplification counters for node-level ownership work. These count protocol operations,
+/// not elapsed time, so the density contract is portable across hosts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PostgresControlPlaneDiagnostics {
+    pub batch_renewal_calls: u64,
+    pub batch_renewal_transactions: u64,
+    pub batch_renewal_statements: u64,
+    pub batch_resolution_calls: u64,
+    pub batch_resolution_statements: u64,
+    pub connections: u64,
 }
 
 impl PostgresControlPlane {
@@ -324,7 +348,23 @@ impl PostgresControlPlane {
         Ok(PostgresControlPlane {
             config,
             inner: Mutex::new(client),
+            batch_renewal_calls: AtomicU64::new(0),
+            batch_renewal_transactions: AtomicU64::new(0),
+            batch_renewal_statements: AtomicU64::new(0),
+            batch_resolution_calls: AtomicU64::new(0),
+            batch_resolution_statements: AtomicU64::new(0),
         })
+    }
+
+    pub fn diagnostics(&self) -> PostgresControlPlaneDiagnostics {
+        PostgresControlPlaneDiagnostics {
+            batch_renewal_calls: self.batch_renewal_calls.load(Ordering::Relaxed),
+            batch_renewal_transactions: self.batch_renewal_transactions.load(Ordering::Relaxed),
+            batch_renewal_statements: self.batch_renewal_statements.load(Ordering::Relaxed),
+            batch_resolution_calls: self.batch_resolution_calls.load(Ordering::Relaxed),
+            batch_resolution_statements: self.batch_resolution_statements.load(Ordering::Relaxed),
+            connections: 1,
+        }
     }
 
     /// Read the authority record for `queue` under `tx` with a `FOR UPDATE` row lock.
@@ -490,19 +530,11 @@ impl QueueControlPlane for PostgresControlPlane {
             .collect();
         let cutoff =
             ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
+        self.batch_resolution_calls.fetch_add(1, Ordering::Relaxed);
         let mut client = self.inner.lock().expect("poisoned");
-        let live_rows = st(client.query(
-            "SELECT owner_id FROM pqueue_workers WHERE heartbeat_at > $1",
-            &[&cutoff],
-        ))?;
-        let live: Vec<OwnerId> = live_rows
-            .into_iter()
-            .map(|row| {
-                OwnerId::new(row.get::<_, String>(0))
-                    .map_err(|error| EngineError::Storage(error.to_string()))
-            })
-            .collect::<EngineResult<_>>()?;
-        let rows = st(client.query(BATCH_RESOLVE_SQL, &[&tenants, &queue_ids]))?;
+        self.batch_resolution_statements
+            .fetch_add(1, Ordering::Relaxed);
+        let rows = st(client.query(BATCH_RESOLVE_SQL, &[&tenants, &queue_ids, &cutoff]))?;
         if rows.len() != queues.len() {
             return Err(EngineError::Storage(format!(
                 "batch owner resolution returned {} rows for {} inputs",
@@ -510,6 +542,14 @@ impl QueueControlPlane for PostgresControlPlane {
                 queues.len()
             )));
         }
+        let live: Vec<OwnerId> = rows[0]
+            .get::<_, Option<Vec<String>>>(6)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|owner| {
+                OwnerId::new(owner).map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .collect::<EngineResult<_>>()?;
         rows.into_iter()
             .zip(queues)
             .map(|(row, queue)| {
@@ -622,8 +662,13 @@ impl QueueControlPlane for PostgresControlPlane {
         let now_nanos = ts_nanos(now);
         let expires_nanos = ts_nanos(pqueue_engine::add_millis(now, self.config.lease_ttl_ms));
 
+        self.batch_renewal_calls.fetch_add(1, Ordering::Relaxed);
         let mut client = self.inner.lock().expect("poisoned");
         let mut tx = st(client.transaction())?;
+        self.batch_renewal_transactions
+            .fetch_add(1, Ordering::Relaxed);
+        self.batch_renewal_statements
+            .fetch_add(1, Ordering::Relaxed);
         let rows = st(tx.query(
             BATCH_RENEW_SQL,
             &[
@@ -762,8 +807,9 @@ mod sql_shape_tests {
 
     #[test]
     fn batch_resolution_is_fixed_statement_set_and_preserves_order() {
-        assert_eq!(BATCH_RESOLVE_SQL.matches("SELECT").count(), 2);
         assert!(BATCH_RESOLVE_SQL.contains("unnest($1::text[], $2::text[])"));
+        assert!(BATCH_RESOLVE_SQL.contains("heartbeat_at > $3"));
+        assert!(BATCH_RESOLVE_SQL.contains("CASE WHEN i.ord = 1 THEN live.owners END"));
         assert!(BATCH_RESOLVE_SQL.contains("ORDER BY i.ord"));
     }
 
