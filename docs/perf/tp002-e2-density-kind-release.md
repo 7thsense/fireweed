@@ -13,12 +13,14 @@ through the generated bootstrap
 inventory (`density:q0` through `density:q1000`). `density:q1000` is the hot
 queue; the other 1,000 queues are cold neighbors.
 
-As in the governed multi-node TP-002 kind run, the pod mounts `/data` from a
-bounded 4 GiB `emptyDir` tmpfs. The service still executes the real object-log
-fsync and SQLite projection code paths, while unrelated host-disk contention
-cannot become an accidental release condition. Kubernetes accounts the volume
-against the pod's fixed memory limit. This one-node diagnostic excludes pod or
-node failover, so it makes no persistence claim beyond the live deployment.
+The pod mounts `/data` from a bounded 16 GiB disk-backed `emptyDir`. This keeps
+object-log segments and SQLite files outside the container's fixed 4 GiB memory
+cgroup; a memory-backed volume would charge those files to the same limit and
+OOM the canonical 300,000-item workload. The service executes the real
+object-log fsync and SQLite projection code paths. Host-disk contention changes
+reported capacity only because elapsed time and absolute throughput are not
+release gates. This one-node diagnostic excludes pod or node failover, so it
+makes no persistence claim beyond the live deployment.
 The wrapper does not set the retired `PQUEUE_OBJECT_LOG_MODE` pseudo-axis. The
 row identifies the exact `object_log_sqlite_projection` success barrier and
 does not relabel a hybrid projection as direct SQLite evidence.
