@@ -68,7 +68,9 @@ mod env_config;
 pub use env_config::ConfigError;
 
 mod postgres_native;
-pub use postgres_native::{PostgresNativeBackend, PostgresWholeOperationAdapter};
+pub use postgres_native::{
+    PostgresBlockingLifecycle, PostgresNativeBackend, PostgresWholeOperationAdapter,
+};
 
 /// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
 /// epoch/fence authority. One half of a [`BackendSpec`].
@@ -1664,6 +1666,10 @@ pub struct Server {
     reclaim_task: Option<JoinHandle<()>>,
     ownership_task: Option<JoinHandle<()>>,
     fjord_task: Option<JoinHandle<()>>,
+    /// Storage maintenance tasks (segment sealers and deferred projection flushers). Kept so shutdown
+    /// cannot silently detach accepted durable work from the server lifecycle.
+    maintenance_tasks: Vec<JoinHandle<()>>,
+    blocking_lifecycles: Vec<PostgresBlockingLifecycle>,
     /// Signals the RESP serve loop to stop accepting and drain in-flight connection handlers.
     cancel: CancellationToken,
     reclaim: Arc<ReclaimCounters>,
@@ -1712,6 +1718,9 @@ impl Server {
     /// in-flight connection handlers to drain. Being sync, it is safe to call from [`Drop`] and from the
     /// existing non-async call sites. For a bounded graceful drain, use [`Server::shutdown_and_drain`].
     pub fn shutdown(&self) {
+        for lifecycle in &self.blocking_lifecycles {
+            lifecycle.close();
+        }
         self.cancel.cancel();
         if let Some(t) = &self.serve_task {
             t.abort();
@@ -1725,6 +1734,9 @@ impl Server {
         if let Some(t) = &self.fjord_task {
             t.abort();
         }
+        for task in &self.maintenance_tasks {
+            task.abort();
+        }
     }
 
     /// Gracefully stop: signal the serve loop to stop accepting and **drain** in-flight connection
@@ -1733,6 +1745,9 @@ impl Server {
     /// it drops the set and hard-aborts any handler still running — so the bound is real, not best-effort.
     /// The reclaim ticker is aborted (it holds no client work). Consumes the server.
     pub async fn shutdown_and_drain(mut self, timeout: Duration) {
+        for lifecycle in &self.blocking_lifecycles {
+            lifecycle.close();
+        }
         self.cancel.cancel();
         if let Some(mut serve) = self.serve_task.take()
             && tokio::time::timeout(timeout, &mut serve).await.is_err()
@@ -1747,6 +1762,13 @@ impl Server {
         }
         if let Some(fjord) = self.fjord_task.take() {
             fjord.abort();
+        }
+        for task in self.maintenance_tasks.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
+        for lifecycle in &self.blocking_lifecycles {
+            let _ = tokio::time::timeout(timeout, lifecycle.drain_started()).await;
         }
     }
 }
@@ -1870,9 +1892,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             })
             .await
             .map_err(|e| EngineError::Storage(format!("sqlite open task failed: {e}")))??;
-            let backend = Arc::new(PostgresWholeOperationAdapter::new(backend));
-            run_owned(
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -1905,10 +1928,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| EngineError::Storage(format!("object-log open task failed: {e}")))??;
             let backend = Arc::new(backend);
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
-            backend.spawn_flusher();
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(backend));
-            run_owned(
+            let flusher = backend.spawn_flusher();
+            let (backend, lifecycle) = blocking_backend(backend);
+            let mut server = run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -1917,7 +1941,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 interval,
                 &queues,
             )
-            .await
+            .await?;
+            server.maintenance_tasks.push(flusher);
+            Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite { path }) => {
             // The segmented group-commit object log driving the derived SQLite projection: concurrent pushes
@@ -1947,10 +1973,11 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 EngineError::Storage(format!("object-log/sqlite open task failed: {e}"))
             })??;
             let backend = Arc::new(backend);
-            backend.spawn_flusher();
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(backend));
-            run_owned(
+            let flusher = backend.spawn_flusher();
+            let (backend, lifecycle) = blocking_backend(backend);
+            let mut server = run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -1959,7 +1986,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 interval,
                 &queues,
             )
-            .await
+            .await?;
+            server.maintenance_tasks.push(flusher);
+            Ok(server)
         }
         #[cfg(feature = "turso-projection")]
         (LogSpec::ObjectLog(spec), ProjectionSpec::Turso { path }) => {
@@ -1985,21 +2014,25 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             "PQUEUE_PROJECTION_BACKEND=turso requires a pqueue-server build with the `turso-projection` cargo feature",
         )),
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = open_objectlog_hybrid_backend(
-                store,
-                &path,
-                segment_config,
-                recovery_max_tail,
-                node_id,
-                deferred_flush_chunk,
-                false,
-                None,
-                objectlog_byte_budget.clone(),
-                config_objectlog_queue_limit,
-            )?;
-            spawn_hybrid_flusher(&backend, debug_segments);
+            let backend = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                open_objectlog_hybrid_backend(
+                    store,
+                    &path,
+                    segment_config,
+                    recovery_max_tail,
+                    node_id,
+                    deferred_flush_chunk,
+                    false,
+                    None,
+                    objectlog_byte_budget,
+                    config_objectlog_queue_limit,
+                )
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("hybrid open task failed: {e}")))??;
+            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2014,7 +2047,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     &change_record_sink,
                     fjord_log.clone(),
                 )?;
-            run_owned_with_fjord_task(
+            let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
@@ -2025,7 +2058,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
                 fjord_task,
             )
-            .await
+            .await?;
+            server.maintenance_tasks.push(flusher);
+            Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridStrict { path }) => {
             // The `objectlog/hybrid-strict` profile (TD-004): the same object-log group-commit substrate as
@@ -2035,21 +2070,25 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // poison cut on the real server write pipeline: a SQLite failure returns no success and replays
             // the object-log tail, and a poisoned store fails closed until a restart rehydrates memory from
             // the durable SQLite `ProjectionImage`.
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = open_objectlog_hybrid_backend(
-                store,
-                &path,
-                segment_config,
-                recovery_max_tail,
-                node_id,
-                deferred_flush_chunk,
-                true,
-                None,
-                objectlog_byte_budget.clone(),
-                config_objectlog_queue_limit,
-            )?;
-            spawn_hybrid_flusher(&backend, debug_segments);
+            let backend = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                open_objectlog_hybrid_backend(
+                    store,
+                    &path,
+                    segment_config,
+                    recovery_max_tail,
+                    node_id,
+                    deferred_flush_chunk,
+                    true,
+                    None,
+                    objectlog_byte_budget,
+                    config_objectlog_queue_limit,
+                )
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("hybrid-strict open task failed: {e}")))??;
+            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2064,7 +2103,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     &change_record_sink,
                     fjord_log.clone(),
                 )?;
-            run_owned_with_fjord_task(
+            let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
@@ -2075,7 +2114,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
                 fjord_task,
             )
-            .await
+            .await?;
+            server.maintenance_tasks.push(flusher);
+            Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridAsync { path }) => {
             // The `objectlog/hybrid-async` profile runs the same object-log + hybrid (hot-memory serving,
@@ -2095,21 +2136,25 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 hybrid_async.oldest_unapplied_max_ms,
                 hybrid_async.apply_poison_retry_threshold,
             );
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = open_objectlog_hybrid_backend(
-                store,
-                &path,
-                segment_config,
-                recovery_max_tail,
-                node_id,
-                deferred_flush_chunk,
-                false,
-                Some(hybrid_async),
-                objectlog_byte_budget.clone(),
-                config_objectlog_queue_limit,
-            )?;
-            spawn_hybrid_flusher(&backend, debug_segments);
+            let backend = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                open_objectlog_hybrid_backend(
+                    store,
+                    &path,
+                    segment_config,
+                    recovery_max_tail,
+                    node_id,
+                    deferred_flush_chunk,
+                    false,
+                    Some(hybrid_async),
+                    objectlog_byte_budget,
+                    config_objectlog_queue_limit,
+                )
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("hybrid-async open task failed: {e}")))??;
+            let flusher = spawn_hybrid_flusher(&backend, debug_segments);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2124,7 +2169,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                     &change_record_sink,
                     fjord_log.clone(),
                 )?;
-            run_owned_with_fjord_task(
+            let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
@@ -2135,7 +2180,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
                 fjord_task,
             )
-            .await
+            .await?;
+            server.maintenance_tasks.push(flusher);
+            Ok(server)
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
@@ -2159,9 +2206,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
-            run_owned(
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2198,9 +2246,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres/sqlite connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
-            run_owned(
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2239,9 +2288,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres/postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
-            run_owned(
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2328,36 +2378,44 @@ fn spawn_hybrid_flusher(
             let Some(backend) = weak.upgrade() else {
                 break;
             };
-            match kind {
-                FlushKind::GroupCommit => {
-                    let now_ms =
-                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            let emit_debug = debug_segments && dbg_last.elapsed() >= Duration::from_secs(1);
+            if emit_debug {
+                dbg_last = std::time::Instant::now();
+            }
+            let join = tokio::task::spawn_blocking(move || {
+                let result = match kind {
+                    FlushKind::GroupCommit => {
+                        let now_ms = match std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                        {
                             Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
                             Err(_) => 0,
                         };
-                    if let Err(e) = backend.flush_tick(now_ms) {
-                        eprintln!("[objectlog/hybrid] group-commit flush failed: {e}");
+                        backend.flush_tick(now_ms).map(|_| ())
                     }
-                }
-                FlushKind::DeferredProjection => {
-                    if let Err(e) = backend.try_flush_deferred_projection() {
-                        eprintln!("[objectlog/hybrid] deferred projection flush failed: {e}");
+                    FlushKind::DeferredProjection => {
+                        backend.try_flush_deferred_projection().map(|_| ())
                     }
+                };
+                if emit_debug {
+                    let c = backend.with_log(|log| log.counters());
+                    let admission = hybrid_byte_admission_telemetry(&backend);
+                    eprintln!(
+                        "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
+                        c.segments_sealed,
+                        c.commands_committed,
+                        c.mean_batch_size(),
+                        c.max_batch_size(),
+                        c.objects_put,
+                        admission,
+                    );
                 }
-            }
-            if debug_segments && dbg_last.elapsed() >= Duration::from_secs(1) {
-                dbg_last = std::time::Instant::now();
-                let c = backend.with_log(|log| log.counters());
-                let admission = hybrid_byte_admission_telemetry(&backend);
-                eprintln!(
-                    "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
-                    c.segments_sealed,
-                    c.commands_committed,
-                    c.mean_batch_size(),
-                    c.max_batch_size(),
-                    c.objects_put,
-                    admission,
-                );
+                result
+            });
+            match join.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("[objectlog/hybrid] maintenance flush failed: {e}"),
+                Err(e) => eprintln!("[objectlog/hybrid] maintenance task failed: {e}"),
             }
         }
     })
@@ -2409,6 +2467,44 @@ async fn run_owned<B: RespBackend>(
         queues,
     )
     .await
+}
+
+fn blocking_backend<B: RespBackend>(
+    inner: Arc<B>,
+) -> (
+    Arc<PostgresWholeOperationAdapter<B>>,
+    PostgresBlockingLifecycle,
+) {
+    let adapter = PostgresWholeOperationAdapter::from_arc(inner);
+    let lifecycle = adapter.lifecycle();
+    (Arc::new(adapter), lifecycle)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_owned_with_blocking_lifecycle<B: RespBackend>(
+    backend: Arc<B>,
+    lifecycle: PostgresBlockingLifecycle,
+    control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
+    owner: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server> {
+    let mut server = run_owned(
+        backend,
+        control_plane,
+        advertise_addr,
+        owner,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+    )
+    .await?;
+    server.blocking_lifecycles.push(lifecycle);
+    Ok(server)
 }
 
 // The Fjord variant carries the same explicit composition-root inputs as `run_owned`, plus the
@@ -2477,6 +2573,8 @@ pub async fn start_with<B: RespBackend>(
         reclaim_task: Some(reclaim_task),
         ownership_task: None,
         fjord_task: None,
+        maintenance_tasks: Vec::new(),
+        blocking_lifecycles: Vec::new(),
         cancel,
         reclaim,
         ownership,
@@ -2587,6 +2685,8 @@ where
         reclaim_task: Some(reclaim_task),
         ownership_task: Some(ownership_task),
         fjord_task: None,
+        maintenance_tasks: Vec::new(),
+        blocking_lifecycles: Vec::new(),
         cancel,
         reclaim,
         ownership,

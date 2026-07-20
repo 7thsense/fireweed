@@ -15,7 +15,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -34,6 +35,7 @@ use pqueue_resp::RespBackend;
 
 const DEFAULT_BLOCKING_OPERATIONS: usize = 8;
 const DEFAULT_QUEUED_OPERATIONS: usize = 1024;
+const DEFAULT_QUEUED_OPERATIONS_PER_QUEUE: usize = 32;
 
 fn global_operation_key() -> QueueKey {
     QueueKey::new(
@@ -45,7 +47,11 @@ fn global_operation_key() -> QueueKey {
 struct BlockingCapacity {
     running: Arc<tokio::sync::Semaphore>,
     outstanding: Arc<tokio::sync::Semaphore>,
-    queue_gates: std::sync::Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
+    queue_gates: std::sync::Mutex<HashMap<QueueKey, Weak<tokio::sync::Mutex<()>>>>,
+    queue_admission: std::sync::Mutex<HashMap<QueueKey, Weak<tokio::sync::Semaphore>>>,
+    closed: AtomicBool,
+    started: AtomicUsize,
+    drained: tokio::sync::Notify,
 }
 
 impl BlockingCapacity {
@@ -56,16 +62,76 @@ impl BlockingCapacity {
                 max_running.get().saturating_add(max_queued),
             )),
             queue_gates: std::sync::Mutex::new(HashMap::new()),
+            queue_admission: std::sync::Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
+            started: AtomicUsize::new(0),
+            drained: tokio::sync::Notify::new(),
         }
     }
 
     fn gate(&self, queue: &QueueKey) -> Arc<tokio::sync::Mutex<()>> {
-        self.queue_gates
+        let mut gates = self
+            .queue_gates
             .lock()
-            .expect("blocking operation queue gates poisoned")
-            .entry(queue.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+            .expect("blocking operation queue gates poisoned");
+        if let Some(gate) = gates.get(queue).and_then(Weak::upgrade) {
+            return gate;
+        }
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(queue.clone(), Arc::downgrade(&gate));
+        gate
+    }
+
+    fn queue_admission(&self, queue: &QueueKey) -> Arc<tokio::sync::Semaphore> {
+        let mut admission = self
+            .queue_admission
+            .lock()
+            .expect("blocking operation queue admission poisoned");
+        if let Some(permits) = admission.get(queue).and_then(Weak::upgrade) {
+            return permits;
+        }
+        admission.retain(|_, permits| permits.strong_count() > 0);
+        let permits = Arc::new(tokio::sync::Semaphore::new(
+            DEFAULT_QUEUED_OPERATIONS_PER_QUEUE,
+        ));
+        admission.insert(queue.clone(), Arc::downgrade(&permits));
+        permits
+    }
+}
+
+struct StartedOperation {
+    capacity: Arc<BlockingCapacity>,
+}
+
+impl Drop for StartedOperation {
+    fn drop(&mut self) {
+        if self.capacity.started.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.capacity.drained.notify_waiters();
+        }
+    }
+}
+
+/// Cloneable lifecycle handle retained by [`crate::Server`]. Closing rejects new work and causes queued
+/// operations to leave before submission; draining waits only for jobs that crossed the started boundary.
+#[derive(Clone)]
+pub struct PostgresBlockingLifecycle {
+    capacity: Arc<BlockingCapacity>,
+}
+
+impl PostgresBlockingLifecycle {
+    pub fn close(&self) {
+        self.capacity.closed.store(true, Ordering::Release);
+    }
+
+    pub async fn drain_started(&self) {
+        loop {
+            let notified = self.capacity.drained.notified();
+            if self.capacity.started.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -111,6 +177,12 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
         }
     }
 
+    pub fn lifecycle(&self) -> PostgresBlockingLifecycle {
+        PostgresBlockingLifecycle {
+            capacity: Arc::clone(&self.capacity),
+        }
+    }
+
     /// A fresh `Arc` handle to move into a `spawn_blocking` closure.
     fn arc(&self) -> Arc<B> {
         self.inner
@@ -131,6 +203,17 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
     {
         let capacity = Arc::clone(&self.capacity);
         async move {
+            if capacity.closed.load(Ordering::Acquire) {
+                return Err(EngineError::Unavailable);
+            }
+            // Queue-local admission is independent of the global bound so one hot queue cannot reserve
+            // every outstanding slot while unrelated queues are ready to run.
+            let queue_outstanding = capacity
+                .queue_admission(&queue)
+                .try_acquire_owned()
+                .map_err(|_| EngineError::Backpressure {
+                    resource: "queue blocking storage operations",
+                })?;
             // Finite admission happens before waiting for the queue gate. Waiters consume no running
             // blocking slot, and Tokio's mutex preserves FIFO order for one queue.
             let outstanding = capacity
@@ -141,19 +224,31 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
                     resource: "blocking storage operations",
                 })?;
             let queue_guard = capacity.gate(&queue).lock_owned().await;
+            if capacity.closed.load(Ordering::Acquire) {
+                return Err(EngineError::Unavailable);
+            }
             let running = capacity
                 .running
                 .clone()
                 .acquire_owned()
                 .await
                 .map_err(|_| EngineError::Unavailable)?;
+            if capacity.closed.load(Ordering::Acquire) {
+                return Err(EngineError::Unavailable);
+            }
             let runtime = tokio::runtime::Handle::current();
+            capacity.started.fetch_add(1, Ordering::AcqRel);
+            let started = StartedOperation {
+                capacity: Arc::clone(&capacity),
+            };
             tokio::task::spawn_blocking(move || {
                 // Ownership of the queue gate, both permits, request data and future crosses the submit
                 // boundary. Dropping the caller's JoinHandle cannot cancel this started operation.
                 let _queue_guard = queue_guard;
                 let _running = running;
                 let _outstanding = outstanding;
+                let _queue_outstanding = queue_outstanding;
+                let _started = started;
                 runtime.block_on(operation())
             })
             .await
@@ -680,5 +775,101 @@ mod tests {
         ));
         release_tx.send(()).unwrap();
         first.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hot_queue_cannot_consume_cold_queue_admission() {
+        let adapter = adapter(2, 100);
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&adapter);
+        let first = tokio::spawn(async move {
+            worker
+                .dispatch(queue("hot"), move || async move {
+                    let _ = started_tx.send(());
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let mut queued = Vec::new();
+        for _ in 1..DEFAULT_QUEUED_OPERATIONS_PER_QUEUE {
+            let worker = Arc::clone(&adapter);
+            let (submitted_tx, submitted_rx) = oneshot::channel();
+            queued.push(tokio::spawn(async move {
+                let _ = submitted_tx.send(());
+                worker
+                    .dispatch(queue("hot"), || async { Ok::<_, EngineError>(()) })
+                    .await
+            }));
+            submitted_rx.await.unwrap();
+        }
+        let hot_error = adapter
+            .dispatch(queue("hot"), || async { Ok::<_, EngineError>(()) })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            hot_error,
+            EngineError::Backpressure {
+                resource: "queue blocking storage operations"
+            }
+        ));
+        adapter
+            .dispatch(queue("cold"), || async { Ok::<_, EngineError>(()) })
+            .await
+            .unwrap();
+        release_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
+        for task in queued {
+            task.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn close_rejects_queued_work_and_drain_waits_for_started_work() {
+        let adapter = adapter(1, 2);
+        let lifecycle = adapter.lifecycle();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&adapter);
+        let started = tokio::spawn(async move {
+            worker
+                .dispatch(queue("a"), move || async move {
+                    let _ = started_tx.send(());
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let queued_worker = Arc::clone(&adapter);
+        let (queued_submitted_tx, queued_submitted_rx) = oneshot::channel();
+        let queued = tokio::spawn(async move {
+            let _ = queued_submitted_tx.send(());
+            queued_worker
+                .dispatch(queue("b"), || async { Ok::<_, EngineError>(()) })
+                .await
+        });
+        queued_submitted_rx.await.unwrap();
+        lifecycle.close();
+        let mut drain = Box::pin(lifecycle.drain_started());
+        assert!(matches!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx))).await,
+            std::task::Poll::Pending
+        ));
+        release_tx.send(()).unwrap();
+        started.await.unwrap().unwrap();
+        drain.await;
+        assert!(matches!(
+            queued.await.unwrap(),
+            Err(EngineError::Unavailable)
+        ));
+        assert!(matches!(
+            adapter
+                .dispatch(queue("c"), || async { Ok::<_, EngineError>(()) })
+                .await,
+            Err(EngineError::Unavailable)
+        ));
     }
 }

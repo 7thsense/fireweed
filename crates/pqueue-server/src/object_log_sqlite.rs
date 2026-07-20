@@ -808,6 +808,22 @@ struct CoordState {
     waiters: Vec<oneshot::Sender<EngineResult<()>>>,
 }
 
+/// Removes a queue from the flusher's in-flight set on every exit path, including unwinding from a
+/// provider panic. The backend remains strongly owned by the blocking job for the guard's lifetime.
+struct FlushInflightGuard<'a> {
+    inflight: &'a Mutex<HashSet<QueueKey>>,
+    shard: QueueKey,
+}
+
+impl Drop for FlushInflightGuard<'_> {
+    fn drop(&mut self) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.shard);
+    }
+}
+
 /// Group-committing object-log authority (`SegmentedObjectLog<LocalFsBlobStore>`) + SQLite materialized
 /// projection. Eventual-apply durability class.
 pub struct SegmentedObjectLogSqliteBackend {
@@ -1216,6 +1232,10 @@ impl SegmentedObjectLogSqliteBackend {
                 let backend = Arc::clone(&this);
                 tokio::task::spawn_blocking(move || {
                     let _slot = slot;
+                    let _inflight = FlushInflightGuard {
+                        inflight: &backend.flush_inflight,
+                        shard: shard.clone(),
+                    };
                     let epoch = backend.cached_epoch(&shard);
                     let mut state = coord.state.blocking_lock();
                     if !state.pending.is_empty() {
@@ -1227,11 +1247,6 @@ impl SegmentedObjectLogSqliteBackend {
                             Err(e) => Self::fail_all(&mut state, e),
                         }
                     }
-                    backend
-                        .flush_inflight
-                        .lock()
-                        .expect("flush inflight poisoned")
-                        .remove(&shard);
                 });
             }
         }
@@ -2152,6 +2167,10 @@ impl SegmentedObjectLogInMemoryBackend {
                 let backend = Arc::clone(&this);
                 tokio::task::spawn_blocking(move || {
                     let _slot = slot;
+                    let _inflight = FlushInflightGuard {
+                        inflight: &backend.flush_inflight,
+                        shard: shard.clone(),
+                    };
                     let epoch = backend.cached_epoch(&shard);
                     let mut state = coord.state.blocking_lock();
                     if !state.pending.is_empty() {
@@ -2163,11 +2182,6 @@ impl SegmentedObjectLogInMemoryBackend {
                             Err(e) => Self::fail_all(&mut state, e),
                         }
                     }
-                    backend
-                        .flush_inflight
-                        .lock()
-                        .expect("flush inflight poisoned")
-                        .remove(&shard);
                 });
             }
         }
