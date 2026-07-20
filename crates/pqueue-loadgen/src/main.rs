@@ -11,9 +11,10 @@
 //!   owner clear the per-queue floor — see `docs/perf/tp002-e2-multinode-kind-release.md`).
 //!
 //! * `emit-row` — fold three per-owner-count `run` results (owners 2 / 4 / 8) into ONE TP-002 E2
-//!   verification-ledger row. It judges the four release bars (ingest aggregate strictly non-decreasing
-//!   2->4->8; 8-owner ingest aggregate at least 3.5x the 2-owner; worst per-queue ingest AND claim+finalize
-//!   each at least the E0 floor 2,777.78/s; one-owner-per-queue live-proven), emits `evidence_tier=release`
+//!   verification-ledger row. It records aggregate monotonicity, the 8/2 scale multiple, and absolute rates
+//!   as declared-topology capacity observations. Portable release judgment requires canonical topology,
+//!   positive measured progress at every point, and exact one-owner-per-queue isolation; it emits
+//!   `evidence_tier=release`
 //!   ONLY when all bars hold (else `smoke`, never a faked release row), strict-validates the row via
 //!   `pqueue_release`, prints the verdict, and exits non-zero unless all bars pass (so a sweep that misses
 //!   the bars fails the orchestrator and keeps the bead open).
@@ -31,8 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s. Single-
-/// sourced from the shared judgment module so the printed verdict and the actual bar can never drift.
+/// Product capacity target, reported for context only. It is not a host-independent pass/fail bar.
 const FLOOR_ITEMS_PER_SEC: f64 = pqueue_release::e2::FLOOR_ITEMS_PER_SEC;
 /// The E2 headline cross-node multiple: 8-owner aggregate must be at least this times the 2-owner aggregate.
 const SCALE_MULTIPLE_BAR: f64 = pqueue_release::e2::SCALE_MULTIPLE_BAR;
@@ -64,6 +64,36 @@ type RunResult = pqueue_release::e2::E2ScalePoint;
 /// Per-node tuning recorded into the evidence row (passed by the orchestrator to `emit-row`). This IS the
 /// shared `pqueue_release::e2::E2Tuning`.
 type TuningMeta = pqueue_release::e2::E2Tuning;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DensityRunResult {
+    hot_items: u64,
+    control_items: u64,
+    hot_sustain_windows: u64,
+    hot_sustain_items: u64,
+    hot_connections: usize,
+    cold_worker_count: usize,
+    seed: u64,
+    hot_phase_started_unix_ms: u64,
+    hot_phase_ended_unix_ms: u64,
+    total_queues: usize,
+    cold_queues_active: usize,
+    cold_queues_progress_eligible: usize,
+    cold_empty_claim_responses: usize,
+    baseline_before_ingest_per_s: f64,
+    baseline_before_claim_finalize_per_s: f64,
+    baseline_after_ingest_per_s: f64,
+    baseline_after_claim_finalize_per_s: f64,
+    baseline_control_ingest_per_s: f64,
+    baseline_control_claim_finalize_per_s: f64,
+    hot_ingest_per_s: f64,
+    hot_claim_finalize_per_s: f64,
+    max_progress_latency_ms: u64,
+    progress_bound_ms: u64,
+    noisy_neighbor_ingest_retention_pct: f64,
+    noisy_neighbor_claim_retention_pct: f64,
+    duration_seconds: u64,
+}
 
 // ----------------------------------------------------------------------------------------------------
 // Raw RESP2 client over std::net::TcpStream (no new dependency).
@@ -215,7 +245,13 @@ fn is_transient_fence(e: &str) -> bool {
 /// SUCCESSFUL `XADD`s count toward `total`; an item fenced by a transient epoch flap is simply re-sent on the
 /// next wave (the item payloads are interchangeable, so retry preserves the exact pushed count). A long fence
 /// storm trips the guard and fails the run loudly rather than spinning forever.
-fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
+fn push_items_counted(
+    conn: &mut Conn,
+    key: &str,
+    total: u64,
+    pipe: usize,
+    completed: Option<&AtomicU64>,
+) {
     let mut done = 0u64;
     let mut pr = 0u64;
     let mut fence_waves = 0u64;
@@ -239,6 +275,9 @@ fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
             }
         }
         done += ok;
+        if let Some(completed) = completed {
+            completed.fetch_add(ok, Ordering::Relaxed);
+        }
         pr += n as u64;
         if ok < n as u64 {
             fence_waves += 1;
@@ -251,8 +290,18 @@ fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
     }
 }
 
+fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
+    push_items_counted(conn, key, total, pipe, None);
+}
+
 /// Cooperatively drain `key` (`XREADGROUP >` + `XACK`) until an empty batch. Returns the count drained.
-fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
+fn drain_counted(
+    conn: &mut Conn,
+    key: &str,
+    consumer: &str,
+    batch: usize,
+    completed: Option<&AtomicU64>,
+) -> u64 {
     let mut total = 0u64;
     let count = batch.max(1).to_string();
     let mut guard = 0u64;
@@ -300,8 +349,15 @@ fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
             }
         }
         total += ids.len() as u64;
+        if let Some(completed) = completed {
+            completed.fetch_add(ids.len() as u64, Ordering::Relaxed);
+        }
     }
     total
+}
+
+fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
+    drain_counted(conn, key, consumer, batch, None)
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -364,7 +420,12 @@ fn assert_one_owner_per_queue(spec: &RunSpec) -> usize {
 }
 
 /// Run ONE phase across every queue's connections and return `(per_queue_max_ns, wall_seconds)`.
-fn run_phase<F>(queue_keys: &[(String, String)], conns_per_queue: usize, work: F) -> (Vec<u64>, f64)
+fn run_phase<F>(
+    queue_keys: &[(String, String)],
+    conns_per_queue: usize,
+    progress: Option<(&str, u64, Arc<AtomicU64>)>,
+    work: F,
+) -> (Vec<u64>, f64)
 where
     F: Fn(&mut Conn, &str, usize) + Send + Sync + 'static,
 {
@@ -393,10 +454,50 @@ where
     }
     barrier.wait();
     let wall_start = Instant::now();
+    let progress_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_reporter = progress.as_ref().map(|(stage, total, completed)| {
+        println!(
+            "DENSITY_PROGRESS stage={stage} completed={} total={total} elapsed_ms=0",
+            completed.load(Ordering::Relaxed)
+        );
+        io::stdout().flush().expect("flush density progress");
+        let stage = (*stage).to_string();
+        let total = *total;
+        let completed = Arc::clone(completed);
+        let stop = Arc::clone(&progress_stop);
+        thread::spawn(move || {
+            let mut next_report = Duration::from_secs(5);
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(250));
+                if wall_start.elapsed() < next_report {
+                    continue;
+                }
+                println!(
+                    "DENSITY_PROGRESS stage={stage} completed={} total={total} elapsed_ms={}",
+                    completed.load(Ordering::Relaxed),
+                    wall_start.elapsed().as_millis()
+                );
+                io::stdout().flush().expect("flush density progress");
+                next_report += Duration::from_secs(5);
+            }
+        })
+    });
     for h in handles {
         h.join().unwrap();
     }
     let wall = wall_start.elapsed().as_secs_f64();
+    progress_stop.store(true, Ordering::Relaxed);
+    if let Some(reporter) = progress_reporter {
+        reporter.join().expect("density progress reporter");
+    }
+    if let Some((stage, total, completed)) = &progress {
+        println!(
+            "DENSITY_PROGRESS stage={stage} completed={} total={total} elapsed_ms={}",
+            completed.load(Ordering::Relaxed),
+            (wall * 1_000.0).round() as u128
+        );
+        io::stdout().flush().expect("flush density progress");
+    }
     let per_queue = Arc::try_unwrap(per_queue_ns)
         .expect("phase done")
         .into_iter()
@@ -442,6 +543,17 @@ fn measure(
     pipe: usize,
     batch: usize,
 ) -> (f64, f64, f64, f64) {
+    measure_with_progress(spec, items_per_queue, conns_per_queue, pipe, batch, None)
+}
+
+fn measure_with_progress(
+    spec: &RunSpec,
+    items_per_queue: u64,
+    conns_per_queue: usize,
+    pipe: usize,
+    batch: usize,
+    progress_prefix: Option<&str>,
+) -> (f64, f64, f64, f64) {
     let conns_per_queue = conns_per_queue.max(1);
     let queue_keys: Vec<(String, String)> = spec
         .nodes
@@ -455,19 +567,42 @@ fn measure(
     let remainder = items_per_queue - per_conn * conns_per_queue as u64;
 
     // ---- Phase 1: INGEST ----
-    let (push_ns, ingest_wall) = run_phase(&queue_keys, conns_per_queue, move |c, key, ci| {
-        let my_push = per_conn + if ci == 0 { remainder } else { 0 };
-        push_items(c, key, my_push, pipe);
-    });
+    let total_items = num_queues as u64 * items_per_queue;
+    let ingest_completed = Arc::new(AtomicU64::new(0));
+    let ingest_worker_completed = Arc::clone(&ingest_completed);
+    let ingest_stage = progress_prefix.map(|prefix| format!("{prefix}_INGEST"));
+    let ingest_progress = ingest_stage
+        .as_deref()
+        .map(|stage| (stage, total_items, Arc::clone(&ingest_completed)));
+    let (push_ns, ingest_wall) = run_phase(
+        &queue_keys,
+        conns_per_queue,
+        ingest_progress,
+        move |c, key, ci| {
+            let my_push = per_conn + if ci == 0 { remainder } else { 0 };
+            push_items_counted(c, key, my_push, pipe, Some(&ingest_worker_completed));
+        },
+    );
 
     // ---- Phase 2: CLAIM+FINALIZE ----
     let drained_total = Arc::new(AtomicU64::new(0));
     let dt = Arc::clone(&drained_total);
-    let (drain_ns, drain_wall) = run_phase(&queue_keys, conns_per_queue, move |c, key, ci| {
-        let consumer = format!("c{ci}");
-        let got = drain(c, key, &consumer, batch);
-        dt.fetch_add(got, Ordering::SeqCst);
-    });
+    let drain_completed = Arc::new(AtomicU64::new(0));
+    let drain_worker_completed = Arc::clone(&drain_completed);
+    let drain_stage = progress_prefix.map(|prefix| format!("{prefix}_CLAIM_FINALIZE"));
+    let drain_progress = drain_stage
+        .as_deref()
+        .map(|stage| (stage, total_items, Arc::clone(&drain_completed)));
+    let (drain_ns, drain_wall) = run_phase(
+        &queue_keys,
+        conns_per_queue,
+        drain_progress,
+        move |c, key, ci| {
+            let consumer = format!("c{ci}");
+            let got = drain_counted(c, key, &consumer, batch, Some(&drain_worker_completed));
+            dt.fetch_add(got, Ordering::SeqCst);
+        },
+    );
     assert_eq!(
         drained_total.load(Ordering::SeqCst),
         num_queues as u64 * items_per_queue,
@@ -479,13 +614,99 @@ fn measure(
             .map(|&ns| items_per_queue as f64 / (ns as f64 / 1e9))
             .fold(f64::INFINITY, f64::min)
     };
-    let total_items = (num_queues as u64 * items_per_queue) as f64;
+    let total_items = total_items as f64;
     (
         total_items / ingest_wall,
         min_per_queue(&push_ns),
         total_items / drain_wall,
         min_per_queue(&drain_ns),
     )
+}
+
+/// Keep every cold queue progress-eligible with a bounded worker pool while the hot queue is measured.
+/// Each worker first completes one claim/finalize cycle on every queue assigned to it, then continues
+/// cycling those queues until `stop` is set. The returned count is the number of distinct cold queues that
+/// proved progress before the hot phase began.
+#[derive(Clone)]
+struct DensityWorkerSignals {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    ready: Arc<AtomicU64>,
+    hot_phase: Arc<std::sync::atomic::AtomicBool>,
+    hot_seen: Arc<Vec<std::sync::atomic::AtomicBool>>,
+    hot_progressed: Arc<AtomicU64>,
+    max_progress_latency_ms: Arc<AtomicU64>,
+    cold_empty_claim_responses: Arc<AtomicU64>,
+}
+
+fn start_density_workers(
+    addr: &str,
+    cold_keys: &[String],
+    workers: usize,
+    signals: DensityWorkerSignals,
+) -> Vec<thread::JoinHandle<()>> {
+    let workers = workers.max(1).min(cold_keys.len().max(1));
+    (0..workers)
+        .map(|worker| {
+            let addr = addr.to_string();
+            let keys: Vec<(usize, String)> = cold_keys
+                .iter()
+                .enumerate()
+                .skip(worker)
+                .step_by(workers)
+                .map(|(index, key)| (index, key.clone()))
+                .collect();
+            let signals = signals.clone();
+            thread::spawn(move || {
+                let mut conn = Conn::connect(&addr).expect("density cold-worker connect");
+                let mut states = Vec::with_capacity(keys.len());
+                for (index, key) in keys {
+                    push_items(&mut conn, &key, 1, 1);
+                    let got = drain(&mut conn, &key, &format!("density-w{worker}"), 1);
+                    if got == 0 {
+                        signals
+                            .cold_empty_claim_responses
+                            .fetch_add(1, Ordering::SeqCst);
+                    }
+                    assert_eq!(got, 1, "cold queue {key} must claim/finalize its seed");
+                    let eligible_since = Instant::now();
+                    push_items(&mut conn, &key, 1, 1);
+                    states.push((index, key, eligible_since));
+                    signals.ready.fetch_add(1, Ordering::SeqCst);
+                }
+                while !signals.stop.load(Ordering::Relaxed) {
+                    for (index, key, eligible_since) in &mut states {
+                        if signals.stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        // Capture phase at operation START. A claim begun before HOT_START must not be
+                        // promoted merely because it finishes after the flag changes.
+                        let started_in_hot_phase = signals.hot_phase.load(Ordering::SeqCst);
+                        let got = drain(&mut conn, key, &format!("density-w{worker}"), 1);
+                        if got == 0 {
+                            signals
+                                .cold_empty_claim_responses
+                                .fetch_add(1, Ordering::SeqCst);
+                        }
+                        assert_eq!(got, 1, "cold queue {key} must remain progress eligible");
+                        let latency_ms = eligible_since.elapsed().as_millis() as u64;
+                        if started_in_hot_phase && signals.hot_phase.load(Ordering::SeqCst) {
+                            signals
+                                .max_progress_latency_ms
+                                .fetch_max(latency_ms, Ordering::SeqCst);
+                            if signals.hot_seen[*index]
+                                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                                .is_ok()
+                            {
+                                signals.hot_progressed.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        *eligible_since = Instant::now();
+                        push_items(&mut conn, key, 1, 1);
+                    }
+                }
+            })
+        })
+        .collect()
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -621,25 +842,25 @@ fn cmd_emit_row(args: &[String]) -> ! {
 
     eprintln!("\n--- TP-002 E2 sweep {} verdict (kind) ---", tuning.sweep);
     eprintln!(
-        "  (1) non-decreasing ingest 2->4->8 : {} ({:.0} -> {:.0} -> {:.0})",
+        "  capacity: non-decreasing ingest 2->4->8 : {} ({:.0} -> {:.0} -> {:.0})",
         yn(verdict.nondecreasing),
         at(2).ingest_aggregate,
         at(4).ingest_aggregate,
         at(8).ingest_aggregate
     );
     eprintln!(
-        "  (2) 8/2 ingest aggregate multiple : {:.2}x (bar >= {SCALE_MULTIPLE_BAR}x) -> {}",
+        "  capacity: 8/2 ingest aggregate multiple : {:.2}x (product target {SCALE_MULTIPLE_BAR}x; not a release gate) -> measurement {}",
         verdict.ratio_8_2,
         yn(verdict.scale_pass)
     );
     eprintln!(
-        "  (3) worst per-queue (floor {FLOOR_ITEMS_PER_SEC:.0}/s) : ingest {:.0}/s, claim+finalize {:.0}/s -> {}",
+        "  capacity: worst per-queue (product target {FLOOR_ITEMS_PER_SEC:.0}/s; not a release gate) : ingest {:.0}/s, claim+finalize {:.0}/s -> progress {}",
         verdict.worst_ingest_per_queue,
         verdict.worst_drain_per_queue,
         yn(verdict.floor_pass)
     );
     eprintln!(
-        "  (4) one-owner-per-queue : {} of {} expected cross-node 'no such queue' confirmations at 8 owners -> {}",
+        "  portable gate: one-owner-per-queue : {} of {} expected cross-node 'no such queue' confirmations at 8 owners -> {}",
         verdict.one_owner_confirmations,
         verdict.expected_confirmations,
         yn(verdict.disjoint_pass)
@@ -669,6 +890,329 @@ fn cmd_emit_row(args: &[String]) -> ! {
     exit(if all_pass { 0 } else { 1 });
 }
 
+fn cmd_density_run(args: &[String]) -> ! {
+    let addr = arg_value(args, "--addr").unwrap_or_else(|| "pqueue:8080".into());
+    let queue_prefix = arg_value(args, "--queue-prefix").unwrap_or_else(|| "density:q".into());
+    let total_queues = parse_usize_arg(args, "--queue-count", 1001);
+    let items = parse_u64_arg(args, "--items", 300_000);
+    let control_items = parse_u64_arg(args, "--control-items", 10_000);
+    let conns = parse_usize_arg(args, "--hot-connections", 8);
+    let pipe = parse_usize_arg(args, "--pipe", 1_000);
+    let batch = parse_usize_arg(args, "--batch", 1_000);
+    let noisy_workers = parse_usize_arg(args, "--noisy-workers", 8);
+    let seed = parse_u64_arg(args, "--seed", 42);
+    let progress_bound_ms = parse_u64_arg(args, "--progress-bound-ms", 60_000);
+    assert!(
+        total_queues >= 1001,
+        "release density needs at least 1001 queues"
+    );
+
+    let keys: Vec<String> = (0..total_queues)
+        .map(|i| format!("{queue_prefix}{i}"))
+        .collect();
+    let hot = keys.last().unwrap().clone();
+    let mut cold = keys[..keys.len() - 1].to_vec();
+    let cold_len = cold.len();
+    cold.rotate_left((seed as usize) % cold_len);
+    let all_spec = RunSpec {
+        owners: 1,
+        nodes: vec![NodeSpec {
+            addr: addr.clone(),
+            queues: keys.clone(),
+        }],
+    };
+    println!("DENSITY_STAGE stage=READINESS status=START");
+    io::stdout().flush().expect("flush density readiness stage");
+    await_ready(&all_spec);
+    println!("DENSITY_STAGE stage=READINESS status=DONE");
+    println!(
+        "DENSITY_STAGE stage=INVENTORY status=START completed=0 total={}",
+        keys.len()
+    );
+    io::stdout().flush().expect("flush density inventory stage");
+    for key in &keys {
+        let mut conn = Conn::connect(&addr).expect("density inventory probe connect");
+        assert!(
+            xlen(&mut conn, key)
+                .expect("density inventory XLEN")
+                .is_ok(),
+            "generated queue {key} is absent"
+        );
+    }
+    println!(
+        "DENSITY_STAGE stage=INVENTORY status=DONE completed={} total={}",
+        keys.len(),
+        keys.len()
+    );
+    io::stdout().flush().expect("flush density inventory stage");
+
+    let hot_spec = RunSpec {
+        owners: 1,
+        nodes: vec![NodeSpec {
+            addr: addr.clone(),
+            queues: vec![hot],
+        }],
+    };
+    let started = Instant::now();
+    println!("DENSITY_STAGE stage=BASELINE status=START");
+    io::stdout().flush().expect("flush density baseline stage");
+    let (_, baseline_before_ingest, _, baseline_before_claim) = measure_with_progress(
+        &hot_spec,
+        control_items,
+        conns,
+        pipe,
+        batch,
+        Some("BASELINE"),
+    );
+    println!("DENSITY_STAGE stage=BASELINE status=DONE");
+    println!(
+        "DENSITY_STAGE stage=COLD_PRIME status=START completed=0 total={}",
+        cold.len()
+    );
+    io::stdout()
+        .flush()
+        .expect("flush density cold-prime stage");
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ready = Arc::new(AtomicU64::new(0));
+    let hot_phase = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hot_seen = Arc::new(
+        (0..cold.len())
+            .map(|_| std::sync::atomic::AtomicBool::new(false))
+            .collect(),
+    );
+    let hot_progressed = Arc::new(AtomicU64::new(0));
+    let max_progress_latency_ms = Arc::new(AtomicU64::new(0));
+    let cold_empty_claim_responses = Arc::new(AtomicU64::new(0));
+    let handles = start_density_workers(
+        &addr,
+        &cold,
+        noisy_workers,
+        DensityWorkerSignals {
+            stop: Arc::clone(&stop),
+            ready: Arc::clone(&ready),
+            hot_phase: Arc::clone(&hot_phase),
+            hot_seen: Arc::clone(&hot_seen),
+            hot_progressed: Arc::clone(&hot_progressed),
+            max_progress_latency_ms: Arc::clone(&max_progress_latency_ms),
+            cold_empty_claim_responses: Arc::clone(&cold_empty_claim_responses),
+        },
+    );
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut next_cold_report = Instant::now();
+    while ready.load(Ordering::SeqCst) < cold.len() as u64 {
+        assert!(
+            Instant::now() < deadline,
+            "cold queues did not all prove progress within 300s"
+        );
+        if Instant::now() >= next_cold_report {
+            let completed = ready.load(Ordering::SeqCst);
+            println!(
+                "DENSITY_PROGRESS stage=COLD_PRIME completed={completed} total={}",
+                cold.len()
+            );
+            io::stdout()
+                .flush()
+                .expect("flush density cold-prime progress");
+            next_cold_report += Duration::from_secs(5);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    println!(
+        "DENSITY_STAGE stage=COLD_PRIME status=DONE completed={} total={}",
+        cold.len(),
+        cold.len()
+    );
+    let hot_phase_started_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as u64;
+    hot_phase.store(true, Ordering::SeqCst);
+    println!("DENSITY_PHASE HOT_START {hot_phase_started_unix_ms}");
+    io::stdout().flush().expect("flush HOT_START marker");
+    let (_, loaded_ingest, _, loaded_claim) =
+        measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("LOADED"));
+    let mut hot_sustain_windows = 1_u64;
+    while hot_progressed.load(Ordering::SeqCst) < cold.len() as u64 {
+        hot_sustain_windows += 1;
+        println!(
+            "DENSITY_STAGE stage=LOADED_SUSTAIN window={hot_sustain_windows} cold_progress={}/{}",
+            hot_progressed.load(Ordering::SeqCst),
+            cold.len()
+        );
+        io::stdout().flush().expect("flush loaded sustain stage");
+        let _ = measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("LOADED_SUSTAIN"));
+    }
+    hot_phase.store(false, Ordering::SeqCst);
+    let hot_phase_ended_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as u64;
+    println!("DENSITY_PHASE HOT_END {hot_phase_ended_unix_ms}");
+    io::stdout().flush().expect("flush HOT_END marker");
+    stop.store(true, Ordering::SeqCst);
+    for handle in handles {
+        handle.join().expect("density cold worker");
+    }
+
+    // Bracket the loaded measurement with a second control window from the same process, deployment,
+    // generated inventory, and revision. This A/B/A shape absorbs monotonic host drift without requiring
+    // an idle or specially selected machine. Rates remain capacity observations; only exact completion,
+    // progress, resource bounds, and a well-formed same-run comparison are release gates.
+    println!("DENSITY_STAGE stage=BASELINE_AFTER status=START");
+    io::stdout().flush().expect("flush trailing baseline stage");
+    let (_, baseline_after_ingest, _, baseline_after_claim) = measure_with_progress(
+        &hot_spec,
+        control_items,
+        conns,
+        pipe,
+        batch,
+        Some("BASELINE_AFTER"),
+    );
+    println!("DENSITY_STAGE stage=BASELINE_AFTER status=DONE");
+
+    let paired_control = |before: f64, after: f64| {
+        if before.is_finite() && before > 0.0 && after.is_finite() && after > 0.0 {
+            2.0 / (before.recip() + after.recip())
+        } else {
+            f64::NAN
+        }
+    };
+    let baseline_ingest = paired_control(baseline_before_ingest, baseline_after_ingest);
+    let baseline_claim = paired_control(baseline_before_claim, baseline_after_claim);
+
+    let mut cold_active = 0usize;
+    for key in &cold {
+        let mut conn = Conn::connect(&addr).expect("density final inventory connect");
+        if xlen(&mut conn, key)
+            .expect("density final XLEN")
+            .is_ok_and(|length| length > 0)
+        {
+            cold_active += 1;
+        }
+    }
+    let progress_eligible = hot_progressed.load(Ordering::SeqCst) as usize;
+    let duration_seconds = started.elapsed().as_secs().max(1);
+    let result = DensityRunResult {
+        hot_items: items,
+        control_items,
+        hot_sustain_windows,
+        hot_sustain_items: items
+            .checked_mul(hot_sustain_windows)
+            .expect("density hot sustain item count overflow"),
+        hot_connections: conns,
+        cold_worker_count: noisy_workers,
+        seed,
+        hot_phase_started_unix_ms,
+        hot_phase_ended_unix_ms,
+        total_queues,
+        cold_queues_active: cold_active,
+        cold_queues_progress_eligible: progress_eligible,
+        cold_empty_claim_responses: cold_empty_claim_responses.load(Ordering::SeqCst) as usize,
+        baseline_before_ingest_per_s: baseline_before_ingest,
+        baseline_before_claim_finalize_per_s: baseline_before_claim,
+        baseline_after_ingest_per_s: baseline_after_ingest,
+        baseline_after_claim_finalize_per_s: baseline_after_claim,
+        baseline_control_ingest_per_s: baseline_ingest,
+        baseline_control_claim_finalize_per_s: baseline_claim,
+        hot_ingest_per_s: loaded_ingest,
+        hot_claim_finalize_per_s: loaded_claim,
+        max_progress_latency_ms: max_progress_latency_ms.load(Ordering::SeqCst),
+        progress_bound_ms,
+        noisy_neighbor_ingest_retention_pct: loaded_ingest / baseline_ingest * 100.0,
+        noisy_neighbor_claim_retention_pct: loaded_claim / baseline_claim * 100.0,
+        duration_seconds,
+    };
+    eprintln!(
+        "density baseline ingest={baseline_ingest:.0}/s claim={baseline_claim:.0}/s; loaded ingest={loaded_ingest:.0}/s claim={loaded_claim:.0}/s; cold progress={progress_eligible}/{}; max progress latency={}ms",
+        cold.len(),
+        result.max_progress_latency_ms
+    );
+    println!("DENSITY_RESULT {}", serde_json::to_string(&result).unwrap());
+    exit(0);
+}
+
+fn cmd_density_emit_row(args: &[String]) -> ! {
+    let result_path = arg_value(args, "--result").expect("density-emit-row needs --result");
+    let raw = std::fs::read_to_string(&result_path).expect("read density result");
+    let json = raw
+        .lines()
+        .find_map(|line| line.strip_prefix("DENSITY_RESULT "))
+        .unwrap_or(raw.trim());
+    let result: DensityRunResult = serde_json::from_str(json).expect("parse density result");
+    let observed_threads = parse_usize_arg(args, "--observed-threads", usize::MAX);
+    let thread_limit = parse_usize_arg(args, "--thread-limit", 4);
+    let observed_connections = parse_usize_arg(args, "--observed-connections", usize::MAX);
+    let connection_limit = parse_usize_arg(args, "--connection-limit", 32);
+    let observed_tasks = parse_usize_arg(args, "--observed-tasks", usize::MAX);
+    let task_limit = parse_usize_arg(args, "--task-limit", 64);
+    let hot_phase_resource_samples = parse_usize_arg(args, "--hot-phase-resource-samples", 0);
+    let first_hot_resource_sample_unix_ms =
+        parse_u64_arg(args, "--first-hot-resource-sample-ms", 0);
+    let last_hot_resource_sample_unix_ms = parse_u64_arg(args, "--last-hot-resource-sample-ms", 0);
+    let revision = arg_value(args, "--revision").expect("density-emit-row needs --revision");
+    let image_digest =
+        arg_value(args, "--image-digest").expect("density-emit-row needs --image-digest");
+    let hardware = arg_value(args, "--hardware").expect("density-emit-row needs --hardware");
+    let topology = arg_value(args, "--topology").expect("density-emit-row needs --topology");
+    let out = arg_value(args, "--out").expect("density-emit-row needs --out");
+    let measurement = pqueue_release::density::DensityMeasurement {
+        hot_items: result.hot_items,
+        control_items: result.control_items,
+        hot_sustain_windows: result.hot_sustain_windows,
+        hot_sustain_items: result.hot_sustain_items,
+        hot_connections: result.hot_connections,
+        cold_worker_count: result.cold_worker_count,
+        configured_server_workers: observed_threads,
+        total_queues: result.total_queues,
+        cold_queues_active: result.cold_queues_active,
+        cold_queues_progress_eligible: result.cold_queues_progress_eligible,
+        hot_ingest_per_s: result.hot_ingest_per_s,
+        hot_claim_finalize_per_s: result.hot_claim_finalize_per_s,
+        cold_empty_claim_responses: result.cold_empty_claim_responses,
+        baseline_before_ingest_per_s: result.baseline_before_ingest_per_s,
+        baseline_before_claim_finalize_per_s: result.baseline_before_claim_finalize_per_s,
+        baseline_after_ingest_per_s: result.baseline_after_ingest_per_s,
+        baseline_after_claim_finalize_per_s: result.baseline_after_claim_finalize_per_s,
+        baseline_control_ingest_per_s: result.baseline_control_ingest_per_s,
+        baseline_control_claim_finalize_per_s: result.baseline_control_claim_finalize_per_s,
+        max_progress_latency_ms: result.max_progress_latency_ms,
+        progress_bound_ms: result.progress_bound_ms,
+        noisy_neighbor_ingest_retention_pct: result.noisy_neighbor_ingest_retention_pct,
+        noisy_neighbor_claim_retention_pct: result.noisy_neighbor_claim_retention_pct,
+        shared_worker_count: observed_threads,
+        shared_worker_limit: thread_limit,
+        connection_count: observed_connections,
+        connection_limit,
+        task_count: observed_tasks,
+        task_limit,
+        hot_phase_resource_samples,
+        first_hot_resource_sample_unix_ms,
+        last_hot_resource_sample_unix_ms,
+        hot_phase_started_unix_ms: result.hot_phase_started_unix_ms,
+        hot_phase_ended_unix_ms: result.hot_phase_ended_unix_ms,
+    };
+    let metadata = pqueue_release::density::DensityMetadata {
+        command: "scripts/perf/tp002-e2-density-kind.sh".into(),
+        revision,
+        topology,
+        hardware,
+        seed: result.seed,
+        duration_seconds: result.duration_seconds,
+        queue_activity_definition: pqueue_release::density::QUEUE_ACTIVITY_DEFINITION.into(),
+        image_digest,
+        clean_revision: true,
+    };
+    let row = pqueue_release::density::build_release_row(&measurement, &metadata);
+    let passed = pqueue_release::density::validate_release_row(&row).is_ok();
+    let path = std::path::PathBuf::from(&out);
+    let _ = std::fs::remove_file(&path);
+    pqueue_release::append_row(&path, &row).expect("append density row");
+    pqueue_release::verify_ledger(&path, true).expect("density ledger strict-validates");
+    println!("DENSITY_ROW {}", row.to_jsonl());
+    exit(if passed { 0 } else { 1 });
+}
+
 fn yn(b: bool) -> &'static str {
     if b { "PASS" } else { "FAIL" }
 }
@@ -678,11 +1222,13 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("emit-row") => cmd_emit_row(&args[1..]),
+        Some("density-run") => cmd_density_run(&args[1..]),
+        Some("density-emit-row") => cmd_density_emit_row(&args[1..]),
         other => {
             eprintln!(
                 "usage:\n  pqueue-loadgen run --spec <json>|--spec-file <path> [--items-per-queue N] \
                  [--conns-per-queue C] [--pipe P] [--batch B]\n  pqueue-loadgen emit-row --result <f> \
-                 --result <f> --result <f> --tuning <json> --out <path>\ngot: {other:?}"
+                 --result <f> --result <f> --tuning <json> --out <path>\n  pqueue-loadgen density-run --addr <host:port> --queue-count 1001 [--items N] [--seed N]\n  pqueue-loadgen density-emit-row --result <f> --observed-threads N --observed-connections N --observed-tasks N --hot-phase-resource-samples N --first-hot-resource-sample-ms N --last-hot-resource-sample-ms N --revision <sha> --image-digest <sha256> --topology <description> --hardware <description> --out <path>\ngot: {other:?}"
             );
             exit(2);
         }

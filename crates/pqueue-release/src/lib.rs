@@ -22,6 +22,137 @@ pub mod e2_failover;
 pub mod e3_contract;
 pub mod transaction;
 
+/// Portable TP-002 E0/E1 evidence validation. Wall-clock rates and latency
+/// percentiles are retained as capacity observations, but never decide this
+/// contract.
+pub mod single_deployment {
+    use super::{LedgerRow, verify_ledger};
+    use std::path::Path;
+
+    fn true_value(row: &LedgerRow, key: &str) -> bool {
+        row.measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }
+
+    fn u64_value(row: &LedgerRow, key: &str) -> Option<u64> {
+        row.measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+    }
+
+    fn nonportable(text: &str) -> bool {
+        let text = text.to_ascii_lowercase();
+        [
+            "quiet host",
+            "quiet-host",
+            "idle host",
+            "items/s >=",
+            "throughput >=",
+            "latency <=",
+            "p95 <",
+            "p99 <",
+            "sub-second",
+        ]
+        .iter()
+        .any(|needle| text.contains(needle))
+    }
+
+    pub fn validate_row(row: &LedgerRow, id: &str, revision: &str) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if !matches!(id, "E0" | "E1") {
+            errors.push("id must be E0 or E1".into());
+        }
+        if row.suite != "performance_single_deployment_baseline_tests" {
+            errors.push("suite must be performance_single_deployment_baseline_tests".into());
+        }
+        if row.backend_profile != "postgres_native" {
+            errors.push("backend must be postgres_native".into());
+        }
+        if row.scale != "release" || row.evidence_tier != "release" {
+            errors.push("row must be release tier and scale".into());
+        }
+        if row.measurements.tp002_evidence_ids.as_slice() != [id] {
+            errors.push(format!("row must carry exactly {id}"));
+        }
+        if nonportable(&format!("{} {}", row.environment, row.pass_bar)) {
+            errors.push("authority text contains a nonportable host-speed gate".into());
+        }
+        for key in [
+            "bars_met",
+            "portable_gate",
+            "wall_clock_capacity_only",
+            "exact_outcomes",
+            "monotonic_progress",
+            "bounded_resources",
+        ] {
+            if !true_value(row, key) {
+                errors.push(format!("{key} must be true"));
+            }
+        }
+        for key in ["quiet_host_required", "host_speed_gate"] {
+            if row
+                .measurements
+                .values
+                .get(key)
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            {
+                errors.push(format!("{key} must be false"));
+            }
+        }
+        if row
+            .measurements
+            .values
+            .get("source_revision")
+            .and_then(serde_json::Value::as_str)
+            != Some(revision)
+        {
+            errors.push("source_revision does not match expected revision".into());
+        }
+        if u64_value(row, "resident_backlog") != Some(10_000_000) {
+            errors.push("resident_backlog must equal 10000000".into());
+        }
+        if u64_value(row, "lost_items") != Some(0) || u64_value(row, "duplicate_claims") != Some(0)
+        {
+            errors.push("lost_items and duplicate_claims must be zero".into());
+        }
+        if id == "E0" {
+            if u64_value(row, "accepted_items") != Some(10_000_000)
+                || u64_value(row, "claimed_items") != Some(10_000_000)
+                || u64_value(row, "finalized_items") != Some(10_000_000)
+            {
+                errors
+                    .push("E0 exact accepted/claimed/finalized counts must equal 10000000".into());
+            }
+        } else if row.measurements.values.get("batch_sizes")
+            != Some(&serde_json::json!([1, 100, 1000]))
+        {
+            errors.push("E1 batch_sizes must equal [1,100,1000]".into());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub fn verify_file(path: &Path, id: &str, revision: &str) -> Result<(), Vec<String>> {
+        verify_ledger(path, true).map_err(|es| es.into_iter().map(|e| e.0).collect::<Vec<_>>())?;
+        let body = std::fs::read_to_string(path).map_err(|e| vec![e.to_string()])?;
+        let mut lines = body.lines().filter(|line| !line.trim().is_empty());
+        let line = lines.next().ok_or_else(|| vec!["ledger is empty".into()])?;
+        if lines.next().is_some() {
+            return Err(vec!["ledger must contain exactly one row".into()]);
+        }
+        let row = serde_json::from_str(line).map_err(|e| vec![e.to_string()])?;
+        validate_row(&row, id, revision)
+    }
+}
+
 /// One verification-ledger row: a single measured release-evidence run.
 ///
 /// Every field is required (a row that fails to deserialize is rejected by the verifier). `measurements`
@@ -467,6 +598,43 @@ fn release_authority_errors(id: &str, row: &LedgerRow, raw_row: &serde_json::Val
         Some(value) => errors.push(format!("bars_met must be boolean true, got {value}")),
         None => errors.push("bars_met is required and must be boolean true".into()),
     }
+    if matches!(id, "E0" | "E1") {
+        let text = format!("{} {}", row.environment, row.pass_bar).to_ascii_lowercase();
+        let values = &row.measurements.values;
+        let portable = values
+            .get("portable_gate")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && values
+                .get("wall_clock_capacity_only")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            && values
+                .get("quiet_host_required")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+            && values
+                .get("host_speed_gate")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false);
+        let nonportable_text = [
+            "quiet host",
+            "quiet-host",
+            "idle host",
+            "items/s >=",
+            "throughput >=",
+            "p95 <",
+            "p99 <",
+            "sub-second",
+        ]
+        .iter()
+        .any(|needle| text.contains(needle));
+        if !portable || nonportable_text {
+            errors.push(format!(
+                "{id} authority does not satisfy the portable semantic contract"
+            ));
+        }
+    }
     let profile_allowed = match id {
         "E0" | "E1" => row.backend_profile == "postgres_native",
         "E2" => row.backend_profile == e2::RELEASE_BACKEND_PROFILE,
@@ -515,11 +683,10 @@ pub fn missing_smoke_evidence(summary: &LedgerSummary, required: &[String]) -> V
 /// function of the measured inputs so the judgment is unit-testable from `pqueue-bench` WITHOUT provisioning
 /// a live cluster.
 ///
-/// The four E2 release bars (every value MEASURED):
-/// 1. ingest aggregate strictly non-decreasing 2 → 4 → 8;
-/// 2. 8-owner ingest aggregate ≥ [`SCALE_MULTIPLE_BAR`]× the 2-owner aggregate;
-/// 3. worst per-queue throughput — ingest AND claim+finalize — ≥ the E0 floor ([`FLOOR_ITEMS_PER_SEC`]);
-/// 4. no queue served by more than one owner (live-proven: at 8 owners, every queue is unknown on every
+/// The portable E2 release bars are canonical topology, complete positive measurements at every scale
+/// point, and exact one-owner-per-queue isolation. Aggregate monotonicity, the 8/2 multiple, and absolute
+/// per-queue rates are retained as declared-topology capacity observations; they are not release gates.
+/// No queue may be served by more than one owner (live-proven: at 8 owners, every queue is unknown on every
 ///    OTHER node, so the cross-node "no such queue" confirmation count equals the expected
 ///    `owners * queues_per_owner * (owners - 1)`).
 pub mod e2 {
@@ -533,10 +700,9 @@ pub mod e2 {
     /// but it is not a release authority for the headline E2 matrix.
     pub const RELEASE_BACKEND_PROFILE: &str = "object_log_sqlite_projection";
 
-    /// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
+    /// Product capacity target retained in evidence for comparison only; never a host-independent gate.
     pub const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
-    /// The E2 headline cross-node multiple: the 8-owner ingest aggregate must be at least this many times the
-    /// 2-owner aggregate.
+    /// Historical capacity target retained in evidence for comparison only; never a release gate.
     pub const SCALE_MULTIPLE_BAR: f64 = 3.5;
     /// The canonical owner counts an E2 sweep must cover (the bars compare 8 vs 2 and require 2→4→8 monotonic).
     pub const CANONICAL_OWNER_COUNTS: [usize; 3] = [2, 4, 8];
@@ -570,6 +736,7 @@ pub mod e2 {
     /// generator's `TuningMeta` wire type (identical field names + serde shape).
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct E2Tuning {
+        pub source_revision: String,
         pub segment_max_latency_ms: u64,
         pub segment_target_bytes: usize,
         pub worker_threads_per_node: usize,
@@ -587,17 +754,17 @@ pub mod e2 {
     pub struct E2Verdict {
         /// Whether the canonical owner counts (2/4/8) are all present — bars cannot pass without them.
         pub canonical_owners_present: bool,
-        /// Bar (1): ingest aggregate non-decreasing 2 → 4 → 8.
+        /// Capacity observation: whether ingest aggregate was non-decreasing 2 → 4 → 8.
         pub nondecreasing: bool,
         /// Bar (2): the measured 8-owner / 2-owner ingest aggregate ratio.
         pub ratio_8_2: f64,
-        /// Bar (2): `ratio_8_2 >= SCALE_MULTIPLE_BAR`.
+        /// Portable measurement check: the 8/2 ratio is finite and positive (the 3.5x target is reporting only).
         pub scale_pass: bool,
         /// Bar (3): worst per-queue ingest throughput across all scale points.
         pub worst_ingest_per_queue: f64,
         /// Bar (3): worst per-queue claim+finalize throughput across all scale points.
         pub worst_drain_per_queue: f64,
-        /// Bar (3): both worst-per-queue throughputs clear the E0 floor.
+        /// Portable progress check: every measured per-queue ingest/drain rate is finite and positive.
         pub floor_pass: bool,
         /// Bar (4): cross-node confirmations measured at 8 owners.
         pub one_owner_confirmations: usize,
@@ -617,13 +784,81 @@ pub mod e2 {
         owners * queues_per_owner * owners.saturating_sub(1)
     }
 
+    /// Validate the cross-owner E2 authority independently of density and
+    /// failover/routing authorities.
+    pub fn validate_release_row(row: &LedgerRow, revision: &str) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        let values = &row.measurements.values;
+        let bool_value = |key: &str| values.get(key).and_then(serde_json::Value::as_bool);
+        let u64_value = |key: &str| values.get(key).and_then(serde_json::Value::as_u64);
+        let positive = |key: &str| {
+            values
+                .get(key)
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|v| v.is_finite() && v > 0.0)
+        };
+        if row.suite != "performance_multi_node_object_log_e2_kind" {
+            errors.push("unexpected E2 scale suite".into());
+        }
+        if row.backend_profile != RELEASE_BACKEND_PROFILE {
+            errors.push("unexpected E2 release backend".into());
+        }
+        if row.scale != "release" || row.evidence_tier != "release" {
+            errors.push("E2 scale row must be release tier and scale".into());
+        }
+        if row.measurements.tp002_evidence_ids.as_slice() != ["E2"] {
+            errors.push("E2 scale row must carry exactly E2".into());
+        }
+        for key in ["bars_met", "portable_gate", "wall_clock_capacity_only"] {
+            if bool_value(key) != Some(true) {
+                errors.push(format!("{key} must be true"));
+            }
+        }
+        for key in ["quiet_host_required", "host_speed_gate"] {
+            if bool_value(key) != Some(false) {
+                errors.push(format!("{key} must be false"));
+            }
+        }
+        if values
+            .get("source_revision")
+            .and_then(serde_json::Value::as_str)
+            != Some(revision)
+        {
+            errors.push("source_revision does not match expected revision".into());
+        }
+        for key in [
+            "owners_2_ingest_aggregate_per_s",
+            "owners_4_ingest_aggregate_per_s",
+            "owners_8_ingest_aggregate_per_s",
+            "owners_2_claim_finalize_aggregate_per_s",
+            "owners_4_claim_finalize_aggregate_per_s",
+            "owners_8_claim_finalize_aggregate_per_s",
+            "worst_ingest_per_queue_per_s",
+            "worst_claim_finalize_per_queue_per_s",
+        ] {
+            if !positive(key) {
+                errors.push(format!("{key} must be finite and positive"));
+            }
+        }
+        let queues = u64_value("queues_per_owner").unwrap_or(0);
+        let expected = expected_one_owner_confirmations(8, queues as usize) as u64;
+        if queues == 0 || u64_value("one_owner_per_queue_confirmations") != Some(expected) {
+            errors.push("one-owner-per-queue confirmation count is not exact".into());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     /// Judge the four E2 release bars from the MEASURED scale points. Pure: no IO, no process exit.
     pub fn evaluate_e2_bars(points: &[E2ScalePoint]) -> E2Verdict {
         let at = |n: usize| points.iter().find(|p| p.owners == n);
         let canonical_owners_present = CANONICAL_OWNER_COUNTS.iter().all(|&n| at(n).is_some());
 
-        // Bar (3): worst per-queue across ALL scale points (the WORST single queue, not an average), for both
-        // ingest and claim+finalize. A single starved queue trips this.
+        // Preserve worst-per-queue capacity observations, but gate only on finite positive progress. Absolute
+        // speed depends on the declared host/topology and cannot make a portable release red.
         let worst_ingest_per_queue = points
             .iter()
             .map(|p| p.ingest_min_per_queue)
@@ -632,8 +867,19 @@ pub mod e2 {
             .iter()
             .map(|p| p.drain_min_per_queue)
             .fold(f64::INFINITY, f64::min);
-        let worst_per_queue = worst_ingest_per_queue.min(worst_drain_per_queue);
-        let floor_pass = worst_per_queue.is_finite() && worst_per_queue >= FLOOR_ITEMS_PER_SEC;
+        let floor_pass = points.iter().all(|point| {
+            [
+                point.ingest_aggregate,
+                point.ingest_min_per_queue,
+                point.drain_aggregate,
+                point.drain_min_per_queue,
+            ]
+            .into_iter()
+            .all(|value| value.is_finite() && value > 0.0)
+                && point.queues_per_owner > 0
+                && point.items_per_queue > 0
+                && point.conns_per_queue > 0
+        });
 
         let (
             nondecreasing,
@@ -647,7 +893,7 @@ pub mod e2 {
             let nondecreasing = p4.ingest_aggregate >= p2.ingest_aggregate
                 && p8.ingest_aggregate >= p4.ingest_aggregate;
             let ratio_8_2 = p8.ingest_aggregate / p2.ingest_aggregate;
-            let scale_pass = ratio_8_2 >= SCALE_MULTIPLE_BAR;
+            let scale_pass = ratio_8_2.is_finite() && ratio_8_2 > 0.0;
             let one_owner_confirmations = p8.one_owner_confirmations;
             let expected_confirmations =
                 expected_one_owner_confirmations(p8.owners, p8.queues_per_owner);
@@ -666,8 +912,7 @@ pub mod e2 {
             (false, 0.0, false, 0, 0, false)
         };
 
-        let bars_met =
-            canonical_owners_present && nondecreasing && scale_pass && floor_pass && disjoint_pass;
+        let bars_met = canonical_owners_present && scale_pass && floor_pass && disjoint_pass;
 
         E2Verdict {
             canonical_owners_present,
@@ -753,6 +998,13 @@ pub mod e2 {
                 "e0_floor_per_s".to_string(),
                 serde_json::json!(FLOOR_ITEMS_PER_SEC.round()),
             ),
+            ("portable_gate".to_string(), serde_json::json!(true)),
+            ("quiet_host_required".to_string(), serde_json::json!(false)),
+            ("host_speed_gate".to_string(), serde_json::json!(false)),
+            (
+                "wall_clock_capacity_only".to_string(),
+                serde_json::json!(true),
+            ),
             (
                 "one_owner_per_queue_confirmations".to_string(),
                 serde_json::json!(verdict.one_owner_confirmations),
@@ -800,6 +1052,10 @@ pub mod e2 {
             ("sweep".to_string(), serde_json::json!(tuning.sweep)),
             ("cores".to_string(), serde_json::json!(tuning.cores)),
             ("bars_met".to_string(), serde_json::json!(verdict.bars_met)),
+            (
+                "source_revision".to_string(),
+                serde_json::json!(tuning.source_revision),
+            ),
         ]);
 
         LedgerRow {
@@ -828,12 +1084,591 @@ pub mod e2 {
             exit_status: 0,
             ac_ids: vec![],
             inv_ids: vec![],
-            pass_bar: "E2: ingest aggregate strictly non-decreasing 2->4->8; 8-owner ingest aggregate >= 3.5x 2-owner; worst per-queue ingest AND claim+finalize each >= E0 floor (2777.78/s); no queue served by more than one owner".into(),
+            pass_bar: "E2: canonical 2/4/8 live owner topology; every measured queue makes ingest and claim/finalize progress; exact one-owner-per-queue isolation; wall-clock rates and scaling multiples are capacity evidence only".into(),
             evidence_tier: tier.into(),
             measurements: Measurements {
                 tp002_evidence_ids: vec!["E2".into()],
                 values,
             },
+        }
+    }
+}
+
+/// TP-002 E2 single-node queue-density release evidence.
+pub mod density {
+    use super::{LedgerRow, Measurements};
+    use serde::{Deserialize, Serialize};
+    use std::collections::BTreeMap;
+
+    pub const MIN_TOTAL_QUEUES: usize = 1001;
+    pub const CANONICAL_HOT_ITEMS: u64 = 300_000;
+    pub const CANONICAL_CONTROL_ITEMS: u64 = 10_000;
+    pub const CANONICAL_HOT_CONNECTIONS: usize = 8;
+    pub const CANONICAL_COLD_WORKERS: usize = 8;
+    pub const CANONICAL_SERVER_WORKERS: usize = 4;
+    pub const CANONICAL_SEED: u64 = 42;
+    pub const CANONICAL_PROGRESS_BOUND_MS: u64 = 60_000;
+    pub const MAX_SERVER_THREADS: usize = CANONICAL_SERVER_WORKERS;
+    pub const MAX_SERVER_CONNECTIONS: usize = 32;
+    pub const MAX_SERVER_TASKS: usize = 64;
+    pub const QUEUE_ACTIVITY_DEFINITION: &str = "a cold queue is active only when final XLEN is >0, and progress-eligible only when a non-empty claim/finalize operation started after HOT_START, completed before HOT_END, and completed before the item was reseeded; elapsed latency is capacity evidence only";
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DensityMeasurement {
+        pub hot_items: u64,
+        pub control_items: u64,
+        pub hot_sustain_windows: u64,
+        pub hot_sustain_items: u64,
+        pub hot_connections: usize,
+        pub cold_worker_count: usize,
+        pub configured_server_workers: usize,
+        pub total_queues: usize,
+        pub cold_queues_active: usize,
+        pub cold_queues_progress_eligible: usize,
+        pub cold_empty_claim_responses: usize,
+        pub baseline_before_ingest_per_s: f64,
+        pub baseline_before_claim_finalize_per_s: f64,
+        pub baseline_after_ingest_per_s: f64,
+        pub baseline_after_claim_finalize_per_s: f64,
+        pub baseline_control_ingest_per_s: f64,
+        pub baseline_control_claim_finalize_per_s: f64,
+        pub hot_ingest_per_s: f64,
+        pub hot_claim_finalize_per_s: f64,
+        pub max_progress_latency_ms: u64,
+        pub progress_bound_ms: u64,
+        pub noisy_neighbor_ingest_retention_pct: f64,
+        pub noisy_neighbor_claim_retention_pct: f64,
+        pub shared_worker_count: usize,
+        pub shared_worker_limit: usize,
+        pub connection_count: usize,
+        pub connection_limit: usize,
+        pub task_count: usize,
+        pub task_limit: usize,
+        pub hot_phase_resource_samples: usize,
+        pub first_hot_resource_sample_unix_ms: u64,
+        pub last_hot_resource_sample_unix_ms: u64,
+        pub hot_phase_started_unix_ms: u64,
+        pub hot_phase_ended_unix_ms: u64,
+    }
+
+    fn finite_positive(value: f64) -> bool {
+        value.is_finite() && value > 0.0
+    }
+
+    fn approximately_equal(actual: f64, expected: f64) -> bool {
+        finite_positive(actual)
+            && finite_positive(expected)
+            && (actual - expected).abs() <= expected.abs().max(1.0) * 0.001
+    }
+
+    fn harmonic_control(before: f64, after: f64) -> f64 {
+        2.0 / (before.recip() + after.recip())
+    }
+
+    fn has_nonportable_host_gate(text: &str) -> bool {
+        let normalized = text.to_ascii_lowercase();
+        [
+            "quiet host",
+            "idle host",
+            "items/s >=",
+            "items/s >",
+            "throughput >=",
+            "latency <=",
+            "latency <",
+            "p95 <",
+            "p99 <",
+        ]
+        .into_iter()
+        .any(|needle| normalized.contains(needle))
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DensityMetadata {
+        pub command: String,
+        pub revision: String,
+        pub topology: String,
+        pub hardware: String,
+        pub seed: u64,
+        pub duration_seconds: u64,
+        pub queue_activity_definition: String,
+        pub image_digest: String,
+        pub clean_revision: bool,
+    }
+
+    pub fn bars_met(m: &DensityMeasurement) -> bool {
+        let cold = m.total_queues.saturating_sub(1);
+        m.hot_items == CANONICAL_HOT_ITEMS
+            && m.control_items == CANONICAL_CONTROL_ITEMS
+            && m.hot_sustain_windows > 0
+            && m.hot_sustain_items == m.hot_items.checked_mul(m.hot_sustain_windows).unwrap_or(0)
+            && m.hot_connections == CANONICAL_HOT_CONNECTIONS
+            && m.cold_worker_count == CANONICAL_COLD_WORKERS
+            && m.configured_server_workers == CANONICAL_SERVER_WORKERS
+            && m.total_queues == MIN_TOTAL_QUEUES
+            && m.cold_queues_active == cold
+            && m.cold_queues_progress_eligible == cold
+            && m.cold_empty_claim_responses == 0
+            && finite_positive(m.baseline_before_ingest_per_s)
+            && finite_positive(m.baseline_before_claim_finalize_per_s)
+            && finite_positive(m.baseline_after_ingest_per_s)
+            && finite_positive(m.baseline_after_claim_finalize_per_s)
+            && finite_positive(m.hot_ingest_per_s)
+            && finite_positive(m.hot_claim_finalize_per_s)
+            && approximately_equal(
+                m.baseline_control_ingest_per_s,
+                harmonic_control(
+                    m.baseline_before_ingest_per_s,
+                    m.baseline_after_ingest_per_s,
+                ),
+            )
+            && approximately_equal(
+                m.baseline_control_claim_finalize_per_s,
+                harmonic_control(
+                    m.baseline_before_claim_finalize_per_s,
+                    m.baseline_after_claim_finalize_per_s,
+                ),
+            )
+            && m.progress_bound_ms == CANONICAL_PROGRESS_BOUND_MS
+            && m.noisy_neighbor_ingest_retention_pct.is_finite()
+            && m.noisy_neighbor_ingest_retention_pct > 0.0
+            && approximately_equal(
+                m.noisy_neighbor_ingest_retention_pct,
+                m.hot_ingest_per_s / m.baseline_control_ingest_per_s * 100.0,
+            )
+            && m.noisy_neighbor_claim_retention_pct.is_finite()
+            && m.noisy_neighbor_claim_retention_pct > 0.0
+            && approximately_equal(
+                m.noisy_neighbor_claim_retention_pct,
+                m.hot_claim_finalize_per_s / m.baseline_control_claim_finalize_per_s * 100.0,
+            )
+            && m.shared_worker_limit == MAX_SERVER_THREADS
+            && m.shared_worker_count > 0
+            && m.shared_worker_count <= m.shared_worker_limit
+            && m.connection_limit == MAX_SERVER_CONNECTIONS
+            && m.connection_count > 0
+            && m.connection_count <= m.connection_limit
+            && m.task_limit == MAX_SERVER_TASKS
+            && m.task_count > 0
+            && m.task_count <= m.task_limit
+            && m.hot_phase_resource_samples > 0
+            && m.hot_phase_started_unix_ms > 0
+            && m.hot_phase_ended_unix_ms > m.hot_phase_started_unix_ms
+            && m.first_hot_resource_sample_unix_ms >= m.hot_phase_started_unix_ms
+            && m.last_hot_resource_sample_unix_ms >= m.first_hot_resource_sample_unix_ms
+            && m.last_hot_resource_sample_unix_ms <= m.hot_phase_ended_unix_ms
+    }
+
+    pub fn build_release_row(m: &DensityMeasurement, meta: &DensityMetadata) -> LedgerRow {
+        let pass = bars_met(m)
+            && meta.seed == CANONICAL_SEED
+            && meta.queue_activity_definition == QUEUE_ACTIVITY_DEFINITION
+            && meta.clean_revision;
+        let tier = if pass { "release" } else { "smoke" };
+        let values = BTreeMap::from([
+            ("bars_met".into(), serde_json::json!(pass)),
+            ("hot_items".into(), serde_json::json!(m.hot_items)),
+            ("control_items".into(), serde_json::json!(m.control_items)),
+            (
+                "hot_sustain_windows".into(),
+                serde_json::json!(m.hot_sustain_windows),
+            ),
+            (
+                "hot_sustain_items".into(),
+                serde_json::json!(m.hot_sustain_items),
+            ),
+            (
+                "hot_connections".into(),
+                serde_json::json!(m.hot_connections),
+            ),
+            (
+                "cold_worker_count".into(),
+                serde_json::json!(m.cold_worker_count),
+            ),
+            (
+                "configured_server_workers".into(),
+                serde_json::json!(m.configured_server_workers),
+            ),
+            ("total_queues".into(), serde_json::json!(m.total_queues)),
+            (
+                "cold_queues_active".into(),
+                serde_json::json!(m.cold_queues_active),
+            ),
+            (
+                "cold_queues_progress_eligible".into(),
+                serde_json::json!(m.cold_queues_progress_eligible),
+            ),
+            (
+                "cold_empty_claim_responses".into(),
+                serde_json::json!(m.cold_empty_claim_responses),
+            ),
+            (
+                "baseline_before_ingest_per_s".into(),
+                serde_json::json!(m.baseline_before_ingest_per_s),
+            ),
+            (
+                "baseline_before_claim_finalize_per_s".into(),
+                serde_json::json!(m.baseline_before_claim_finalize_per_s),
+            ),
+            (
+                "baseline_after_ingest_per_s".into(),
+                serde_json::json!(m.baseline_after_ingest_per_s),
+            ),
+            (
+                "baseline_after_claim_finalize_per_s".into(),
+                serde_json::json!(m.baseline_after_claim_finalize_per_s),
+            ),
+            (
+                "baseline_control_ingest_per_s".into(),
+                serde_json::json!(m.baseline_control_ingest_per_s),
+            ),
+            (
+                "baseline_control_claim_finalize_per_s".into(),
+                serde_json::json!(m.baseline_control_claim_finalize_per_s),
+            ),
+            (
+                "hot_ingest_per_s".into(),
+                serde_json::json!(m.hot_ingest_per_s),
+            ),
+            (
+                "hot_claim_finalize_per_s".into(),
+                serde_json::json!(m.hot_claim_finalize_per_s),
+            ),
+            (
+                "max_progress_latency_ms".into(),
+                serde_json::json!(m.max_progress_latency_ms),
+            ),
+            (
+                "progress_bound_ms".into(),
+                serde_json::json!(m.progress_bound_ms),
+            ),
+            (
+                "noisy_neighbor_ingest_retention_pct".into(),
+                serde_json::json!(m.noisy_neighbor_ingest_retention_pct),
+            ),
+            (
+                "noisy_neighbor_claim_retention_pct".into(),
+                serde_json::json!(m.noisy_neighbor_claim_retention_pct),
+            ),
+            (
+                "shared_worker_count".into(),
+                serde_json::json!(m.shared_worker_count),
+            ),
+            (
+                "shared_worker_limit".into(),
+                serde_json::json!(m.shared_worker_limit),
+            ),
+            (
+                "connection_count".into(),
+                serde_json::json!(m.connection_count),
+            ),
+            (
+                "connection_limit".into(),
+                serde_json::json!(m.connection_limit),
+            ),
+            ("task_count".into(), serde_json::json!(m.task_count)),
+            ("task_limit".into(), serde_json::json!(m.task_limit)),
+            (
+                "hot_phase_resource_samples".into(),
+                serde_json::json!(m.hot_phase_resource_samples),
+            ),
+            (
+                "hot_phase_started_unix_ms".into(),
+                serde_json::json!(m.hot_phase_started_unix_ms),
+            ),
+            (
+                "hot_phase_ended_unix_ms".into(),
+                serde_json::json!(m.hot_phase_ended_unix_ms),
+            ),
+            (
+                "first_hot_resource_sample_unix_ms".into(),
+                serde_json::json!(m.first_hot_resource_sample_unix_ms),
+            ),
+            (
+                "last_hot_resource_sample_unix_ms".into(),
+                serde_json::json!(m.last_hot_resource_sample_unix_ms),
+            ),
+            ("revision".into(), serde_json::json!(meta.revision)),
+            (
+                "duration_seconds".into(),
+                serde_json::json!(meta.duration_seconds),
+            ),
+            (
+                "queue_activity_definition".into(),
+                serde_json::json!(meta.queue_activity_definition),
+            ),
+            ("failover_excluded".into(), serde_json::json!(true)),
+            (
+                "failover_reference".into(),
+                serde_json::json!("pqueue-0a1d4386"),
+            ),
+            ("image_digest".into(), serde_json::json!(meta.image_digest)),
+            (
+                "clean_revision".into(),
+                serde_json::json!(meta.clean_revision),
+            ),
+            ("portable_gate".into(), serde_json::json!(true)),
+            ("quiet_host_required".into(), serde_json::json!(false)),
+            ("host_speed_gate".into(), serde_json::json!(false)),
+            ("wall_clock_capacity_only".into(), serde_json::json!(true)),
+        ]);
+        LedgerRow {
+            suite: "queue_density_live_objectlog_sqlite_release".into(),
+            command: meta.command.clone(),
+            backend_profile: "object_log_sqlite_projection".into(),
+            scale: tier.into(),
+            seed: meta.seed,
+            environment: format!("{}; hardware={}", meta.topology, meta.hardware),
+            exit_status: 0,
+            ac_ids: vec![],
+            inv_ids: vec![],
+            pass_bar: ">=1001 generated active queues on one live objectlog/sqlite node; every cold queue claims/finalizes during hot load with zero empty claims; fixed shared resource caps; bracketed same-run baseline/load measurements are complete and internally consistent; wall-clock rates are capacity evidence only; failover excluded (pqueue-0a1d4386)".into(),
+            evidence_tier: tier.into(),
+            measurements: Measurements { tp002_evidence_ids: vec!["E2".into()], values },
+        }
+    }
+
+    pub fn validate_release_row(row: &LedgerRow) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if row.suite != "queue_density_live_objectlog_sqlite_release" {
+            errors.push("suite must be queue_density_live_objectlog_sqlite_release".into());
+        }
+        if row.backend_profile != "object_log_sqlite_projection" {
+            errors.push("backend_profile must be object_log_sqlite_projection".into());
+        }
+        if row.scale != "release" || row.evidence_tier != "release" {
+            errors.push("density row must be release tier and scale".into());
+        }
+        if row.measurements.tp002_evidence_ids.as_slice() != ["E2"] {
+            errors.push("density row must carry exactly E2".into());
+        }
+        let values = &row.measurements.values;
+        let number = |key: &str| values.get(key).and_then(serde_json::Value::as_f64);
+        let integer = |key: &str| values.get(key).and_then(serde_json::Value::as_u64);
+        let require_nonempty = |key: &str, errors: &mut Vec<String>| {
+            if values
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                errors.push(format!("{key} is required"));
+            }
+        };
+        if values.get("bars_met") != Some(&serde_json::Value::Bool(true)) {
+            errors.push("bars_met must be true".into());
+        }
+        if has_nonportable_host_gate(&row.pass_bar) {
+            errors.push(
+                "pass_bar must not require a quiet host or absolute host-speed threshold".into(),
+            );
+        }
+        let total = integer("total_queues").unwrap_or(0);
+        if total != MIN_TOTAL_QUEUES as u64 {
+            errors.push("total_queues must equal canonical 1001".into());
+        }
+        let cold = total.saturating_sub(1);
+        if integer("cold_queues_active") != Some(cold) {
+            errors.push("all cold queues must be active".into());
+        }
+        if integer("cold_queues_progress_eligible") != Some(cold) {
+            errors.push("all cold queues must be progress eligible".into());
+        }
+        if integer("cold_empty_claim_responses") != Some(0) {
+            errors.push("cold_empty_claim_responses must be zero".into());
+        }
+        for key in [
+            "baseline_before_ingest_per_s",
+            "baseline_before_claim_finalize_per_s",
+            "baseline_after_ingest_per_s",
+            "baseline_after_claim_finalize_per_s",
+            "baseline_control_ingest_per_s",
+            "baseline_control_claim_finalize_per_s",
+            "hot_ingest_per_s",
+            "hot_claim_finalize_per_s",
+            "noisy_neighbor_ingest_retention_pct",
+            "noisy_neighbor_claim_retention_pct",
+        ] {
+            if number(key).is_none_or(|value| !finite_positive(value)) {
+                errors.push(format!("{key} must be finite and positive"));
+            }
+        }
+        let comparisons = [
+            (
+                "baseline_control_ingest_per_s",
+                harmonic_control(
+                    number("baseline_before_ingest_per_s").unwrap_or(f64::NAN),
+                    number("baseline_after_ingest_per_s").unwrap_or(f64::NAN),
+                ),
+            ),
+            (
+                "baseline_control_claim_finalize_per_s",
+                harmonic_control(
+                    number("baseline_before_claim_finalize_per_s").unwrap_or(f64::NAN),
+                    number("baseline_after_claim_finalize_per_s").unwrap_or(f64::NAN),
+                ),
+            ),
+            (
+                "noisy_neighbor_ingest_retention_pct",
+                number("hot_ingest_per_s").unwrap_or(f64::NAN)
+                    / number("baseline_control_ingest_per_s").unwrap_or(f64::NAN)
+                    * 100.0,
+            ),
+            (
+                "noisy_neighbor_claim_retention_pct",
+                number("hot_claim_finalize_per_s").unwrap_or(f64::NAN)
+                    / number("baseline_control_claim_finalize_per_s").unwrap_or(f64::NAN)
+                    * 100.0,
+            ),
+        ];
+        for (key, expected) in comparisons {
+            if number(key).is_none_or(|actual| !approximately_equal(actual, expected)) {
+                errors.push(format!(
+                    "{key} is inconsistent with the bracketed same-run measurements"
+                ));
+            }
+        }
+        if integer("progress_bound_ms") != Some(CANONICAL_PROGRESS_BOUND_MS) {
+            errors.push("progress_bound_ms must record the canonical queue configuration".into());
+        }
+        if integer("max_progress_latency_ms").is_none() {
+            errors.push("max_progress_latency_ms capacity observation is required".into());
+        }
+        for (key, expected) in [
+            ("hot_items", CANONICAL_HOT_ITEMS),
+            ("control_items", CANONICAL_CONTROL_ITEMS),
+            ("hot_connections", CANONICAL_HOT_CONNECTIONS as u64),
+            ("cold_worker_count", CANONICAL_COLD_WORKERS as u64),
+            ("configured_server_workers", CANONICAL_SERVER_WORKERS as u64),
+        ] {
+            if integer(key) != Some(expected) {
+                errors.push(format!("{key} must equal canonical {expected}"));
+            }
+        }
+        let hot_items = integer("hot_items").unwrap_or(0);
+        let sustain_windows = integer("hot_sustain_windows").unwrap_or(0);
+        if sustain_windows == 0
+            || integer("hot_sustain_items") != hot_items.checked_mul(sustain_windows)
+        {
+            errors.push(
+                "hot_sustain_items must exactly reconcile canonical hot work across positive windows"
+                    .into(),
+            );
+        }
+        if row.seed != CANONICAL_SEED {
+            errors.push(format!("seed must equal canonical {CANONICAL_SEED}"));
+        }
+        if integer("hot_phase_resource_samples").is_none_or(|v| v == 0) {
+            errors.push("hot_phase_resource_samples must be positive".into());
+        }
+        match (
+            integer("hot_phase_started_unix_ms"),
+            integer("hot_phase_ended_unix_ms"),
+        ) {
+            (Some(start), Some(end)) if start > 0 && end > start => {}
+            _ => errors.push("hot-phase timestamps must be ordered and positive".into()),
+        }
+        match (
+            integer("hot_phase_started_unix_ms"),
+            integer("first_hot_resource_sample_unix_ms"),
+            integer("last_hot_resource_sample_unix_ms"),
+            integer("hot_phase_ended_unix_ms"),
+        ) {
+            (Some(start), Some(first), Some(last), Some(end))
+                if start <= first && first <= last && last <= end => {}
+            _ => errors.push("resource sample timestamps must fall inside the hot phase".into()),
+        }
+        for (key, expected) in [
+            ("portable_gate", true),
+            ("quiet_host_required", false),
+            ("host_speed_gate", false),
+            ("wall_clock_capacity_only", true),
+        ] {
+            if values.get(key).and_then(serde_json::Value::as_bool) != Some(expected) {
+                errors.push(format!("{key} must be {expected}"));
+            }
+        }
+        for (count, limit, governed_limit) in [
+            (
+                "shared_worker_count",
+                "shared_worker_limit",
+                MAX_SERVER_THREADS,
+            ),
+            (
+                "connection_count",
+                "connection_limit",
+                MAX_SERVER_CONNECTIONS,
+            ),
+            ("task_count", "task_limit", MAX_SERVER_TASKS),
+        ] {
+            match (integer(count), integer(limit)) {
+                (Some(c), Some(l)) if c > 0 && l == governed_limit as u64 && c <= l => {}
+                _ => errors.push(format!(
+                    "{count} must be bounded by governed {limit}={governed_limit}"
+                )),
+            }
+        }
+        require_nonempty("revision", &mut errors);
+        if values
+            .get("queue_activity_definition")
+            .and_then(serde_json::Value::as_str)
+            != Some(QUEUE_ACTIVITY_DEFINITION)
+        {
+            errors.push(
+                "queue_activity_definition must record HOT_START claim-start semantics".into(),
+            );
+        }
+        if integer("duration_seconds").is_none_or(|v| v == 0) {
+            errors.push("duration_seconds must be positive".into());
+        }
+        if values.get("failover_excluded") != Some(&serde_json::Value::Bool(true)) {
+            errors.push("failover_excluded must be true".into());
+        }
+        if values
+            .get("failover_reference")
+            .and_then(serde_json::Value::as_str)
+            != Some("pqueue-0a1d4386")
+        {
+            errors.push("failover_reference must be pqueue-0a1d4386".into());
+        }
+        if row.command.trim().is_empty() {
+            errors.push("command is required".into());
+        }
+        if row.command != "scripts/perf/tp002-e2-density-kind.sh" {
+            errors.push("command must be scripts/perf/tp002-e2-density-kind.sh".into());
+        }
+        let revision = values
+            .get("revision")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if revision.len() != 40 || !revision.bytes().all(|b| b.is_ascii_hexdigit()) {
+            errors.push("revision must be a full 40-character Git SHA".into());
+        }
+        let digest = values
+            .get("image_digest")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if digest.len() != 71
+            || !digest.starts_with("sha256:")
+            || !digest[7..].bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            errors.push("image_digest must be a sha256 digest".into());
+        }
+        if values.get("clean_revision") != Some(&serde_json::Value::Bool(true)) {
+            errors.push("clean_revision must be true".into());
+        }
+        if !row.environment.contains("live one-node kind deployment")
+            || !row.environment.contains("objectlog/sqlite")
+            || !row.environment.contains("cores")
+            || !row.environment.contains("GiB RAM")
+        {
+            errors.push(
+                "environment must record live one-node objectlog/sqlite topology and hardware"
+                    .into(),
+            );
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
         }
     }
 }

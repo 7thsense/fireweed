@@ -400,7 +400,12 @@ impl ProjectionStore for SqliteRelational {
 
     fn render_claimed(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>> {
         let g = self.lock();
-        render_claimed(&g.conn, shard, ids, |id| g.live_tokens.get(id).cloned())
+        render_claimed(&g.conn, shard, ids, |id| {
+            g.live_tokens
+                .get(shard)
+                .and_then(|tokens| tokens.get(id))
+                .cloned()
+        })
     }
 
     fn lookup_by_key(

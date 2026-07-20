@@ -946,6 +946,9 @@ pub struct Config {
     /// Tokio worker-thread cap (the typed form of `PQUEUE_WORKER_THREADS`). `None` = one worker per core.
     /// Consumed by the bin when building the runtime, not by [`start`].
     pub worker_threads: Option<usize>,
+    /// Optional path for the service binary's atomic Tokio worker/live-task gauge snapshot. `None`
+    /// disables the reporter. The env-config form requires an absolute, non-empty path.
+    pub runtime_resource_metrics_path: Option<std::path::PathBuf>,
     /// Per-queue bounds on `objectlog/hybrid-async` async SQLite apply debt (bead pqueue-6da52695): the
     /// hard lag/bytes/depth/age limits and the apply-retry poison threshold that drive backpressure and
     /// fail-closed poison (TD-004 §"Async apply debt, backpressure, and poison thresholds"). The typed form
@@ -990,6 +993,7 @@ impl Config {
             debug_segments: false,
             objectlog_byte_limits: ObjectLogByteLimits::default(),
             worker_threads: None,
+            runtime_resource_metrics_path: None,
             hybrid_async: HybridAsyncThresholds::default(),
             deferred_flush_chunk: pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
             change_record_sink: ChangeRecordSinkConfig::default(),

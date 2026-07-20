@@ -767,6 +767,24 @@ impl Config {
                 .get("PQUEUE_WORKER_THREADS")
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n > 0),
+            runtime_resource_metrics_path: match env.get("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH") {
+                None => None,
+                Some(value) => {
+                    let value = value.trim();
+                    if value.is_empty() {
+                        return Err(ConfigError::new(
+                            "PQUEUE_RUNTIME_RESOURCE_METRICS_PATH must not be empty",
+                        ));
+                    }
+                    let path = PathBuf::from(value);
+                    if !path.is_absolute() {
+                        return Err(ConfigError::new(
+                            "PQUEUE_RUNTIME_RESOURCE_METRICS_PATH must be absolute",
+                        ));
+                    }
+                    Some(path)
+                }
+            },
             hybrid_async: hybrid_async_thresholds(env)?,
             deferred_flush_chunk: parse_usize(
                 env,
@@ -808,6 +826,7 @@ mod tests {
         assert_eq!(config.recovery_max_tail, DEFAULT_RECOVERY_MAX_TAIL);
         assert!(!config.debug_segments);
         assert_eq!(config.worker_threads, None);
+        assert_eq!(config.runtime_resource_metrics_path, None);
         assert_eq!(config.queues.len(), 1, "default bootstrap is t1:q1");
         assert_eq!(config.queues[0].tenant_id.as_str(), "t1");
         assert_eq!(config.queues[0].queue_id.as_str(), "q1");
@@ -821,6 +840,10 @@ mod tests {
             ("PQUEUE_NODE_ID", "7"),
             ("PQUEUE_LISTEN_ADDR", "127.0.0.1:6390"),
             ("PQUEUE_WORKER_THREADS", "4"),
+            (
+                "PQUEUE_RUNTIME_RESOURCE_METRICS_PATH",
+                "/tmp/pqueue-runtime-resources.json",
+            ),
             ("PQUEUE_RECLAIM_INTERVAL_MS", "250"),
             ("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", "42"),
             ("PQUEUE_DEBUG_SEGMENTS", "1"),
@@ -835,6 +858,10 @@ mod tests {
         assert_eq!(config.node_id, 7);
         assert_eq!(config.listen, "127.0.0.1:6390");
         assert_eq!(config.worker_threads, Some(4));
+        assert_eq!(
+            config.runtime_resource_metrics_path,
+            Some(PathBuf::from("/tmp/pqueue-runtime-resources.json"))
+        );
         assert_eq!(config.reclaim_interval, Duration::from_millis(250));
         assert_eq!(config.recovery_max_tail, 42);
         assert!(config.debug_segments);
@@ -891,6 +918,23 @@ mod tests {
         assert_eq!(explicit.queues.len(), 1);
         assert_eq!(explicit.queues[0].tenant_id.as_str(), "override");
         assert_eq!(explicit.queues[0].queue_id.as_str(), "only");
+    }
+
+    #[test]
+    fn runtime_resource_metrics_path_rejects_empty_and_relative_values() {
+        for value in ["", "   ", "relative/resources.json"] {
+            let error =
+                match Config::from_env(&map(&[("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH", value)])) {
+                    Ok(_) => panic!("invalid runtime resource metrics path was accepted"),
+                    Err(error) => error,
+                };
+            assert!(
+                error
+                    .to_string()
+                    .contains("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

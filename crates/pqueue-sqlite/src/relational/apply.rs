@@ -31,7 +31,8 @@ pub(crate) struct Inner {
     pub(crate) claim_scan_hints: HashMap<QueueKey, i64>,
     pub(crate) claim_scan_default_fifo: HashMap<QueueKey, bool>,
     /// Ephemeral live lease tokens (cleartext is never persisted; only the hash is). Lost on reopen.
-    pub(crate) live_tokens: HashMap<ItemId, LeaseToken>,
+    /// Item ids are queue-local, so the queue key is part of the identity here as it is in SQLite.
+    pub(crate) live_tokens: HashMap<QueueKey, HashMap<ItemId, LeaseToken>>,
 }
 
 impl Inner {
@@ -613,18 +614,26 @@ pub(crate) fn reap_terminal_items_sql(
 /// ONLY after the transaction commits — so a commit failure can never leave the RAM tokens ahead of the
 /// durable `pqueue_items` state (F4).
 pub(crate) enum TokenOp {
-    Set(ItemId, LeaseToken),
-    Clear(ItemId),
+    Set(QueueKey, ItemId, LeaseToken),
+    Clear(QueueKey, ItemId),
 }
 
-pub(crate) fn apply_token_ops(live_tokens: &mut HashMap<ItemId, LeaseToken>, ops: Vec<TokenOp>) {
+pub(crate) fn apply_token_ops(
+    live_tokens: &mut HashMap<QueueKey, HashMap<ItemId, LeaseToken>>,
+    ops: Vec<TokenOp>,
+) {
     for op in ops {
         match op {
-            TokenOp::Set(id, token) => {
-                live_tokens.insert(id, token);
+            TokenOp::Set(shard, id, token) => {
+                live_tokens.entry(shard).or_default().insert(id, token);
             }
-            TokenOp::Clear(id) => {
-                live_tokens.remove(&id);
+            TokenOp::Clear(shard, id) => {
+                if let Some(tokens) = live_tokens.get_mut(&shard) {
+                    tokens.remove(&id);
+                    if tokens.is_empty() {
+                        live_tokens.remove(&shard);
+                    }
+                }
             }
         }
     }
@@ -886,7 +895,7 @@ pub(crate) fn apply_command_sql(
                 )?;
             }
             for id in &c.item_ids {
-                token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
+                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
             if grouped_shards.contains(shard) {
                 for g in groups_of(tx, shard, &c.item_ids)? {
@@ -921,7 +930,7 @@ pub(crate) fn apply_command_sql(
                 params![t, q, c.cohort_id.as_str(), hash],
             ))?;
             for id in &c.item_ids {
-                token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
+                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
             if grouped_shards.contains(shard) {
                 for g in groups_of(tx, shard, &c.item_ids)? {
@@ -993,7 +1002,7 @@ pub(crate) fn apply_command_sql(
                 &ids,
             )?;
             for id in &c.item_ids {
-                token_ops.push(TokenOp::Set(*id, c.lease_token.clone()));
+                token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
             Ok(())
         }
@@ -1171,7 +1180,7 @@ pub(crate) fn apply_command_sql(
                 {
                     backoff.entry(ts_nanos(nb)).or_default().push(id.clone());
                 }
-                token_ops.push(TokenOp::Clear(o.item_id));
+                token_ops.push(TokenOp::Clear(shard.clone(), o.item_id));
             }
             const FINALIZE_SET: &str = "UPDATE pqueue_items SET lifecycle_state=?, lease_token_hash=NULL, \
                  lease_expires_at=NULL, worker_id=NULL, fenced=0, item_version=item_version+1, \
@@ -1431,7 +1440,7 @@ pub(crate) fn apply_command_sql(
                 &ids,
             )?;
             for id in &c.item_ids {
-                token_ops.push(TokenOp::Clear(*id));
+                token_ops.push(TokenOp::Clear(shard.clone(), *id));
             }
             if grouped_shards.contains(shard) {
                 for g in groups_of(tx, shard, &c.item_ids)? {
@@ -1475,7 +1484,7 @@ pub(crate) fn apply_command_sql(
                 &id_strs,
             )?;
             for id in &ids {
-                token_ops.push(TokenOp::Clear(*id));
+                token_ops.push(TokenOp::Clear(shard.clone(), *id));
             }
             st(tx.execute(
                 "UPDATE pqueue_cohorts SET state='terminal', expire_command_pos=?4, \
@@ -1623,7 +1632,7 @@ pub(crate) fn apply_command_sql(
             // ADR-011: drop the purged items' typed secondary index rows.
             delete_typed_index_rows(tx, &t, &q, &id_strs)?;
             for id in &c.item_ids {
-                token_ops.push(TokenOp::Clear(*id));
+                token_ops.push(TokenOp::Clear(shard.clone(), *id));
             }
             for g in &groups {
                 refresh_group_summary(tx, shard, g, now)?;

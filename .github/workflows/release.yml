@@ -53,10 +53,6 @@ jobs:
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
 
-      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
-      - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
-      - run: cargo install --locked cargo-llvm-cov --version 0.8.2
-
       - name: Resolve release tag
         id: release
         shell: bash
@@ -88,6 +84,29 @@ jobs:
             git fetch origin "refs/tags/v${workspace_version}:refs/tags/v${workspace_version}"
             test "${GITHUB_SHA}" = "$(git rev-list -n 1 "v${workspace_version}")"
           fi
+
+      - name: Acquire and preflight exact-revision governed evidence
+        env:
+          PQUEUE_GOVERNED_EVIDENCE_BASE_URL: ${{ vars.PQUEUE_GOVERNED_EVIDENCE_BASE_URL }}
+        run: |
+          test -n "$PQUEUE_GOVERNED_EVIDENCE_BASE_URL"
+          evidence_url="${PQUEUE_GOVERNED_EVIDENCE_BASE_URL%/}/${GITHUB_SHA}.tar.gz"
+          mkdir -p target
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "$evidence_url" -o target/tp002-release.tar.gz
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "${evidence_url}.sha256" -o target/tp002-release.tar.gz.sha256
+          expected_sha="$(awk 'NR == 1 { print $1 }' target/tp002-release.tar.gz.sha256)"
+          [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]
+          echo "$expected_sha  target/tp002-release.tar.gz" | sha256sum -c -
+          test -z "$(tar -tzf target/tp002-release.tar.gz | grep -E '(^/|(^|/)\.\.(/|$))')"
+          tar -xzf target/tp002-release.tar.gz -C target
+          test -s target/tp002-release/composite-contract.json
+          test -s target/tp002-release/attestation.json
+
+      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt --component llvm-tools-preview
+      - run: rustup toolchain install nightly --profile minimal --component llvm-tools-preview
+      - run: cargo install --locked cargo-llvm-cov --version 0.8.2
 
       - name: Exact Postgres TP-003 storage-pair proof
         env:
@@ -128,19 +147,18 @@ jobs:
         env:
           PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
         run: |
-          test -s target/tp002-release/manifest.json
-          test -s target/tp002-release/e3-contract.json
-          test -s target/tp002-release/attestation.json
+          bash scripts/ci/verify-governed-release-composite.sh \
+            --contract target/tp002-release/composite-contract.json \
+            --expected-revision "$GITHUB_SHA"
           bash scripts/ci/release-gate.sh
 
       - name: Bind governed TP-002 evidence to exact release tag
         shell: bash
         run: |
-          bash scripts/ci/governed-release-evidence-gate.sh \
-            --mode exact-tag \
-            --manifest target/tp002-release/manifest.json \
-            --e3-contract target/tp002-release/e3-contract.json \
-            --attestation target/tp002-release/attestation.json \
+          cargo +1.92.0 run -q -p pqueue-release \
+            --bin pqueue-verify-evidence-attestation -- \
+            --manifest target/tp002-release/attestation.json \
+            --repo-root . \
             --tag "${{ steps.release.outputs.tag }}" \
             --commit "${GITHUB_SHA}"
 

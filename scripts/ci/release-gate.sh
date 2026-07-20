@@ -30,8 +30,7 @@ CARGO="rustup run 1.92.0 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TP002_RELEASE_DIR="${PQUEUE_TP002_RELEASE_DIR:-${REPO_ROOT}/target/tp002-release}"
-TP002_RELEASE_MANIFEST="${TP002_RELEASE_DIR}/manifest.json"
-TP002_E3_CONTRACT="${TP002_RELEASE_DIR}/e3-contract.json"
+TP002_COMPOSITE_CONTRACT="${TP002_RELEASE_DIR}/composite-contract.json"
 if (($# != 0)); then
     printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
     echo "usage: bash scripts/ci/release-gate.sh" >&2
@@ -43,7 +42,7 @@ SOURCE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
     echo "release-gate.sh: checked-out HEAD is not a full lowercase Git revision" >&2
     exit 1
 }
-for required in "${TP002_RELEASE_MANIFEST}" "${TP002_E3_CONTRACT}"; do
+for required in "${TP002_COMPOSITE_CONTRACT}"; do
     [[ -s "${required}" ]] || {
         echo "release-gate.sh: required exact-revision evidence is missing or empty: ${required}" >&2
         exit 1
@@ -88,12 +87,9 @@ ${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
     --strict \
     --require-smoke-evidence E2,E3
 
-echo "--- governed TP-002 E0-E3 semantic + portable E3 contract ---"
-bash "${SCRIPT_DIR}/governed-release-evidence-gate.sh" \
-    --mode semantic \
-    --manifest "${TP002_RELEASE_MANIFEST}" \
-    --e3-contract "${TP002_E3_CONTRACT}" \
-    --expected-revision "${SOURCE_REVISION}"
+echo "--- governed TP-002 composite semantic contract ---"
+bash "${SCRIPT_DIR}/verify-governed-release-composite.sh" \
+    --contract "${TP002_COMPOSITE_CONTRACT}" --expected-revision "${SOURCE_REVISION}"
 
 echo "--- live coverage gate ---"
 mkdir -p "${REPO_ROOT}/target/coverage"
