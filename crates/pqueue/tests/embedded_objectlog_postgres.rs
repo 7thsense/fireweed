@@ -10,10 +10,10 @@ use postgres::{Client, NoTls};
 use pqueue::{
     Bytes, ClaimRef, CommitEntry, CommitRequest, EligibilityPolicy, EmbeddedDurabilityConfig,
     EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryPolicy,
-    EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig, EntryOutcome, FinalizeKind,
-    InstanceFence, NewItem, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueKey, RecurrencePolicy,
-    RequestId, RetryPolicy, SideRecord, TenantId,
+    EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig, EngineError, EntryOutcome,
+    FinalizeKind, InstanceFence, NewItem, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueKey,
+    RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SideRecord, TenantId,
 };
 use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
@@ -138,6 +138,22 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     let key = queue();
 
     block_on(pq.create_queue(definition())).unwrap();
+    let query_caps = pq.hot_projection_capabilities(&key);
+    assert_eq!(query_caps, Default::default());
+    assert!(query_caps.paired_capabilities_consistent());
+    assert!(matches!(
+        block_on(pq.range_scan(
+            &key,
+            RangeScanRequest {
+                index: None,
+                filters: vec![],
+                order_by: vec![],
+                page_size: 1,
+                cursor: None,
+            }
+        )),
+        Err(EngineError::Unavailable)
+    ));
     let first_request = RequestId::new("embedded-request-1").unwrap();
     let first = block_on(pq.push_with_request_id(&key, first_request.clone(), item(10))).unwrap();
     let second = block_on(pq.push(&key, item(20))).unwrap();

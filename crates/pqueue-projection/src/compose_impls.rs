@@ -18,7 +18,7 @@ use bytes::Bytes;
 use pqueue_core::{
     BoundedMutationRequest, BoundedMutationResponse, DeclaredBucketSegmentRequest,
     DeclaredBucketSegmentResponse, GroupedAggregateRequest, GroupedAggregateResponse,
-    MetricsByQueryRequest, RangeScanRequest, RangeScanResponse,
+    MetricsByQueryRequest, QueryCapabilityFlags, RangeScanRequest, RangeScanResponse,
 };
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
@@ -207,6 +207,17 @@ impl InMemoryProjection {
 }
 
 impl ProjectionStore for InMemoryProjection {
+    fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
+        QueryCapabilityFlags {
+            range_scan: true,
+            grouped_aggregate: true,
+            declared_bucket_segment: true,
+            bounded_mutation: true,
+            claim_by_query: true,
+            side_record_query: false,
+        }
+    }
+
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         self.projections.entry(key).or_insert_with(|| {

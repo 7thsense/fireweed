@@ -5,7 +5,7 @@ use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse,
     GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, MetricsByQueryRequest,
-    QueueDefinition, UtcTimestamp,
+    QueryCapabilityFlags, QueueDefinition, RangeScanRequest, RangeScanResponse, UtcTimestamp,
 };
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{AsOfProjectionStore, ProjectionSnapshot, ProjectionStore};
@@ -610,6 +610,14 @@ impl HybridProjectionStore {
 }
 
 impl ProjectionStore for HybridProjectionStore {
+    fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
+        if self.poisoned.is_some() {
+            QueryCapabilityFlags::default()
+        } else {
+            self.memory.hot_projection_capabilities()
+        }
+    }
+
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         self.check_healthy()?;
         self.ensure_async_monitor(&Self::shard_for(definition));
@@ -1205,6 +1213,15 @@ impl ProjectionStore for HybridProjectionStore {
     ) -> EngineResult<Vec<Option<LiveItemView>>> {
         self.require_hydrated(shard)?;
         self.memory.live_items(shard, keys)
+    }
+
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> EngineResult<RangeScanResponse> {
+        self.require_hydrated(shard)?;
+        self.memory.range_scan(shard, request)
     }
 
     fn grouped_aggregate(

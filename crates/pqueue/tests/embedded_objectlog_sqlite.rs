@@ -3,19 +3,21 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::executor::block_on;
 use pqueue::{
-    Bytes, ClaimRef, CommitCapabilities, CommitEntry, CommitRequest, CompoundIndexDef,
-    CompoundIndexField, EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig,
-    EmbeddedProjectionConfig, EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret,
-    EmbeddedSegmentConfig, EngineError, EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration,
-    IndexType, InstanceFence, LeaseToken, MetricsByQueryRequest, MultiClaimCommitEntry,
-    MultiClaimCommitRequest, NewItem, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryFilter, QueueDefinition, QueueId,
-    QueueIndex, QueueKey, RecurrencePolicy, RequestId, RetryPolicy, SideRecord, TenantId,
-    TypedValue, UtcTimestamp,
+    Bytes, ClaimByQueryAt, ClaimByQueryRequest, ClaimRef, Clock, CommitCapabilities, CommitEntry,
+    CommitRequest, CompoundIndexDef, CompoundIndexField, EligibilityPolicy,
+    EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
+    EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
+    EngineError, EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration, IndexType, InstanceFence,
+    LeaseToken, MetricsByQueryRequest, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem,
+    OrderField, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey,
+    RecurrencePolicy, RequestId, RetryPolicy, SideRecord, SortDirection, TenantId, TypedValue,
+    UtcTimestamp,
 };
 use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
@@ -71,6 +73,28 @@ fn item(priority: i64) -> NewItem {
         priority: Some(PriorityValue::Int64(priority)),
         payload: Some(format!("payload-{priority}").into()),
         ..NewItem::default()
+    }
+}
+
+struct PanicClock(AtomicBool);
+
+impl PanicClock {
+    fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    fn arm(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Clock for PanicClock {
+    fn now(&self) -> UtcTimestamp {
+        assert!(
+            !self.0.load(Ordering::SeqCst),
+            "explicit query-claim times must not consult the injected clock"
+        );
+        UtcTimestamp::new(0, 0).unwrap()
     }
 }
 
@@ -670,6 +694,126 @@ fn public_objectlog_sqlite_filtered_metrics_survive_delete_and_rehydrate() {
         expected
     );
     assert_eq!(block_on(pq.metrics(&key)).unwrap(), ordinary_before);
+    drop(pq);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_filtered_claim_survives_delete_and_rehydrate() {
+    let fixture = std::env::temp_dir().join(format!("pqueue-public-filtered-claim-{}", nonce()));
+    let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
+    let clock = Arc::new(PanicClock::new());
+    let pq = pqueue::open_embedded_sqlite(config, clock.clone()).unwrap();
+    let key = queue("filtered-claim-queue");
+    let mut queue_definition = definition("filtered-claim-queue");
+    queue_definition.typed_indexes = vec![QueueIndex {
+        name: "by_record_kind_scheduled_at".to_string(),
+        declaration: IndexDeclaration::Compound(CompoundIndexDef {
+            fields: vec![
+                CompoundIndexField {
+                    field: "record_kind".to_string(),
+                    index_type: IndexType::String,
+                },
+                CompoundIndexField {
+                    field: "scheduled_at".to_string(),
+                    index_type: IndexType::Datetime,
+                },
+            ],
+            unique: false,
+        }),
+    }];
+    block_on(pq.create_queue(queue_definition)).unwrap();
+
+    let caps = pq.hot_projection_capabilities(&key);
+    assert!(caps.paired_capabilities_consistent());
+    assert!(caps.range_scan);
+    assert!(caps.claim_by_query);
+
+    let records = [
+        ("transition", "1970-01-01T00:01:40Z", 100),
+        ("effect", "1970-01-01T00:01:41Z", 100),
+        ("await", "1970-01-01T00:01:42Z", 100),
+        ("result", "1970-01-01T00:01:43Z", 100),
+        ("transition", "1970-01-01T00:03:20Z", 200),
+    ];
+    let ids = block_on(
+        pq.push_batch(
+            &key,
+            records
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(offset, (record_kind, scheduled_at, not_before))| NewItem {
+                        priority: Some(PriorityValue::Int64(offset as i64)),
+                        not_before: Some(UtcTimestamp::new(not_before, 0).unwrap()),
+                        entity: Some(serde_json::json!({
+                            "record_kind": record_kind,
+                            "scheduled_at": scheduled_at,
+                        })),
+                        ..NewItem::default()
+                    },
+                )
+                .collect(),
+        ),
+    )
+    .unwrap();
+    clock.arm();
+
+    let request = ClaimByQueryRequest {
+        index: Some("by_record_kind_scheduled_at".to_string()),
+        filters: vec![QueryFilter {
+            field: "record_kind".to_string(),
+            op: FilterOp::Eq,
+            value: TypedValue::String("transition".to_string()),
+        }],
+        order_by: OrderField {
+            field: "scheduled_at".to_string(),
+            direction: SortDirection::Ascending,
+        },
+        max_items: 1,
+        lease_duration_ms: 30_000,
+        worker_id: pqueue_core::WorkerId::new("transition-worker").unwrap(),
+        request_id: Some(RequestId::new("transition-query-1").unwrap()),
+    };
+    let first = block_on(
+        pq.claim_by_query_at(
+            &key,
+            request.clone(),
+            ClaimByQueryAt::new()
+                .eligibility_time(UtcTimestamp::new(150, 0).unwrap())
+                .lease_time(UtcTimestamp::new(1_000, 0).unwrap()),
+        ),
+    )
+    .unwrap();
+    assert_eq!(first.items.len(), 1);
+    assert_eq!(first.items[0].item_id, ids[0]);
+    assert_eq!(
+        first.items[0].lease_expires_at,
+        UtcTimestamp::new(1_030, 0).unwrap()
+    );
+    assert!(block_on(pq.claimed(&key, &ids[1..4])).unwrap().is_empty());
+
+    block_on(pq.delete_projection()).unwrap();
+    block_on(pq.rehydrate_projection()).unwrap();
+    block_on(pq.verify_projection()).unwrap();
+
+    let second = block_on(
+        pq.claim_by_query_at(
+            &key,
+            ClaimByQueryRequest {
+                request_id: Some(RequestId::new("transition-query-2").unwrap()),
+                ..request
+            },
+            ClaimByQueryAt::new()
+                .eligibility_time(UtcTimestamp::new(250, 0).unwrap())
+                .lease_time(UtcTimestamp::new(1_001, 0).unwrap()),
+        ),
+    )
+    .unwrap();
+    assert_eq!(second.items.len(), 1);
+    assert_eq!(second.items[0].item_id, ids[4]);
+    assert!(block_on(pq.claimed(&key, &ids[1..4])).unwrap().is_empty());
+
     drop(pq);
     let _ = fs::remove_dir_all(fixture);
 }
