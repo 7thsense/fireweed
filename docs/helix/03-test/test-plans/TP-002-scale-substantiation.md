@@ -8,14 +8,14 @@ ddx:
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
-    self_hash: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
+    self_hash: e0ca180cb81c98e7c451341f1ea912bf152ac2c75d422a3b315516fc9f8ee7d3
     deps:
       adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
       adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
       prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
       td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-    reviewed_at: "2026-07-20T00:01:25Z"
+    reviewed_at: "2026-07-20T19:58:48Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -116,10 +116,17 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > capacity evidence; current release qualification applies the portable E0/E2
 > correctness, progress, resource, and same-run comparison bars below.
 
-`scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3` validates
-these source beads directly when invoked with the corresponding
-`--tp002-*-source` flags. The gate may also scan generated ledger rows, but the
-source mapping is the reproducible release authority from a clean checkout.
+`scripts/release/build-governed-evidence-bundle.sh` stages explicitly named E0,
+E1, E2 cross-owner, E2 density, E2 failover/routing, and E3 producer outputs for
+the checked-out revision. It writes `target/tp002-release/composite-contract.json`
+and dispatches `scripts/ci/verify-governed-release-composite.sh`; neither command
+scans a ledger or evidence directory for substitutes. `scripts/ci/release-gate.sh`
+separately generates fresh smoke-tier E2/E3 rows, then requires that exact
+composite and verifies every named semantic authority against checked-out
+`HEAD`. The tag workflow acquires the deterministic exact-revision archive and
+SHA-256 sidecar, reruns the composite verifier with `GITHUB_SHA`, and verifies
+the archive's attestation against the resolved tag and commit before packaging
+or publication.
 
 ## Release-evidence freshness and source binding
 

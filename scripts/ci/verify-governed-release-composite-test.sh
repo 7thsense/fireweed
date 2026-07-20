@@ -43,6 +43,42 @@ expect_failure wrong_revision env PATH="$CASE/bin:$PATH" \
   --contract "$CASE/bundle/composite-contract.json" \
   --expected-revision ffffffffffffffffffffffffffffffffffffffff
 
+duplicate_density="$CASE/duplicate-density"
+cp -R "$CASE/bundle" "$duplicate_density"
+cat "$CASE/bundle/e2-density.jsonl" >>"$duplicate_density/e2-density.jsonl"
+expect_failure duplicate_density env PATH="$CASE/bin:$PATH" \
+  bash "$ROOT/scripts/ci/verify-governed-release-composite.sh" \
+  --contract "$duplicate_density/composite-contract.json" --expected-revision "$REV"
+grep -Fq 'must contain exactly one row, found 2' "$CASE/duplicate_density.out" ||
+  fail "duplicate density rows did not produce the fail-closed diagnostic"
+
+later_revision="$CASE/later-density-revision"
+cp -R "$CASE/bundle" "$later_revision"
+printf '%s\n' '{"measurements":{"revision":"ffffffffffffffffffffffffffffffffffffffff"}}' \
+  >>"$later_revision/e2-density.jsonl"
+expect_failure later_density_revision env PATH="$CASE/bin:$PATH" \
+  bash "$ROOT/scripts/ci/verify-governed-release-composite.sh" \
+  --contract "$later_revision/composite-contract.json" --expected-revision "$REV"
+grep -Fq 'E2 density row 2 revision mismatch' "$CASE/later_density_revision.out" ||
+  fail "later mismatched density row did not produce the fail-closed diagnostic"
+
+duplicate_key="$CASE/duplicate-contract-key"
+cp -R "$CASE/bundle" "$duplicate_key"
+python3 - "$duplicate_key/composite-contract.json" <<'PY'
+import sys
+
+path = sys.argv[1]
+body = open(path, encoding="utf-8").read()
+body = body.replace('"e0": "e0.jsonl",', '"e0": "e0.jsonl", "e0": "unlisted-e0.jsonl",')
+open(path, "w", encoding="utf-8").write(body)
+PY
+printf '{}\n' >"$duplicate_key/unlisted-e0.jsonl"
+expect_failure duplicate_contract_key env PATH="$CASE/bin:$PATH" \
+  bash "$ROOT/scripts/ci/verify-governed-release-composite.sh" \
+  --contract "$duplicate_key/composite-contract.json" --expected-revision "$REV"
+grep -Fq 'duplicate JSON key: e0' "$CASE/duplicate_contract_key.out" ||
+  fail "duplicate composite authority key did not produce the fail-closed diagnostic"
+
 # The tag gate consumes this composite, so exercise its exact authority set rather
 # than the retired four-row manifest fixture. Every governed E0/E1/E2/E3 input
 # must fail closed even when an unlisted lookalike file remains beside the contract.
