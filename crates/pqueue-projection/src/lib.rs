@@ -625,6 +625,8 @@ struct RangeScanCursorState {
     order_by: Vec<OrderField>,
     anchor_item_id: ItemId,
     anchor_values: Vec<TypedValue>,
+    #[serde(default)]
+    anchor_index_key: Option<Vec<u8>>,
 }
 
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
@@ -2919,6 +2921,7 @@ impl ProjectionData {
                             .ok_or(EngineError::Invalid("cursor-invalidated"))
                     })
                     .collect::<EngineResult<_>>()?,
+                anchor_index_key: None,
             };
             Some(QueryCursor(
                 serde_json::to_string(&payload).expect("cursor serialization"),

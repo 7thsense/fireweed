@@ -7,6 +7,9 @@ pub struct RangeScanCursorState {
     pub order_by: Vec<OrderField>,
     pub anchor_item_id: ItemId,
     pub anchor_values: Vec<TypedValue>,
+    /// Canonical declared-index key used for an index-backed keyset seek.
+    #[serde(default)]
+    pub anchor_index_key: Option<Vec<u8>>,
 }
 
 /// Canonical typed-index keys grouped by item.
