@@ -103,6 +103,8 @@ pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 const RECOVERY_MAINTENANCE_QUEUE_PAGE: usize = 8;
 const RECOVERY_MAINTENANCE_PIN_PAGE: usize = 64;
 const RECOVERY_MAINTENANCE_GC_BATCH_PAGE: usize = 8;
+const RECOVERY_MAINTENANCE_BLOCKING_CONCURRENCY: usize = 4;
+const RECOVERY_MAINTENANCE_TASK_LIMIT: usize = RECOVERY_MAINTENANCE_QUEUE_PAGE;
 const SEGMENT_FLUSH_QUEUE_PAGE: usize = 4;
 
 /// O(1)-average keyed queue registration plus a stable insertion-order ring for bounded maintenance.
@@ -175,6 +177,139 @@ fn registered_queue_key_page<V: Clone>(
         .into_iter()
         .map(|(key, _)| key)
         .collect()
+}
+
+struct RecoveryMaintenanceTask {
+    shard: QueueKey,
+    handle: tokio::task::JoinHandle<EngineResult<()>>,
+}
+
+/// Separately admits bounded per-shard maintenance work.
+///
+/// A tick only dispatches work; it does not wait for a provider call that may be indefinitely delayed.
+/// Completed failures are both logged by the task and returned by the next tick, preserving the reclaim
+/// loop's error counter. The fixed task cap bounds Tokio wrappers while [`BoundedBlockingExecutor`] bounds
+/// the OS threads that may enter a synchronous object-store provider.
+struct RecoveryMaintenanceDispatcher {
+    executor: BoundedBlockingExecutor,
+    tasks: Mutex<Vec<RecoveryMaintenanceTask>>,
+}
+
+impl RecoveryMaintenanceDispatcher {
+    fn new() -> EngineResult<Self> {
+        Ok(Self {
+            executor: BoundedBlockingExecutor::new(RECOVERY_MAINTENANCE_BLOCKING_CONCURRENCY)?,
+            tasks: Mutex::new(Vec::with_capacity(RECOVERY_MAINTENANCE_TASK_LIMIT)),
+        })
+    }
+
+    async fn dispatch(
+        &self,
+        log: Arc<FsSegmentedLog>,
+        shards: Vec<QueueKey>,
+        now_ms: i64,
+    ) -> EngineResult<TickReport> {
+        let completed = {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .expect("recovery maintenance tasks poisoned");
+            let mut completed = Vec::new();
+            let mut index = 0;
+            while index < tasks.len() {
+                if tasks[index].handle.is_finished() {
+                    completed.push(tasks.swap_remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            completed
+        };
+
+        let mut first_error = None;
+        for task in completed {
+            let result = match task.handle.await {
+                Ok(result) => result,
+                Err(error) => Err(EngineError::Storage(format!(
+                    "recovery maintenance task failed for tenant={} queue={}: {error}",
+                    task.shard.tenant_id.as_str(),
+                    task.shard.queue_id.as_str(),
+                ))),
+            };
+            if first_error.is_none() {
+                first_error = result.err();
+            }
+        }
+
+        {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .expect("recovery maintenance tasks poisoned");
+            for shard in shards {
+                if tasks.len() == RECOVERY_MAINTENANCE_TASK_LIMIT {
+                    break;
+                }
+                if tasks.iter().any(|task| task.shard == shard) {
+                    continue;
+                }
+                let task_log = Arc::clone(&log);
+                let executor = self.executor.clone();
+                let task_shard = shard.clone();
+                let handle = tokio::spawn(async move {
+                    let operation_shard = task_shard.clone();
+                    let result = executor
+                        .execute(move || {
+                            task_log.reap_recovery_pins_expired_bounded(
+                                &operation_shard,
+                                now_ms,
+                                RECOVERY_MAINTENANCE_PIN_PAGE,
+                            )?;
+                            task_log.reap_recovery_index_garbage_bounded(
+                                &operation_shard,
+                                RECOVERY_MAINTENANCE_GC_BATCH_PAGE,
+                            )?;
+                            Ok(())
+                        })
+                        .await;
+                    if let Err(error) = &result {
+                        eprintln!(
+                            "[objectlog] recovery maintenance failed tenant={} queue={}: {error:?}",
+                            task_shard.tenant_id.as_str(),
+                            task_shard.queue_id.as_str(),
+                        );
+                    }
+                    result
+                });
+                tasks.push(RecoveryMaintenanceTask { shard, handle });
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(TickReport::default()),
+        }
+    }
+
+    #[cfg(test)]
+    fn in_flight_len(&self) -> usize {
+        self.tasks
+            .lock()
+            .expect("recovery maintenance tasks poisoned")
+            .len()
+    }
+}
+
+impl Drop for RecoveryMaintenanceDispatcher {
+    fn drop(&mut self) {
+        let tasks = self
+            .tasks
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for task in tasks.drain(..) {
+            task.handle.abort();
+        }
+    }
 }
 
 fn default_objectlog_byte_budget() -> BufferedByteBudget {
@@ -951,7 +1086,7 @@ pub struct SegmentedObjectLogSqliteBackend {
     epochs: Mutex<HashMap<QueueKey, u64>>,
     registry: Mutex<QueueRegistry<Arc<ShardCoord>>>,
     maintenance_cursor: AtomicUsize,
-    maintenance_executor: BoundedBlockingExecutor,
+    maintenance_dispatcher: RecoveryMaintenanceDispatcher,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
     counters: QueueCounters,
     command_seq: AtomicU64,
@@ -1038,7 +1173,7 @@ impl SegmentedObjectLogSqliteBackend {
             epochs: Mutex::new(HashMap::new()),
             registry: Mutex::new(QueueRegistry::default()),
             maintenance_cursor: AtomicUsize::new(0),
-            maintenance_executor: BoundedBlockingExecutor::new(1)?,
+            maintenance_dispatcher: RecoveryMaintenanceDispatcher::new()?,
             mutate_locks: Mutex::new(HashMap::new()),
             counters: QueueCounters::default(),
             command_seq: AtomicU64::new(0),
@@ -1936,7 +2071,7 @@ impl PurgePort for SegmentedObjectLogSqliteBackend {
 impl ReclaimDriver for SegmentedObjectLogSqliteBackend {
     fn tick(
         &self,
-        _now: UtcTimestamp,
+        now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         let shards = registered_queue_key_page(
             &self.registry,
@@ -1944,24 +2079,8 @@ impl ReclaimDriver for SegmentedObjectLogSqliteBackend {
             RECOVERY_MAINTENANCE_QUEUE_PAGE,
         );
         let log = Arc::clone(&self.log);
-        let executor = self.maintenance_executor.clone();
-        async move {
-            executor
-                .execute(move || {
-                    for shard in shards {
-                        log.reap_recovery_pins_fenced_bounded(
-                            &shard,
-                            RECOVERY_MAINTENANCE_PIN_PAGE,
-                        )?;
-                        log.reap_recovery_index_garbage_bounded(
-                            &shard,
-                            RECOVERY_MAINTENANCE_GC_BATCH_PAGE,
-                        )?;
-                    }
-                    Ok(TickReport::default())
-                })
-                .await
-        }
+        self.maintenance_dispatcher
+            .dispatch(log, shards, ts_to_ms(now))
     }
 }
 
@@ -2052,7 +2171,7 @@ pub struct SegmentedObjectLogInMemoryBackend {
     epochs: Mutex<HashMap<QueueKey, u64>>,
     registry: Mutex<QueueRegistry<Arc<ShardCoord>>>,
     maintenance_cursor: AtomicUsize,
-    maintenance_executor: BoundedBlockingExecutor,
+    maintenance_dispatcher: RecoveryMaintenanceDispatcher,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
     counters: QueueCounters,
     command_seq: AtomicU64,
@@ -2114,7 +2233,7 @@ impl SegmentedObjectLogInMemoryBackend {
             epochs: Mutex::new(HashMap::new()),
             registry: Mutex::new(QueueRegistry::default()),
             maintenance_cursor: AtomicUsize::new(0),
-            maintenance_executor: BoundedBlockingExecutor::new(1)?,
+            maintenance_dispatcher: RecoveryMaintenanceDispatcher::new()?,
             mutate_locks: Mutex::new(HashMap::new()),
             counters: QueueCounters::default(),
             command_seq: AtomicU64::new(0),
@@ -3005,7 +3124,7 @@ impl PurgePort for SegmentedObjectLogInMemoryBackend {
 impl ReclaimDriver for SegmentedObjectLogInMemoryBackend {
     fn tick(
         &self,
-        _now: UtcTimestamp,
+        now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         let shards = registered_queue_key_page(
             &self.registry,
@@ -3013,24 +3132,8 @@ impl ReclaimDriver for SegmentedObjectLogInMemoryBackend {
             RECOVERY_MAINTENANCE_QUEUE_PAGE,
         );
         let log = Arc::clone(&self.log);
-        let executor = self.maintenance_executor.clone();
-        async move {
-            executor
-                .execute(move || {
-                    for shard in shards {
-                        log.reap_recovery_pins_fenced_bounded(
-                            &shard,
-                            RECOVERY_MAINTENANCE_PIN_PAGE,
-                        )?;
-                        log.reap_recovery_index_garbage_bounded(
-                            &shard,
-                            RECOVERY_MAINTENANCE_GC_BATCH_PAGE,
-                        )?;
-                    }
-                    Ok(TickReport::default())
-                })
-                .await
-        }
+        self.maintenance_dispatcher
+            .dispatch(log, shards, ts_to_ms(now))
     }
 }
 
@@ -3344,18 +3447,28 @@ mod recovery_tests {
 
     struct BlockingMaintenanceStore {
         inner: Arc<InMemoryBlobStore>,
+        blocked_pin_prefix: String,
+        progress_pin_prefix: String,
         block_pin_list: std::sync::atomic::AtomicBool,
         pin_list_entered: std::sync::atomic::AtomicBool,
+        progress_pin_list_completed: std::sync::atomic::AtomicBool,
         release_pin_list: std::sync::atomic::AtomicBool,
+        active_pin_lists: AtomicUsize,
+        peak_active_pin_lists: AtomicUsize,
     }
 
     impl BlockingMaintenanceStore {
-        fn new() -> Self {
+        fn new(blocked: &QueueKey, progress: &QueueKey) -> Self {
             Self {
                 inner: Arc::new(InMemoryBlobStore::new()),
+                blocked_pin_prefix: format!("{}recovery_pins/v1/", object_prefix(blocked)),
+                progress_pin_prefix: format!("{}recovery_pins/v1/", object_prefix(progress)),
                 block_pin_list: std::sync::atomic::AtomicBool::new(false),
                 pin_list_entered: std::sync::atomic::AtomicBool::new(false),
+                progress_pin_list_completed: std::sync::atomic::AtomicBool::new(false),
                 release_pin_list: std::sync::atomic::AtomicBool::new(false),
+                active_pin_lists: AtomicUsize::new(0),
+                peak_active_pin_lists: AtomicUsize::new(0),
             }
         }
     }
@@ -3391,70 +3504,100 @@ mod recovery_tests {
             start_after: Option<&str>,
             limit: usize,
         ) -> EngineResult<Vec<String>> {
-            if prefix.contains("/recovery_pins/v1/")
-                && self
-                    .block_pin_list
-                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            let is_pin_list = prefix.ends_with("/recovery_pins/v1/");
+            if is_pin_list {
+                let active = self.active_pin_lists.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak_active_pin_lists
+                    .fetch_max(active, Ordering::SeqCst);
+            }
+            if prefix == self.blocked_pin_prefix
+                && self.block_pin_list.swap(false, Ordering::SeqCst)
             {
-                self.pin_list_entered
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                while !self
-                    .release_pin_list
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                self.pin_list_entered.store(true, Ordering::SeqCst);
+                while !self.release_pin_list.load(Ordering::SeqCst) {
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+            } else if prefix == self.progress_pin_prefix {
+                while !self.pin_list_entered.load(Ordering::SeqCst) {
                     std::thread::park_timeout(Duration::from_millis(1));
                 }
             }
-            self.inner.list_page(prefix, start_after, limit)
+            let result = self.inner.list_page(prefix, start_after, limit);
+            if prefix == self.progress_pin_prefix {
+                self.progress_pin_list_completed
+                    .store(true, Ordering::SeqCst);
+            }
+            if is_pin_list {
+                self.active_pin_lists.fetch_sub(1, Ordering::SeqCst);
+            }
+            result
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_recovery_maintenance_does_not_block_another_queue() {
-        let store = Arc::new(BlockingMaintenanceStore::new());
+        let first = queue_def("maintenance", "blocked");
+        let second = queue_def("maintenance", "progress");
+        let first_key = QueueKey::new(first.tenant_id.clone(), first.queue_id.clone());
+        let second_key = QueueKey::new(second.tenant_id.clone(), second.queue_id.clone());
+        let store = Arc::new(BlockingMaintenanceStore::new(&first_key, &second_key));
         let blob_store: Arc<dyn BlobStore> = store.clone();
         let backend = Arc::new(
             SegmentedObjectLogInMemoryBackend::open_with_blob_store(blob_store, seal_each_config())
                 .unwrap(),
         );
-        let first = queue_def("maintenance", "blocked");
-        let second = queue_def("maintenance", "progress");
-        let first_key = QueueKey::new(first.tenant_id.clone(), first.queue_id.clone());
-        let second_key = QueueKey::new(second.tenant_id.clone(), second.queue_id.clone());
         backend.create_queue(first).await.unwrap();
         backend.create_queue(second).await.unwrap();
-        backend
-            .push(&first_key, vec![spec("seed")], ts(), None)
-            .await
-            .unwrap();
+        for index in 0..(RECOVERY_MAINTENANCE_TASK_LIMIT * 2 - 2) {
+            backend
+                .create_queue(queue_def("maintenance-extra", &format!("q-{index}")))
+                .await
+                .unwrap();
+        }
 
-        store
-            .block_pin_list
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let tick_backend = Arc::clone(&backend);
-        let tick = tokio::spawn(async move { tick_backend.tick(ts()).await });
+        store.block_pin_list.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_millis(250), backend.tick(ts()))
+            .await
+            .expect("tick dispatch must not await a shard's blocking provider call")
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
-            while !store
-                .pin_list_entered
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
+            while !store.pin_list_entered.load(Ordering::SeqCst) {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("maintenance reached the blocking store seam");
 
-        tokio::time::timeout(
-            Duration::from_millis(250),
-            backend.push(&second_key, vec![spec("still-progresses")], ts(), None),
-        )
+        tokio::time::timeout(Duration::from_millis(250), async {
+            while !store.progress_pin_list_completed.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .expect("maintenance I/O must not occupy the Tokio reactor")
-        .unwrap();
-        store
-            .release_pin_list
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        tick.await.unwrap().unwrap();
+        .expect("queue B maintenance must complete while queue A LIST remains blocked");
+        assert!(!store.release_pin_list.load(Ordering::SeqCst));
+        assert_eq!(
+            backend.maintenance_dispatcher.in_flight_len(),
+            RECOVERY_MAINTENANCE_TASK_LIMIT,
+            "one fixed task page is tracked even when one shard hangs"
+        );
+        assert!(
+            store.peak_active_pin_lists.load(Ordering::SeqCst)
+                <= RECOVERY_MAINTENANCE_BLOCKING_CONCURRENCY,
+            "blocking store concurrency stays globally bounded"
+        );
+
+        // A later tick reaps completed wrappers and admits the next round-robin page without waiting for A.
+        tokio::time::timeout(Duration::from_millis(250), backend.tick(ts()))
+            .await
+            .expect("later tick must remain live while one prior shard hangs")
+            .unwrap();
+        assert!(
+            backend.maintenance_dispatcher.in_flight_len() <= RECOVERY_MAINTENANCE_TASK_LIMIT,
+            "maintenance wrapper tasks remain bounded across ticks"
+        );
+
+        store.release_pin_list.store(true, Ordering::SeqCst);
     }
 
     #[tokio::test]
