@@ -22,6 +22,29 @@ done
   echo "usage: $0 --source-dir <dir> --e3-source-dir <dir> --out <dir> --revision <sha>" >&2; exit 64;
 }
 [[ "$revision" == "$(git -C "$REPO_ROOT" rev-parse HEAD)" ]] || { echo "revision must equal checked-out HEAD" >&2; exit 1; }
+out="$(realpath -m "$out")"
+repo_root="$(realpath "$REPO_ROOT")"
+case "$out" in
+  "$repo_root"/*) ;;
+  *) echo "output must be inside the repository: $out" >&2; exit 1 ;;
+esac
+[[ "$(basename "$out")" == tp002-release ]] || {
+  echo "output basename must be tp002-release so the release workflow extracts the governed path" >&2
+  exit 1
+}
+if [[ -n "$tag$produced_at$reviewed_at" ]]; then
+  [[ -n "$tag" && -n "$produced_at" && -n "$reviewed_at" ]] || {
+    echo "tag/timestamps must be supplied together" >&2
+    exit 64
+  }
+  archive_dir="$(dirname "$out")"
+  archive="$archive_dir/$revision.tar.gz"
+  sidecar="$archive.sha256"
+  [[ ! -e "$archive" && ! -e "$sidecar" ]] || {
+    echo "exact-revision archive or digest already exists; refusing stale substitution" >&2
+    exit 1
+  }
+fi
 for name in e0.jsonl e1.jsonl e2-scale.jsonl e2-density.jsonl e2-failover.json; do
   [[ -f "$source_dir/$name" && ! -L "$source_dir/$name" ]] || { echo "missing regular source artifact: $source_dir/$name" >&2; exit 1; }
 done
@@ -33,7 +56,7 @@ if find "$e3_dir" -type l -print -quit | grep -q .; then echo "E3 source contain
 [[ ! -e "$out" ]] || { echo "output already exists; choose a fresh staging directory: $out" >&2; exit 1; }
 mkdir -p "$out/e3"
 for name in e0.jsonl e1.jsonl e2-scale.jsonl e2-density.jsonl e2-failover.json; do install -m 0644 "$source_dir/$name" "$out/$name"; done
-cp -R "$e3_dir/." "$out/e3/"
+for name in e3.jsonl tp003.jsonl fencing.json; do install -m 0644 "$e3_dir/$name" "$out/e3/$name"; done
 rustup run 1.92.0 cargo run -q -p pqueue-release --bin pqueue-build-e3-contract -- \
   --out "$out/e3/e3-contract.json" --source-revision "$revision" \
   --e3-ledger "$out/e3/e3.jsonl" --transaction-evidence "$out/e3/tp003.jsonl" \
@@ -52,7 +75,6 @@ PY
 bash "$REPO_ROOT/scripts/ci/verify-governed-release-composite.sh" \
   --contract "$out/composite-contract.json" --expected-revision "$revision"
 if [[ -n "$tag$produced_at$reviewed_at" ]]; then
-  [[ -n "$tag" && -n "$produced_at" && -n "$reviewed_at" ]] || { echo "tag/timestamps must be supplied together" >&2; exit 64; }
   bundle_rel="$(realpath -m --relative-to="$REPO_ROOT" "$out")"
   [[ "$bundle_rel" != .. && "$bundle_rel" != ../* ]] || { echo "attested output must be inside the repository" >&2; exit 1; }
   rustup run 1.92.0 cargo run -q -p pqueue-release --bin pqueue-build-evidence-attestation -- \
@@ -60,5 +82,24 @@ if [[ -n "$tag$produced_at$reviewed_at" ]]; then
     --produced-at "$produced_at" --reviewed-at "$reviewed_at" --out "$out/attestation.json"
   rustup run 1.92.0 cargo run -q -p pqueue-release --bin pqueue-verify-evidence-attestation -- \
     --manifest "$out/attestation.json" --repo-root "$REPO_ROOT" --tag "$tag" --commit "$revision"
+
+  archive_tmp="$(mktemp "$archive_dir/.${revision}.tar.XXXXXX")"
+  gzip_tmp="$(mktemp "$archive_dir/.${revision}.tar.gz.XXXXXX")"
+  sidecar_tmp="$(mktemp "$archive_dir/.${revision}.sha256.XXXXXX")"
+  cleanup_archive_temps() { rm -f "$archive_tmp" "$gzip_tmp" "$sidecar_tmp"; }
+  trap cleanup_archive_temps EXIT
+  tar --sort=name --format=gnu --mode='u+rwX,go+rX,go-w' \
+    --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+    -C "$archive_dir" -cf "$archive_tmp" tp002-release
+  gzip -n -9 <"$archive_tmp" >"$gzip_tmp"
+  archive_sha="$(sha256sum "$gzip_tmp" | awk '{print $1}')"
+  [[ "$archive_sha" =~ ^[0-9a-f]{64}$ ]]
+  printf '%s  %s\n' "$archive_sha" "$(basename "$archive")" >"$sidecar_tmp"
+  mv "$gzip_tmp" "$archive"
+  mv "$sidecar_tmp" "$sidecar"
+  rm -f "$archive_tmp"
+  trap - EXIT
+  echo "wrote governed evidence archive: $archive"
+  echo "wrote governed evidence digest: $sidecar"
 fi
 echo "staged governed evidence bundle: $out"

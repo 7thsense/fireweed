@@ -38,12 +38,17 @@ and E3 semantic validators.
 
 The E3 handoff is deliberately a directory hook (`--e3-source-dir`). The
 strengthened E3 producer owns the measured ledger, TP-003 rows, and fencing
-evidence in that directory; the stager invokes `pqueue-build-e3-contract` to
-recompute cost rows and build the exact-revision contract without weakening it.
+evidence in that directory. The stager copies only those three named inputs;
+unlisted files beside them cannot enter the governed bundle. It invokes
+`pqueue-build-e3-contract` to recompute cost rows and build the exact-revision
+contract without weakening it.
 When tag and review timestamps are supplied, the stager adds and verifies
 `attestation.json`, using `pqueue_release::attestation::digest_path`, then
-archives the directory as `<exact-head>.tar.gz` plus its SHA-256 sidecar. The
-tag workflow explicitly acquires that archive before installing toolchains or
+archives the fixed `tp002-release/` root as `<exact-head>.tar.gz` plus
+`<exact-head>.tar.gz.sha256` beside it. Sorted paths and normalized tar/gzip
+metadata make identical inputs byte-identical. Existing output, archive, or
+sidecar paths fail closed instead of substituting stale evidence. The tag
+workflow explicitly acquires that archive before installing toolchains or
 starting heavy validation. A fresh checkout never assumes untracked `target/`
 files exist.
 
