@@ -3,15 +3,15 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use pqueue_core::{
-    BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey, CohortId,
-    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
-    GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexType, ItemId,
-    ItemState, LeaseToken, Metadata, MetricsByQueryRequest, MutationOutcome, MutationResult,
-    PriorityValue, QueryCapabilityFlags, QueryCursor, QueueDefinition, QueueId, RangeScanRequest,
-    RangeScanResponse, RangeScanRow, RequestId, TenantId, TypedValue, UtcTimestamp,
+    AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount,
+    ClaimByQueryRequest, ClientItemKey, CohortId, DeclaredBucketSegmentRequest,
+    DeclaredBucketSegmentResponse, FilterOp, GroupKey, GroupedAggregateRequest,
+    GroupedAggregateResponse, IndexDeclaration, IndexType, ItemId, ItemState, LeaseToken, Metadata,
+    MetricsByQueryRequest, MutationOutcome, MutationResult, PriorityValue, QueryCapabilityFlags,
+    QueryCursor, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RangeScanRow,
+    RequestId, TenantId, TimeBucket, TypedValue, UtcTimestamp,
 };
 use pqueue_engine::ClaimUnit;
-use pqueue_engine::ProjectionStore;
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
@@ -30,10 +30,228 @@ use pqueue_engine::{
     validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
     validate_gate_push, validate_instance_fence, validate_purge_force,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+};
 use serde_json::Value as JsonValue;
 
 use super::*;
+
+#[derive(Debug)]
+struct HotQueryCandidate {
+    item_id: ItemId,
+    entity: JsonValue,
+    fields: String,
+    item_version: i64,
+    lifecycle_state: String,
+    fenced: bool,
+    superseded: bool,
+}
+
+const HOT_QUERY_CANDIDATES_SQL: &str = "SELECT i.item_id,i.entity_document,i.fields,i.item_version,i.lifecycle_state,i.fenced,i.superseded \
+     FROM pqueue_item_index AS x INDEXED BY pqueue_item_index_key_idx \
+     JOIN pqueue_items AS i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id \
+         AND i.item_id=x.item_id \
+     WHERE x.tenant_id=?1 AND x.queue_id=?2 AND x.index_name=?3 \
+       AND x.index_key>=?4 AND x.index_key<?5 \
+     ORDER BY x.index_key,x.item_id";
+const HOT_QUERY_ALL_INDEX_ROWS_SQL: &str = "SELECT i.item_id,i.entity_document,i.fields,i.item_version,i.lifecycle_state,i.fenced,i.superseded \
+     FROM pqueue_item_index AS x INDEXED BY pqueue_item_index_key_idx \
+     JOIN pqueue_items AS i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id \
+         AND i.item_id=x.item_id \
+     WHERE x.tenant_id=?1 AND x.queue_id=?2 AND x.index_name=?3 \
+     ORDER BY x.index_key,x.item_id";
+
+fn typed_value_json(value: &TypedValue) -> JsonValue {
+    match value {
+        TypedValue::String(value) => JsonValue::String(value.clone()),
+        TypedValue::Integer(value) => JsonValue::Number((*value).into()),
+        TypedValue::Float(value) => serde_json::Number::from_f64(*value)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null),
+        TypedValue::Bool(value) => JsonValue::Bool(*value),
+        TypedValue::DateTime(value) => JsonValue::Number(ts_nanos(*value).into()),
+    }
+}
+
+fn index_fields(spec: &pqueue_core::QueueIndex) -> Vec<(&str, &IndexType)> {
+    match &spec.declaration {
+        IndexDeclaration::Single(def) => vec![(def.field.as_str(), &def.index_type)],
+        IndexDeclaration::Compound(def) => def
+            .fields
+            .iter()
+            .map(|field| (field.field.as_str(), &field.index_type))
+            .collect(),
+    }
+}
+
+fn index_field_type<'a>(spec: &'a pqueue_core::QueueIndex, field: &str) -> Option<&'a IndexType> {
+    index_fields(spec)
+        .into_iter()
+        .find(|(name, _)| *name == field)
+        .map(|(_, ty)| ty)
+}
+
+fn truncate_query_timestamp(value: UtcTimestamp, bucket: TimeBucket) -> UtcTimestamp {
+    let seconds = match bucket {
+        TimeBucket::Hour => value.seconds.div_euclid(3_600) * 3_600,
+        TimeBucket::Day => value.seconds.div_euclid(86_400) * 86_400,
+    };
+    UtcTimestamp::new(seconds, 0).expect("bucketed timestamp")
+}
+
+fn value_matches_bucket(value: &TypedValue, rule: &pqueue_core::BucketRule) -> bool {
+    let value = match value {
+        TypedValue::Integer(value) => *value as f64,
+        TypedValue::Float(value) => *value,
+        _ => return false,
+    };
+    rule.exact.is_some_and(|exact| value == exact)
+        || (rule.exact.is_none()
+            && rule.gt.is_none_or(|bound| value > bound)
+            && rule.gte.is_none_or(|bound| value >= bound)
+            && rule.lt.is_none_or(|bound| value < bound)
+            && rule.lte.is_none_or(|bound| value <= bound))
+}
+
+fn prefix_successor(mut prefix: Vec<u8>) -> Option<Vec<u8>> {
+    for byte in prefix.iter_mut().rev() {
+        if *byte != u8::MAX {
+            *byte += 1;
+            return Some(prefix);
+        }
+        *byte = 0;
+    }
+    None
+}
+
+/// Resolve the equality-constrained leading portion of a declared index to its canonical byte prefix.
+/// The SQL seek is deliberately followed by typed predicate evaluation: the seek bounds I/O while the
+/// shared codec remains the semantic authority for range comparisons and coercion.
+fn hot_query_prefix(
+    spec: &pqueue_core::QueueIndex,
+    filters: &[pqueue_core::QueryFilter],
+) -> EngineResult<Vec<u8>> {
+    let fields = index_fields(spec);
+    let mut encoded = Vec::new();
+    for (field, index_type) in fields {
+        let Some(filter) = filters
+            .iter()
+            .find(|filter| filter.field == field && filter.op == FilterOp::Eq)
+        else {
+            break;
+        };
+        let json = typed_value_json(&filter.value);
+        let Some(component) =
+            axon_esf::encode_compound_index_key(&[(&json, index_type)]).map_err(|_| {
+                EngineError::Invalid("typed index value is not valid for declared type")
+            })?
+        else {
+            return Err(EngineError::Invalid(
+                "typed index value is not valid for declared type",
+            ));
+        };
+        encoded.extend(component);
+    }
+    Ok(encoded)
+}
+
+fn entity_matches_filters(
+    entity: &JsonValue,
+    filters: &[pqueue_core::QueryFilter],
+) -> EngineResult<bool> {
+    for filter in filters {
+        let index_type = match filter.value {
+            TypedValue::String(_) => IndexType::String,
+            TypedValue::Integer(_) => IndexType::Integer,
+            TypedValue::Float(_) => IndexType::Float,
+            TypedValue::Bool(_) => IndexType::Boolean,
+            TypedValue::DateTime(_) => IndexType::Datetime,
+        };
+        let Some(value) = typed_value_for_json(
+            entity.get(&filter.field).unwrap_or(&JsonValue::Null),
+            &index_type,
+        )?
+        else {
+            return Ok(false);
+        };
+        let order = typed_value_compare(&value, &filter.value)?;
+        let matches = match filter.op {
+            FilterOp::Eq => order.is_eq(),
+            FilterOp::Gte => order.is_ge(),
+            FilterOp::Gt => order.is_gt(),
+            FilterOp::Lte => order.is_le(),
+            FilterOp::Lt => order.is_lt(),
+        };
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn hot_query_candidates(
+    conn: &Connection,
+    shard: &QueueKey,
+    spec: &pqueue_core::QueueIndex,
+    filters: &[pqueue_core::QueryFilter],
+) -> EngineResult<Vec<HotQueryCandidate>> {
+    let prefix = hot_query_prefix(spec, filters)?;
+    let upper = prefix_successor(prefix.clone());
+    let (tenant, queue) = parts(shard);
+    let sql = if prefix.is_empty() {
+        HOT_QUERY_ALL_INDEX_ROWS_SQL
+    } else {
+        HOT_QUERY_CANDIDATES_SQL
+    };
+    let mut stmt = st(conn.prepare(sql))?;
+    let mut candidates = Vec::new();
+    let mut consume = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, i64>(6)?,
+        ))
+    };
+    let rows = if prefix.is_empty() {
+        st(stmt.query_map(params![tenant, queue, spec.name], &mut consume))?
+    } else {
+        st(stmt.query_map(
+            params![
+                tenant,
+                queue,
+                spec.name,
+                prefix,
+                upper.expect("non-empty prefix successor")
+            ],
+            &mut consume,
+        ))?
+    };
+    for row in rows {
+        let (item_id, entity, fields, item_version, lifecycle_state, fenced, superseded) = st(row)?;
+        let Some(entity) = entity else { continue };
+        let item_id = ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
+        let entity =
+            serde_json::from_str(&entity).map_err(|e| EngineError::Storage(e.to_string()))?;
+        if entity_matches_filters(&entity, filters)? {
+            candidates.push(HotQueryCandidate {
+                item_id,
+                entity,
+                fields,
+                item_version,
+                lifecycle_state,
+                fenced: fenced != 0,
+                superseded: superseded != 0,
+            });
+        }
+    }
+    Ok(candidates)
+}
 
 // ---------------------------------------------------------------------------
 // SqliteRelationalBackend
@@ -1363,9 +1581,9 @@ impl RecoveryReadPort for SqliteRelationalBackend {
     }
 }
 
-/// Hot projection query substrate (API-004) is not implemented for any backend in epic pqueue-45e13e4d;
-/// the sqlite-relational family inherits the all-`Unavailable` default except for the range-scan slice
-/// wired in this bead.
+/// SQLite API-004 implementation. Every advertised operation resolves through the durable declared-index
+/// projection; mutations retain the same transaction, fencing, idempotency, and response-barrier rules as
+/// the ordinary item lifecycle.
 impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
     fn hot_projection_capabilities(&self, _shard: &QueueKey) -> QueryCapabilityFlags {
         QueryCapabilityFlags {
@@ -1445,119 +1663,13 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 return Err(EngineError::Invalid("cursor-invalidated"));
             }
 
-            let (t, q) = parts(shard);
-            let mut stmt = st(g.conn.prepare(
-                "SELECT item_id, entity_document FROM pqueue_items \
-                 WHERE tenant_id=?1 AND queue_id=?2",
-            ))?;
-            let rows = st(stmt.query_map(params![t, q], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-            }))?;
-
-            let mut matched = Vec::new();
-            for row in rows {
-                let (item_id, entity_json): (String, Option<String>) = st(row)?;
-                let item_id =
-                    ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
-                let Some(entity_json) = entity_json else {
-                    continue;
-                };
-                let entity: JsonValue = serde_json::from_str(&entity_json)
-                    .map_err(|e| EngineError::Storage(e.to_string()))?;
-                let mut fields_map = BTreeMap::new();
-                match &spec.declaration {
-                    IndexDeclaration::Single(def) => {
-                        let Some(value) = typed_value_for_json(
-                            entity.get(&def.field).unwrap_or(&JsonValue::Null),
-                            &def.index_type,
-                        )?
-                        else {
-                            continue;
-                        };
-                        fields_map.insert(def.field.clone(), value);
-                    }
-                    IndexDeclaration::Compound(def) => {
-                        let mut missing = false;
-                        for field in &def.fields {
-                            let Some(value) = typed_value_for_json(
-                                entity.get(&field.field).unwrap_or(&JsonValue::Null),
-                                &field.index_type,
-                            )?
-                            else {
-                                missing = true;
-                                break;
-                            };
-                            fields_map.insert(field.field.clone(), value);
-                        }
-                        if missing {
-                            continue;
-                        }
-                    }
-                }
-                let row = RangeScanRow {
-                    item_id,
-                    fields: fields_map,
-                };
-
-                let mut accepted = true;
-                let mut prefix_len = 0usize;
-                for (field_name, index_type) in &fields {
-                    let Some(filter) = request
-                        .filters
-                        .iter()
-                        .find(|filter| filter.field == *field_name)
-                    else {
-                        break;
-                    };
-                    if filter.op != FilterOp::Eq {
-                        break;
-                    }
-                    let typed = typed_value_from_filter_value(&filter.value, index_type)?;
-                    let Some(value) = row.fields.get(*field_name) else {
-                        accepted = false;
-                        break;
-                    };
-                    if !typed_value_matches_query(value, &typed) {
-                        accepted = false;
-                        break;
-                    }
-                    prefix_len += 1;
-                }
-                if accepted {
-                    for filter in &request.filters {
-                        let Some((idx, (_, index_type))) = fields
-                            .iter()
-                            .enumerate()
-                            .find(|(_, (field_name, _))| *field_name == filter.field.as_str())
-                        else {
-                            return Err(EngineError::Invalid("unindexed-field"));
-                        };
-                        if idx < prefix_len {
-                            continue;
-                        }
-                        let Some(value) = row.fields.get(filter.field.as_str()) else {
-                            accepted = false;
-                            break;
-                        };
-                        let typed = typed_value_from_filter_value(&filter.value, index_type)?;
-                        let ord = typed_value_compare(value, &typed)?;
-                        let ok = match filter.op {
-                            FilterOp::Eq => ord.is_eq(),
-                            FilterOp::Gte => ord.is_ge(),
-                            FilterOp::Gt => ord.is_gt(),
-                            FilterOp::Lte => ord.is_le(),
-                            FilterOp::Lt => ord.is_lt(),
-                        };
-                        if !ok {
-                            accepted = false;
-                            break;
-                        }
-                    }
-                }
-                if accepted {
-                    matched.push(row);
-                }
-            }
+            let mut matched = hot_query_candidates(&g.conn, shard, spec, &request.filters)?
+                .into_iter()
+                .map(|candidate| {
+                    typed_index_row_from_entity(spec, candidate.item_id, &candidate.entity)?
+                        .ok_or(EngineError::Invalid("typed index row disappeared"))
+                })
+                .collect::<EngineResult<Vec<_>>>()?;
 
             matched.sort_by(|lhs, rhs| {
                 compare_rows(lhs, rhs, &request.order_by).expect("typed order compare")
@@ -1732,34 +1844,51 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             {
                 return Err(EngineError::Invalid("unindexed-field"));
             }
+            let query_prefix = hot_query_prefix(spec, &request.filters)?;
+            let query_upper = prefix_successor(query_prefix.clone());
 
             let paused = queue_paused(&tx, shard)?;
             let mut matched = Vec::new();
             let mut stmt = (!paused)
                 .then(|| {
                     tx.prepare(
-                        "SELECT item_id, entity_document, item_version FROM pqueue_items \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' \
+                        "SELECT i.item_id, i.entity_document, i.item_version \
+                 FROM pqueue_item_index AS x INDEXED BY pqueue_item_index_key_idx \
+                 JOIN pqueue_items AS i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id \
+                     AND i.item_id=x.item_id \
+                 WHERE x.tenant_id=?1 AND x.queue_id=?2 AND x.index_name=?4 \
+                 AND (?5=X'' OR x.index_key>=?5) AND (?6 IS NULL OR x.index_key<?6) \
+                 AND lifecycle_state='Pending' \
                  AND superseded=0 AND fenced=0 AND cohort_size IS NULL \
                  AND (not_before IS NULL OR not_before<=?3) AND eligible_since IS NOT NULL \
                  AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
                      ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
                      AND gs.gate_key=ig.gate_key \
-                     WHERE ig.tenant_id=pqueue_items.tenant_id \
-                     AND ig.queue_id=pqueue_items.queue_id \
-                     AND ig.item_id=pqueue_items.item_id)",
+                     WHERE ig.tenant_id=i.tenant_id \
+                     AND ig.queue_id=i.queue_id \
+                     AND ig.item_id=i.item_id)",
                     )
                 })
                 .transpose()
                 .map_err(|e| EngineError::Storage(e.to_string()))?;
             if let Some(stmt) = stmt.as_mut() {
-                let rows = st(stmt.query_map(params![t, q, eligibility_nanos], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                }))?;
+                let rows = st(stmt.query_map(
+                    params![
+                        t,
+                        q,
+                        eligibility_nanos,
+                        spec.name,
+                        query_prefix,
+                        query_upper
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                ))?;
 
                 for row in rows {
                     let (item_id, entity_json, item_version): (String, Option<String>, i64) =
@@ -1892,22 +2021,35 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             let hash = lease_hash(&lease_token);
             let lease_expires_nanos = ts_nanos(lease_expires_at);
             let mut token_ops = Vec::new();
-            let mut claimed_ids = Vec::with_capacity(selected.len());
-            for (item_id, expected_version) in selected {
-                let changed = st(tx.execute(
-                    "UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
+            let selected_json = serde_json::to_string(
+                &selected
+                    .iter()
+                    .map(|(item_id, version)| (item_id.to_string(), *version))
+                    .collect::<Vec<_>>(),
+            )
+            .map_err(|e| EngineError::Storage(e.to_string()))?;
+            let mut updated = HashSet::new();
+            if !selected.is_empty() {
+                let mut update = st(tx.prepare(
+                    "WITH selected AS (SELECT json_extract(value,'$[0]') AS item_id, \
+                         json_extract(value,'$[1]') AS item_version FROM json_each(?11)) \
+                     UPDATE pqueue_items SET lifecycle_state='Leased', lease_token_hash=?1, \
                      lease_expires_at=?2, worker_id=?3, retry_count=retry_count+1, \
                      item_version=item_version+1, updated_at=?4, last_command_sequence=?5 \
-                     WHERE tenant_id=?6 AND queue_id=?7 AND item_id=?8 AND item_version=?9 \
+                     WHERE tenant_id=?6 AND queue_id=?7 \
+                     AND EXISTS (SELECT 1 FROM selected s WHERE s.item_id=pqueue_items.item_id \
+                         AND s.item_version=pqueue_items.item_version) \
                      AND lifecycle_state='Pending' AND superseded=0 AND fenced=0 \
-                     AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?10) \
+                     AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?8) \
                      AND eligible_since IS NOT NULL \
                      AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
                          ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
                          AND gs.gate_key=ig.gate_key \
                          WHERE ig.tenant_id=pqueue_items.tenant_id \
                          AND ig.queue_id=pqueue_items.queue_id \
-                         AND ig.item_id=pqueue_items.item_id)",
+                         AND ig.item_id=pqueue_items.item_id) RETURNING item_id",
+                ))?;
+                let rows = st(update.query_map(
                     params![
                         hash,
                         lease_expires_nanos,
@@ -1916,15 +2058,24 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                         seq,
                         t,
                         q,
-                        item_id.to_string(),
-                        expected_version,
                         eligibility_nanos,
+                        Option::<i64>::None,
+                        Option::<i64>::None,
+                        selected_json,
                     ],
+                    |row| row.get::<_, String>(0),
                 ))?;
-                if changed == 1 {
-                    token_ops.push(TokenOp::Set(shard.clone(), item_id, lease_token.clone()));
-                    claimed_ids.push(item_id);
+                for row in rows {
+                    updated.insert(st(row)?);
                 }
+            }
+            let claimed_ids = selected
+                .into_iter()
+                .map(|(item_id, _)| item_id)
+                .filter(|item_id| updated.contains(&item_id.to_string()))
+                .collect::<Vec<_>>();
+            for item_id in &claimed_ids {
+                token_ops.push(TokenOp::Set(shard.clone(), *item_id, lease_token.clone()));
             }
             let mut positions = Vec::new();
             if !claimed_ids.is_empty() {
@@ -1988,9 +2139,58 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
         let result = (|| {
             let g = self.inner.lock().expect("projection store poisoned");
             let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
-            let image = export_projection_image_sql(&g.conn, shard)?;
-            query_projection_image(&definition, image, |projection, shard| {
-                projection.grouped_aggregate(shard, request)
+            if request.group_by.is_empty() {
+                return Err(EngineError::Invalid("group-by required"));
+            }
+            let spec = match request.index.as_deref() {
+                Some(name) => definition
+                    .typed_indexes
+                    .iter()
+                    .find(|index| index.name == name),
+                None => definition.typed_indexes.first(),
+            }
+            .ok_or(EngineError::Invalid("unknown secondary index"))?;
+            let mut groups: BTreeMap<String, (BTreeMap<String, TypedValue>, u64)> = BTreeMap::new();
+            for candidate in hot_query_candidates(&g.conn, shard, spec, &request.filters)? {
+                let mut key = BTreeMap::new();
+                for group in &request.group_by {
+                    let index_type = index_field_type(spec, &group.field)
+                        .ok_or(EngineError::Invalid("unindexed-field"))?;
+                    let Some(mut value) = typed_value_for_json(
+                        candidate
+                            .entity
+                            .get(&group.field)
+                            .unwrap_or(&JsonValue::Null),
+                        index_type,
+                    )?
+                    else {
+                        continue;
+                    };
+                    if let Some(bucket) = group.time_bucket {
+                        value = match value {
+                            TypedValue::DateTime(value) => {
+                                TypedValue::DateTime(truncate_query_timestamp(value, bucket))
+                            }
+                            _ => return Err(EngineError::Invalid("unsupported time bucket")),
+                        };
+                    }
+                    key.insert(group.field.clone(), value);
+                }
+                if key.len() != request.group_by.len() {
+                    continue;
+                }
+                let serialized =
+                    serde_json::to_string(&key).map_err(|e| EngineError::Storage(e.to_string()))?;
+                if !groups.contains_key(&serialized) && groups.len() as u32 >= request.max_groups {
+                    return Err(EngineError::Invalid("aggregate-too-large"));
+                }
+                groups.entry(serialized).or_insert((key, 0)).1 += 1;
+            }
+            Ok(GroupedAggregateResponse {
+                groups: groups
+                    .into_values()
+                    .map(|(key, count)| AggregateGroup { key, count })
+                    .collect(),
             })
         })();
         std::future::ready(result)
@@ -2004,10 +2204,35 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
         let result = (|| {
             let g = self.inner.lock().expect("projection store poisoned");
             let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
-            let image = export_projection_image_sql(&g.conn, shard)?;
-            query_projection_image(&definition, image, |projection, shard| {
-                projection.metrics_by_query(shard, request)
-            })
+            let spec = match request.index.as_deref() {
+                Some(name) => definition
+                    .typed_indexes
+                    .iter()
+                    .find(|index| index.name == name),
+                None => definition.typed_indexes.first(),
+            }
+            .ok_or(EngineError::Invalid("unknown secondary index"))?;
+            if request.filters.iter().any(|filter| {
+                !index_fields(spec)
+                    .iter()
+                    .any(|(field, _)| *field == filter.field)
+            }) {
+                return Err(EngineError::Invalid("unindexed-field"));
+            }
+            let mut metrics = QueueMetrics::default();
+            for candidate in hot_query_candidates(&g.conn, shard, spec, &request.filters)? {
+                if candidate.superseded {
+                    continue;
+                }
+                match parse_state(&candidate.lifecycle_state)? {
+                    ItemState::Pending => metrics.pending += 1,
+                    ItemState::Leased => metrics.leased += 1,
+                    ItemState::Complete => metrics.complete += 1,
+                    ItemState::Failed => metrics.failed += 1,
+                }
+            }
+            metrics.resident_terminal_count = metrics.complete + metrics.failed;
+            Ok(metrics)
         })();
         std::future::ready(result)
     }
@@ -2020,10 +2245,70 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
         let result = (|| {
             let g = self.inner.lock().expect("projection store poisoned");
             let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
-            let image = export_projection_image_sql(&g.conn, shard)?;
-            query_projection_image(&definition, image, |projection, shard| {
-                projection.declared_bucket_segment(shard, request)
-            })
+            request
+                .validate(1_000)
+                .map_err(|_| EngineError::Invalid("invalid request"))?;
+            let spec = match request.index.as_deref() {
+                Some(name) => definition
+                    .typed_indexes
+                    .iter()
+                    .find(|index| index.name == name),
+                None => definition.typed_indexes.first(),
+            }
+            .ok_or(EngineError::Invalid("unknown secondary index"))?;
+            let index_type = index_field_type(spec, &request.field)
+                .ok_or(EngineError::Invalid("unindexed-field"))?;
+            if !matches!(index_type, IndexType::Integer | IndexType::Float) {
+                return Err(EngineError::Invalid("unsupported bucket field"));
+            }
+            let mut counts = vec![0_u64; request.buckets.len()];
+            let scan_spec = definition
+                .typed_indexes
+                .iter()
+                .find(|candidate| {
+                    let fields = index_fields(candidate);
+                    request
+                        .filters
+                        .iter()
+                        .all(|filter| fields.iter().any(|(field, _)| *field == filter.field))
+                })
+                .unwrap_or(spec);
+            let mut null_count = 0_u64;
+            for candidate in hot_query_candidates(&g.conn, shard, scan_spec, &request.filters)? {
+                let Some(value) = typed_value_for_json(
+                    candidate
+                        .entity
+                        .get(&request.field)
+                        .unwrap_or(&JsonValue::Null),
+                    index_type,
+                )?
+                else {
+                    null_count += 1;
+                    continue;
+                };
+                if let Some((position, _)) = request
+                    .buckets
+                    .iter()
+                    .enumerate()
+                    .find(|(_, bucket)| value_matches_bucket(&value, bucket))
+                {
+                    counts[position] += 1;
+                }
+            }
+            let mut buckets = request
+                .buckets
+                .into_iter()
+                .zip(counts)
+                .map(|(bucket, count)| BucketCount {
+                    label: bucket.label,
+                    count,
+                })
+                .collect::<Vec<_>>();
+            buckets.push(BucketCount {
+                label: request.null_bucket_label,
+                count: null_count,
+            });
+            Ok(DeclaredBucketSegmentResponse { buckets })
         })();
         std::future::ready(result)
     }
@@ -2065,93 +2350,203 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 return Err(EngineError::Invalid("unindexed-field"));
             }
 
-            let (t, q) = parts(shard);
-            let mut matches = {
-                let mut stmt = st(g.conn.prepare(
-                    "SELECT item_id,lifecycle_state,fenced,superseded,entity_document \
-                     FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2",
-                ))?;
-                let rows = st(stmt.query_map(params![t, q], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                    ))
-                }))?;
-                let mut matches = Vec::new();
-                for row in rows {
-                    let (item_id, lifecycle_state, fenced, superseded, entity_json) = st(row)?;
-                    let item_id =
-                        ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
-                    let entity_json = match entity_json {
-                        Some(raw) => serde_json::from_str::<JsonValue>(&raw)
+            let mut matches = hot_query_candidates(&g.conn, shard, spec, &request.filters)?;
+            matches.sort_by_key(|candidate| candidate.item_id);
+
+            struct PlannedMutation {
+                candidate: HotQueryCandidate,
+                entity: JsonValue,
+                fields: String,
+                keys: Vec<(String, Vec<u8>)>,
+            }
+            let mut planned = Vec::new();
+            let mut results = Vec::with_capacity(matches.len());
+            for candidate in matches {
+                if candidate.fenced
+                    || candidate.superseded
+                    || parse_state(&candidate.lifecycle_state)? != ItemState::Pending
+                {
+                    results.push(MutationResult {
+                        item_id: candidate.item_id,
+                        outcome: MutationOutcome::Conflict,
+                    });
+                    continue;
+                }
+                let entity = merge_entity_document(Some(&candidate.entity), &request.set_fields)?;
+                validate_entity(g.schemas.get(shard), Some(&entity))?;
+                let mut fields = fields_from_json(candidate.fields.clone())?;
+                for (field, value) in &request.set_fields {
+                    fields.insert(
+                        field.clone(),
+                        Bytes::from(
+                            serde_json::to_vec(value)
+                                .map_err(|e| EngineError::Storage(e.to_string()))?,
+                        ),
+                    );
+                }
+                planned.push(PlannedMutation {
+                    keys: typed_index_keys_for_entity(&definition.typed_indexes, Some(&entity))?,
+                    fields: fields_to_json(&fields)?,
+                    candidate,
+                    entity,
+                });
+            }
+
+            let (tenant, queue) = parts(shard);
+            let now = {
+                let d = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid ts")
+            };
+            let tx = st(g
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate))?;
+            let (seq, _epoch): (i64, i64) = st(tx.query_row(
+                "SELECT next_seq,assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                params![tenant, queue],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ))?;
+            let mut updated = HashSet::new();
+            if !planned.is_empty() {
+                let values_clause = std::iter::repeat_n("(?,?,?,?)", planned.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "WITH mutations(item_id,item_version,fields,entity) AS (VALUES {values_clause}) \
+                     UPDATE pqueue_items SET \
+                       fields=(SELECT fields FROM mutations WHERE mutations.item_id=pqueue_items.item_id), \
+                       entity_document=(SELECT entity FROM mutations WHERE mutations.item_id=pqueue_items.item_id), \
+                       item_version=item_version+1,updated_at={},last_command_sequence={} \
+                     WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Pending' \
+                       AND fenced=0 AND superseded=0 AND EXISTS (SELECT 1 FROM mutations \
+                         WHERE mutations.item_id=pqueue_items.item_id \
+                           AND mutations.item_version=pqueue_items.item_version) RETURNING item_id",
+                    ts_nanos(now),
+                    seq
+                );
+                let mut values = Vec::with_capacity(planned.len() * 4 + 2);
+                for mutation in &planned {
+                    values.push(SqlValue::Text(mutation.candidate.item_id.to_string()));
+                    values.push(SqlValue::Integer(mutation.candidate.item_version));
+                    values.push(SqlValue::Text(mutation.fields.clone()));
+                    values.push(SqlValue::Text(
+                        serde_json::to_string(&mutation.entity)
                             .map_err(|e| EngineError::Storage(e.to_string()))?,
-                        None => continue,
-                    };
-                    let row = typed_index_row_from_entity(spec, item_id, &entity_json)?;
-                    let Some(row) = row else {
-                        continue;
-                    };
-                    if !typed_index_row_matches(spec, &request.filters, &row)? {
-                        continue;
-                    }
-                    matches.push((
-                        item_id,
-                        lifecycle_state,
-                        fenced != 0,
-                        superseded != 0,
-                        entity_json,
                     ));
                 }
-                matches
-            };
-            matches.sort_by_key(|(item_id, ..)| *item_id);
+                values.push(SqlValue::Text(tenant.clone()));
+                values.push(SqlValue::Text(queue.clone()));
+                let mut statement = st(tx.prepare(&sql))?;
+                let rows =
+                    st(statement
+                        .query_map(params_from_iter(values), |row| row.get::<_, String>(0)))?;
+                for row in rows {
+                    updated.insert(st(row)?);
+                }
+                drop(statement);
 
-            let mut results = Vec::with_capacity(matches.len());
-            for (item_id, lifecycle_state, fenced, superseded, entity) in matches {
-                let outcome = if fenced
-                    || superseded
-                    || parse_state(&lifecycle_state)?.is_terminal()
-                    || parse_state(&lifecycle_state)? != ItemState::Pending
-                {
-                    MutationOutcome::Conflict
-                } else {
-                    let new_entity = merge_entity_document(Some(&entity), &request.set_fields)?;
-                    validate_entity(g.schemas.get(shard), Some(&new_entity))?;
-                    let now = {
-                        let d = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default();
-                        UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid ts")
-                    };
-                    g.commit_command(
-                        shard,
-                        QueueCommand::UpdateFields(UpdateFieldsCommand {
-                            item_id,
-                            field_ops: request
-                                .set_fields
-                                .iter()
-                                .map(|(field, value)| {
-                                    serde_json::to_vec(value)
-                                        .map(Bytes::from)
-                                        .map_err(|e| EngineError::Storage(e.to_string()))
-                                        .map(|bytes| (field.clone(), Some(bytes)))
-                                })
-                                .collect::<EngineResult<BTreeMap<_, _>>>()?,
-                            payload: PayloadUpdate::Keep,
-                            set_priority: Default::default(),
-                            set_not_before: Default::default(),
-                            set_entity_document: Some(new_entity),
-                        }),
-                        now,
-                        None,
-                    )?;
-                    MutationOutcome::Updated
-                };
-                results.push(MutationResult { item_id, outcome });
+                if !updated.is_empty() {
+                    let placeholders = std::iter::repeat_n("?", updated.len())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let delete_sql = format!(
+                        "DELETE FROM pqueue_item_index WHERE tenant_id=? AND queue_id=? \
+                         AND item_id IN ({placeholders})"
+                    );
+                    let mut delete_values = vec![
+                        SqlValue::Text(tenant.clone()),
+                        SqlValue::Text(queue.clone()),
+                    ];
+                    delete_values.extend(updated.iter().cloned().map(SqlValue::Text));
+                    st(tx.execute(&delete_sql, params_from_iter(delete_values)))?;
+
+                    let index_rows = planned
+                        .iter()
+                        .filter(|mutation| {
+                            updated.contains(&mutation.candidate.item_id.to_string())
+                        })
+                        .flat_map(|mutation| {
+                            mutation.keys.iter().map(move |(name, key)| {
+                                (
+                                    mutation.candidate.item_id.to_string(),
+                                    name.clone(),
+                                    key.clone(),
+                                )
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if !index_rows.is_empty() {
+                        let values_clause = std::iter::repeat_n("(?,?,?,?,?)", index_rows.len())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let insert_sql = format!(
+                            "INSERT INTO pqueue_item_index \
+                             (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values_clause}"
+                        );
+                        let mut index_values = Vec::with_capacity(index_rows.len() * 5);
+                        for (item_id, name, key) in index_rows {
+                            index_values.extend([
+                                SqlValue::Text(tenant.clone()),
+                                SqlValue::Text(queue.clone()),
+                                SqlValue::Text(name),
+                                SqlValue::Blob(key),
+                                SqlValue::Text(item_id),
+                            ]);
+                        }
+                        st(tx.execute(&insert_sql, params_from_iter(index_values)))?;
+                    }
+                }
             }
+            let unresolved = planned
+                .iter()
+                .filter(|mutation| !updated.contains(&mutation.candidate.item_id.to_string()))
+                .map(|mutation| mutation.candidate.item_id.to_string())
+                .collect::<Vec<_>>();
+            let mut existing = HashSet::new();
+            if !unresolved.is_empty() {
+                let placeholders = std::iter::repeat_n("?", unresolved.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT item_id FROM pqueue_items WHERE tenant_id=? AND queue_id=? \
+                     AND item_id IN ({placeholders})"
+                );
+                let mut values = vec![
+                    SqlValue::Text(tenant.clone()),
+                    SqlValue::Text(queue.clone()),
+                ];
+                values.extend(unresolved.into_iter().map(SqlValue::Text));
+                let mut statement = st(tx.prepare(&sql))?;
+                let rows =
+                    st(statement
+                        .query_map(params_from_iter(values), |row| row.get::<_, String>(0)))?;
+                for row in rows {
+                    existing.insert(st(row)?);
+                }
+            }
+            for mutation in &planned {
+                let item_id = mutation.candidate.item_id;
+                results.push(MutationResult {
+                    item_id,
+                    outcome: if updated.contains(&item_id.to_string()) {
+                        MutationOutcome::Updated
+                    } else if existing.contains(&item_id.to_string()) {
+                        MutationOutcome::Conflict
+                    } else {
+                        MutationOutcome::NotFound
+                    },
+                });
+            }
+            let updated_any = !updated.is_empty();
+            if updated_any {
+                st(tx.execute(
+                    "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
+                    params![tenant, queue, seq + 1],
+                ))?;
+            }
+            st(tx.commit())?;
+            results.sort_by_key(|result| result.item_id);
 
             Ok(BoundedMutationResponse { results })
         })();
@@ -2693,3 +3088,217 @@ impl ReclaimDriver for SqliteRelationalBackend {
 // This reaches capability parity with the monolithic [`SqliteRelationalBackend`] for the CORE conformance
 // class: the orthogonal orchestration (already proven against `InMemoryProjection`) gets correct answers
 // from the relational SQL projection, so the composition passes `core_suite!(@atomic)` identically.
+
+#[cfg(test)]
+mod hot_query_sql_tests {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use pqueue_core::{
+        EligibilityPolicy, FilterOp, IndexDeclaration, IndexDef, OrderingMode, PriorityDirection,
+        PriorityModel, PriorityModelKind, PriorityTieBreaker, QueryFilter, QueueDefinition,
+        QueueIndex, RecurrencePolicy, RetryPolicy, TypedValue,
+    };
+    use pqueue_engine::{ControlPlaneStore, HotProjectionQueryPort, PushPort, PushSpec};
+
+    use super::*;
+
+    static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_statement(_: &str) {
+        TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mutation_queue() -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new("queue").unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 1_000,
+            max_claim_batch_size: 1_000,
+            max_eligible_group_size: None,
+            secondary_indexes: vec![],
+            entity_schema: None,
+            typed_indexes: vec![QueueIndex {
+                name: "by_status".into(),
+                declaration: IndexDeclaration::Single(IndexDef {
+                    field: "status".into(),
+                    index_type: IndexType::String,
+                    unique: false,
+                }),
+            }],
+            emit_change_records: true,
+        }
+    }
+
+    async fn mutation_statement_count(rows: usize) -> usize {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                (0..rows)
+                    .map(|_| PushSpec {
+                        entity: Some(serde_json::json!({"status":"ready"})),
+                        ..PushSpec::default()
+                    })
+                    .collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        TRACE_COUNT.store(0, Ordering::Relaxed);
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            inner.conn.trace(Some(count_statement));
+        }
+        let response = backend
+            .bounded_mutation(
+                &shard,
+                BoundedMutationRequest {
+                    index: Some("by_status".into()),
+                    filters: vec![QueryFilter {
+                        field: "status".into(),
+                        op: FilterOp::Eq,
+                        value: TypedValue::String("ready".into()),
+                    }],
+                    set_fields: BTreeMap::from([(
+                        "status".into(),
+                        TypedValue::String("done".into()),
+                    )]),
+                    max_scan_rows: rows as u32,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.results.len(), rows);
+        backend.inner.lock().unwrap().conn.trace(None);
+        TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
+    #[tokio::test]
+    async fn bounded_mutation_statement_count_is_independent_of_match_count() {
+        let one = mutation_statement_count(1).await;
+        let hundred = mutation_statement_count(100).await;
+        let thousand = mutation_statement_count(1_000).await;
+        assert_eq!((one, hundred, thousand), (one, one, one));
+    }
+
+    #[test]
+    fn indexed_candidate_seek_ignores_a_large_nonmatching_inventory() {
+        let mut conn = Connection::open_in_memory().expect("sqlite");
+        conn.execute_batch(
+            "CREATE TABLE pqueue_items (
+                tenant_id TEXT,queue_id TEXT,item_id TEXT,entity_document TEXT,fields TEXT,
+                item_version INTEGER,lifecycle_state TEXT,fenced INTEGER,superseded INTEGER,
+                PRIMARY KEY(tenant_id,queue_id,item_id));
+             CREATE TABLE pqueue_item_index (
+                tenant_id TEXT,queue_id TEXT,index_name TEXT,index_key BLOB,item_id TEXT,
+                PRIMARY KEY(tenant_id,queue_id,index_name,item_id));
+             CREATE INDEX pqueue_item_index_key_idx ON pqueue_item_index
+                (tenant_id,queue_id,index_name,index_key);
+             WITH RECURSIVE n(v) AS (VALUES(1) UNION ALL SELECT v+1 FROM n WHERE v<100000)
+             INSERT INTO pqueue_item_index
+                SELECT 'tenant','queue','by_status',X'000000056F74686572',printf('noise-%06d',v) FROM n;",
+        )
+        .expect("seed nonmatches");
+        let spec = QueueIndex {
+            name: "by_status".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "status".into(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        };
+        let target = JsonValue::String("ready".into());
+        let key = axon_esf::encode_compound_index_key(&[(&target, &IndexType::String)])
+            .expect("key")
+            .expect("present");
+        let tx = conn.transaction().expect("seed transaction");
+        for ordinal in 0..32 {
+            let item_id = ItemId::mint(1, 0, ordinal).to_string();
+            tx.execute(
+                "INSERT INTO pqueue_items VALUES(?1,?2,?3,?4,'{}',1,'Pending',0,0)",
+                params!["tenant", "queue", item_id, r#"{"status":"ready"}"#],
+            )
+            .expect("item");
+            tx.execute(
+                "INSERT INTO pqueue_item_index VALUES(?1,?2,?3,?4,?5)",
+                params!["tenant", "queue", spec.name, key, item_id],
+            )
+            .expect("index row");
+        }
+        tx.commit().expect("seed commit");
+
+        let prefix = hot_query_prefix(
+            &spec,
+            &[QueryFilter {
+                field: "status".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("ready".into()),
+            }],
+        )
+        .expect("prefix");
+        let upper = prefix_successor(prefix.clone()).expect("upper");
+        let plan = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {HOT_QUERY_CANDIDATES_SQL}"))
+            .expect("plan")
+            .query_map(
+                params!["tenant", "queue", spec.name, prefix, upper],
+                |row| row.get::<_, String>(3),
+            )
+            .expect("plan rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan details")
+            .join("\n");
+        assert!(plan.contains("pqueue_item_index_key_idx"), "{plan}");
+        assert!(!plan.contains("SCAN i"), "{plan}");
+
+        let vm_steps = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&vm_steps);
+        conn.progress_handler(
+            1,
+            Some(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+                false
+            }),
+        );
+        let shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        );
+        let rows = hot_query_candidates(
+            &conn,
+            &shard,
+            &spec,
+            &[QueryFilter {
+                field: "status".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("ready".into()),
+            }],
+        )
+        .expect("seek");
+        conn.progress_handler(0, None::<fn() -> bool>);
+        assert_eq!(rows.len(), 32);
+        assert!(vm_steps.load(Ordering::Relaxed) < 20_000);
+    }
+}
