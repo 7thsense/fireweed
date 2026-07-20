@@ -69,14 +69,15 @@ use pqueue_engine::{
     DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand,
     FinalizeKind, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision,
     IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView,
-    PayloadUpdate, ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushFingerprint,
-    PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ScheduleUpdate, SetGatesCommand,
-    SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema,
-    project_scopes, validate_api001_reserved_write_fields, validate_claim_compatibility,
-    validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
+    PayloadUpdate, PendingPage, PendingSummary, ProjectionRead, PurgeItemsCommand, PurgePort,
+    PushCommand, PushFingerprint, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters,
+    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ScheduleUpdate,
+    SetGatesCommand, SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
+    compile_entity_schema, project_scopes, validate_api001_reserved_write_fields,
+    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
+    validate_purge_force,
 };
 use pqueue_engine::{
     AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogLineageIdentity,
@@ -170,6 +171,10 @@ CREATE INDEX IF NOT EXISTS pqueue_items_claim_idx
 CREATE INDEX IF NOT EXISTS pqueue_items_expired_lease_idx
     ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)
     WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = false AND superseded = false;
+CREATE INDEX IF NOT EXISTS pqueue_items_pending_entry_idx
+    ON pqueue_items (tenant_id, queue_id, (item_id::numeric))
+    INCLUDE (lease_token_hash, lease_expires_at, retry_count)
+    WHERE lifecycle_state = 'Leased';
 CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     next_seq BIGINT NOT NULL,
@@ -556,6 +561,13 @@ const GROUP_SUMMARY_INDEX_MIGRATIONS: &[(&str, &str)] = &[
          ON pqueue_items (lease_expires_at,tenant_id,queue_id,item_id) \
          WHERE lifecycle_state='Leased' AND cohort_size IS NULL \
            AND fenced=false AND superseded=false",
+    ),
+    (
+        "pqueue_items_pending_entry_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_pending_entry_idx \
+         ON pqueue_items (tenant_id,queue_id,(item_id::numeric)) \
+         INCLUDE (lease_token_hash,lease_expires_at,retry_count) \
+         WHERE lifecycle_state='Leased'",
     ),
     (
         "pqueue_group_due_pending_frontier_idx",
@@ -3465,6 +3477,171 @@ fn pending_sql(
     Ok(out)
 }
 
+fn pending_summary_sql(
+    client: &mut Client,
+    live_tokens: &HashMap<ItemId, LeaseToken>,
+    shard: &QueueKey,
+) -> EngineResult<PendingSummary> {
+    if live_tokens.is_empty() {
+        return Ok(PendingSummary::default());
+    }
+    let (t, q) = parts(shard);
+    let rows = st(client.query(
+        "SELECT lease_token_hash,COUNT(*),MIN(item_id::numeric)::text,MAX(item_id::numeric)::text \
+         FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
+         AND lease_token_hash IS NOT NULL GROUP BY lease_token_hash",
+        &[&t, &q],
+    ))?;
+    let mut summary = PendingSummary::default();
+    for row in rows {
+        let count: i64 = row.get(1);
+        let min = ItemId::new(row.get::<_, String>(2))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let max = ItemId::new(row.get::<_, String>(3))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let Some(token) = live_tokens.get(&min) else {
+            // A restart intentionally loses every plaintext lease token. Old durable leases remain
+            // invisible to the PEL until ordinary expiry/reclaim, matching pending_sql.
+            continue;
+        };
+        summary.count = summary.count.saturating_add(count as u64);
+        summary.min_id = Some(summary.min_id.map_or(min, |current| current.min(min)));
+        summary.max_id = Some(summary.max_id.map_or(max, |current| current.max(max)));
+        summary.consumers.push((token.clone(), count as u64));
+    }
+    summary
+        .consumers
+        .sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+    Ok(summary)
+}
+
+fn lease_views_from_rows(
+    rows: Vec<postgres::Row>,
+    live_tokens: &HashMap<ItemId, LeaseToken>,
+) -> EngineResult<Vec<LeaseView>> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let item_id = ItemId::new(row.get::<_, String>(0))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let (Some(token), Some(expires_at)) =
+            (live_tokens.get(&item_id), row.get::<_, Option<i64>>(1))
+        else {
+            continue;
+        };
+        out.push(LeaseView {
+            item_id,
+            lease_token: token.clone(),
+            lease_expires_at: nanos_ts(expires_at),
+            attempt_count: row.get::<_, i64>(2) as u32,
+        });
+    }
+    Ok(out)
+}
+
+fn pending_page_sql(
+    client: &mut Client,
+    live_tokens: &HashMap<ItemId, LeaseToken>,
+    shard: &QueueKey,
+    start: Option<ItemId>,
+    limit: usize,
+) -> EngineResult<PendingPage> {
+    if limit == 0 || live_tokens.is_empty() {
+        return Ok(PendingPage::default());
+    }
+    let (t, q) = parts(shard);
+    let start = start
+        .map(|item| item.to_string())
+        .unwrap_or_else(|| "0".into());
+    let row_limit = limit.saturating_add(1).min(i64::MAX as usize) as i64;
+    let mut rows = st(client.query(
+        "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+         WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
+         AND item_id::numeric >= $3::text::numeric ORDER BY item_id::numeric LIMIT $4",
+        &[&t, &q, &start, &row_limit],
+    ))?;
+    let next = if rows.len() > limit {
+        let row = rows.pop().expect("limit-plus-one row exists");
+        Some(
+            ItemId::new(row.get::<_, String>(0))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+        )
+    } else {
+        None
+    };
+    Ok(PendingPage {
+        entries: lease_views_from_rows(rows, live_tokens)?,
+        next,
+    })
+}
+
+fn pending_range_sql(
+    client: &mut Client,
+    live_tokens: &HashMap<ItemId, LeaseToken>,
+    shard: &QueueKey,
+    start: Option<ItemId>,
+    end: Option<ItemId>,
+    consumer: Option<&LeaseToken>,
+    limit: usize,
+) -> EngineResult<Vec<LeaseView>> {
+    if limit == 0 || live_tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (t, q) = parts(shard);
+    let start = start
+        .map(|item| item.to_string())
+        .unwrap_or_else(|| "0".into());
+    let end = end
+        .map(|item| item.to_string())
+        .unwrap_or_else(|| u64::MAX.to_string());
+    let row_limit = limit.min(i64::MAX as usize) as i64;
+    let rows = if let Some(consumer) = consumer {
+        let hash = lease_hash(consumer);
+        st(client.query(
+            "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
+             AND item_id::numeric BETWEEN $3::text::numeric AND $4::text::numeric \
+             AND lease_token_hash=$5 ORDER BY item_id::numeric LIMIT $6",
+            &[&t, &q, &start, &end, &hash, &row_limit],
+        ))?
+    } else {
+        st(client.query(
+            "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
+             AND item_id::numeric BETWEEN $3::text::numeric AND $4::text::numeric \
+             ORDER BY item_id::numeric LIMIT $5",
+            &[&t, &q, &start, &end, &row_limit],
+        ))?
+    };
+    lease_views_from_rows(rows, live_tokens)
+}
+
+fn pending_by_ids_sql(
+    client: &mut Client,
+    live_tokens: &HashMap<ItemId, LeaseToken>,
+    shard: &QueueKey,
+    ids: &[ItemId],
+) -> EngineResult<Vec<LeaseView>> {
+    if ids.is_empty() || live_tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (t, q) = parts(shard);
+    let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    let rows = st(client.query(
+        "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+         WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Leased' \
+         AND item_id = ANY($3::text[])",
+        &[&t, &q, &id_strings],
+    ))?;
+    let by_id: HashMap<_, _> = lease_views_from_rows(rows, live_tokens)?
+        .into_iter()
+        .map(|lease| (lease.item_id, lease))
+        .collect();
+    Ok(ids
+        .iter()
+        .filter_map(|item_id| by_id.get(item_id).cloned())
+        .collect())
+}
+
 /// Build a [`ClaimedItem`] from a row carrying (client_item_key, item_version, priority, group_key,
 /// not_before, lease_expires_at, retry_count, payload, fields), pairing it with `token`. Shared by the
 /// claim CTE RETURNING and the `claimed_view` read port.
@@ -3540,36 +3717,49 @@ fn render_claimed(
     ids: &[ItemId],
     resolve: impl Fn(&ItemId) -> Option<LeaseToken>,
 ) -> EngineResult<Vec<ClaimedItem>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
     let (t, q) = parts(shard);
-    let mut out = Vec::new();
+    let id_strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    let rows = st(client.query(
+        "SELECT item_id,client_item_key,item_version,priority,group_key,not_before, \
+         lease_expires_at,retry_count,payload,fields,metadata FROM pqueue_items \
+         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3::text[]) \
+         AND lifecycle_state='Leased'",
+        &[&t, &q, &id_strings],
+    ))?;
+    let mut rows_by_id = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let item_id = ItemId::new(row.get::<_, String>(0))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        rows_by_id.insert(item_id, row);
+    }
     let mut gate_keys_by_id = item_gate_keys_by_id(client, shard, ids)?;
+    let mut out = Vec::with_capacity(rows_by_id.len());
     for id in ids {
         let Some(token) = resolve(id) else {
             continue;
         };
-        let row = st(client.query_opt(
-            "SELECT client_item_key, item_version, priority, group_key, not_before, \
-             lease_expires_at, retry_count, payload, fields, metadata FROM pqueue_items \
-             WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 AND lifecycle_state='Leased'",
-            &[&t, &q, &id.to_string()],
-        ))?;
-        let Some(row) = row else { continue };
-        let exp: Option<i64> = row.get(5);
+        let Some(row) = rows_by_id.remove(id) else {
+            continue;
+        };
+        let exp: Option<i64> = row.get(6);
         let Some(exp) = exp else { continue };
         let gate_keys = gate_keys_by_id.remove(&id.to_string()).unwrap_or_default();
         out.push(claimed_from_row(
             *id,
             token,
-            row.get(0),
             row.get(1),
             row.get(2),
             row.get(3),
             row.get(4),
+            row.get(5),
             exp,
-            row.get(6),
             row.get(7),
             row.get(8),
             row.get(9),
+            row.get(10),
             gate_keys,
         )?);
     }
@@ -4687,6 +4877,77 @@ impl ProjectionRead for PostgresRelationalBackend {
                 ..
             } = &mut *g;
             pending_sql(client, live_tokens, shard)
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        let result = {
+            let mut guard = self.inner.lock().expect("poisoned");
+            let Inner {
+                client,
+                live_tokens,
+                ..
+            } = &mut *guard;
+            pending_summary_sql(client, live_tokens, shard)
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        let result = {
+            let mut guard = self.inner.lock().expect("poisoned");
+            let Inner {
+                client,
+                live_tokens,
+                ..
+            } = &mut *guard;
+            pending_page_sql(client, live_tokens, shard, start, limit)
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = {
+            let mut guard = self.inner.lock().expect("poisoned");
+            let Inner {
+                client,
+                live_tokens,
+                ..
+            } = &mut *guard;
+            pending_range_sql(client, live_tokens, shard, start, end, consumer, limit)
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = {
+            let mut guard = self.inner.lock().expect("poisoned");
+            let Inner {
+                client,
+                live_tokens,
+                ..
+            } = &mut *guard;
+            pending_by_ids_sql(client, live_tokens, shard, ids)
         };
         std::future::ready(result)
     }
@@ -7306,6 +7567,58 @@ impl ProjectionStore for PostgresRelational {
         pending_sql(client, live_tokens, shard)
     }
 
+    fn pending_summary(&self, shard: &QueueKey) -> EngineResult<PendingSummary> {
+        let mut guard = self.lock();
+        let Inner {
+            client,
+            live_tokens,
+            ..
+        } = &mut *guard;
+        pending_summary_sql(client, live_tokens, shard)
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        let mut guard = self.lock();
+        let Inner {
+            client,
+            live_tokens,
+            ..
+        } = &mut *guard;
+        pending_page_sql(client, live_tokens, shard, start, limit)
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        let mut guard = self.lock();
+        let Inner {
+            client,
+            live_tokens,
+            ..
+        } = &mut *guard;
+        pending_range_sql(client, live_tokens, shard, start, end, consumer, limit)
+    }
+
+    fn pending_by_ids(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<LeaseView>> {
+        let mut guard = self.lock();
+        let Inner {
+            client,
+            live_tokens,
+            ..
+        } = &mut *guard;
+        pending_by_ids_sql(client, live_tokens, shard, ids)
+    }
+
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
         metrics_sql(&mut self.lock().client, shard)
     }
@@ -7487,6 +7800,45 @@ mod sql_shape_tests {
             .unwrap();
         assert!(metrics_fn.contains("FROM pqueue_queue_metrics_v2"));
         assert!(!metrics_fn.contains("COUNT(*)"));
+    }
+
+    #[test]
+    fn pending_entry_reads_are_set_based_and_request_bounded() {
+        let source = include_str!("relational.rs");
+        let page = source
+            .split("fn pending_page_sql(")
+            .nth(1)
+            .unwrap()
+            .split("fn pending_range_sql(")
+            .next()
+            .unwrap();
+        assert!(page.contains("item_id::numeric >= $3::text::numeric"));
+        assert!(page.contains("ORDER BY item_id::numeric LIMIT $4"));
+        assert!(page.contains("limit.saturating_add(1)"));
+
+        let by_ids = source
+            .split("fn pending_by_ids_sql(")
+            .nth(1)
+            .unwrap()
+            .split("/// Build a [`ClaimedItem`]")
+            .next()
+            .unwrap();
+        assert!(by_ids.contains("item_id = ANY($3::text[])"));
+
+        let claimed = source
+            .split("fn render_claimed(")
+            .nth(1)
+            .unwrap()
+            .split("fn live_items_sql(")
+            .next()
+            .unwrap();
+        assert!(claimed.contains("item_id=ANY($3::text[])"));
+        assert!(!claimed.contains("query_opt"));
+        assert!(GROUP_SUMMARY_INDEX_MIGRATIONS.iter().any(|(name, ddl)| {
+            *name == "pqueue_items_pending_entry_idx"
+                && ddl.contains("(item_id::numeric)")
+                && ddl.contains("WHERE lifecycle_state='Leased'")
+        }));
     }
 
     #[test]
@@ -7776,6 +8128,85 @@ mod gated_group_summary_tests {
             )
             .unwrap()
             .get(0)
+    }
+
+    #[test]
+    fn pending_entry_ports_preserve_bounds_and_requested_order() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (pending_entry_ports_preserve_bounds_and_requested_order) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_pending_ports_{}", std::process::id());
+        let mut client = Client::connect(&url, NoTls).expect("connect");
+        client
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(client);
+
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(qdef())).unwrap();
+        let ids = block_on(backend.push(
+            &shard(),
+            vec![
+                PushSpec::default(),
+                PushSpec::default(),
+                PushSpec::default(),
+            ],
+            ts(1),
+            None,
+        ))
+        .unwrap();
+        let claimed = block_on(backend.claim(claim_req(3, 100, 2))).unwrap();
+        assert_eq!(claimed.items.len(), 3);
+
+        let summary = block_on(backend.pending_summary(&shard())).unwrap();
+        assert_eq!(summary.count, 3);
+        assert_eq!(summary.min_id, Some(ids[0]));
+        assert_eq!(summary.max_id, Some(ids[2]));
+        assert_eq!(
+            summary.consumers,
+            vec![(LeaseToken::new("lease-1").unwrap(), 3)]
+        );
+
+        let page = block_on(backend.pending_page(&shard(), None, 2)).unwrap();
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>(),
+            ids[..2]
+        );
+        assert_eq!(page.next, Some(ids[2]));
+
+        let range = block_on(backend.pending_range(
+            &shard(),
+            Some(ids[0]),
+            Some(ids[1]),
+            Some(&LeaseToken::new("lease-1").unwrap()),
+            10,
+        ))
+        .unwrap();
+        assert_eq!(
+            range.iter().map(|entry| entry.item_id).collect::<Vec<_>>(),
+            ids[..2]
+        );
+
+        let requested = vec![ids[2], ids[0]];
+        let by_ids = block_on(backend.pending_by_ids(&shard(), &requested)).unwrap();
+        assert_eq!(
+            by_ids.iter().map(|entry| entry.item_id).collect::<Vec<_>>(),
+            requested
+        );
+        let rendered = block_on(backend.claimed_view(&shard(), &requested)).unwrap();
+        assert_eq!(
+            rendered
+                .iter()
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>(),
+            requested
+        );
     }
 
     #[test]

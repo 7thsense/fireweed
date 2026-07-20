@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
+use pqueue_core::{ClientItemKey, ItemId, ItemState, LeaseToken, QueueDefinition, UtcTimestamp};
 use pqueue_engine::ClaimUnit;
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{
     ActiveScope, AsOfProjectionStore, ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope,
     CommandPosition, DiscoveryGranularity, DurabilityClass, EngineError, EngineResult,
-    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PushItem, QueueCounters,
-    QueueKey, QueueMetrics,
+    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary,
+    PushItem, QueueCounters, QueueKey, QueueMetrics,
 };
 use pqueue_engine::{
     CommandPage, LogStore, ProjectionSnapshot, ProjectionStore, RichClaimSelection, SnapshotRef,
@@ -562,6 +562,51 @@ impl ProjectionStore for SqliteRelational {
     fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
         let g = self.lock();
         pending_sql(&g.conn, &g.live_tokens, shard)
+    }
+
+    fn pending_summary(&self, shard: &QueueKey) -> EngineResult<PendingSummary> {
+        let g = self.lock();
+        Ok(pending_summary_sql(
+            &g.live_tokens,
+            &g.live_tokens_by_consumer,
+            shard,
+        ))
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        let g = self.lock();
+        pending_page_sql(&g.conn, &g.live_tokens, shard, start, limit)
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        let g = self.lock();
+        pending_range_sql(
+            &g.conn,
+            &g.live_tokens,
+            &g.live_tokens_by_consumer,
+            shard,
+            start,
+            end,
+            consumer,
+            limit,
+        )
+    }
+
+    fn pending_by_ids(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<LeaseView>> {
+        let g = self.lock();
+        pending_by_ids_sql(&g.conn, &g.live_tokens, shard, ids)
     }
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {

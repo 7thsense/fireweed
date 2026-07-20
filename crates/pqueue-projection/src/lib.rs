@@ -40,8 +40,8 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeKind, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PayloadUpdate,
-    ProjectionSnapshot, PushItem, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
-    ScheduleUpdate, SnapshotRef, TerminalEmissionMetrics,
+    PendingPage, PendingSummary, ProjectionSnapshot, PushItem, QueueCommand, QueueCounters,
+    QueueKey, QueueMetrics, ScheduleUpdate, SnapshotRef, TerminalEmissionMetrics,
 };
 use serde_json::Value;
 
@@ -218,6 +218,18 @@ impl ItemRecord {
             fields: self.fields.clone(),
             metadata: self.metadata.clone(),
             gate_keys: self.gate_keys.clone(),
+        })
+    }
+
+    fn lease_view(&self) -> Option<LeaseView> {
+        if self.state != ItemState::Leased || self.superseded {
+            return None;
+        }
+        Some(LeaseView {
+            item_id: self.item_id,
+            lease_token: self.lease_token.clone()?,
+            lease_expires_at: self.lease_expires_at?,
+            attempt_count: self.attempt_count,
         })
     }
 
@@ -1378,6 +1390,10 @@ pub fn commit(
 
 pub struct ProjectionData {
     items: FastHashMap<ItemId, ItemRecord>,
+    /// Ordered PEL indexes. These keep cursor/range reads proportional to the
+    /// requested page instead of scanning every resident item or lease.
+    leased_ids: BTreeSet<ItemId>,
+    leased_by_consumer: FastHashMap<LeaseToken, BTreeSet<ItemId>>,
     by_key: FastHashMap<ClientItemKey, ItemId>,
     eligible: EligibilityIndex,
     metrics: QueueMetrics,
@@ -1432,6 +1448,8 @@ impl ProjectionData {
         }
         Self {
             items: FastHashMap::default(),
+            leased_ids: BTreeSet::new(),
+            leased_by_consumer: FastHashMap::default(),
             by_key: FastHashMap::default(),
             eligible: EligibilityIndex::new(),
             metrics: QueueMetrics::default(),
@@ -1516,6 +1534,17 @@ impl ProjectionData {
                 projection
                     .eligible
                     .insert(&rec, &projection.items, &projection.priority_model);
+            }
+            if rec.state == ItemState::Leased
+                && !rec.superseded
+                && let Some(token) = rec.lease_token.clone()
+            {
+                projection.leased_ids.insert(rec.item_id);
+                projection
+                    .leased_by_consumer
+                    .entry(token)
+                    .or_default()
+                    .insert(rec.item_id);
             }
             if !rec.superseded {
                 projection.metrics_inc(rec.state);
@@ -1667,7 +1696,7 @@ impl ProjectionData {
         terminal_position: Option<&CommandPosition>,
     ) -> EngineResult<ItemState> {
         let model = self.priority_model;
-        let (old_key, new_key, old_state, new_state) = {
+        let (old_key, new_key, old_state, new_state, old_token) = {
             let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
             // A superseded id (replaced by upsert) must never re-enter eligible or mutate
             // (TD-007 §2.3): the orchestration ports map this to `-ERR pqueue superseded`.
@@ -1692,8 +1721,19 @@ impl ProjectionData {
                 rec.terminal_position = None;
             }
             let nk = (new == ItemState::Pending).then(|| EligibilityIndex::token(rec, &model));
-            (old, nk, old_state, new)
+            (old, nk, old_state, new, rec.lease_token.clone())
         };
+        if old_state == ItemState::Leased && new_state != ItemState::Leased {
+            self.leased_ids.remove(id);
+            if let Some(token) = old_token
+                && let Some(ids) = self.leased_by_consumer.get_mut(&token)
+            {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.leased_by_consumer.remove(&token);
+                }
+            }
+        }
         if let Some(k) = old_key {
             self.eligible.remove(k);
         }
@@ -1741,6 +1781,11 @@ impl ProjectionData {
                     rec.lease_expires_at = Some(c.lease_expires_at);
                     rec.worker_id = c.worker_id.clone();
                     rec.attempt_count += 1; // delivery count (flavor-diff 7)
+                    self.leased_ids.insert(*id);
+                    self.leased_by_consumer
+                        .entry(c.lease_token.clone())
+                        .or_default()
+                        .insert(*id);
                 }
                 Ok(())
             }
@@ -1751,6 +1796,11 @@ impl ProjectionData {
                     rec.lease_token = Some(c.lease_token.clone());
                     rec.lease_expires_at = Some(c.lease_expires_at);
                     rec.attempt_count += 1;
+                    self.leased_ids.insert(*id);
+                    self.leased_by_consumer
+                        .entry(c.lease_token.clone())
+                        .or_default()
+                        .insert(*id);
                 }
                 Ok(())
             }
@@ -1787,10 +1837,22 @@ impl ProjectionData {
                             && !rec.state.is_terminal(),
                         "ReassignLease applied to a non-renewable item; reassign_validate was bypassed"
                     );
-                    rec.lease_token = Some(c.lease_token.clone());
+                    let old_token = rec.lease_token.replace(c.lease_token.clone());
                     rec.lease_expires_at = Some(c.lease_expires_at);
                     rec.attempt_count += 1; // a re-delivery to a new consumer is a delivery (TD-006:129)
                     rec.item_version += 1;
+                    if let Some(old_token) = old_token
+                        && let Some(ids) = self.leased_by_consumer.get_mut(&old_token)
+                    {
+                        ids.remove(id);
+                        if ids.is_empty() {
+                            self.leased_by_consumer.remove(&old_token);
+                        }
+                    }
+                    self.leased_by_consumer
+                        .entry(c.lease_token.clone())
+                        .or_default()
+                        .insert(*id);
                 }
                 Ok(())
             }
@@ -2048,10 +2110,13 @@ impl ProjectionData {
                     .map(|r| r.item_id)
                     .collect();
                 for id in ids {
-                    if let Some(rec) = self.items.get_mut(&id) {
+                    let old_token = if let Some(rec) = self.items.get_mut(&id) {
                         let old = (rec.state == ItemState::Pending)
                             .then(|| EligibilityIndex::token(rec, &model));
                         let old_state = rec.state;
+                        let old_token = (old_state == ItemState::Leased)
+                            .then(|| rec.lease_token.clone())
+                            .flatten();
                         rec.state = ItemState::Failed; // forced terminal (cohort-incomplete)
                         rec.item_version += 1;
                         rec.terminal_at = terminal_at;
@@ -2060,6 +2125,18 @@ impl ProjectionData {
                             self.eligible.remove(k);
                         }
                         self.metrics_transition(old_state, ItemState::Failed);
+                        old_token
+                    } else {
+                        None
+                    };
+                    if let Some(token) = old_token {
+                        self.leased_ids.remove(&id);
+                        if let Some(leased) = self.leased_by_consumer.get_mut(&token) {
+                            leased.remove(&id);
+                            if leased.is_empty() {
+                                self.leased_by_consumer.remove(&token);
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -2257,9 +2334,9 @@ impl ProjectionData {
 
     /// `ProjectionRead::pending` — the in-flight (leased) items.
     pub fn pending_leases(&self) -> Vec<LeaseView> {
-        self.items
-            .values()
-            .filter(|r| r.state == ItemState::Leased)
+        self.leased_ids
+            .iter()
+            .filter_map(|id| self.items.get(id))
             .filter_map(|r| {
                 Some(LeaseView {
                     item_id: r.item_id,
@@ -2268,6 +2345,63 @@ impl ProjectionData {
                     attempt_count: r.attempt_count,
                 })
             })
+            .collect()
+    }
+
+    pub fn pending_summary(&self) -> PendingSummary {
+        let consumers = self
+            .leased_by_consumer
+            .iter()
+            .map(|(token, ids)| (token.clone(), ids.len() as u64))
+            .collect::<Vec<_>>();
+        let mut consumers = consumers;
+        consumers.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+        PendingSummary {
+            count: self.leased_ids.len() as u64,
+            min_id: self.leased_ids.first().copied(),
+            max_id: self.leased_ids.last().copied(),
+            consumers,
+        }
+    }
+
+    pub fn pending_page(&self, start: Option<ItemId>, limit: usize) -> PendingPage {
+        use std::ops::Bound::{Included, Unbounded};
+        let bounds = (start.map_or(Unbounded, Included), Unbounded);
+        let mut leases = self
+            .leased_ids
+            .range(bounds)
+            .filter_map(|id| self.items.get(id).and_then(ItemRecord::lease_view))
+            .take(limit.saturating_add(1));
+        let entries = leases.by_ref().take(limit).collect();
+        let next = leases.next().map(|lease| lease.item_id);
+        PendingPage { entries, next }
+    }
+
+    pub fn pending_range(
+        &self,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> Vec<LeaseView> {
+        use std::ops::Bound::{Included, Unbounded};
+        let bounds = (
+            start.map_or(Unbounded, Included),
+            end.map_or(Unbounded, Included),
+        );
+        let ids = consumer
+            .and_then(|token| self.leased_by_consumer.get(token))
+            .unwrap_or(&self.leased_ids);
+        ids.range(bounds)
+            .filter_map(|id| self.items.get(id).and_then(ItemRecord::lease_view))
+            .take(limit)
+            .collect()
+    }
+
+    pub fn pending_by_ids(&self, ids: &[ItemId]) -> Vec<LeaseView> {
+        ids.iter()
+            .filter(|id| self.leased_ids.contains(id))
+            .filter_map(|id| self.items.get(id).and_then(ItemRecord::lease_view))
             .collect()
     }
 
@@ -2297,6 +2431,17 @@ impl ProjectionData {
         if rec.state == ItemState::Pending {
             self.eligible
                 .remove(EligibilityIndex::token(&rec, &self.priority_model));
+        }
+        if rec.state == ItemState::Leased {
+            self.leased_ids.remove(&rec.item_id);
+            if let Some(token) = rec.lease_token.as_ref()
+                && let Some(ids) = self.leased_by_consumer.get_mut(token)
+            {
+                ids.remove(&rec.item_id);
+                if ids.is_empty() {
+                    self.leased_by_consumer.remove(token);
+                }
+            }
         }
         let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
         self.index_remove_keys(rec.item_id, &keys);
@@ -3237,8 +3382,8 @@ mod tests {
         ClaimRequest, CommandChecksum, CommandId, ComposedBackend, ControlPlaneStore,
         FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, InProcessControlPlane,
         LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand, PushCommand, PushPort,
-        PushSpec, QueueKey, QueueMetrics, RenewLeaseCommand, SideRecord, UpdateFieldsCommand,
-        WriteSideRecordsCommand,
+        PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand, RenewLeaseCommand, SideRecord,
+        UpdateFieldsCommand, WriteSideRecordsCommand,
     };
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -3839,6 +3984,73 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(projection.metrics(), QueueMetrics::default());
+    }
+
+    #[test]
+    fn pel_indexes_bound_pages_and_requested_id_reads() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let items: Vec<_> = (1..=1_000)
+            .map(|id| push_item(&id.to_string(), &format!("k{id}"), id))
+            .collect();
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand { items }))
+            .unwrap();
+        let first = LeaseToken::new("consumer-a").unwrap();
+        let second = LeaseToken::new("consumer-b").unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: (1..=1_000).map(ItemId::from_u64).collect(),
+                lease_token: first.clone(),
+                lease_expires_at: ts(60),
+                worker_id: None,
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: vec![iid("500"), iid("900")],
+                lease_token: second.clone(),
+                lease_expires_at: ts(120),
+            }))
+            .unwrap();
+
+        let page = projection.pending_page(Some(iid("498")), 3);
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>(),
+            vec![iid("498"), iid("499"), iid("500")]
+        );
+        assert_eq!(page.next, Some(iid("501")));
+        assert_eq!(page.entries.len(), 3, "page output is request-bounded");
+
+        let consumer_page = projection.pending_range(None, None, Some(&second), 1);
+        assert_eq!(consumer_page.len(), 1);
+        assert_eq!(consumer_page[0].item_id, iid("500"));
+        let requested = projection.pending_by_ids(&[iid("900"), iid("1"), iid("4040")]);
+        assert_eq!(
+            requested
+                .iter()
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>(),
+            vec![iid("900"), iid("1")]
+        );
+        let summary = projection.pending_summary();
+        assert_eq!(summary.count, 1_000);
+        assert_eq!(summary.min_id, Some(iid("1")));
+        assert_eq!(summary.max_id, Some(iid("1000")));
+        assert_eq!(
+            summary.consumers,
+            vec![(first, 998), (second, 2)],
+            "consumer counts come from the maintained set index"
+        );
     }
 
     #[test]

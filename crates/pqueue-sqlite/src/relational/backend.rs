@@ -21,14 +21,14 @@ use pqueue_engine::{
     CommitEntryStatus, CommitRecovery, CommitTransition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort,
-    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate, ProjectionRead,
-    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
-    SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
-    validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
-    validate_gate_push, validate_instance_fence, validate_purge_force,
+    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate, PendingPage,
+    PendingSummary, ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort,
+    PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand,
+    RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
+    build_push_items, validate_api001_reserved_write_fields, validate_claim_compatibility,
+    validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{
@@ -740,6 +740,7 @@ impl Backend for SqliteRelationalBackend {
                 claim_scan_hints,
                 claim_scan_default_fifo,
                 live_tokens,
+                live_tokens_by_consumer,
                 ..
             } = &mut *guard;
             let tx = st(conn.transaction())?;
@@ -763,7 +764,7 @@ impl Backend for SqliteRelationalBackend {
                 projection_txn.apply(&positions, &commands)?;
             }
             st(tx.commit())?;
-            apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
+            apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops); // only after a durable commit (F4)
             Ok(pqueue_engine::RawCommitOutcome::applied(positions))
         })();
         std::future::ready(result)
@@ -901,6 +902,70 @@ impl ProjectionRead for SqliteRelationalBackend {
         let result = {
             let g = self.inner.lock().expect("poisoned");
             pending_sql(&g.conn, &g.live_tokens, shard)
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            Ok(pending_summary_sql(
+                &g.live_tokens,
+                &g.live_tokens_by_consumer,
+                shard,
+            ))
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            pending_page_sql(&g.conn, &g.live_tokens, shard, start, limit)
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            pending_range_sql(
+                &g.conn,
+                &g.live_tokens,
+                &g.live_tokens_by_consumer,
+                shard,
+                start,
+                end,
+                consumer,
+                limit,
+            )
+        };
+        std::future::ready(result)
+    }
+
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = {
+            let g = self.inner.lock().expect("poisoned");
+            pending_by_ids_sql(&g.conn, &g.live_tokens, shard, ids)
         };
         std::future::ready(result)
     }
@@ -1160,6 +1225,7 @@ impl PushPort for SqliteRelationalBackend {
                 claim_scan_hints,
                 claim_scan_default_fifo,
                 live_tokens,
+                live_tokens_by_consumer,
                 ..
             } = &mut *g;
             let (t, q) = parts(shard);
@@ -1224,7 +1290,7 @@ impl PushPort for SqliteRelationalBackend {
                 expires_at,
             )?;
             st(tx.commit())?;
-            apply_token_ops(live_tokens, token_ops);
+            apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
             Ok(ids)
         })();
         std::future::ready(result)
@@ -1287,6 +1353,7 @@ impl ClaimPort for SqliteRelationalBackend {
                 claim_scan_hints,
                 claim_scan_default_fifo,
                 live_tokens,
+                live_tokens_by_consumer,
                 ..
             } = &mut *g;
             let (t, q) = parts(&req.shard);
@@ -1420,7 +1487,7 @@ impl ClaimPort for SqliteRelationalBackend {
                 "every claimed candidate must render"
             );
             st(tx.commit())?;
-            apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
+            apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops); // only after a durable commit (F4)
             let mut claimed = Claimed {
                 items,
                 ..Default::default()
@@ -1594,6 +1661,7 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                 claim_scan_hints,
                 claim_scan_default_fifo,
                 live_tokens,
+                live_tokens_by_consumer,
                 ..
             } = &mut *g;
             let (t, q) = parts(shard);
@@ -1793,7 +1861,7 @@ impl pqueue_engine::CommitTransitionPort for SqliteRelationalBackend {
                 )?;
             }
             st(tx.commit())?;
-            apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
+            apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops); // only after a durable commit (F4)
             Ok(outcomes)
         })();
         std::future::ready(result)
@@ -2050,6 +2118,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             let Inner {
                 conn,
                 live_tokens,
+                live_tokens_by_consumer,
                 grouped_shards,
                 claim_scan_hints,
                 claim_scan_default_fifo,
@@ -2289,7 +2358,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 "every queried claim candidate must render"
             );
             st(tx.commit())?;
-            apply_token_ops(live_tokens, token_ops);
+            apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
             Ok(Claimed {
                 items,
                 ..Default::default()
@@ -3360,7 +3429,10 @@ mod hot_query_sql_tests {
         PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueryFilter,
         QueueDefinition, QueueIndex, RecurrencePolicy, RetryPolicy, TypedValue,
     };
-    use pqueue_engine::{ControlPlaneStore, HotProjectionQueryPort, PushPort, PushSpec};
+    use pqueue_engine::{
+        ClaimPort, ClaimRequest, ControlPlaneStore, HotProjectionQueryPort, ProjectionRead,
+        PushPort, PushSpec,
+    };
 
     use super::*;
 
@@ -3415,6 +3487,72 @@ mod hot_query_sql_tests {
             }],
             emit_change_records: true,
         }
+    }
+
+    async fn pel_read_statement_count(rows: usize) -> usize {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                (0..rows).map(|_| PushSpec::default()).collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend
+            .claim(ClaimRequest {
+                eligibility_time: None,
+                shard: shard.clone(),
+                worker_id: pqueue_core::WorkerId::new("worker").unwrap(),
+                max_items: rows,
+                lease_token: LeaseToken::new("consumer").unwrap(),
+                lease_expires_at: UtcTimestamp::new(60, 0).unwrap(),
+                now: UtcTimestamp::new(0, 0).unwrap(),
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        TRACE_COUNT.store(0, Ordering::Relaxed);
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .trace(Some(count_statement));
+        let page = backend.pending_page(&shard, None, 3).await.unwrap();
+        assert_eq!(page.entries.len(), 3);
+        let requested = [page.entries[2].item_id, page.entries[0].item_id];
+        assert_eq!(
+            backend
+                .pending_by_ids(&shard, &requested)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            backend
+                .pending_range(&shard, None, None, None, 2)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        backend.inner.lock().unwrap().conn.trace(None);
+        TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
+    #[tokio::test]
+    async fn pel_reads_issue_request_bounded_index_queries() {
+        let ten = pel_read_statement_count(10).await;
+        let thousand = pel_read_statement_count(1_000).await;
+        assert_eq!(ten, thousand, "resident PEL size must not add SQL queries");
+        assert_eq!(ten, 3, "each bounded read is one set-based indexed query");
     }
 
     async fn mutation_statement_count(rows: usize) -> usize {

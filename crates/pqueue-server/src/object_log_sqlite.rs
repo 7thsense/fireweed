@@ -21,12 +21,12 @@ use pqueue_engine::{
     ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandId, CommandPosition,
     CompiledSchema, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
     EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView,
-    LeaseView, LiveItemView, LogRead, OwnedBytePermit, ProjectionRead, PurgePort, PushCommand,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
-    TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort, build_push_items,
-    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
-    validate_gate_push,
+    LeaseView, LiveItemView, LogRead, OwnedBytePermit, PendingPage, PendingSummary, ProjectionRead,
+    PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
+    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    RenewLeaseCommand, RenewLeasePort, TerminalEmissionMetrics, TickReport, UpsertOutcome,
+    UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
+    validate_gate_command, validate_gate_push,
 };
 use pqueue_objectlog::segmented::{
     BlobStore, FaultHook, LocalFsBlobStore, ManifestPointerStore, PointerFencedBlobStore,
@@ -1009,6 +1009,39 @@ impl ProjectionRead for ObjectLogSqliteBackend {
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
         self.projection.pending(shard)
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        self.projection.pending_summary(shard)
+    }
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        self.projection.pending_page(shard, start, limit)
+    }
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        self.projection
+            .pending_range(shard, start, end, consumer, limit)
+    }
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        self.projection.pending_by_ids(shard, ids)
     }
 
     fn claimed_view(
@@ -2154,6 +2187,39 @@ impl ProjectionRead for SegmentedObjectLogSqliteBackend {
         self.projection.pending(shard)
     }
 
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        self.projection.pending_summary(shard)
+    }
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        self.projection.pending_page(shard, start, limit)
+    }
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        self.projection
+            .pending_range(shard, start, end, consumer, limit)
+    }
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        self.projection.pending_by_ids(shard, ids)
+    }
+
     fn claimed_view(
         &self,
         shard: &QueueKey,
@@ -3223,6 +3289,66 @@ impl ProjectionRead for SegmentedObjectLogInMemoryBackend {
             let proj = self.projection_for(shard)?;
             let p = proj.lock().expect("segmented inmemory projection poisoned");
             Ok(p.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        let result = (|| {
+            let projection = self.projection_for(shard)?;
+            Ok(projection
+                .lock()
+                .expect("segmented inmemory projection poisoned")
+                .pending_summary())
+        })();
+        std::future::ready(result)
+    }
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        let result = (|| {
+            let projection = self.projection_for(shard)?;
+            Ok(projection
+                .lock()
+                .expect("segmented inmemory projection poisoned")
+                .pending_page(start, limit))
+        })();
+        std::future::ready(result)
+    }
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let projection = self.projection_for(shard)?;
+            Ok(projection
+                .lock()
+                .expect("segmented inmemory projection poisoned")
+                .pending_range(start, end, consumer, limit))
+        })();
+        std::future::ready(result)
+    }
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let projection = self.projection_for(shard)?;
+            Ok(projection
+                .lock()
+                .expect("segmented inmemory projection poisoned")
+                .pending_by_ids(ids))
         })();
         std::future::ready(result)
     }

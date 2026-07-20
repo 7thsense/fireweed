@@ -274,6 +274,7 @@ pub(crate) fn checkpoint_batch_sql(
         claim_scan_hints,
         claim_scan_default_fifo,
         live_tokens,
+        live_tokens_by_consumer,
         ..
     } = g;
     let (t, q) = parts(shard);
@@ -369,7 +370,7 @@ pub(crate) fn checkpoint_batch_sql(
         params![t, q, cursor, max_epoch],
     ))?;
     st(tx.commit())?;
-    apply_token_ops(live_tokens, token_ops);
+    apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
     Ok(CheckpointProgress {
         logical_high_water: Some(cursor as u64),
         applied_commands: total_applied as u64,
@@ -404,6 +405,7 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
         claim_scan_hints: HashMap::new(),
         claim_scan_default_fifo: HashMap::new(),
         live_tokens: HashMap::new(),
+        live_tokens_by_consumer: HashMap::new(),
     };
     inner.reload()?;
     Ok(inner)
@@ -615,6 +617,7 @@ pub(crate) fn apply_committed_sql(
         claim_scan_hints,
         claim_scan_default_fifo,
         live_tokens,
+        live_tokens_by_consumer,
         ..
     } = g;
     let (t, q) = parts(&position.queue);
@@ -665,7 +668,7 @@ pub(crate) fn apply_committed_sql(
         params![t, q, new_next_seq as i64, position.backend_epoch as i64],
     ))?;
     st(tx.commit())?;
-    apply_token_ops(live_tokens, token_ops);
+    apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
     Ok(())
 }
 
@@ -684,6 +687,7 @@ pub(crate) fn apply_committed_batch_sql(
         claim_scan_hints,
         claim_scan_default_fifo,
         live_tokens,
+        live_tokens_by_consumer,
         ..
     } = g;
     for pos in positions {
@@ -762,6 +766,6 @@ pub(crate) fn apply_committed_batch_sql(
         ))?;
     }
     st(tx.commit())?;
-    apply_token_ops(live_tokens, token_ops);
+    apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops);
     Ok(())
 }

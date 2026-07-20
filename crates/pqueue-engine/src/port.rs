@@ -153,6 +153,23 @@ pub struct LeaseView {
     pub attempt_count: u32,
 }
 
+/// Set-based summary of the visible pending-entry list (PEL).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PendingSummary {
+    pub count: u64,
+    pub min_id: Option<ItemId>,
+    pub max_id: Option<ItemId>,
+    pub consumers: Vec<(LeaseToken, u64)>,
+}
+
+/// One bounded, insertion-id-ordered PEL page. `next` is the first entry not
+/// returned and can be passed back as the next inclusive cursor.
+#[derive(Debug, Clone, Default)]
+pub struct PendingPage {
+    pub entries: Vec<LeaseView>,
+    pub next: Option<ItemId>,
+}
+
 /// Lifecycle counts + bound metrics (RESP `XLEN`/`XINFO` basic; rich is library-only).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct QueueMetrics {
@@ -193,6 +210,74 @@ pub trait ProjectionRead: Send + Sync {
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send;
 
+    /// Aggregate the PEL without returning one Rust value per leased item.
+    ///
+    /// The default preserves source compatibility for external backends. Production
+    /// backends override it with an aggregate/index-backed implementation.
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        async move { Ok(summarize_pending(self.pending(shard).await?)) }
+    }
+
+    /// Read at most `limit` PEL entries at or after `start`, plus an opaque next
+    /// cursor. Production implementations push the cursor and `limit + 1` into
+    /// their storage/index layer.
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        async move { Ok(page_pending(self.pending(shard).await?, start, limit)) }
+    }
+
+    /// Read a bounded XPENDING range. Bounds are inclusive; `consumer` narrows
+    /// the result to one live lease token.
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        async move {
+            let start = start.map(|id| id.as_u64()).unwrap_or(0);
+            let end = end.map(|id| id.as_u64()).unwrap_or(u64::MAX);
+            let mut leases = self.pending(shard).await?;
+            leases.sort_by_key(|lease| lease.item_id);
+            Ok(leases
+                .into_iter()
+                .filter(|lease| {
+                    (start..=end).contains(&lease.item_id.as_u64())
+                        && consumer.is_none_or(|token| token == &lease.lease_token)
+                })
+                .take(limit)
+                .collect())
+        }
+    }
+
+    /// Fetch PEL metadata for only the requested IDs, preserving request order.
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        async move {
+            let wanted: std::collections::HashSet<_> = ids.iter().copied().collect();
+            let by_id: std::collections::HashMap<_, _> = self
+                .pending(shard)
+                .await?
+                .into_iter()
+                .filter(|lease| wanted.contains(&lease.item_id))
+                .map(|lease| (lease.item_id, lease))
+                .collect();
+            Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
+        }
+    }
+
     /// Render the rich claimed-item shape for specific (currently-leased) `ids` — the RESP `XCLAIM` reply
     /// (and any read that needs an in-flight item's full payload/fields, not just the [`LeaseView`]).
     /// Ids that are absent or not in a renderable state are silently omitted (the caller knows the set it
@@ -223,6 +308,44 @@ pub trait ProjectionRead: Send + Sync {
         emit_change_records: bool,
         emission_cursor: Option<&crate::types::CommandPosition>,
     ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send;
+}
+
+/// Compatibility helper used by the default PEL read methods and small in-memory
+/// projections. Storage backends should aggregate in storage instead.
+pub fn summarize_pending(leases: Vec<LeaseView>) -> PendingSummary {
+    let mut consumers = std::collections::HashMap::<LeaseToken, u64>::new();
+    let mut min_id = None;
+    let mut max_id = None;
+    for lease in &leases {
+        min_id = Some(min_id.map_or(lease.item_id, |id: ItemId| id.min(lease.item_id)));
+        max_id = Some(max_id.map_or(lease.item_id, |id: ItemId| id.max(lease.item_id)));
+        *consumers.entry(lease.lease_token.clone()).or_default() += 1;
+    }
+    let mut consumers: Vec<_> = consumers.into_iter().collect();
+    consumers.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+    PendingSummary {
+        count: leases.len() as u64,
+        min_id,
+        max_id,
+        consumers,
+    }
+}
+
+/// Compatibility helper that bounds allocation to `limit + 1` after ordering.
+pub fn page_pending(
+    mut leases: Vec<LeaseView>,
+    start: Option<ItemId>,
+    limit: usize,
+) -> PendingPage {
+    leases.sort_by_key(|lease| lease.item_id);
+    let start = start.map(|id| id.as_u64()).unwrap_or(0);
+    let mut selected = leases
+        .into_iter()
+        .filter(|lease| lease.item_id.as_u64() >= start)
+        .take(limit.saturating_add(1));
+    let entries: Vec<_> = selected.by_ref().take(limit).collect();
+    let next = selected.next().map(|lease| lease.item_id);
+    PendingPage { entries, next }
 }
 
 // ---------------------------------------------------------------------------
