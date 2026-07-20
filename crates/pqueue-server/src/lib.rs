@@ -67,9 +67,7 @@ mod env_config;
 #[cfg(feature = "env-config")]
 pub use env_config::ConfigError;
 
-#[cfg(feature = "postgres")]
 mod postgres_native;
-#[cfg(feature = "postgres")]
 pub use postgres_native::{PostgresNativeBackend, PostgresWholeOperationAdapter};
 
 /// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
@@ -1864,9 +1862,15 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         (LogSpec::Sqlite { path }, ProjectionSpec::InMemory) => {
             let p = path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = Arc::new(composed_sqlite_backend(p)?.with_node_id(node_id));
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
+            let backend = tokio::task::spawn_blocking(move || {
+                composed_sqlite_backend(&p).map(|backend| backend.with_node_id(node_id))
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("sqlite open task failed: {e}")))??;
+            let backend = Arc::new(PostgresWholeOperationAdapter::new(backend));
             run_owned(
                 backend,
                 control_plane,
@@ -1882,19 +1886,27 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         (LogSpec::ObjectLog(spec), ProjectionSpec::InMemory) => {
             // The segmented group-commit object log (the object log's only production form) over an in-memory
             // projection rebuilt by `read_all` replay on open.
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = Arc::new(
-                SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, segment_config)?
-                    .with_byte_admission(
-                        objectlog_byte_budget.clone(),
-                        config_objectlog_queue_limit,
-                    )
-                    .with_debug_segments(debug_segments)
-                    .with_node_id(node_id),
-            );
+            let backend = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, segment_config).map(
+                    |backend| {
+                        backend
+                            .with_byte_admission(
+                                objectlog_byte_budget.clone(),
+                                config_objectlog_queue_limit,
+                            )
+                            .with_debug_segments(debug_segments)
+                            .with_node_id(node_id)
+                    },
+                )
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("object-log open task failed: {e}")))??;
+            let backend = Arc::new(backend);
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
             backend.spawn_flusher();
+            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(backend));
             run_owned(
                 backend,
                 control_plane,
@@ -1912,21 +1924,31 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // co-buffer into one sealed segment (one durable object + one manifest-CAS + one batched SQLite
             // apply), and a reopen replays the object-log tail beyond the projection snapshot high-water.
             let p = path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = Arc::new(
-                SegmentedObjectLogSqliteBackend::open_with_blob_store(store, p, segment_config)?
-                    .with_byte_admission(
-                        objectlog_byte_budget.clone(),
-                        config_objectlog_queue_limit,
-                    )
-                    .with_node_id(node_id)
-                    .with_recovery_max_tail(recovery_max_tail)
-                    .with_debug_segments(debug_segments),
-            );
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
+            let backend = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                SegmentedObjectLogSqliteBackend::open_with_blob_store(store, &p, segment_config)
+                    .map(|backend| {
+                        backend
+                            .with_byte_admission(
+                                objectlog_byte_budget.clone(),
+                                config_objectlog_queue_limit,
+                            )
+                            .with_node_id(node_id)
+                            .with_recovery_max_tail(recovery_max_tail)
+                            .with_debug_segments(debug_segments)
+                    })
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("object-log/sqlite open task failed: {e}"))
+            })??;
+            let backend = Arc::new(backend);
             backend.spawn_flusher();
+            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(backend));
             run_owned(
                 backend,
                 control_plane,
