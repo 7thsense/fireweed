@@ -16,13 +16,13 @@ use pqueue_core::{
     QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, BufferedByteBudget, BufferedByteBudgetConfig, BufferedByteBudgetStats,
-    ByteAdmissionError, ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, Claimed,
-    CommandChecksum, CommandEnvelope, CommandId, CommandPosition, CompiledSchema,
-    ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
-    FinalizeCommand, FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView, LeaseView,
-    LiveItemView, LogRead, OwnedBytePermit, ProjectionRead, PurgePort, PushCommand, PushPort,
-    PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
+    Backend, BoundedBlockingExecutor, BufferedByteBudget, BufferedByteBudgetConfig,
+    BufferedByteBudgetStats, ByteAdmissionError, ClaimCommand, ClaimCompatibility, ClaimPort,
+    ClaimRequest, Claimed, CommandChecksum, CommandEnvelope, CommandId, CommandPosition,
+    CompiledSchema, ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError,
+    EngineResult, FinalizeCommand, FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView,
+    LeaseView, LiveItemView, LogRead, OwnedBytePermit, ProjectionRead, PurgePort, PushCommand,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
     ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
     TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort, build_push_items,
     compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
@@ -97,6 +97,31 @@ fn record_replay_progress(samples: &mut Vec<u64>, sequence: u64) {
 /// (populated by the bin from `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS`) via [`Self::with_recovery_max_tail`]. The
 /// backend itself never reads the process environment.
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
+
+// Recovery-index maintenance is deliberately independent of segment sealing. One reclaim tick touches a
+// fixed queue page and fixed object pages; repeated ticks round-robin across arbitrarily many queues.
+const RECOVERY_MAINTENANCE_QUEUE_PAGE: usize = 8;
+const RECOVERY_MAINTENANCE_PIN_PAGE: usize = 64;
+const RECOVERY_MAINTENANCE_GC_BATCH_PAGE: usize = 8;
+
+fn register_maintenance_shard(shards: &Mutex<Vec<QueueKey>>, shard: &QueueKey) {
+    let mut shards = shards.lock().expect("maintenance shards poisoned");
+    if !shards.contains(shard) {
+        shards.push(shard.clone());
+    }
+}
+
+fn maintenance_shard_page(shards: &Mutex<Vec<QueueKey>>, cursor: &AtomicUsize) -> Vec<QueueKey> {
+    let shards = shards.lock().expect("maintenance shards poisoned");
+    if shards.is_empty() {
+        return Vec::new();
+    }
+    let count = shards.len().min(RECOVERY_MAINTENANCE_QUEUE_PAGE);
+    let start = cursor.fetch_add(count, Ordering::Relaxed) % shards.len();
+    (0..count)
+        .map(|offset| shards[(start + offset) % shards.len()].clone())
+        .collect()
+}
 
 fn default_objectlog_byte_budget() -> BufferedByteBudget {
     BufferedByteBudget::new(
@@ -871,6 +896,9 @@ pub struct SegmentedObjectLogSqliteBackend {
     /// the flusher's seal). Authoritative epoch still lives in the manifest; this only mirrors it.
     epochs: Mutex<HashMap<QueueKey, u64>>,
     coords: Mutex<HashMap<QueueKey, Arc<ShardCoord>>>,
+    maintenance_shards: Mutex<Vec<QueueKey>>,
+    maintenance_cursor: AtomicUsize,
+    maintenance_executor: BoundedBlockingExecutor,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
     counters: QueueCounters,
     command_seq: AtomicU64,
@@ -956,6 +984,9 @@ impl SegmentedObjectLogSqliteBackend {
             schemas: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
             coords: Mutex::new(HashMap::new()),
+            maintenance_shards: Mutex::new(Vec::new()),
+            maintenance_cursor: AtomicUsize::new(0),
+            maintenance_executor: BoundedBlockingExecutor::new(1)?,
             mutate_locks: Mutex::new(HashMap::new()),
             counters: QueueCounters::default(),
             command_seq: AtomicU64::new(0),
@@ -1506,6 +1537,7 @@ impl ControlPlaneStore for SegmentedObjectLogSqliteBackend {
                 .lock()
                 .expect("segmented queues poisoned")
                 .insert(key.clone(), definition);
+            register_maintenance_shard(&self.maintenance_shards, &key);
             let compiled_schema = compile_queue_schema(&outcome.definition)?;
             if let Some(cs) = compiled_schema {
                 self.schemas
@@ -1865,7 +1897,26 @@ impl ReclaimDriver for SegmentedObjectLogSqliteBackend {
         &self,
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        std::future::ready(Ok(TickReport::default()))
+        let shards = maintenance_shard_page(&self.maintenance_shards, &self.maintenance_cursor);
+        let log = Arc::clone(&self.log);
+        let executor = self.maintenance_executor.clone();
+        async move {
+            executor
+                .execute(move || {
+                    for shard in shards {
+                        log.reap_recovery_pins_fenced_bounded(
+                            &shard,
+                            RECOVERY_MAINTENANCE_PIN_PAGE,
+                        )?;
+                        log.reap_recovery_index_garbage_bounded(
+                            &shard,
+                            RECOVERY_MAINTENANCE_GC_BATCH_PAGE,
+                        )?;
+                    }
+                    Ok(TickReport::default())
+                })
+                .await
+        }
     }
 }
 
@@ -1955,6 +2006,9 @@ pub struct SegmentedObjectLogInMemoryBackend {
     schemas: Mutex<HashMap<QueueKey, Arc<CompiledSchema>>>,
     epochs: Mutex<HashMap<QueueKey, u64>>,
     coords: Mutex<HashMap<QueueKey, Arc<ShardCoord>>>,
+    maintenance_shards: Mutex<Vec<QueueKey>>,
+    maintenance_cursor: AtomicUsize,
+    maintenance_executor: BoundedBlockingExecutor,
     mutate_locks: Mutex<HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
     counters: QueueCounters,
     command_seq: AtomicU64,
@@ -2015,6 +2069,9 @@ impl SegmentedObjectLogInMemoryBackend {
             schemas: Mutex::new(HashMap::new()),
             epochs: Mutex::new(HashMap::new()),
             coords: Mutex::new(HashMap::new()),
+            maintenance_shards: Mutex::new(Vec::new()),
+            maintenance_cursor: AtomicUsize::new(0),
+            maintenance_executor: BoundedBlockingExecutor::new(1)?,
             mutate_locks: Mutex::new(HashMap::new()),
             counters: QueueCounters::default(),
             command_seq: AtomicU64::new(0),
@@ -2521,6 +2578,7 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
                 .lock()
                 .expect("segmented queues poisoned")
                 .insert(key.clone(), definition.clone());
+            register_maintenance_shard(&self.maintenance_shards, &key);
             let compiled_schema = compile_queue_schema(&definition)?;
             if let Some(cs) = compiled_schema {
                 self.schemas
@@ -2917,7 +2975,26 @@ impl ReclaimDriver for SegmentedObjectLogInMemoryBackend {
         &self,
         _now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        std::future::ready(Ok(TickReport::default()))
+        let shards = maintenance_shard_page(&self.maintenance_shards, &self.maintenance_cursor);
+        let log = Arc::clone(&self.log);
+        let executor = self.maintenance_executor.clone();
+        async move {
+            executor
+                .execute(move || {
+                    for shard in shards {
+                        log.reap_recovery_pins_fenced_bounded(
+                            &shard,
+                            RECOVERY_MAINTENANCE_PIN_PAGE,
+                        )?;
+                        log.reap_recovery_index_garbage_bounded(
+                            &shard,
+                            RECOVERY_MAINTENANCE_GC_BATCH_PAGE,
+                        )?;
+                    }
+                    Ok(TickReport::default())
+                })
+                .await
+        }
     }
 }
 
@@ -3030,7 +3107,8 @@ mod recovery_tests {
         EligibilityPolicy, EntitySchemaDocument, OrderingMode, PriorityDirection, PriorityModel,
         PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RequestId, RetryPolicy,
     };
-    use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort};
+    use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, ReclaimDriver};
+    use pqueue_objectlog::segmented::InMemoryBlobStore;
     use serde_json::json;
 
     /// A unique scratch directory under the system temp dir, removed on drop.
@@ -3153,6 +3231,226 @@ mod recovery_tests {
     /// size seal inside `enqueue`, so the projection is applied before `push` returns.
     fn seal_each_config() -> SegmentConfig {
         SegmentConfig::new(1, 1_000).unwrap()
+    }
+
+    fn object_prefix(shard: &QueueKey) -> String {
+        fn hex(value: &str) -> String {
+            value
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+        format!(
+            "t/{}/q/{}/",
+            hex(shard.tenant_id.as_str()),
+            hex(shard.queue_id.as_str())
+        )
+    }
+
+    struct BlockingMaintenanceStore {
+        inner: Arc<InMemoryBlobStore>,
+        block_pin_list: std::sync::atomic::AtomicBool,
+        pin_list_entered: std::sync::atomic::AtomicBool,
+        release_pin_list: std::sync::atomic::AtomicBool,
+    }
+
+    impl BlockingMaintenanceStore {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(InMemoryBlobStore::new()),
+                block_pin_list: std::sync::atomic::AtomicBool::new(false),
+                pin_list_entered: std::sync::atomic::AtomicBool::new(false),
+                release_pin_list: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl BlobStore for BlockingMaintenanceStore {
+        fn backend_kind(&self) -> pqueue_objectlog::object_store_observability::BlobBackendKind {
+            pqueue_objectlog::object_store_observability::BlobBackendKind::Memory
+        }
+
+        fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+            self.inner.put(key, body)
+        }
+
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+            self.inner.put_if_absent(key, body)
+        }
+
+        fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> EngineResult<bool> {
+            self.inner.delete(key)
+        }
+
+        fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+            self.inner.list(prefix)
+        }
+
+        fn list_page(
+            &self,
+            prefix: &str,
+            start_after: Option<&str>,
+            limit: usize,
+        ) -> EngineResult<Vec<String>> {
+            if prefix.contains("/recovery_pins/v1/")
+                && self
+                    .block_pin_list
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.pin_list_entered
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                while !self
+                    .release_pin_list
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+            }
+            self.inner.list_page(prefix, start_after, limit)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_recovery_maintenance_does_not_block_another_queue() {
+        let store = Arc::new(BlockingMaintenanceStore::new());
+        let blob_store: Arc<dyn BlobStore> = store.clone();
+        let backend = Arc::new(
+            SegmentedObjectLogInMemoryBackend::open_with_blob_store(blob_store, seal_each_config())
+                .unwrap(),
+        );
+        let first = queue_def("maintenance", "blocked");
+        let second = queue_def("maintenance", "progress");
+        let first_key = QueueKey::new(first.tenant_id.clone(), first.queue_id.clone());
+        let second_key = QueueKey::new(second.tenant_id.clone(), second.queue_id.clone());
+        backend.create_queue(first).await.unwrap();
+        backend.create_queue(second).await.unwrap();
+        backend
+            .push(&first_key, vec![spec("seed")], ts(), None)
+            .await
+            .unwrap();
+
+        store
+            .block_pin_list
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let tick_backend = Arc::clone(&backend);
+        let tick = tokio::spawn(async move { tick_backend.tick(ts()).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !store
+                .pin_list_entered
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("maintenance reached the blocking store seam");
+
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            backend.push(&second_key, vec![spec("still-progresses")], ts(), None),
+        )
+        .await
+        .expect("maintenance I/O must not occupy the Tokio reactor")
+        .unwrap();
+        store
+            .release_pin_list
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        tick.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn production_tick_fences_crash_pins_and_converges_recovery_index_gc() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let blob_store: Arc<dyn BlobStore> = store.clone();
+        let backend = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+            blob_store,
+            seal_each_config().with_writer_format(pqueue_objectlog::SegmentWriterFormat::V3),
+        )
+        .unwrap();
+        let definition = queue_def("maintenance", "recovery-index");
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        ControlPlaneStore::fence_epoch(&backend, &shard, 0)
+            .await
+            .unwrap();
+
+        for index in 0..24 {
+            backend
+                .push(&shard, vec![spec(&format!("item-{index}"))], ts(), None)
+                .await
+                .unwrap();
+        }
+        let prefix = object_prefix(&shard);
+        let pin_prefix = format!("{prefix}recovery_pins/v1/");
+        let gc_prefix = format!("{prefix}recovery_index_gc/v1/");
+        let node_prefix = format!("{prefix}recovery_index/v1/");
+        let batches_before = store.list(&gc_prefix).unwrap().len();
+        let nodes_before = store.list(&node_prefix).unwrap().len();
+        assert!(batches_before > 0, "seals published retirement work");
+        assert!(nodes_before > 1);
+
+        // Simulate a process crash: the cursor's durable pin is intentionally not dropped. A tick in the
+        // same epoch must preserve it and therefore preserve the covered COW nodes.
+        let crashed_cursor = backend.log.open_recovery_cursor(&shard, 0).unwrap();
+        std::mem::forget(crashed_cursor);
+        let mut retained_cursor = backend.log.open_recovery_cursor(&shard, 0).unwrap();
+        assert_eq!(store.list(&pin_prefix).unwrap().len(), 2);
+        backend.tick(ts()).await.unwrap();
+        assert_eq!(store.list(&pin_prefix).unwrap().len(), 2);
+        let mut recovered = Vec::new();
+        loop {
+            let (page, _) = backend
+                .log
+                .read_recovery_cursor_page(&mut retained_cursor)
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            recovered.extend(page.into_iter().map(|(position, _)| position.sequence));
+        }
+        assert_eq!(recovered, (0..24).collect::<Vec<_>>());
+        drop(retained_cursor);
+
+        // The ownership fence advances the authoritative head epoch. A new current-epoch reader must
+        // survive maintenance while the old, now-fenced crash pin is eligible for bounded cleanup.
+        ControlPlaneStore::acquire_epoch(&backend, &shard)
+            .await
+            .unwrap();
+        let live_cursor = backend.log.open_recovery_cursor(&shard, 0).unwrap();
+        assert_eq!(store.list(&pin_prefix).unwrap().len(), 2);
+        backend.tick(ts()).await.unwrap();
+        assert_eq!(
+            store.list(&pin_prefix).unwrap().len(),
+            1,
+            "old-epoch crash pin reaped; current-epoch live pin preserved"
+        );
+
+        drop(live_cursor);
+        for _ in 0..16 {
+            backend.tick(ts()).await.unwrap();
+        }
+        assert!(store.list(&gc_prefix).unwrap().is_empty());
+        assert_eq!(
+            store.list(&node_prefix).unwrap().len(),
+            1,
+            "only the current content-addressed recovery-index root remains"
+        );
+
+        let lists_before_seal = backend.segment_counters().list_count;
+        backend
+            .push(&shard, vec![spec("post-maintenance")], ts(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.segment_counters().list_count,
+            lists_before_seal,
+            "segment seal must not LIST recovery maintenance namespaces"
+        );
     }
 
     fn test_budget(bytes: usize) -> BufferedByteBudget {

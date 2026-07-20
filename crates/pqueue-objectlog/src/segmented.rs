@@ -1728,6 +1728,10 @@ struct RecoveryRootPin {
 struct RecoveryRootPinRecord {
     owner: String,
     version: u64,
+    /// Assignment epoch captured from the same authoritative head as `version`. Maintenance may only
+    /// discard a crash-left pin after a later durable head has strictly fenced this epoch.
+    #[serde(default)]
+    authority_epoch: Option<u64>,
     root: Option<RecoveryIndexRoot>,
 }
 
@@ -4817,6 +4821,42 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(reaped)
     }
 
+    /// Bounded production cleanup for pins left behind by a crashed reader. A strictly newer durable
+    /// assignment epoch is the liveness proof: readers captured under an older epoch are fenced and can no
+    /// longer authorize work. Legacy pins without an epoch and pins at/currently beyond the durable epoch
+    /// fail closed and remain in place.
+    pub fn reap_recovery_pins_fenced_bounded(
+        &self,
+        shard: &QueueKey,
+        limit: usize,
+    ) -> EngineResult<usize> {
+        if limit == 0 || limit > S3_LIST_PAGE_MAX_KEYS {
+            return Err(EngineError::Invalid(
+                "bounded fenced pin reap requires 1..=1000",
+            ));
+        }
+        let current_epoch = self
+            .read_authoritative_head(shard)?
+            .map(|head| head.value.current_epoch)
+            .unwrap_or(0);
+        let prefix = Self::recovery_pin_prefix(shard);
+        let mut reaped = 0;
+        for key in self.store.list_page(&prefix, None, limit)? {
+            let Some(bytes) = self.store_get(&key)? else {
+                continue;
+            };
+            let pin: RecoveryRootPinRecord = serde_json::from_slice(&bytes).map_err(store_err)?;
+            if pin
+                .authority_epoch
+                .is_some_and(|pin_epoch| pin_epoch < current_epoch)
+            {
+                let _ = self.store.delete(&key)?;
+                reaped += 1;
+            }
+        }
+        Ok(reaped)
+    }
+
     fn has_recovery_pin_at_or_before(&self, shard: &QueueKey, version: u64) -> EngineResult<bool> {
         let prefix = Self::recovery_pin_prefix(shard);
         let pins = self.store.list_page(&prefix, None, S3_LIST_PAGE_MAX_KEYS)?;
@@ -4927,6 +4967,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let body = to_json(&RecoveryRootPinRecord {
                 owner: self.recovery_pin_owner()?.to_owned(),
                 version: observed.version,
+                authority_epoch: Some(observed.value.current_epoch),
                 root: observed.value.recovery_index.clone(),
             })?;
             if !self.store.put_if_absent(&key, &body)? {

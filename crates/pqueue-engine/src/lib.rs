@@ -65,8 +65,8 @@ pub use async_reclaim_planner::{
 };
 pub use async_store::{
     AsyncControlPlane, AsyncLogStore, AsyncProjectionStore, BlockingControlPlane, BlockingLogStore,
-    BlockingProjectionStore, BlockingStoreOperation, FinalizeLeaseMember, InProcessLogStore,
-    InProcessProjectionStore,
+    BlockingProjectionStore, BlockingStoreOperation, BoundedBlockingExecutor, FinalizeLeaseMember,
+    InProcessLogStore, InProcessProjectionStore,
 };
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use byte_admission::{

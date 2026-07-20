@@ -48,13 +48,15 @@ pub trait BlockingStoreOperation<S>: Send + 'static {
     fn run(self, store: &mut S) -> EngineResult<Self::Output>;
 }
 
+/// Cloneable admission boundary for synchronous storage work. Waiting operations consume no OS thread;
+/// at most `max_in_flight` tasks are started concurrently, and reactor threads never execute the task.
 #[derive(Clone)]
-struct BoundedBlockingExecutor {
+pub struct BoundedBlockingExecutor {
     permits: Arc<BlockingPermits>,
 }
 
 impl BoundedBlockingExecutor {
-    fn new(max_in_flight: usize) -> EngineResult<Self> {
+    pub fn new(max_in_flight: usize) -> EngineResult<Self> {
         if max_in_flight == 0 {
             return Err(EngineError::Invalid(
                 "blocking adapter bound must be nonzero",
@@ -65,7 +67,7 @@ impl BoundedBlockingExecutor {
         })
     }
 
-    fn execute<T, F>(&self, task: F) -> BlockingTaskFuture<EngineResult<T>>
+    pub fn execute<T, F>(&self, task: F) -> impl Future<Output = EngineResult<T>> + Send + 'static
     where
         T: Send + 'static,
         F: FnOnce() -> EngineResult<T> + Send + 'static,
@@ -270,7 +272,7 @@ impl<S: LogStore> BlockingLogStore<S> {
         })
     }
 
-    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    fn run_sync<T, F>(&self, operation: F) -> impl Future<Output = EngineResult<T>> + Send + 'static
     where
         S: Send + 'static,
         T: Send + 'static,
@@ -318,7 +320,7 @@ impl<S: ProjectionStore> BlockingProjectionStore<S> {
         })
     }
 
-    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    fn run_sync<T, F>(&self, operation: F) -> impl Future<Output = EngineResult<T>> + Send + 'static
     where
         S: Send + 'static,
         T: Send + 'static,
@@ -363,7 +365,7 @@ impl<S> BlockingControlPlane<S> {
         })
     }
 
-    fn run_sync<T, F>(&self, operation: F) -> BlockingTaskFuture<EngineResult<T>>
+    fn run_sync<T, F>(&self, operation: F) -> impl Future<Output = EngineResult<T>> + Send + 'static
     where
         S: Send + 'static,
         T: Send + 'static,
