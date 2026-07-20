@@ -8,14 +8,14 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
+    self_hash: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
     deps:
-      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-19T02:12:30Z"
+      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
+      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
+      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+    reviewed_at: "2026-07-20T00:01:25Z"
 ---
 
 # Technical Design: TD-003 Queue Ownership and Fencing
@@ -130,9 +130,10 @@ partitions it across multiple queues at the application layer (ADR-008).
   because the owned unit is the whole queue, a claim never fans out across owners
   — it is single-hop and stall-free (ADR-008).
 - We accept that a single queue cannot exceed one owner's throughput; this is
-  mitigated by app-level multi-queue fan-out and is acceptable because the
-  per-queue E0 floor (≥10M items/hr) is met by a single owner with batching
-  (ADR-008).
+  mitigated by app-level multi-queue fan-out. E0 requires a single owner to
+  preserve exact outcomes, queue-global progress, and bounded resources under
+  load; the owner's absolute capacity is measured for its declared topology
+  rather than imposed as a portable release threshold (ADR-008, TP-002).
 
 ## Queue Ownership and Placement
 

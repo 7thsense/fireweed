@@ -5,10 +5,10 @@ ddx:
     - prd
   status: accepted
   review:
-    self_hash: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+    self_hash: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
     deps:
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-18T02:36:05Z"
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+    reviewed_at: "2026-07-20T00:01:20Z"
 ---
 
 # Architecture Decision Record
@@ -44,9 +44,10 @@ Two costs surfaced in review:
    `postgres_native` rebuilt as a log-store rather than the relational projection), leaving large queues
    RAM-bound to a single process and the multi-shard horizontal envelope unbuildable.
 
-The product floor (E0: ≥10M items/hr ≈ 2,778 items/s **per queue**) is met by a single owner with batching,
-so "a single queue must exceed one node" is a narrow need; "many queues across many owners" covers the floor,
-the ≥1000-active-queue density, and aggregate headroom. The product owner has decided to trade single-queue
+E0 requires a single owner to preserve exact outcomes, queue-global progress,
+and bounded resources under load. "Many queues across many owners" provides
+aggregate headroom while the at-least-1,001-active-queue density run exercises
+one hot queue and at least 1,000 cold queues. The product owner has decided to trade single-queue
 horizontal scale for single-hop, no-stall claims: **"Queue is the unit of sharding. If you want more
 sharding, create more queues."**
 
@@ -106,13 +107,15 @@ sharding, create more queues."**
   **unconditional queue properties**, gated only by `cohort_policy.enabled` / `compatibility.group_batching`
   config, never by a `group_co_residency` flag. `metrics.oldest_eligible_age_ms` and
   `progress_bound_risk_count` are per-queue on its one owner (not cross-shard).
-- **TP-002 E2 is reframed** from single-queue-N-shard (≥4× one deployment) to **cross-queue scale-out** —
-  N queues across N owners, monotonic with owner count, the per-queue floor preserved under density.
+- **TP-002 E2 is reframed** from single-queue-N-shard to **cross-queue scale-out** —
+  N queues across N owners, with exact work, logical progress, single ownership,
+  fencing, and bounded shared resources preserved as owner and queue counts rise.
 - **Gains:** claims are single-hop (no scatter-gather, no stalls); the relational projection removes the
   in-RAM ceiling; ownership/coordination collapses to one lease per queue — replacing the per-`(queue,shard)`
   lease — which is what makes the no-Postgres option tractable.
-- **Trade-off accepted:** a single queue cannot exceed one owner's throughput — mitigated by app-level
-  multi-queue fan-out, and acceptable because the per-queue E0 floor is met by one owner.
+- **Trade-off accepted:** a single queue cannot exceed one owner's capacity — mitigated by app-level
+  multi-queue fan-out. E0 qualifies behavior under load; measured rates are
+  capacity evidence for the declared owner topology, not a portable contract.
 - **Supersedes / amends:** ADR-004 (item-to-shard placement; `group_co_residency`), TD-003 (the cross-shard
   model), ADR-007 (retract the "fused vs split disappears" claim, ADR-007:71). It **amends ADR-001** — which
   already states "Postgres is preferred; a backend-specific control plane may be supported later but must

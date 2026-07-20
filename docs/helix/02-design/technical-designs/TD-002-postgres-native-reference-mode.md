@@ -12,18 +12,18 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
+    self_hash: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
-      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
-      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
-      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-    reviewed_at: "2026-07-18T02:36:05Z"
+      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
+      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+    reviewed_at: "2026-07-20T00:01:26Z"
 ---
 
 # Technical Design: TD-002 Postgres-Native Reference Mode
@@ -883,7 +883,7 @@ These targets define the single-deployment (Tier-1) envelope. `postgres_native`
 mirrors a proven single-Postgres `SKIP LOCKED` design and inherits its
 single-deployment scale ceiling; per ADR-001 "Scale Claim Scoping" it delivers
 Tier-1 and MUST NOT be cited as evidence for the horizontal envelope (TP-002 E1
-vs the per-queue throughput floor E0: >=10M items/hr per queue). The claim path
+against E0's portable correctness, progress, and bounded-resource contract). The claim path
 here is a single owner-local `SKIP LOCKED` statement. The horizontal envelope is
 delivered by **cross-queue scale-out** (ADR-008) — distributing queues across
 owners — with per-queue ownership (TD-003) and the `object_log_sqlite_projection`
@@ -892,11 +892,13 @@ E2/E3. A `postgres_native` queue is one owner-local `SKIP LOCKED` claim; scale i
 achieved by running many such queues across many owners, not by sharding within a
 queue.
 
-Targets inherit PRD success metrics: 10M items in a hot queue, the per-queue
-throughput floor (TP-002 E0: >=10M items/hr per queue, preserved for every queue
-at any scale), at least 1000 concurrently active queues per node (queue density,
-TP-002 E2), and sub-second p95/p99 for core batch operations under representative
-load.
+Targets inherit PRD success metrics: 10M items in a hot queue; the portable E0
+contract for exact outcomes, monotonic queue-global progress, and bounded shared
+resources; and the canonical density shape of at least 1,000 cold queues plus
+one hot queue per node (TP-002 E2). Core-operation throughput and p50/p95/p99
+are reported for the declared topology, while pass/fail uses exact results,
+structural query bounds, declared resource ceilings, and interleaved same-run
+comparisons.
 
 Design constraints:
 

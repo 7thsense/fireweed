@@ -7,9 +7,9 @@ ddx:
   review:
     self_hash: cd412536c22371beb00f53e7d439cbabed2de5f357c1cf2b8659b9ab38f4c055
     deps:
-      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-    reviewed_at: "2026-07-18T02:36:05Z"
+      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
+      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
+    reviewed_at: "2026-07-20T00:01:21Z"
 ---
 
 # ADR-010: Per-Queue Projection-Maintained Secondary Indexes over Configured Item Fields

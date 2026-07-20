@@ -15,7 +15,7 @@ ddx:
     self_hash: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
     deps:
       adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
-    reviewed_at: "2026-07-18T02:36:05Z"
+    reviewed_at: "2026-07-20T00:01:23Z"
 ---
 
 # ADR-016: Turso is the Rust-native derived SQL projection

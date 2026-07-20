@@ -9,15 +9,15 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 5194d0692b08378442c24a48b23aa0a78053337b87572e6e2090abd407a67709
+    self_hash: 9f8dd7ccf732934ef58132679dc751d9708929df420b4d62e936aed05ee3794f
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
-      td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
-      td-s3-object-log-sqlite-projection-mode: ec22ad6a2a2f16f8164253f0f8c321ae5e33f24f250daf6a7aadcc016340acbd
-      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-      tp-scale-substantiation: f22ca60c926403fbb83ae37a54150507296929660ed8bfcea4bcae85f9f37798
-      tp-verification-acceptance-criteria: d726a7a901d02af34d992042834d1f054944ca4c5f64cb265a3c08bd601f5bdb
-    reviewed_at: "2026-07-19T23:16:56Z"
+      td-postgres-native-reference-mode: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+      tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
+      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
+    reviewed_at: "2026-07-20T00:01:30Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -93,8 +93,7 @@ deployment release matrix, release/tag gates, operator support contract, and
 public support claims.
 
 Runtime wiring is authorization to exercise and improve the profile; it is not
-authorization to advertise support. Likewise, authorizing implementation work
-does not declare support. The current evidence proves only that
+authorization to advertise support. The current evidence proves only that
 `PQUEUE_LOG_BACKEND=objectlog` plus
 `PQUEUE_PROJECTION_BACKEND=hybrid-strict` selects the strict runtime with its
 SQLite path and that non-object-log pairings fail closed. The chart still omits
@@ -102,13 +101,13 @@ SQLite path and that non-object-log pairings fail closed. The chart still omits
 Deployment templates do not include it; and the Helm, live-`kind`, deployment,
 and release/tag matrices do not exercise it.
 
-Revisit the support decision only after all of the following are complete and
-green on one release candidate revision:
+Revisit the support decision only after all of the following are green on one
+release candidate revision:
 
 1. fresh governed TP-003 evidence covers AC-HYB-1 through AC-HYB-6, including
    portable under-load comparative performance and exact 100k/10M recovery;
-   wall-clock results may describe a declared deployment's capacity but cannot
-   be a quiet-host or absolute host-speed support gate;
+   wall-clock results may describe a deployment's capacity but cannot be a
+   quiet-host or absolute host-speed support gate;
 2. the chart schema, templates, SQLite PVC/path handling, and operator controls
    expose the exact `objectlog/hybrid-strict` profile and fail closed for invalid
    pairings;
@@ -119,11 +118,8 @@ green on one release candidate revision:
 5. manifest fencing plus the applicable TP-002 E2/E3 correctness, progress,
    recovery, cost, and bounded-resource prerequisites are closed.
 
-Until then, documentation and Helm tests must preserve the exclusion. A
-separate execution item owns a named negative Helm assertion for the exact
-schema enum-exclusion error and the related operator-document reconciliation;
-this decision does not implement that gate.
-
+Until then, documentation and Helm tests preserve the exclusion with a named
+negative schema assertion; implementation work does not imply support.
 ## Production Target
 
 The production deployment target is a Kubernetes installation delivered by Helm.

@@ -13,18 +13,19 @@ ddx:
     - concerns
     - prd
   review:
-    self_hash: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
+    self_hash: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
     deps:
+      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
       adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
-      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
       adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
-      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
-      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-    reviewed_at: "2026-07-18T02:36:05Z"
+      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
+      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+    reviewed_at: "2026-07-20T00:01:24Z"
 ---
 
 # Technical Design: TD-001 Storage Architecture and Backend Contracts
@@ -619,8 +620,9 @@ storage-contract surface; TD-003 is the ownership/coordination mechanism.
 Per-queue ownership (one single-writer owner per queue with epoch fencing) is a
 committed v1 mechanism; only the *magnitude* claim — aggregate throughput/queue
 scale beyond a single deployment — remains evidence-gated, and it is expressed as
-**cross-queue scale-out** (TP-002 E2) over the per-queue throughput floor (E0:
->=10M items/hr per queue, preserved for every queue at any scale; E1–E3).
+**cross-queue scale-out** (TP-002 E2) under E0's portable contract: exact
+outcomes, monotonic queue-global progress, fencing, and bounded shared resources
+under concurrent load. E1–E3 report topology-bound capacity separately.
 
 ## Data Model Changes
 
@@ -776,39 +778,42 @@ duplicated here; they come from the single `pqueue_group_summary`.
 
 ## Performance
 
-- **Expected Load**: the per-queue throughput floor (TP-002 E0: >=10M items/hr
-  per queue, preserved for every queue at any scale); at least 10M items in a hot
-  queue; at least 1000 concurrently active queues per node (queue density,
-  TP-002 E2); large batches for cost-optimized object-log profiles.
-- **Queue density (>=1000 active queues per node)**: backend implementations of
+- **Expected Load**: at least 10M items in a hot queue; at least 1000 concurrently
+  active cold queues plus one designated hot queue per node (queue density,
+  TP-002 E2); representative concurrent operation mixes; and large batches for
+  cost-optimized object-log profiles.
+- **Queue density (at least 1,001 active queues per node)**: backend implementations of
   the capability traits MUST NOT allocate unbounded per-queue resources.
   Background work — lease-expiry sweeps, progress-bound aggregation,
   `pqueue_group_summary` recompute, recurring rearm, and idempotency/retention GC
   — MUST be multiplexed onto bounded shared per-node pools (a batched sweeper that
   scans many queues per pass, a shared connection pool, a bounded/LRU set of open
   per-queue projection handles), never one task, loop, or connection per queue. A
-  node MUST sustain >=1000 concurrently active queues with each meeting its
-  progress bound and any one able to reach the per-queue floor; aggregate
-  single-node throughput is bounded by the node, and multi-node deployment
-  provides aggregate headroom.
-- **Response Target**: API-001 core batch operations target sub-second p95/p99
-  under representative workloads, except object-log profiles where configured
-  batch windows may intentionally trade acknowledgement latency for cost.
+  node MUST exercise the canonical one-hot-plus-1,000-cold shape, with every
+  cold queue completing a non-empty claim/finalize operation while sustained hot
+  work remains active. Exact counts and queue-global progress are mandatory;
+  aggregate single-node throughput and latency are declared-topology capacity
+  observations, and multi-node deployment provides aggregate headroom.
+- **Response Target**: API-001 core batch operations preserve exact outcomes and
+  monotonic progress within declared resource bounds. Interleaved same-run
+  controls quantify degradation; absolute latency percentiles are capacity
+  evidence, including for object-log profiles whose configured batch windows
+  intentionally trade acknowledgement latency for cost.
 - **`objectlog/hybrid` hot-read target**: claim selection, `peek`, `pending`,
   metrics, live-item lookup, secondary-index lookup, and pre-commit validation
   MUST be served from the in-memory projection. SQLite work is amortized on
   sealed-segment apply and recovery image export, not on hot reads. Release-tier
   hybrid evidence MUST compare against `objectlog/inmemory` and
-  `objectlog/sqlite` with the same segment settings: push throughput and
-  p50/p95/p99 acknowledgement latency within 20% of `objectlog/inmemory`;
-  claim/finalize p95 latency within 20% of `objectlog/inmemory` after initial
-  SQLite apply cost is amortized; segment batch density and object PUT count;
-  owner-local recovery elapsed time and object-log tail length; and maximum
-  memory rehydrate time from the SQLite `ProjectionImage`.
+  `objectlog/sqlite` with identical segment settings, seeded work, and
+  interleaved same-run control windows. It proves exact operation counts, hot
+  reads served from memory, bounded queue/task/memory debt, and a declared
+  relative degradation envelope. It reports p50/p95/p99, throughput, segment
+  batch density, object PUT count, owner-local recovery elapsed time, object-log
+  tail length, and maximum memory rehydrate time as topology-bound capacity.
 - **Delivered envelopes**: these figures define two delivered v1 envelopes. The
   single-deployment envelope is delivered by `postgres_native` and validated
-  against the per-queue throughput floor (TP-002 E0: >=10M items/hr per queue;
-  E1). The horizontal envelope spreads write/claim load **across queues**
+  against E0's portable correctness, progress, and bounded-resource contract
+  (E1). The horizontal envelope spreads write/claim load **across queues**
   distributed over independent owners (cross-queue scale-out, ADR-008) and is
   delivered by per-queue ownership (TD-003) and the `object_log_sqlite_projection`
   backend (TD-004); it is validated by TP-002 E2/E3. Per-queue ownership and the

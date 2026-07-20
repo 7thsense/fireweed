@@ -7,7 +7,7 @@ ddx:
     self_hash: 09abb88848c53782d2e9b2664714d0a4c7081b698c73da75349492f8fac714ca
     deps:
       adr-embedded-engine-integration-and-public-surface: e06dc6a96cdcd7293b5ba67e9c17d387cd2bd51c14daef13287bdf62a9e3951e
-    reviewed_at: "2026-07-18T02:36:05Z"
+    reviewed_at: "2026-07-20T00:01:27Z"
 ---
 
 # Rust-Native Embedded Projection Alternatives

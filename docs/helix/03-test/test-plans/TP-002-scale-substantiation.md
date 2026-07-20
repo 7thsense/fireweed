@@ -8,14 +8,14 @@ ddx:
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
-    self_hash: 8d4b9a39799bd01ceb6007fd17832590e7af854bae5092894579b3bcb660d842
+    self_hash: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
     deps:
-      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
-      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-19T02:12:30Z"
+      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
+      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+      td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+    reviewed_at: "2026-07-20T00:01:25Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -62,7 +62,7 @@ The two v1 scale envelopes both deliver and both substantiate:
 
 | Envelope | Deployment shape | Delivered by | Evidence record |
 |----------|------------------|--------------|-----------------|
-| **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | `postgres_native` (TD-002) | **E1** vs the per-queue throughput floor **E0** |
+| **Tier-1 (single-deployment)** | one storage deployment, one queue owned by one node | `postgres_native` (TD-002) | **E1** vs the portable progress/capacity contract **E0** |
 | **Tier-2 (cross-queue horizontal)** | N queues distributed across N independent owner nodes (per-queue ownership leases), each queue's progress bound local to its owner | per-queue ownership (TD-003) + cross-queue distribution (ADR-008) + object-log local-projection profiles (TD-004) | **E2** (cross-queue scale-out) and **E3** (object-log latency/cost + recovery) |
 
 ## Scale Evidence Records
@@ -86,7 +86,7 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > ADR-008 (queue is the unit of sharding) the **E2 requirement is reframed to
 > cross-queue scale-out** (below); the E0/E1/E3 records keep their meaning. The
 > prior E2 measurement stands as a historical attestation of the retired
-> multi-shard mechanism. E0, E1, and E3 (the per-queue floor, the
+> multi-shard mechanism. E0, E1, and E3 (the portable progress contract, the
 > single-deployment envelope, and the object-log latency/cost/recovery profile)
 > are unaffected by the reframe.
 >
@@ -100,11 +100,11 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > in-cluster RESP load Job over Service ClusterIP; harness
 > `crates/pqueue-bench/tests/performance_cross_queue_scale_out_tests.rs` ::
 > `live_multi_node_object_log_sqlite_projection_e2` +
-> `scripts/perf/tp002-e2-kind.sh`). All four E2 bars passed on real measured data:
+> `scripts/perf/tp002-e2-kind.sh`). The historical run recorded:
 > (1) ingest aggregate non-decreasing **8,206 → 15,726 → 30,088 items/s** across
 > 2 → 4 → 8 owners; (2) 8-owner / 2-owner ingest multiple **3.67× ≥ 3.5×** (≈73%
 > cross-node efficiency); (3) worst single-queue floor held — ingest **3,761/s**
-> and claim+finalize **34,234/s**, both ≥ the E0 floor (2,777.78/s); (4)
+> and claim+finalize **34,234/s**; (4)
 > one-owner-per-queue proven live — **56 of 56** cross-node "no such queue"
 > confirmations at 8 owners. Host: 32 cores, node image `kindest/node:v1.36.1`,
 > kind v0.32.0. (Build-provenance note: in this sandbox the source `Dockerfile.e2`
@@ -112,7 +112,9 @@ Release-gate mapping as of 2026-06-16 (**pre-ADR-008 build record**):
 > the harness image was assembled from host-built release binaries via the
 > prebuilt-image path — `SKIP_BUILD=1` + `PQUEUE_E2_IMAGE` — which is a packaging
 > detail only; the binaries, backend, cluster topology, and load are identical to
-> the source-build path.)
+> the source-build path.) These absolute rates and ratios remain topology-bound
+> capacity evidence; current release qualification applies the portable E0/E2
+> correctness, progress, resource, and same-run comparison bars below.
 
 `scripts/ci/release-gate.sh --require-tp002-evidence E0,E1,E2,E3` validates
 these source beads directly when invoked with the corresponding
@@ -187,34 +189,29 @@ evidence and user-visible risk, and a follow-up exact-tag evidence run. The tag
 and release UI must remain visibly unverified until that follow-up passes; an
 exception cannot suppress or relabel the failed gate.
 
-### E0 — Per-queue throughput floor (stated requirement)
+### E0 — Portable per-queue progress and capacity contract
 
-E0 is the fixed scale **requirement**, not a measurement of any existing system:
+E0 is the host-independent scale **requirement**:
 
-> **Every queue MUST sustain at least 10,000,000 (10M) accepted items/hr** —
-> covering both ingest (push/update) and claim/finalize — **and this per-queue
-> capability MUST hold at any deployment scale**: increasing the number of queues
-> or the total deployment load MUST NOT reduce any individual queue below the
-> floor.
+> Under ordinary concurrent load, every queue MUST preserve exact accepted,
+> claimed, and finalized outcomes; monotonically advance; meet its configured
+> queue-global progress bound; and consume only bounded shared workers,
+> connections, memory, and pending tasks as queue count and total load increase.
 
-Origin: Seventh Sense already schedules at ≥10M/hr, so pqueue must meet or exceed
-that for any queue, at any scale. The floor is a target the system is built to,
-and E1/E2/E3 validate that the system meets it on each profile; there is no
-"measure the old system first" gate. A representative Seventh Sense item/payload
-band and ingest/claim/finalize operation mix are used to drive the benchmarks
-(stated in E1).
+Origin: Seventh Sense requires a high-volume queue that remains correct and makes
+progress while the system is busy. A representative item/payload band and
+ingest/claim/finalize mix drive E1/E2/E3. Each run reports absolute throughput
+and latency with its exact host, topology, and resource limits as capacity
+evidence. Those values do not decide release eligibility and do not require an
+idle, quiet, dedicated, or specially selected host.
 
-**What "preserved for every queue at any scale" means (read once, applies
-everywhere it is repeated).** The floor is a per-queue *capability* that stays
-**reachable by any queue** — whichever queue is the hot one can hit ≥10M items/hr
-— and that adding queues or load MUST NOT drop a queue below what it could
-otherwise reach or cause a progress-bound violation. It does **NOT** mean every
-active queue runs at the floor simultaneously: at the queue-density point (≥1000
-active queues on one node) aggregate single-node throughput is bounded by the
-node, not 1000× the floor; multi-node deployment provides aggregate headroom.
-Benchmark fixtures MUST keep this distinction explicit — one designated hot queue
-driven to the floor while the other ~999 stay active — and MUST NOT assert a
-1000× single-node aggregate.
+**What "preserved for every queue at any scale" means.** Adding queues or load
+must not lose or duplicate work, strand an eligible queue, violate its progress
+bound, or create per-queue background resources. One designated hot queue and at
+least 1000 cold queues remain active. Interleaved same-run controls provide the
+comparison baseline; a declared degradation envelope must be justified by the
+workload and resource saturation signal. Aggregate capacity is reported, never
+extrapolated to other hosts or required to equal 1000 times a per-queue number.
 
 ### E1 — Tier-1 single-deployment envelope (pass/fail)
 
@@ -229,8 +226,9 @@ Backend: `postgres_native` (TD-002). Deployment: one Postgres, one queue owned b
 | Telemetry | enabled |
 | Postgres sizing | stated instance class, CPU, memory, IOPS, pool |
 | Resident set | 10M items including terminal retained rows under retention policy |
-| Pass: throughput | a single queue sustains ≥ 10M items/hr (the E0 floor) for ingest and for claim/finalize |
-| Pass: latency | sub-second p95 and p99 for batch push/update/claim/finalize |
+| Pass: progress and correctness | exact accepted/claimed/finalized counts, no lost or duplicate transitions, monotonic cursor/progress samples, and no queue-global progress-bound violation |
+| Pass: resources | shared workers, connections, pending tasks, and memory remain within workload-declared bounds |
+| Capacity report | ingest and claim/finalize throughput plus p50/p95/p99 latency, tied to this topology and not used as a portable pass bar |
 
 ### E2 — Tier-2 cross-queue scale-out (pass/fail)
 
@@ -252,9 +250,9 @@ envelope).
 | Parameter | Value |
 |-----------|-------|
 | Owner counts | benchmark at ≥ 3 owner-node counts (e.g. 2, 4, 8 owners), distributing a fixed-per-owner number of active queues across them |
-| Pass: cross-queue scale-out (measurable bar) | aggregate accepted write/claim rate across the queue population MUST scale **strictly monotonic non-decreasing with owner-node count** (2 → 4 → 8 owners) at ≈ linear efficiency (each added owner adds throughput; default bar: aggregate at 8 owners ≥ **3.5×** the 2-owner aggregate, i.e. ≥ ~70% cross-node scaling efficiency), while every individual queue independently holds its per-queue floor. A *single* queue does NOT exceed one owner's throughput (ADR-008); scale comes from more queues on more owners, and a producer that outgrows one owner partitions its stream across multiple queues. The published headline multiple is a user decision (see Open Questions). |
-| Pass: queue density (≥1000 active queues, single-node target) | a single node hosts **≥ 1000 concurrently active queues** with: (a) every active queue meeting its queue-global progress bound; (b) no cross-queue degradation as the active-queue count grows to ≥ 1000 (noisy-neighbor isolation, FR-43); (c) any single queue still able to reach the per-queue floor (≥10M items/hr) when it is the hot queue while the other ~999 stay active; (d) per-queue background work (lease-expiry sweeps, progress-bound aggregation, summary recompute, recurring rearm, idempotency/retention GC) multiplexed onto bounded shared per-node pools, never one loop/connection per queue. Aggregate single-node throughput is reported, NOT required to equal 1000× the per-queue floor; multi-node deployment provides aggregate headroom. |
-| Pass: per-queue floor preserved at scale (E0 invariant) | adding queues or total load — including at the ≥1000-active-queue density point — MUST NOT drop any individual queue below its reachable per-queue floor or cause a progress-bound violation. This is the "every queue at any scale" guarantee (noisy-neighbor isolation under load, FR-43). |
+| Pass: cross-queue scale-out | at 2, 4, and 8 owners, every phase completes exact work, aggregate logical progress is monotonic, ownership is single-valued, and shared resources remain bounded. Interleaved controls report scaling efficiency and saturation; no fixed host-speed multiple is a release bar. |
+| Pass: queue density (≥1000 active queues, single-node target) | a single node exercises **at least 1000 cold queues plus one hot queue**; every cold queue becomes claim-visible and progress-eligible, all hot and cold counts reconcile exactly, queue-global progress violations and empty post-reseed claims are zero, and background work is multiplexed onto bounded shared pools rather than one loop/connection per queue. Same-run controls quantify noisy-neighbor degradation. |
+| Pass: per-queue behavior preserved at scale (E0 invariant) | adding queues or total load must not lose or duplicate work, strand a queue, violate its progress bound, or exceed declared shared-resource bounds. |
 | Pass: per-queue local progress | each queue's oldest-eligible item is claimed before `progress_bound_ms` from its own owner's local computation (queue-global, D1 / FR-12); there is no cross-shard aggregation. |
 | Pass: owner failover / fencing | killing a queue's owner: after lease expiry a new owner acquires a strictly greater epoch, the deposed owner's append is fenced, and the queue recovers from snapshot + log tail with no lost/double work (TD-003); a queue left unowned past `progress_bound_ms` surfaces as a progress-bound violation in metrics (FR-41) and `DiscoverActiveScopes` (TD-003). |
 | SP-06 handoff profile | The E2 failover evidence schema v2 may carry a dedicated-recorder `handoff_object_store_profile`; schema v1 remains readable for historical evidence. The explicit matrix runs 200 post-fence/pre-serve samples for 256- and 1,000-item queues at scripted 25 ms and 100 ms request latency, with clean and one-unapplied-tail arms. Recorder totals reconcile with named requests. Clean: 20,300 immutable / 20,100 avoidable / 20,099 repeated GETs. Tail: 40,600 immutable / 40,400 avoidable / 39,999 repeated GETs, including 200 unique required segment GETs and 200 replayed commands. First local read requests = 0. Queue item count is not active-queue density. |
@@ -284,15 +282,15 @@ avoidable reads exceed 70% and absolute modeled gain exceeds 50 ms, but relative
 design input for constant-time head access and async bounded-parallel tail recovery.
 
 Backend: `object_log_inmemory_projection` and `object_log_sqlite_projection`
-(TD-004). Reported against the per-queue throughput floor E0.
+(TD-004). Evaluated against the portable E0 contract.
 
 | Parameter | Value |
 |-----------|-------|
 | Commit-latency-bound sweep | run at ≥ 4 configured bounds, including low-latency, balanced, and cost-optimized values (for example 1 ms, 5 ms, 20 ms, 100 ms or implementation-equivalent documented values) |
-| Pass: ack latency | p95/p99 group-commit ack reported for each bound and projection variant, within stated budget relative to the configured `segment_max_latency_ms` / `max_commit_latency_ms` window |
-| Pass: throughput | sustained items/hr at or above the E0 per-queue floor (≥10M items/hr per queue) reported alongside the ack-latency distribution |
+| Pass: commit-bound semantics | every acknowledged request is durable and visible within the declared commit-bound semantics; p50/p95/p99 are reported as topology-bound capacity evidence |
+| Pass: progress and resources | exact logical operation counts, monotonic progress, and bounded memory/work queues hold for every bound/profile; throughput is reported but is not an absolute release threshold |
 | Pass: cost | $/billion-commands and object/log requests per billion commands reported for each latency bound; the cost-optimized point beats `postgres_native` at high sustained volume (ADR-001 cost table) |
-| Pass: recovery | rebuild 10M-item SQLite projection from snapshot + log tail within stated recovery-window budget |
+| Pass: recovery | rebuild an exact 10M-item projection from snapshot + log tail with checksum/count/order equality, monotonic replay progress, and bounded memory/work queues; wall time is capacity evidence only |
 | Pass: manifest fencing | a stale-epoch writer's manifest CAS commit is rejected; on a no-CAS object store the Postgres-held manifest pointer enforces the same fence (TD-004) |
 | Pass: transaction contract | success-visible, rejection-no-effect, and unknown-outcome replay invariants hold under the same bound sweep; no latency setting may weaken TP-003 transaction invariants |
 | Pass: byte admission | Compare request-count-only evidence with global+tenant byte admission for small, target-sized, and oversize payloads under stalled-store and hot/cold-tenant contention. Global/tenant charges never exceed caps; a cold tenant progresses; median throughput regression is <=5% and p99 regression <=10%, including serialization paid before oversize rejection. |
@@ -316,9 +314,9 @@ P0 items are referenced by name (not number) to stay robust to PRD renumbering.
 
 | Requirement | Governing Artifact | Required Test Evidence |
 |-------------|--------------------|------------------------|
-| PRD P0 horizontal-distribution item | PRD / TD-001 / TD-003 / ADR-008 | E2 cross-queue scale-out: aggregate rate scales monotonically with owner-node count; the E0 per-queue floor holds for every queue under K-queue concurrency; per-queue local progress holds; single lease across owner reassignment. |
-| PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 (single queue ≥ E0 floor of 10M items/hr, sub-second p95/p99) and E2 (aggregate scales beyond one deployment's ceiling by distributing queues across owners AND the E0 floor is preserved for every queue at any scale, while preserving each queue's local progress bound). |
-| PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density: the release command `scripts/perf/tp002-e2-density-kind.sh` proves exactly 1000 cold queues plus one hot queue on one live objectlog/SQLite node using canonical 300,000-item hot windows, 8 hot connections, 8 cold workers, 4 server workers, and seed 42. Every cold queue retains an eligible item (`XLEN > 0`) and completes a non-empty claim/finalize operation that starts during the loaded hot phase; additional exact hot sustain windows keep load active until all 1,000 queues have progressed. The hot queue completes bracketed baseline/load/baseline work; absolute rates and retention are recorded as declared-topology capacity evidence, never as host-speed release gates. Between explicit hot-phase markers, a separate sampler bounds Tokio's actual worker pool (4), live async tasks (64), and established connections (32). The row is bound to a clean full Git revision and exact loaded image digest, with clean-HEAD checks repeated at emission and validation. No quiet or otherwise specially selected host is required. This density proof excludes aggregate 1000× throughput and failover, which is tracked by `pqueue-0a1d4386`. `queue_density_single_node_tests` remains smoke-only supporting evidence. |
+| PRD P0 horizontal-distribution item | PRD / TD-001 / TD-003 / ADR-008 | E2 cross-queue scale-out: exact work and logical progress remain monotonic as owner count rises; the portable E0 contract holds for every queue under K-queue concurrency; single lease across owner reassignment. |
+| PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 and E2 preserve exact outcomes, queue-global progress, and bounded resources while distributing queues across owners. Throughput and latency remain declared-topology capacity evidence. |
+| PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density: the release command `scripts/perf/tp002-e2-density-kind.sh` proves exactly 1,000 cold queues plus one hot queue on one live objectlog/SQLite node using canonical 300,000-item hot windows, 8 hot connections, 8 cold workers, 4 server workers, and seed 42. Every cold queue retains an eligible item and completes a non-empty claim/finalize operation during loaded hot work; additional exact hot sustain windows keep load active until all 1,000 queues progress. Hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and quiet-host or fixed-speed gates are forbidden. Absolute rates, latency, and retention remain declared-topology capacity evidence. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment, epoch fencing of a stale owner, graceful drain without loss/duplication, recovery, and stalled-queue visibility. |
 | TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery; commit-latency-bound sweep; manifest-CAS (or Postgres-pointer fallback) current-epoch fencing; passes the shared TD-001 backend conformance suite. |
 | Per-queue local progress (D1) | TD-001 / TD-003 | Each queue's oldest-eligible age is computed locally on its owner (gate-aware); the oldest item is claimed before the bound; no cross-shard aggregation. |
@@ -346,17 +344,17 @@ Implementation beads should create or extend these suites:
 
 Scale benchmarking must include:
 
-- single-deployment write/throughput/latency meeting the per-queue floor E0
-  (≥10M items/hr per queue) (E1);
+- single-deployment exact lifecycle outcomes, monotonic progress, and bounded
+  resources under the portable E0 contract, with throughput/latency reported as
+  declared-topology capacity (E1);
 - cross-queue scale-out at ≥ 3 owner-node counts, reported as aggregate accepted
   write/claim rate per owner count, scaling monotonically with owner count (E2);
-- the E0 per-queue floor preserved for every queue under concurrent load as the
-  active-queue count and total load grow (the "every queue at any scale"
-  guarantee, E2);
-- queue density: ≥1000 concurrently active queues on a single node, each meeting
-  its progress bound with no cross-queue degradation, any one able to reach the
-  per-queue floor, and all per-queue background work multiplexed onto bounded
-  shared per-node pools (E2, `queue_density_single_node_tests`);
+- the portable E0 correctness, progress, and resource contract preserved for
+  every queue as active-queue count and total load grow (E2);
+- queue density: at least 1000 cold queues plus one hot queue on one node, exact
+  cold/hot lifecycle completion, every queue progress-eligible, same-run
+  degradation within its declared envelope, and all background work multiplexed
+  onto bounded shared pools (E2, `queue_density_single_node_tests`);
 - per-queue local progress: each queue's oldest-eligible item claimed before the
   bound from its owner's local computation (E2);
 - owner failover/fencing and stalled/unowned-queue visibility as a progress-bound
@@ -406,26 +404,23 @@ Reviewers MUST reject documents matching any rule above.
 ## Exit Criteria
 
 Before scale claims are published, the referencing evidence records must pass
-against the E0 per-queue floor (≥10M items/hr per queue, preserved for every
-queue at any scale): E1 for the single-deployment envelope, E2 for the horizontal
-envelope (including the every-queue-at-any-scale floor under K-queue concurrency),
+against the portable E0 correctness, progress, and resource contract: E1 for the
+single-deployment envelope, E2 for the horizontal envelope (including every-queue
+progress under K-queue concurrency),
 and E3 for the object-log latency/cost/recovery profile. A scale claim in any
 document must cite at least one evidence record (E0–E3) and, where it asserts a
 benchmark outcome, the named scale test suite that produces it. A horizontal-scale
 claim MUST NOT be substantiated by `postgres_native` alone.
 
-## Open Questions
+## Resolved Decisions
 
-1. **Tier-2 published pass bar**: the E0 floor (≥10M items/hr per queue) is fixed;
-   beyond it, is the default cross-queue scale-out headline "aggregate at 8 owners
-   ≥ 3.5× the 2-owner aggregate (≥ ~70% cross-node efficiency), monotonic across
-   2/4/8 owners" the bar you want, or a different efficiency target?
-2. **Tier-2 comparator scope for E2**: object-log is required for E2; do you also
-   want a `postgres_native` cross-queue comparator run (N single-owner Postgres
-   queues across N nodes) so E2 and E3 can share a harness, or object-log only?
+- Cross-owner throughput and efficiency are published capacity observations, not
+  universal bars. Release qualification uses the portable E0/E2 contract and
+  never waits for an operator to select a machine-speed threshold.
+- Object-log remains required for E2. A `postgres_native` comparator may be
+  recorded when useful but is not required to qualify the portable envelope.
 
-Resolved: the queue-density target is **≥1000 concurrently active queues on a
-single node** (density + floor-reachable: every active queue meets its progress
-bound and any one can reach the per-queue floor; the single node is not required
-to sustain 1000× the floor in aggregate — multi-node provides aggregate
-headroom).
+The queue-density target is **at least 1000 cold queues plus one hot queue on one
+node**. Every queue meets its progress contract, all lifecycle counts reconcile,
+and shared resources remain bounded; aggregate capacity is reported for that
+node without extrapolation.

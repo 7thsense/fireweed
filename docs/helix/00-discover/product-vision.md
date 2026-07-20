@@ -2,9 +2,9 @@
 ddx:
   id: product-vision
   review:
-    self_hash: 0e59c80e42299b3426b95bc91d71ad509059dcadf3a47aa74b688acb6c626e5e
+    self_hash: d70aaff09b5d5f59211e5ef3ae9156ee30776e95bce7a70398978e83e39d39e8
     deps: {}
-    reviewed_at: "2026-07-18T02:36:05Z"
+    reviewed_at: "2026-07-20T00:01:19Z"
 ---
 
 # Product Vision
@@ -50,7 +50,7 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 | Who | Engineers building durable, high-volume async work systems |
 | Pain | FIFO queues and ad hoc scheduler tables do not model priority, eligibility, leases, batching, and retries as one contract |
 | Current Solution | Message brokers, sorted sets, database tables, and worker-specific retry logic |
-| Why They Switch | Priority-aware execution, durable lifecycle state, group-aware batching, and horizontal scale beyond a single database belong in the queue primitive, on infrastructure that infrastructure teams already operate. Horizontal scale is a v1 commitment substantiated by recorded benchmark evidence (TP-002 E2 cross-queue scale-out and E3 object-log profile prove the per-queue floor of ≥10M items/hr holds for every queue at any scale, E0), not an aspiration. |
+| Why They Switch | Priority-aware execution, durable lifecycle state, group-aware batching, and horizontal scale beyond a single database belong in the queue primitive, on infrastructure that infrastructure teams already operate. Horizontal scale is a v1 commitment substantiated by portable TP-002 evidence: queue-global progress, correctness, bounded shared resources, and same-run behavior as queues, owners, and load increase. Machine-specific capacity is published for declared topologies, not used as a universal release gate. |
 
 ## Key Value Propositions
 
@@ -71,7 +71,7 @@ idempotently, claim compatible batches of eligible items, and record outcomes.
 | Priority correctness | Claims follow the queue's configured priority and progress contract |
 | Durable execution safety | No accepted item is lost or concurrently held by multiple active claims |
 | Transaction contract | Every implementation profile satisfies the same externally visible mutation contract: success means durable and visible, rejection means no committed effect, and unknown outcomes are resolvable by `request_id` without duplicate state-machine transitions |
-| Scale readiness | Every queue sustains at least 10M items/hr (the per-queue floor, E0), and that floor holds for any queue at any deployment scale: hot queues with millions of items stay writable, claimable, and observable under production load, scaling horizontally beyond a single database by distributing **queues across independent owner nodes** (the queue is the unit of sharding) while preserving each queue's queue-global progress guarantee and the per-queue floor for every queue. A single node supports at least 1000 concurrently active queues (queue density) with no cross-queue degradation. Substantiated by the recorded scale evidence the PRD and design/test artifacts reference (TP-002 E1 single-deployment, E2 cross-queue + multi-queue density scale-out, E3 object-log profile) |
+| Scale readiness | Hot queues with 10M resident items remain writable, claimable, observable, and exactly recoverable under ordinary concurrent load. Horizontal deployments distribute **queues across independent owner nodes** while preserving queue-global progress, claim safety, and bounded shared resources. A node exercises at least 1000 concurrently active queues without lost or duplicate work. Same-run baseline/load comparisons detect material degradation; absolute rates and latency percentiles are capacity evidence tied to the declared host and topology, never portable release bars. Substantiated by TP-002 E1 single-deployment, E2 cross-queue and density, and E3 object-log evidence. |
 | Seventh Sense validation | Timestamp-ascending delivery queues meet Seventh Sense scheduling, idempotency, batch, and latency requirements |
 
 ## Why Now

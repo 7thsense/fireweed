@@ -7,7 +7,7 @@ ddx:
     self_hash: bc29e64f6e6f89932496a4803282d3e388bea665db6c526a92ba17fe49422347
     deps:
       adr-per-queue-secondary-indexes: cd412536c22371beb00f53e7d439cbabed2de5f357c1cf2b8659b9ab38f4c055
-    reviewed_at: "2026-07-18T02:36:05Z"
+    reviewed_at: "2026-07-20T00:01:22Z"
 ---
 
 # ADR-011: Typed Payload Schemas and Secondary Indexes via the Shared `axon-esf` ESF Vocabulary

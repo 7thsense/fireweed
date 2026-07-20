@@ -14,14 +14,14 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 6dec7a945b45c870541c7a5493e274c1579a2ad4e4d940cf48ea32d758a09785
+    self_hash: 55aa54bb9ccb2fe1d905655831b26e3676590c1a88528bba4d9349f63572ad54
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      td-s3-object-log-sqlite-projection-mode: a88fb07f8275de066ab5f7a65f815e2da511774a164a20b464ebabf0a6e9d369
-      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
-      tp-scale-substantiation: 8d4b9a39799bd01ceb6007fd17832590e7af854bae5092894579b3bcb660d842
-      tp-verification-acceptance-criteria: 6d3ebd44a41784009a425580189619661bdb5620ba831c5f1952ca2b61bcc888
-    reviewed_at: "2026-07-19T03:37:52Z"
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+      td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
+      tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
+      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
+    reviewed_at: "2026-07-20T00:01:29Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption

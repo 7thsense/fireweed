@@ -7,13 +7,13 @@ ddx:
     - {kind: informed_by, to: td-sharding-and-shard-ownership}
     - {kind: verified_by, to: tp-scale-substantiation}
   review:
-    self_hash: 5aabef389a79a395503e0333e2a1d6976a4bd598444cd202c6faea572738b0b8
+    self_hash: 676d83770b1b88a293c614f6886fdc524cdd898c5200d9dd3e4d307197e4f42e
     deps:
-      build-sp01-global-buffer-byte-admission: 5cfbe42a94ec4813e4855e431f0319152c6c8d11c5b081dcc77954a1ecf933b7
-      build-sp04-object-store-observability: 7fc689fb0f1334fee08304160a66d3215372c754dddf679ae4411c4c0d625926
-      build-sp05-maintenance-policy-execution: 19aa494aeeef8822839e5dc70dee309c87a9ad5d3d9d094adb26e4e4a03f64c8
-      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
-    reviewed_at: "2026-07-19T02:12:30Z"
+      build-sp01-global-buffer-byte-admission: 97d1032e2b1bbd9ecae2df5daed4350d88364b2bb4d9e7b3c643677f665d8280
+      build-sp04-object-store-observability: b75fdf641cb7d51d5baedf66abe2569b7ae19d2722fec456710c887204508706
+      build-sp05-maintenance-policy-execution: 1d89282c8fae482f99334b909d45dea15768f6b4ab5ddf7dd57180092e19d8e9
+      td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
+    reviewed_at: "2026-07-20T00:01:31Z"
 ---
 
 # Technical Spike Plan: SP-06 Targeted Ownership-Handoff Warmup

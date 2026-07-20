@@ -6,12 +6,12 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+    self_hash: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
     deps:
-      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      product-vision: 0e59c80e42299b3426b95bc91d71ad509059dcadf3a47aa74b688acb6c626e5e
-    reviewed_at: "2026-07-18T02:36:05Z"
+      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+      product-vision: d70aaff09b5d5f59211e5ef3ae9156ee30776e95bce7a70398978e83e39d39e8
+    reviewed_at: "2026-07-20T00:01:21Z"
 ---
 
 # ADR-001: CQRS Log Projection Storage Model
@@ -22,8 +22,8 @@ pqueue must provide durable priority queue semantics without making application
 nodes durable authorities, requiring node-to-node discovery, or embedding a
 cluster consensus algorithm. It must support batch push, priority update, batch
 claim, lease renewal, finalize, retry, failure, progress bounds, and recovery at
-10M-item queue scale, meeting the per-queue throughput floor (TP-002 E0:
->=10M items/hr per queue, preserved for every queue at any scale). These targets are delivered
+10M-item queue scale while preserving exact outcomes, queue-global progress,
+and bounded shared resources under concurrent load (TP-002 E0). These targets are delivered
 in two committed v1 envelopes: a single-deployment envelope (delivered by
 `postgres_native`), and a horizontal envelope (delivered by **cross-queue
 scale-out** — distributing whole queues across nodes via control-plane-lease
@@ -256,8 +256,9 @@ This ADR's backend menu maps to two **delivered v1** envelopes:
 
 - **Single-deployment envelope** — delivered by `postgres_native` (TD-002). Its
   ceiling is that of a well-tuned single-Postgres `SKIP LOCKED` priority queue;
-  v1's advantage here is durable queue semantics. Evidence: TP-002 E1 vs the
-  per-queue throughput floor E0 (>=10M items/hr per queue).
+  v1's advantage here is durable queue semantics. Evidence: TP-002 E1 against
+  E0's portable correctness, progress, and resource contract. Rates and
+  percentiles describe the measured topology's capacity.
 - **Horizontal envelope** — delivered by **cross-queue scale-out**: distributing
   whole queues across nodes via per-queue ownership (TD-003) over the
   **`object_log_sqlite_projection`** second backend (TD-004) and/or independent
@@ -267,8 +268,8 @@ This ADR's backend menu maps to two **delivered v1** envelopes:
 
 | Claim | Substantiated by (committed v1) | Evidence record |
 |-------|--------------------------------|-----------------|
-| Single-deployment per-queue throughput >= floor (>=10M items/hr/queue) | `postgres_native` (TD-002) | E1 vs E0 |
-| Write/claim load scales beyond one deployment by distributing queues across nodes; per-queue floor preserved for every queue at any scale | cross-queue placement + per-queue ownership (TD-003) + object-log backend (TD-004) | E2 |
+| Single-deployment exact outcomes and queue-global progress under load with bounded shared resources | `postgres_native` (TD-002) | E1 vs E0 |
+| Write/claim load scales beyond one deployment by distributing queues across nodes while exact outcomes, per-queue progress, fencing, and bounded shared resources are preserved | cross-queue placement + per-queue ownership (TD-003) + object-log backend (TD-004) | E2 |
 | Per-queue progress bound holds on the queue's single owner | per-queue oldest-eligible tracking (TD-003); queue-local, no cross-shard aggregation | E1 |
 | Lower $/command + bounded recovery at high volume | `object_log_sqlite_projection` and local-projection object-log variants using group commit + projection rebuild (TD-004) | E3 |
 
