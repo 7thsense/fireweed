@@ -4848,29 +4848,38 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         superseded: &[String],
     ) -> EngineResult<()> {
         if !superseded.is_empty() {
-            if self.has_recovery_pin_at_or_before(shard, safe_after_version)? {
-                let batch = RecoveryIndexGarbageBatch {
-                    safe_after_version,
-                    keys: superseded.to_vec(),
-                };
-                let body = to_json(&batch)?;
-                let key = format!(
-                    "{}{}-{}.json",
-                    Self::recovery_index_garbage_prefix(shard),
-                    safe_after_version,
-                    publication_attempt_id()?
-                );
-                let _ = self.store.put_if_absent(&key, &body)?;
-            } else {
-                for key in superseded {
-                    let _ = self.store.delete(key)?;
-                }
-            }
+            let batch = RecoveryIndexGarbageBatch {
+                safe_after_version,
+                keys: superseded.to_vec(),
+            };
+            let body = to_json(&batch)?;
+            let key = format!(
+                "{}{}-{}.json",
+                Self::recovery_index_garbage_prefix(shard),
+                safe_after_version,
+                publication_attempt_id()?
+            );
+            let _ = self.store.put_if_absent(&key, &body)?;
         }
-        // Each append reaps a fixed number of deferred batches. A long-running cursor can defer reclamation,
-        // but once its durable root pin drops, subsequent appends converge without a resident-sized scan.
+        Ok(())
+    }
+
+    /// Bounded maintenance-page reclamation for superseded COW index nodes. Seal only publishes a fixed-size
+    /// retirement batch; it never LISTs pin or garbage namespaces. Maintenance invokes this separately so a
+    /// remote object-store scan cannot inflate acknowledgement latency or weaken stale-writer fencing.
+    pub fn reap_recovery_index_garbage_bounded(
+        &self,
+        shard: &QueueKey,
+        max_batches: usize,
+    ) -> EngineResult<usize> {
+        if max_batches == 0 || max_batches > 64 {
+            return Err(EngineError::Invalid(
+                "recovery index GC requires 1..=64 batches",
+            ));
+        }
         let prefix = Self::recovery_index_garbage_prefix(shard);
-        for key in self.store.list_page(&prefix, None, 16)? {
+        let mut reaped = 0;
+        for key in self.store.list_page(&prefix, None, max_batches)? {
             let Some(bytes) = self.store_get(&key)? else {
                 continue;
             };
@@ -4886,8 +4895,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 let _ = self.store.delete(&node)?;
             }
             let _ = self.store.delete(&key)?;
+            reaped += 1;
         }
-        Ok(())
+        Ok(reaped)
     }
 
     fn pin_recovery_head(
@@ -9695,7 +9705,7 @@ mod manifest_deletion_watermark_tests {
     }
 
     #[test]
-    fn captured_root_pin_defers_cow_gc_then_bounded_append_reaps_it() {
+    fn captured_root_pin_defers_cow_gc_then_bounded_maintenance_reaps_it() {
         let store = Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
         let shard = conformance_shard();
@@ -9735,6 +9745,7 @@ mod manifest_deletion_watermark_tests {
 
         log.enqueue(&shard, &pushes(1), 0, 20).unwrap();
         log.seal(&shard, 0, 21).unwrap();
+        assert!(log.reap_recovery_index_garbage_bounded(&shard, 64).unwrap() > 0);
         assert!(
             store
                 .list(
@@ -9744,7 +9755,7 @@ mod manifest_deletion_watermark_tests {
                 )
                 .unwrap()
                 .is_empty(),
-            "the next append must reap every bounded deferred batch after the pin drops"
+            "bounded maintenance must reap every deferred batch after the pin drops"
         );
     }
 
