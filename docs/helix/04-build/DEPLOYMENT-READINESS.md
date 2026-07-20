@@ -241,22 +241,24 @@ The tag workflow has two independent TP-002 lanes, and both are mandatory:
 
 1. `scripts/ci/release-gate.sh` generates a clean smoke ledger and requires fresh
    smoke-tier E2 and E3 rows. It then validates the exact E0-E3 authority files
-   listed by `target/tp002-release/manifest.json` and validates
-   `target/tp002-release/e3-contract.json` against the checked-out source
+   listed by `target/tp002-release/composite-contract.json`, including
+   `target/tp002-release/e3/e3-contract.json`, against the checked-out source
    revision. These exact-commit outputs are staged by the evidence producers;
    they cannot be checked into the commit whose SHA they bind.
-2. The release workflow reruns the governed verifier in `exact-tag` mode with
-   `target/tp002-release/attestation.json`, the resolved release tag,
-   and `GITHUB_SHA`. The tag must resolve to that exact checked-out commit, and
-   every attested evidence/input digest must match.
+2. The release workflow verifies `target/tp002-release/attestation.json` with
+   the resolved release tag and `GITHUB_SHA`. The tag must resolve to that exact
+   checked-out commit, and every attested evidence/input digest must match.
 
 The governed lane never scans `docs/perf/evidence` or the staging directory.
 TP-003 transaction JSONL may coexist there but is not a TP-002 `LedgerRow`; an unlisted E0-E3 row cannot
 replace a missing manifest authority. Missing, duplicate, malformed, smoke-tier,
-wrong-profile, false-bar, revision-mismatched, or unattested authorities fail
+wrong-profile, false-bar, revision-mismatched, or unattested composite authorities fail
 closed. The E3 contract additionally requires explicit portable-gate markers and
 rejects quiet-host or absolute machine-speed release criteria; wall-clock
-measurements are capacity observations only.
+measurements are capacity observations only. A configured `progress_bound_ms`
+remains a queue liveness contract: eligible work must make logical progress
+within that configured bound under load. It is not a benchmark of host speed,
+and slow absolute throughput or latency alone cannot fail a release.
 
 ## Managed Postgres Boundary
 
