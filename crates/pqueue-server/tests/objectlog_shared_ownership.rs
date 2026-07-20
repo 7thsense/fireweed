@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex, mpsc};
+use std::time::Duration;
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -22,6 +23,48 @@ use pqueue_resp::{RespHooks, RouteDecision};
 use pqueue_server::{OwnershipRuntime, SegmentConfig, SegmentedObjectLogSqliteBackend};
 
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
+const COORDINATION_TIMEOUT_ENV: &str = "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS";
+const DEFAULT_COORDINATION_TIMEOUT_SECS: u64 = 300;
+
+/// Deadlock watchdog for live fault coordination. This is deliberately not a latency or
+/// performance assertion: loaded hosts may take arbitrarily longer to complete storage IO.
+fn parse_coordination_watchdog_timeout(value: Option<&str>) -> Result<Duration, String> {
+    let seconds = match value {
+        None => DEFAULT_COORDINATION_TIMEOUT_SECS,
+        Some(raw) => raw.parse::<u64>().map_err(|_| {
+            format!("{COORDINATION_TIMEOUT_ENV} must be a positive integer, got {raw:?}")
+        })?,
+    };
+    if seconds == 0 {
+        return Err(format!(
+            "{COORDINATION_TIMEOUT_ENV} must be a positive integer, got 0"
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn coordination_watchdog_timeout() -> Duration {
+    parse_coordination_watchdog_timeout(std::env::var(COORDINATION_TIMEOUT_ENV).ok().as_deref())
+        .unwrap_or_else(|message| panic!("{message}"))
+}
+
+#[test]
+fn coordination_watchdog_timeout_is_configurable_and_not_a_speed_bar() {
+    assert_eq!(
+        parse_coordination_watchdog_timeout(None).unwrap(),
+        Duration::from_secs(DEFAULT_COORDINATION_TIMEOUT_SECS)
+    );
+    assert_eq!(
+        parse_coordination_watchdog_timeout(Some("17")).unwrap(),
+        Duration::from_secs(17)
+    );
+    for invalid in ["", "0", "-1", "1.5", "slow"] {
+        assert!(
+            parse_coordination_watchdog_timeout(Some(invalid)).is_err(),
+            "invalid watchdog value {invalid:?} must fail closed"
+        );
+    }
+}
 
 fn live_env(label: &str) -> Option<(String, Arc<S3BlobStore>)> {
     let Ok(pg) = std::env::var("PQUEUE_PG_TEST_URL") else {
@@ -742,6 +785,7 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
         fired: AtomicBool::new(false),
     })));
     let reopened = backend(store, "race-reopen");
+    let coordination_timeout = coordination_watchdog_timeout();
     test_runtime().block_on(async {
         a_backend.create_queue(definition.clone()).await.unwrap();
         b_backend.create_queue(definition.clone()).await.unwrap();
@@ -764,7 +808,7 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
         tokio::task::spawn_blocking(move || resume.wait())
             .await
             .unwrap();
-        let stale = tokio::time::timeout(std::time::Duration::from_secs(5), stale_push)
+        let stale = tokio::time::timeout(coordination_timeout, stale_push)
             .await
             .expect("stale waiter must not hang")
             .unwrap();
@@ -773,7 +817,7 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
 
         let flusher_b = b_backend.spawn_flusher();
         tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            coordination_timeout,
             b_backend.push(&queue, vec![spec("fresh")], ts(21), Some(2)),
         )
         .await
