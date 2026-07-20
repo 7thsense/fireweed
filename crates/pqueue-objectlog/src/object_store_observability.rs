@@ -1600,20 +1600,20 @@ mod tests {
             row(BlobOperation::UpdateManifestHead, BlobResultClass::Success).completions,
             1
         );
-        // One read inside update plus the explicit read.
+        // The successor-key CAS does not rescan the immutable history; only the explicit read is logical.
         assert_eq!(
             row(BlobOperation::ReadManifestHead, BlobResultClass::Success).completions,
-            2
+            1
         );
         assert_eq!(
             row(BlobOperation::List, BlobResultClass::Success).completions,
-            2
+            1
         );
         assert_eq!(
             row(BlobOperation::PutIfAbsent, BlobResultClass::Success).completions,
             1
         );
-        // Empty first read plus one GET for the explicit read: no provider composite bypass and no duplicate.
+        // One GET for the explicit read: no provider composite bypass and no duplicate.
         assert_eq!(
             row(BlobOperation::Get, BlobResultClass::Success).completions,
             1

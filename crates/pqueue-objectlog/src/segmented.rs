@@ -55,8 +55,8 @@ use sha2::{Digest, Sha256};
 
 use pqueue_engine::sequenced_metadata::{
     AssignmentEpoch, CommandSequence, CreateOnlyPublication, CreateOnlyResolution,
-    DeleteThenAdvance, DeletionWatermarkClass, FreeAddress, HeadVersion, ManifestHeadClass,
-    ManifestIndex, RetainedAddress,
+    DeleteThenAdvance, DeletionWatermarkClass, FreeAddress, ManifestHeadClass, ManifestIndex,
+    RetainedAddress,
 };
 
 // ---------------------------------------------------------------------------
@@ -407,29 +407,30 @@ pub(crate) fn update_manifest_head_via<S: BlobStore + ?Sized>(
     expected_version: Option<u64>,
     value: &ManifestHeadBlob,
 ) -> EngineResult<bool> {
-    let current = store.read_manifest_head(prefix)?;
-    let expected_version = expected_version.map(HeadVersion);
-    match (
-        expected_version,
-        current.as_ref().map(|head| HeadVersion(head.version)),
-    ) {
-        (None, None) => {}
-        (Some(expected), Some(current)) if current == expected => {}
-        _ => return Ok(false),
-    }
-    let next_version = current.as_ref().map_or(0, |head| head.version + 1);
+    // The immutable successor key IS the compare-and-set location. A caller can only hold version `v`
+    // after reading its permanent object; racing writers from `v` both create `v + 1`, so exactly one wins,
+    // while a stale writer observes the already-created successor and loses. Re-reading the whole
+    // append-only version prefix here made the Nth head update read and parse all N prior heads, turning a
+    // sustained segmented append into O(N^2) object reads. Recovery still validates the complete contiguous
+    // version chain; the steady-state CAS only verifies its immutable predecessor and creates its successor.
+    let next_version = match expected_version {
+        Some(version) => {
+            let predecessor = versioned_manifest_head_key(prefix, version);
+            if store.get(&predecessor)?.is_none() {
+                return Ok(false);
+            }
+            version
+                .checked_add(1)
+                .ok_or_else(|| EngineError::Storage("manifest head version overflow".into()))?
+        }
+        None => 0,
+    };
     let key = versioned_manifest_head_key(prefix, next_version);
     let body = serde_json::to_vec(value).map_err(store_err)?;
-    match CreateOnlyPublication::<ManifestHeadClass, RetainedAddress>::publish(
-        &body,
-        || store.put_if_absent(&key, &body),
-        || store.get(&key),
-    )? {
-        resolution if resolution.applied() => Ok(true),
-        CreateOnlyResolution::PreconditionLost => Ok(false),
-        CreateOnlyResolution::Ambiguous(source) => Err(source),
-        _ => unreachable!("all applied resolutions handled by the guard"),
-    }
+    // Unlike immutable data publication, an identical pre-existing successor is still a LOST CAS: another
+    // writer advanced from the same observed version and this caller must not acknowledge a second append.
+    // Therefore do not collapse an equal body into idempotent success here.
+    store.put_if_absent(&key, &body)
 }
 
 /// Share one store between several owners (e.g. two competing epoch holders) — delegates through the `Arc`.
@@ -1720,6 +1721,10 @@ struct ShardBuf {
     next_manifest_index: u64,
     /// Highest epoch any committed manifest entry records (the queue's current epoch).
     committed_epoch: u64,
+    /// Exact shared-authority head observed during recovery/fencing and advanced only after its immutable
+    /// successor CAS wins. Normal single-writer seals use this token instead of re-listing and re-reading the
+    /// complete append-only head history. A competing owner still fences this cache at the successor CAS.
+    authority_head: Option<VersionedHead<ManifestHeadBlob>>,
     /// Cached durable manifest-deletion watermark (read-horizon). This is a conservative local copy of
     /// the persisted object; the permanent head CAS remains the stale-writer fence.
     manifest_deletion_watermark: Option<u64>,
@@ -2121,55 +2126,87 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     where
         F: FnOnce() -> EngineResult<()>,
     {
-        let authority_prefix = Self::authoritative_head_prefix(shard);
         if let Some(head) = self.read_authoritative_head(shard)? {
-            if entry.index != head.value.next_manifest_index
-                || entry.epoch != head.value.current_epoch
-            {
-                return Ok(Some(false));
-            }
-            let candidate = ManifestCandidate {
-                entry: entry.clone(),
-                previous_candidate_key: head.value.tail_candidate_key.clone(),
-                expected_head_version: head.version,
-            };
-            let candidate_body = to_json(&candidate)?;
-            let candidate_digest = hex_lower(&Sha256::digest(&candidate_body));
-            let candidate_key = format!(
-                "{}e{:020}/i{:020}/{candidate_digest}.json",
-                Self::manifest_candidate_prefix(shard),
-                entry.epoch,
-                entry.index,
-            );
-            let _ = self.store_put_if_absent(&candidate_key, &candidate_body, count_object_put)?;
-            self.fault(FaultCutPoint::AfterManifestCandidateBeforeHead)?;
-            after_candidate()?;
-            if self.store.get(&candidate_key)?.is_none() {
-                // A concurrent fence may have made this candidate a permanent loser and GC may already have
-                // removed it while preparation was paused. Never publish a head that names a missing record.
-                return Ok(Some(false));
-            }
-            let next_seq = if entry.fence || entry.retention_floor_through.is_some() {
-                entry.first_seq
-            } else {
-                Self::visible_last_seq(entry) + 1
-            };
-            let next_head = ManifestHeadBlob {
-                current_epoch: entry.epoch,
-                next_seq,
-                next_manifest_index: entry.index + 1,
-                retention_floor_through: entry
-                    .retention_floor_through
-                    .or(head.value.retention_floor_through),
-                tail_candidate_key: Some(candidate_key),
-                legacy_next_manifest_index: head.value.legacy_next_manifest_index,
-            };
             return self
-                .store
-                .update_manifest_head_if_version(&authority_prefix, Some(head.version), &next_head)
-                .map(Some);
+                .commit_authoritative_entry_from_head(
+                    shard,
+                    entry,
+                    count_object_put,
+                    &head,
+                    after_candidate,
+                )
+                .map(|(won, _)| Some(won));
         }
         Ok(None)
+    }
+
+    /// Commit against an already-observed immutable authority head. The returned head is the exact durable
+    /// successor when `won` is true. Keeping this seam separate lets the normal seal path reuse its per-shard
+    /// recovered/CAS-advanced token while recovery, fencing, and maintenance can retain their fresh-read
+    /// behavior.
+    fn commit_authoritative_entry_from_head<F>(
+        &self,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+        count_object_put: bool,
+        head: &VersionedHead<ManifestHeadBlob>,
+        after_candidate: F,
+    ) -> EngineResult<(bool, VersionedHead<ManifestHeadBlob>)>
+    where
+        F: FnOnce() -> EngineResult<()>,
+    {
+        if entry.index != head.value.next_manifest_index || entry.epoch != head.value.current_epoch
+        {
+            return Ok((false, head.clone()));
+        }
+        let candidate = ManifestCandidate {
+            entry: entry.clone(),
+            previous_candidate_key: head.value.tail_candidate_key.clone(),
+            expected_head_version: head.version,
+        };
+        let candidate_body = to_json(&candidate)?;
+        let candidate_digest = hex_lower(&Sha256::digest(&candidate_body));
+        let candidate_key = format!(
+            "{}e{:020}/i{:020}/{candidate_digest}.json",
+            Self::manifest_candidate_prefix(shard),
+            entry.epoch,
+            entry.index,
+        );
+        let _ = self.store_put_if_absent(&candidate_key, &candidate_body, count_object_put)?;
+        self.fault(FaultCutPoint::AfterManifestCandidateBeforeHead)?;
+        after_candidate()?;
+        if self.store.get(&candidate_key)?.is_none() {
+            // A concurrent fence may have made this candidate a permanent loser and GC may already have
+            // removed it while preparation was paused. Never publish a head that names a missing record.
+            return Ok((false, head.clone()));
+        }
+        let next_seq = if entry.fence || entry.retention_floor_through.is_some() {
+            entry.first_seq
+        } else {
+            Self::visible_last_seq(entry) + 1
+        };
+        let next_head = ManifestHeadBlob {
+            current_epoch: entry.epoch,
+            next_seq,
+            next_manifest_index: entry.index + 1,
+            retention_floor_through: entry
+                .retention_floor_through
+                .or(head.value.retention_floor_through),
+            tail_candidate_key: Some(candidate_key),
+            legacy_next_manifest_index: head.value.legacy_next_manifest_index,
+        };
+        let won = self.store.update_manifest_head_if_version(
+            &Self::authoritative_head_prefix(shard),
+            Some(head.version),
+            &next_head,
+        )?;
+        Ok((
+            won,
+            VersionedHead {
+                version: head.version + 1,
+                value: next_head,
+            },
+        ))
     }
 
     fn commit_manifest_entry(
@@ -2933,8 +2970,37 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(())
     }
 
+    /// Refresh the local maintenance fence from the exact head this instance just published. The serialized
+    /// body is identical to the immutable authority object, so no post-seal prefix scan or GET is needed.
+    fn refresh_maintenance_authority_token_from_head(
+        &self,
+        shard: &QueueKey,
+        epoch: u64,
+        head: &VersionedHead<ManifestHeadBlob>,
+    ) -> EngineResult<()> {
+        let prefix = Self::authoritative_head_prefix(shard);
+        let authority_key = versioned_manifest_head_key(&prefix, head.version);
+        let authority_body = to_json(&head.value)?;
+        let authority_digest: [u8; 32] = Sha256::digest(&authority_body).into();
+        self.maintenance_owned_epochs
+            .lock()
+            .expect("maintenance owner epochs poisoned")
+            .insert(
+                shard.clone(),
+                MaintenanceOwnerToken {
+                    epoch,
+                    authority_key,
+                    authority_digest,
+                    authority_body,
+                    successor_prefix: prefix,
+                },
+            );
+        Ok(())
+    }
+
     fn load_shard_buf(&self, shard: &QueueKey) -> EngineResult<ShardBuf> {
         let (next_seq, next_index, epoch, _) = self.recover_manifest(shard)?;
+        let authority_head = self.read_authoritative_head(shard)?;
         // Only append-only marker history is durable fencing authority. The legacy read_horizon blob may be
         // stale or forged high and is never loaded into the seal/recovery fence cache.
         let manifest_deletion_watermark = self.read_manifest_deletion_watermark(shard)?;
@@ -2945,6 +3011,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             next_seq,
             next_manifest_index: next_index,
             committed_epoch: epoch,
+            authority_head,
             manifest_deletion_watermark,
         })
     }
@@ -3155,6 +3222,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     buf.committed_epoch = target_epoch;
                     buf.next_seq = final_head.value.next_seq;
                     buf.next_manifest_index = final_head.value.next_manifest_index;
+                    buf.authority_head = Some(final_head);
                     return Ok(target_epoch);
                 }
                 Some(head) => {
@@ -3192,6 +3260,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             buf.committed_epoch = target_epoch;
             buf.next_seq = final_head.value.next_seq;
             buf.next_manifest_index = final_head.value.next_manifest_index;
+            buf.authority_head = Some(final_head);
             return Ok(target_epoch);
         }
         Err(EngineError::Conflict)
@@ -3390,7 +3459,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
         // 2. Epoch fence from the recovered in-memory tail. Recovery/acquire/CAS-lost paths refresh this tail
         //    from the manifest; the normal single-writer hot path must not list the manifest before every seal.
-        let (cur_seq, cur_index, cur_epoch) = {
+        let (cur_seq, cur_index, cur_epoch, authority_head) = {
             let mut g = self.inner.lock().expect("segmented log poisoned");
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             if expected_epoch != buf.committed_epoch {
@@ -3399,7 +3468,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 buf.oldest_buffered_ms = None;
                 return Err(EngineError::EpochFenced);
             }
-            (buf.next_seq, buf.next_manifest_index, buf.committed_epoch)
+            (
+                buf.next_seq,
+                buf.next_manifest_index,
+                buf.committed_epoch,
+                buf.authority_head.clone(),
+            )
         };
 
         // Reclaim-time fence: if compaction has already advanced the durable read-horizon beyond this
@@ -3435,7 +3509,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         )?;
         let seg_bytes = encoded.bytes;
         let seg_checksum = encoded.legacy_checksum;
-        let shared_authority = self.read_authoritative_head(shard)?.is_some();
+        let shared_authority = authority_head.is_some();
         let content_sha256 = encoded
             .content_sha256
             .or_else(|| shared_authority.then(|| hex_lower(&Sha256::digest(&seg_bytes))));
@@ -3485,23 +3559,27 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             retention_floor_through: None,
             compacted_through_index: None,
         };
-        let won = if shared_authority {
-            self.commit_authoritative_entry(shard, &entry, true, || {
-                let _ = self.store_put_segment_if_absent(
-                    entry.segment_key.as_deref().expect("data entry segment"),
-                    &seg_bytes,
-                )?;
-                self.fault(FaultCutPoint::AfterSegmentWriteBeforeManifest)
-            })?
-            .ok_or(EngineError::Conflict)?
+        let (won, next_authority_head) = if let Some(head) = authority_head.as_ref() {
+            let (won, next_head) =
+                self.commit_authoritative_entry_from_head(shard, &entry, true, head, || {
+                    let _ = self.store_put_segment_if_absent(
+                        entry.segment_key.as_deref().expect("data entry segment"),
+                        &seg_bytes,
+                    )?;
+                    self.fault(FaultCutPoint::AfterSegmentWriteBeforeManifest)
+                })?;
+            (won, won.then_some(next_head))
         } else {
-            self.commit_manifest_entry(
-                shard,
-                ManifestIndex(entry.index),
-                AssignmentEpoch(entry.epoch),
-                &entry,
-                true,
-            )?
+            (
+                self.commit_manifest_entry(
+                    shard,
+                    ManifestIndex(entry.index),
+                    AssignmentEpoch(entry.epoch),
+                    &entry,
+                    true,
+                )?,
+                None,
+            )
         };
         if !won {
             // Content-addressed candidates can be shared by an identical winning
@@ -3544,11 +3622,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             buf.next_seq = last_seq + 1;
             buf.next_manifest_index = cur_index + 1;
+            if let Some(head) = next_authority_head.clone() {
+                buf.authority_head = Some(head);
+            }
             buf.buffered_bytes = 0;
             buf.oldest_buffered_ms = None;
         }
         if self.maintenance_owner_epoch(shard) == Some(expected_epoch) {
-            self.refresh_maintenance_authority_token(shard, expected_epoch)?;
+            if let Some(head) = next_authority_head.as_ref() {
+                self.refresh_maintenance_authority_token_from_head(shard, expected_epoch, head)?;
+            } else {
+                self.refresh_maintenance_authority_token(shard, expected_epoch)?;
+            }
         }
         Ok(positions)
     }
@@ -4392,12 +4477,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
             let (next_seq, next_manifest_index, committed_epoch, _) =
                 self.recover_manifest(&branch)?;
+            let authority_head = self.read_authoritative_head(&branch)?;
             {
                 let mut g = self.inner.lock().expect("segmented log poisoned");
                 let buf = g.shards.get_mut(&branch).ok_or(EngineError::NotFound)?;
                 buf.next_seq = next_seq;
                 buf.next_manifest_index = next_manifest_index;
                 buf.committed_epoch = committed_epoch;
+                buf.authority_head = authority_head;
             }
 
             // Own lease / epoch: the branch gets its own fence entry without mutating the parent queue.
@@ -6244,13 +6331,19 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             return Err(EngineError::Conflict);
         }
         // Keep the in-memory tail bookkeeping in sync so the next seal's CAS uses the right index.
+        let authority_head = self.read_authoritative_head(shard)?;
         let mut g = self.inner.lock().expect("segmented log poisoned");
         if let Some(buf) = g.shards.get_mut(shard) {
             buf.next_manifest_index = buf.next_manifest_index.max(cur_index.0 + 1);
+            buf.authority_head = authority_head.clone();
         }
         drop(g);
         if self.maintenance_owner_epoch(shard) == Some(expected_epoch) {
-            self.refresh_maintenance_authority_token(shard, expected_epoch)?;
+            if let Some(head) = authority_head.as_ref() {
+                self.refresh_maintenance_authority_token_from_head(shard, expected_epoch, head)?;
+            } else {
+                self.refresh_maintenance_authority_token(shard, expected_epoch)?;
+            }
         }
         Ok(())
     }
@@ -8148,6 +8241,125 @@ mod manifest_deletion_watermark_tests {
         fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
             self.inner.stats(prefix)
         }
+    }
+
+    fn authority_seal_request_counts(history: u64) -> (u64, u64, u64) {
+        let store = Arc::new(CountingBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(log.fence_epoch(&shard, 0, 0).unwrap(), 0);
+        for i in 0..history {
+            log.enqueue(&shard, &pushes(1), 0, i as i64 * 2 + 1)
+                .unwrap();
+            log.seal(&shard, 0, i as i64 * 2 + 2).unwrap();
+        }
+        store.reset_request_counts();
+        log.enqueue(&shard, &pushes(1), 0, 10_000).unwrap();
+        log.seal(&shard, 0, 10_001).unwrap();
+        store.request_counts()
+    }
+
+    #[test]
+    fn authority_seal_cost_is_constant_after_long_head_history() {
+        let short = authority_seal_request_counts(2);
+        let long = authority_seal_request_counts(512);
+        assert_eq!(
+            short, long,
+            "seal object reads must not grow with head history"
+        );
+        assert_eq!(
+            long.0, 0,
+            "steady-state seal must not LIST authority history"
+        );
+        assert!(
+            long.1 <= 2,
+            "seal should GET only predecessor and candidate"
+        );
+    }
+
+    #[test]
+    fn reopened_authority_cache_makes_first_seal_constant_work() {
+        let store = Arc::new(CountingBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        {
+            let writer = SegmentedObjectLog::open(store.clone(), cfg);
+            writer.create_queue(&conformance_qdef()).unwrap();
+            writer.fence_epoch(&shard, 0, 0).unwrap();
+            for i in 0..128 {
+                writer
+                    .enqueue(&shard, &pushes(1), 0, i as i64 * 2 + 1)
+                    .unwrap();
+                writer.seal(&shard, 0, i as i64 * 2 + 2).unwrap();
+            }
+        }
+        let reopened = SegmentedObjectLog::open(store.clone(), cfg);
+        reopened.create_queue(&conformance_qdef()).unwrap();
+        store.reset_request_counts();
+        reopened.enqueue(&shard, &pushes(1), 0, 1_000).unwrap();
+        reopened.seal(&shard, 0, 1_001).unwrap();
+        let counts = store.request_counts();
+        assert_eq!(
+            counts.0, 0,
+            "recovery pays the scan once, not on the next seal"
+        );
+        assert!(counts.1 <= 2, "first post-reopen seal stays constant-work");
+    }
+
+    #[test]
+    fn cached_stale_owner_loses_successor_cas_without_ack() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let stale = SegmentedObjectLog::open(store.clone(), cfg);
+        stale.create_queue(&conformance_qdef()).unwrap();
+        stale.fence_epoch(&shard, 0, 0).unwrap();
+        let winner = SegmentedObjectLog::open(store, cfg);
+        winner.create_queue(&conformance_qdef()).unwrap();
+        winner.fence_epoch(&shard, 1, 1).unwrap();
+
+        stale.enqueue(&shard, &pushes(1), 0, 2).unwrap();
+        assert_eq!(stale.seal(&shard, 0, 3), Err(EngineError::EpochFenced));
+        assert!(winner.read_all(&shard).unwrap().is_empty());
+    }
+
+    #[test]
+    fn successful_seal_refreshes_maintenance_token_without_rescan() {
+        let store = Arc::new(CountingBlobStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        store.reset_request_counts();
+        log.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+        log.seal(&shard, 0, 2).unwrap();
+        let counts = store.request_counts();
+        assert_eq!(
+            counts.0, 0,
+            "maintenance token refresh must not scan head history"
+        );
+        assert!(counts.1 <= 2);
+
+        let token = log
+            .maintenance_owned_epochs
+            .lock()
+            .unwrap()
+            .get(&shard)
+            .cloned()
+            .expect("serving owner token");
+        let durable = store
+            .inner
+            .get(&token.authority_key)
+            .unwrap()
+            .expect("durable authority head");
+        assert_eq!(token.authority_body, durable);
+        assert_eq!(
+            token.authority_digest.as_slice(),
+            Sha256::digest(&durable).as_slice()
+        );
     }
 
     #[test]
