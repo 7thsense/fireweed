@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS log_entries (
     envelope TEXT NOT NULL,
     PRIMARY KEY (tenant, queue, epoch, seq)
 );
+-- `read_from` spans ownership epochs while sequence is queue-global. The primary key cannot serve its
+-- `(tenant, queue, seq)` order because `epoch` precedes `seq`, so give bounded page reads their own index.
+CREATE INDEX IF NOT EXISTS log_entries_read_idx ON log_entries(tenant, queue, seq);
 CREATE TABLE IF NOT EXISTS log_counters (
     tenant TEXT NOT NULL, queue TEXT NOT NULL, next_seq BIGINT NOT NULL,
     PRIMARY KEY (tenant, queue)
@@ -78,6 +81,39 @@ CREATE TABLE IF NOT EXISTS queue_defs (
 // connection from advancing the authoritative epoch after append validates it but before append commits.
 const LOCK_CURRENT_EPOCH_SQL: &str =
     "SELECT assignment_epoch FROM log_epochs WHERE tenant=$1 AND queue=$2 FOR UPDATE";
+
+const ALLOCATE_SEQUENCE_RANGE_SQL: &str = "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,$3) \
+     ON CONFLICT(tenant,queue) DO UPDATE \
+     SET next_seq = log_counters.next_seq + EXCLUDED.next_seq \
+     RETURNING next_seq - $3";
+
+const INSERT_LOG_ENTRY_BATCH_SQL: &str = "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) \
+     SELECT $1,$2,$3,batch.seq,batch.envelope \
+     FROM UNNEST($4::bigint[], $5::text[]) AS batch(seq,envelope)";
+
+const ADVANCE_HIGH_WATER_SQL: &str = "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
+     ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+     WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)";
+
+const READ_PAGE_SQL: &str = "SELECT seq, epoch, envelope FROM log_entries \
+     WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT $4";
+
+// Array parameters keep each insert set-based. Chunking bounds a single postgres message when envelopes
+// are large without returning to one network round-trip per command.
+const APPEND_INSERT_CHUNK_SIZE: usize = 1024;
+#[cfg(test)]
+const APPEND_FIXED_QUERY_COUNT: usize = 3; // epoch lock + range allocation + high-water advance
+#[cfg(test)]
+const READ_PAGE_QUERY_COUNT: usize = 1;
+
+#[cfg(test)]
+fn append_query_count(batch_len: usize) -> usize {
+    if batch_len == 0 {
+        1 // epoch lock only
+    } else {
+        APPEND_FIXED_QUERY_COUNT + batch_len.div_ceil(APPEND_INSERT_CHUNK_SIZE)
+    }
+}
 
 fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
     r.map_err(|e| EngineError::Storage(e.to_string()))
@@ -190,7 +226,10 @@ impl LogStore for PostgresLog {
         expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
         let (t, q) = parts(shard);
-        let mut positions = Vec::with_capacity(commands.len());
+        let envelopes = commands
+            .iter()
+            .map(to_json)
+            .collect::<EngineResult<Vec<_>>>()?;
         let client = self.client.get_mut();
         let mut tx = st(client.transaction())?;
         // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
@@ -200,35 +239,51 @@ impl LogStore for PostgresLog {
         if expected_epoch != epoch as u64 {
             return Err(EngineError::EpochFenced);
         }
-        for env in commands {
-            let json = to_json(env)?;
-            // Atomically allocate the next per-queue sequence number so concurrent connections cannot
-            // read the same value.
-            let seq: i64 = st(tx.query_one(
-                "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,1) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET next_seq = log_counters.next_seq + 1 \
-                 RETURNING next_seq - 1",
-                &[&t, &q],
-            ))?
-            .get(0);
-            st(tx.execute(
-                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES($1,$2,$3,$4,$5)",
-                &[&t, &q, &epoch, &seq, &json],
-            ))?;
-            st(tx.execute(
-                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
-                 WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)",
-                &[&t, &q, &epoch, &seq],
-            ))?;
-            positions.push(CommandPosition::new(
-                shard.clone(),
-                epoch as u64,
-                seq as u64,
-            ));
+
+        if envelopes.is_empty() {
+            st(tx.commit())?;
+            return Ok(Vec::new());
         }
+
+        let batch_len = i64::try_from(envelopes.len())
+            .map_err(|_| EngineError::Invalid("append batch is too large"))?;
+        // Allocate the whole batch in one atomic counter update. Concurrent appenders therefore receive
+        // disjoint contiguous ranges while the epoch lock keeps the allocation under the same fence.
+        let first_seq: i64 =
+            st(tx.query_one(ALLOCATE_SEQUENCE_RANGE_SQL, &[&t, &q, &batch_len]))?.get(0);
+
+        for (chunk_index, envelope_chunk) in envelopes.chunks(APPEND_INSERT_CHUNK_SIZE).enumerate()
+        {
+            let chunk_offset = chunk_index
+                .checked_mul(APPEND_INSERT_CHUNK_SIZE)
+                .ok_or(EngineError::Invalid("append batch is too large"))?;
+            let chunk_first = first_seq
+                .checked_add(
+                    i64::try_from(chunk_offset)
+                        .map_err(|_| EngineError::Invalid("append batch is too large"))?,
+                )
+                .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+            let sequences = (0..envelope_chunk.len())
+                .map(|offset| {
+                    chunk_first
+                        .checked_add(offset as i64)
+                        .ok_or(EngineError::Invalid("log sequence exhausted"))
+                })
+                .collect::<EngineResult<Vec<_>>>()?;
+            st(tx.execute(
+                INSERT_LOG_ENTRY_BATCH_SQL,
+                &[&t, &q, &epoch, &sequences, &envelope_chunk],
+            ))?;
+        }
+
+        let last_seq = first_seq
+            .checked_add(batch_len - 1)
+            .ok_or(EngineError::Invalid("log sequence exhausted"))?;
+        st(tx.execute(ADVANCE_HIGH_WATER_SQL, &[&t, &q, &epoch, &last_seq]))?;
         st(tx.commit())?;
-        Ok(positions)
+        Ok((first_seq..=last_seq)
+            .map(|seq| CommandPosition::new(shard.clone(), epoch as u64, seq as u64))
+            .collect())
     }
 
     fn read_from(
@@ -242,17 +297,27 @@ impl LogStore for PostgresLog {
             Some(p) => p.sequence + 1,
             None => 0,
         };
-        let mut client = self.client.borrow_mut();
-        let total: i64 = st(client.query_one(
-            "SELECT COUNT(*) FROM log_entries WHERE tenant=$1 AND queue=$2",
-            &[&t, &q],
-        ))?
-        .get(0);
-        let rows = st(client.query(
-            "SELECT seq, epoch, envelope FROM log_entries \
-             WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT $4",
-            &[&t, &q, &(start as i64), &(limit as i64)],
-        ))?;
+        if limit == 0 {
+            return Ok(CommandPage {
+                entries: Vec::new(),
+                next: None,
+            });
+        }
+        let start = i64::try_from(start)
+            .map_err(|_| EngineError::Invalid("log cursor exceeds postgres sequence range"))?;
+        let fetch_limit = i64::try_from(limit)
+            .unwrap_or(i64::MAX - 1)
+            .saturating_add(1);
+        // Fetching one lookahead row proves continuation without a history-wide COUNT(*). This is one
+        // bounded indexed query per page regardless of total shard history.
+        let mut rows = st(self
+            .client
+            .borrow_mut()
+            .query(READ_PAGE_SQL, &[&t, &q, &start, &fetch_limit]))?;
+        let has_more = rows.len() > limit;
+        if has_more {
+            rows.pop();
+        }
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
             let seq: i64 = row.get(0);
@@ -265,13 +330,9 @@ impl LogStore for PostgresLog {
                 env,
             ));
         }
-        let consumed = start + entries.len() as u64;
         // `from` is the last consumed position and the next read adds one. Carry the last position this
         // page actually returned; carrying `consumed` here would skip one command at every page boundary.
-        let next = next_page_cursor(
-            consumed < total as u64,
-            entries.last().map(|(position, _)| position),
-        );
+        let next = next_page_cursor(has_more, entries.last().map(|(position, _)| position));
         Ok(CommandPage { entries, next })
     }
 
@@ -434,7 +495,11 @@ mod safety_shape_tests {
     use pqueue_core::{QueueId, TenantId};
     use pqueue_engine::{CommandPosition, QueueKey};
 
-    use super::{LOCK_CURRENT_EPOCH_SQL, next_page_cursor};
+    use super::{
+        ADVANCE_HIGH_WATER_SQL, ALLOCATE_SEQUENCE_RANGE_SQL, APPEND_INSERT_CHUNK_SIZE,
+        INSERT_LOG_ENTRY_BATCH_SQL, LOCK_CURRENT_EPOCH_SQL, READ_PAGE_QUERY_COUNT, READ_PAGE_SQL,
+        SCHEMA, append_query_count, next_page_cursor,
+    };
 
     #[test]
     fn append_locks_epoch_authority_until_its_transaction_finishes() {
@@ -454,5 +519,35 @@ mod safety_shape_tests {
         assert_eq!(cursor, last_returned);
         assert_eq!(cursor.sequence, 7, "the reader adds one when resuming");
         assert!(next_page_cursor(false, Some(&cursor)).is_none());
+    }
+
+    #[test]
+    fn append_query_shape_is_fixed_plus_set_based_chunks() {
+        let allocation = ALLOCATE_SEQUENCE_RANGE_SQL.to_ascii_uppercase();
+        assert!(allocation.contains("NEXT_SEQ = LOG_COUNTERS.NEXT_SEQ + EXCLUDED.NEXT_SEQ"));
+        assert!(allocation.contains("RETURNING NEXT_SEQ - $3"));
+
+        let insert = INSERT_LOG_ENTRY_BATCH_SQL.to_ascii_uppercase();
+        assert!(insert.contains("FROM UNNEST($4::BIGINT[], $5::TEXT[])"));
+        assert!(!insert.contains("VALUES($1,$2,$3,$4,$5)"));
+
+        let high_water = ADVANCE_HIGH_WATER_SQL.to_ascii_uppercase();
+        assert_eq!(high_water.matches("INSERT INTO HIGH_WATER").count(), 1);
+        assert_eq!(append_query_count(1), 4);
+        assert_eq!(append_query_count(APPEND_INSERT_CHUNK_SIZE), 4);
+        assert_eq!(append_query_count(APPEND_INSERT_CHUNK_SIZE + 1), 5);
+    }
+
+    #[test]
+    fn read_page_is_one_indexed_limit_plus_one_query_without_history_count() {
+        let query = READ_PAGE_SQL.to_ascii_uppercase();
+        assert_eq!(READ_PAGE_QUERY_COUNT, 1);
+        assert!(!query.contains("COUNT("));
+        assert!(query.contains("SEQ>=$3 ORDER BY SEQ LIMIT $4"));
+
+        let schema = SCHEMA.to_ascii_uppercase();
+        assert!(schema.contains(
+            "CREATE INDEX IF NOT EXISTS LOG_ENTRIES_READ_IDX ON LOG_ENTRIES(TENANT, QUEUE, SEQ)"
+        ));
     }
 }
