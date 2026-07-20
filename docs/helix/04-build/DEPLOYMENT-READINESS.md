@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 5a3605ab53b9ea20cb4cd49f14be95d46f03d90eaa4e7b2f75bd24df256fd112
+    self_hash: 490871303329604f1034f3c745859b600dbfe2940488a0b4afdf73b4b78f7056
     deps:
       build-implementation-plan: 4ddbeab6da535522d8253e3ce6018c89b901556e2e179453df6de86b3c02363e
       td-postgres-native-reference-mode: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
       tp-scale-substantiation: e0ca180cb81c98e7c451341f1ea912bf152ac2c75d422a3b315516fc9f8ee7d3
       tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
-    reviewed_at: "2026-07-20T20:00:41Z"
+    reviewed_at: "2026-07-20T20:03:42Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -146,8 +146,8 @@ Release readiness requires:
   `ac_txn_contract_matrix_postgres_storage_pairs` plus
   `ac_txn_6_postgres_storage_pair_parity` with `PQUEUE_PG_TEST_URL` set, so the
   exact `postgres/sqlite` and `postgres/postgres` rows cannot pass by skip. Each
-  job deletes both tracked JSONL outputs before the tests, requires both
-  regenerated files to be non-empty, and only then invokes the verifier; stale
+  job deletes both tracked JSONL outputs, reruns the tests, asserts that both
+  regenerated files are non-empty, and only then invokes the verifier. Stale
   repository evidence cannot satisfy the live proof step.
 - `pqueue-verify-transaction-evidence` consumes the two exact-pair JSONL files
   and requires AC-TXN-1/2/3/6 for both profiles. Missing, duplicate, failed,
