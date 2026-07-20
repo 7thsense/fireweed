@@ -54,6 +54,16 @@ pub mod single_deployment {
             .collect()
     }
 
+    fn u64_map(row: &LedgerRow, key: &str) -> Option<std::collections::BTreeMap<String, u64>> {
+        row.measurements
+            .values
+            .get(key)?
+            .as_object()?
+            .iter()
+            .map(|(key, value)| Some((key.clone(), value.as_u64()?)))
+            .collect()
+    }
+
     fn measured_progress_errors(row: &LedgerRow) -> Vec<String> {
         let mut errors = Vec::new();
         let samples = u64_array(row, "progress_samples_finalized");
@@ -83,30 +93,37 @@ pub mod single_deployment {
         }
         let bound = u64_value(row, "progress_bound_ms");
         let oldest = u64_array(row, "oldest_eligible_age_samples_ms").unwrap_or_default();
-        let sentinels = u64_array(row, "sentinel_latency_samples_ms").unwrap_or_default();
+        let buckets = u64_map(row, "progress_latency_upper_buckets").unwrap_or_default();
+        let bucket_count: u64 = buckets.values().sum();
+        let violations = buckets.get("gt_60000").copied().unwrap_or(0);
         if bound != Some(60_000)
-            || oldest.is_empty()
-            || sentinels.is_empty()
-            || oldest
-                .iter()
-                .chain(&sentinels)
-                .any(|value| Some(*value) > bound)
-            || u64_value(row, "progress_bound_violations") != Some(0)
+            || oldest.iter().any(|value| Some(*value) > bound)
+            || u64_value(row, "discovery_query_count").is_none_or(|count| count == 0)
+            || u64_value(row, "discovery_nonempty_count")
+                .is_none_or(|count| count > u64_value(row, "discovery_query_count").unwrap_or(0))
+            || (u64_value(row, "discovery_nonempty_count") == Some(0)) != oldest.is_empty()
+            || u64_value(row, "progress_identity_sample_count") != Some(10_000_000)
+            || buckets.keys().map(String::as_str).collect::<Vec<_>>()
+                != ["gt_60000", "le_1000", "le_10000", "le_60000"]
+            || bucket_count != 10_000_000
+            || u64_value(row, "progress_latency_lower_max_ms")
+                > u64_value(row, "progress_latency_upper_max_ms")
+            || u64_value(row, "progress_latency_upper_max_ms").is_none_or(|value| value > 60_000)
+            || u64_value(row, "progress_bound_violations") != Some(violations)
+            || violations != 0
+            || row
+                .measurements
+                .values
+                .get("progress_measurement")
+                .and_then(serde_json::Value::as_str)
+                != Some("per-item accepted and claimed timestamp intervals")
         {
-            errors.push("measured oldest-eligible and sentinel latency samples must meet the configured 60000ms progress bound with zero violations".into());
+            errors.push("all 10000000 accepted identities and discovery ages must have timestamp-derived interval bounds within 60000ms, with bucket-derived zero violations".into());
         }
         errors
     }
 
     fn measured_resource_errors(row: &LedgerRow) -> Vec<String> {
-        const EXPECTED: [(&str, &str, u64); 2] = [
-            ("max_connections_observed", "connection_limit", 1),
-            (
-                "max_in_flight_operations_observed",
-                "in_flight_operation_limit",
-                2,
-            ),
-        ];
         let mut errors = Vec::new();
         if u64_value(row, "resource_sample_count").is_none_or(|count| count < 3) {
             errors.push("at least three measured resource samples are required".into());
@@ -119,14 +136,14 @@ pub mod single_deployment {
                 .is_none_or(|value| value == 0 || value > u64_value(row, limit).unwrap_or(0))
             {
                 errors.push(format!(
-                    "{observed} must be within the measured host-enforced {limit}"
+                    "{observed} must be within the explicitly declared workload budget {limit}"
                 ));
             }
         }
         for (peak, limit) in [
             ("shared_workers_peak", "shared_workers_limit"),
             ("connections_peak", "connections_limit"),
-            ("pending_tasks_peak", "pending_tasks_limit"),
+            ("pending_work_items_peak", "pending_work_items_limit"),
             ("memory_peak_bytes", "memory_limit_bytes"),
         ] {
             if u64_value(row, peak)
@@ -141,12 +158,6 @@ pub mod single_deployment {
                 "connections_limit",
                 "max_connections_observed",
                 "connection_limit",
-            ),
-            (
-                "pending_tasks_peak",
-                "pending_tasks_limit",
-                "max_in_flight_operations_observed",
-                "in_flight_operation_limit",
             ),
             (
                 "memory_peak_bytes",
@@ -164,18 +175,29 @@ pub mod single_deployment {
             }
         }
         if u64_value(row, "configured_concurrency") != Some(2)
-            || u64_value(row, "max_in_flight_operations_observed") != Some(2)
+            || u64_value(row, "workers_started") != Some(2)
+            || u64_value(row, "workers_completed") != Some(2)
+            || u64_value(row, "shared_workers_peak") != Some(2)
+            || u64_value(row, "max_in_flight_operations_observed").is_none_or(|value| value < 2)
         {
-            errors.push("ordinary load must configure and observe concurrency 2".into());
+            errors.push(
+                "ordinary load must start, overlap, and complete two independent workers".into(),
+            );
         }
-        for (observed_key, limit_key, expected_limit) in EXPECTED {
-            let observed = u64_value(row, observed_key).unwrap_or(0);
-            let limit = u64_value(row, limit_key).unwrap_or(0);
-            if observed == 0 || limit != expected_limit || observed > limit {
-                errors.push(format!(
-                    "{observed_key} must be measured, nonzero, and within the declared {limit_key}={expected_limit}"
-                ));
-            }
+        if u64_value(row, "max_in_flight_operations_observed")
+            .is_none_or(|value| value > u64_value(row, "in_flight_operation_limit").unwrap_or(0))
+            || u64_value(row, "shared_workers_limit").is_none_or(|value| value < 2)
+        {
+            errors.push(
+                "natural operation overlap and workers must remain within explicit caps".into(),
+            );
+        }
+        if u64_value(row, "max_connections_observed") != Some(2)
+            || u64_value(row, "connection_limit").is_none_or(|limit| limit < 2)
+        {
+            errors.push(
+                "two independent labeled Postgres production connections must be observed".into(),
+            );
         }
         if row
             .measurements
@@ -183,7 +205,7 @@ pub mod single_deployment {
             .get("resource_measurement_source")
             .and_then(serde_json::Value::as_str)
             != Some(
-                "linux_procfs+cgroup_limits+postgres_pg_stat_activity+in_process_operation_counter",
+                "linux_procfs+declared_workload_caps+postgres_pg_stat_activity+natural_operation_counter",
             )
         {
             errors.push("resource measurement source is missing or unsupported".into());
@@ -221,18 +243,56 @@ pub mod single_deployment {
                 ));
             }
         }
-        if !true_value(row, "telemetry_enabled")
-            || u64_value(row, "telemetry_sample_count").is_none_or(|count| count < 3)
+        let snapshots = row
+            .measurements
+            .values
+            .get("lifecycle_snapshots")
+            .and_then(serde_json::Value::as_array);
+        let valid_snapshot = |value: &serde_json::Value| {
+            let object = value.as_object()?;
+            let pending = object.get("pending")?.as_u64()?;
+            let leased = object.get("leased")?.as_u64()?;
+            let complete = object.get("complete")?.as_u64()?;
+            let failed = object.get("failed")?.as_u64()?;
+            let resident_terminal = object.get("resident_terminal_count")?.as_u64()?;
+            let cursor = object.get("cursor")?.as_u64()?;
+            Some((pending, leased, complete, failed, resident_terminal, cursor))
+        };
+        let parsed = snapshots.and_then(|values| {
+            values
+                .iter()
+                .map(valid_snapshot)
+                .collect::<Option<Vec<_>>>()
+        });
+        if row
+            .measurements
+            .values
+            .get("telemetry_surface")
+            .and_then(serde_json::Value::as_str)
+            != Some("Pqueue::metrics+current_position+discover_active_scopes")
+            || parsed.as_ref().is_none_or(|values| values.len() < 3)
+            || u64_value(row, "telemetry_sample_count")
+                != parsed.as_ref().map(|values| values.len() as u64)
+            || parsed
+                .as_ref()
+                .and_then(|values| values.last())
+                .is_none_or(|last| *last != (0, 0, 10_000_000, 0, 10_000_000, last.5))
         {
-            errors.push(
-                "telemetry must be enabled and observed through at least three lifecycle samples"
-                    .into(),
-            );
+            errors.push("real Pqueue lifecycle telemetry snapshots must be parseable, counted, and end at the exact 10M checkpoint".into());
         }
         if !true_value(row, "topology_declared") {
             errors.push(
                 "release topology must be explicitly declared by the producer environment".into(),
             );
+        }
+        if row
+            .measurements
+            .values
+            .get("topology")
+            .and_then(serde_json::Value::as_str)
+            != Some("single-process+single-postgres+two-production-connections")
+        {
+            errors.push("topology must declare two independent production connections".into());
         }
         errors
     }
@@ -306,6 +366,16 @@ pub mod single_deployment {
         {
             errors.push("source_revision does not match expected revision".into());
         }
+        if row
+            .measurements
+            .values
+            .get("checkout_revision")
+            .and_then(serde_json::Value::as_str)
+            != Some(revision)
+        {
+            errors
+                .push("checkout_revision does not match the exact verified source revision".into());
+        }
         if u64_value(row, "resident_set_items") != Some(10_000_000)
             || u64_value(row, "retained_terminal_items") != Some(10_000_000)
         {
@@ -318,6 +388,18 @@ pub mod single_deployment {
         {
             errors.push("lost_items and duplicate_claims must be zero".into());
         }
+        let counter_min = u64_value(row, "identity_counter_min");
+        let counter_max = u64_value(row, "identity_counter_max");
+        if !true_value(row, "identity_bijection")
+            || u64_value(row, "identity_epoch_node_prefix").is_none_or(|value| value == 0)
+            || counter_min.is_none()
+            || counter_max.is_none()
+            || counter_max
+                .zip(counter_min)
+                .is_none_or(|(max, min)| max < min || max - min + 1 != 10_000_000)
+        {
+            errors.push("full ItemId epoch/node prefix and contiguous counter bijection must reconcile all 10M identities".into());
+        }
         errors.extend(measured_progress_errors(row));
         errors.extend(measured_resource_errors(row));
         if u64_value(row, "checkpoint_pending") != Some(0)
@@ -327,20 +409,25 @@ pub mod single_deployment {
         {
             errors.push("checkpoint lifecycle reconciliation must be pending=0 leased=0 complete=10000000 failed=0".into());
         }
-        if u64_value(row, "payload_bytes_min") != Some(1024)
-            || u64_value(row, "payload_bytes_max") != Some(1024)
-            || u64_value(row, "group_cardinality") != Some(64)
-            || row
-                .measurements
-                .values
-                .get("priority_profile")
-                .and_then(serde_json::Value::as_str)
-                != Some("90pct_regular+10pct_high+sentinel_highest")
+        let payloads = u64_map(row, "payload_size_counts").unwrap_or_default();
+        let groups = u64_array(row, "group_item_counts").unwrap_or_default();
+        let priorities = u64_map(row, "priority_class_counts").unwrap_or_default();
+        let mix = u64_map(row, "workload_operation_mix").unwrap_or_default();
+        if payloads.keys().map(String::as_str).collect::<Vec<_>>() != ["1024", "2048", "512"]
+            || payloads.values().sum::<u64>() != 10_000_000
+            || payloads.values().any(|count| *count == 0)
+            || groups.len() != 64
+            || groups.iter().sum::<u64>() != 10_000_000
+            || groups.contains(&0)
+            || priorities.keys().map(String::as_str).collect::<Vec<_>>()
+                != ["high", "regular", "sentinel"]
+            || priorities.values().sum::<u64>() != 10_000_000
+            || priorities.values().any(|count| *count == 0)
+            || mix.get("push_batches").copied().unwrap_or(0) == 0
+            || mix.get("claim_batches").copied().unwrap_or(0) == 0
+            || mix.get("claim_batches") != mix.get("finalize_batches")
         {
-            errors.push(
-                "representative 1KiB/group64/skewed-priority workload declaration is required"
-                    .into(),
-            );
+            errors.push("measured payload histogram, 64-group counts, priority counts, and operation mix must reconcile to 10M".into());
         }
         if id == "E0" {
             if u64_value(row, "accepted_items") != Some(10_000_000)
@@ -371,6 +458,7 @@ pub mod single_deployment {
                 }
             }
             let accepted = u64_value(row, "probe_accepted_items");
+            let probe_mix = u64_map(row, "probe_operation_mix").unwrap_or_default();
             if accepted.is_none()
                 || accepted != u64_value(row, "probe_claimed_items")
                 || accepted != u64_value(row, "probe_finalized_items")
@@ -379,6 +467,30 @@ pub mod single_deployment {
                 || u64_value(row, "total_claimed_items") != accepted.map(|count| 10_000_000 + count)
                 || u64_value(row, "total_finalized_items")
                     != accepted.map(|count| 10_000_000 + count)
+                || u64_value(row, "probe_unique_accepted_ids") != accepted
+                || u64_value(row, "probe_unique_claimed_ids") != accepted
+                || u64_value(row, "probe_unique_finalized_ids") != accepted
+                || !true_value(row, "probe_identity_exact")
+                || u64_value(row, "post_probe_pending") != Some(0)
+                || u64_value(row, "post_probe_leased") != Some(0)
+                || u64_value(row, "post_probe_complete") != accepted.map(|count| 10_000_000 + count)
+                || u64_value(row, "post_probe_failed") != Some(0)
+                || u64_value(row, "post_probe_resident_terminal_count")
+                    != accepted.map(|count| 10_000_000 + count)
+                || probe_mix.get("push_batches").copied().unwrap_or(0) == 0
+                || probe_mix.get("push_items").copied() != accepted
+                || probe_mix.get("claim_items").copied() != accepted
+                || probe_mix.get("finalize_items").copied() != accepted
+                || probe_mix.get("claim_batches") != probe_mix.get("push_batches")
+                || probe_mix.get("finalize_batches") != probe_mix.get("push_batches")
+                || probe_mix
+                    .get("update_item_calls")
+                    .copied()
+                    .is_none_or(|count| count == 0 || Some(count) > accepted)
+                || !true_value(row, "post10m_concurrent_probe")
+                || !true_value(row, "post10m_overlap_observed")
+                || u64_value(row, "post10m_max_in_flight_observed").is_none_or(|value| value < 2)
+                || u64_value(row, "post10m_active_pending_before") != Some(1_000)
             {
                 errors.push(
                     "E1 probe accepted/claimed/finalized counts must reconcile exactly".into(),

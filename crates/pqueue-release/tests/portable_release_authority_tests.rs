@@ -15,6 +15,7 @@ fn portable(id: &str) -> LedgerRow {
         ("monotonic_progress".into(), serde_json::json!(true)),
         ("bounded_resources".into(), serde_json::json!(true)),
         ("source_revision".into(), serde_json::json!(REV)),
+        ("checkout_revision".into(), serde_json::json!(REV)),
         ("resident_set_items".into(), serde_json::json!(10_000_000)),
         (
             "retained_terminal_items".into(),
@@ -26,6 +27,10 @@ fn portable(id: &str) -> LedgerRow {
         ("checkpoint_failed".into(), serde_json::json!(0)),
         ("lost_items".into(), serde_json::json!(0)),
         ("duplicate_claims".into(), serde_json::json!(0)),
+        ("identity_epoch_node_prefix".into(), serde_json::json!(256)),
+        ("identity_counter_min".into(), serde_json::json!(1)),
+        ("identity_counter_max".into(), serde_json::json!(10_000_000)),
+        ("identity_bijection".into(), serde_json::json!(true)),
         (
             "progress_samples_finalized".into(),
             serde_json::json!([0, 9_000_000, 10_000_000]),
@@ -36,17 +41,35 @@ fn portable(id: &str) -> LedgerRow {
             "oldest_eligible_age_samples_ms".into(),
             serde_json::json!([1, 5, 10]),
         ),
+        ("discovery_query_count".into(), serde_json::json!(3)),
+        ("discovery_nonempty_count".into(), serde_json::json!(3)),
         (
-            "sentinel_latency_samples_ms".into(),
-            serde_json::json!([2, 7, 12]),
+            "progress_identity_sample_count".into(),
+            serde_json::json!(10_000_000),
+        ),
+        (
+            "progress_latency_lower_max_ms".into(),
+            serde_json::json!(12),
+        ),
+        (
+            "progress_latency_upper_max_ms".into(),
+            serde_json::json!(20),
+        ),
+        (
+            "progress_latency_upper_buckets".into(),
+            serde_json::json!({"le_1000": 10_000_000, "le_10000": 0, "le_60000": 0, "gt_60000": 0}),
+        ),
+        (
+            "progress_measurement".into(),
+            serde_json::json!("per-item accepted and claimed timestamp intervals"),
         ),
         ("progress_bound_ms".into(), serde_json::json!(60_000)),
         ("progress_bound_violations".into(), serde_json::json!(0)),
         ("resource_sample_count".into(), serde_json::json!(3)),
         ("max_threads_observed".into(), serde_json::json!(2)),
         ("thread_limit".into(), serde_json::json!(64)),
-        ("max_connections_observed".into(), serde_json::json!(1)),
-        ("connection_limit".into(), serde_json::json!(1)),
+        ("max_connections_observed".into(), serde_json::json!(2)),
+        ("connection_limit".into(), serde_json::json!(2)),
         (
             "max_rss_bytes_observed".into(),
             serde_json::json!(64 * 1024 * 1024),
@@ -63,10 +86,12 @@ fn portable(id: &str) -> LedgerRow {
         ("configured_concurrency".into(), serde_json::json!(2)),
         ("shared_workers_peak".into(), serde_json::json!(2)),
         ("shared_workers_limit".into(), serde_json::json!(2)),
-        ("connections_peak".into(), serde_json::json!(1)),
-        ("connections_limit".into(), serde_json::json!(1)),
-        ("pending_tasks_peak".into(), serde_json::json!(2)),
-        ("pending_tasks_limit".into(), serde_json::json!(2)),
+        ("workers_started".into(), serde_json::json!(2)),
+        ("workers_completed".into(), serde_json::json!(2)),
+        ("connections_peak".into(), serde_json::json!(2)),
+        ("connections_limit".into(), serde_json::json!(2)),
+        ("pending_work_items_peak".into(), serde_json::json!(1000)),
+        ("pending_work_items_limit".into(), serde_json::json!(2000)),
         (
             "memory_peak_bytes".into(),
             serde_json::json!(64 * 1024 * 1024),
@@ -95,7 +120,7 @@ fn portable(id: &str) -> LedgerRow {
             "postgres_memory_limit_bytes".into(),
             serde_json::json!(16_u64 * 1024 * 1024 * 1024),
         ),
-        ("postgres_pool_limit".into(), serde_json::json!(1)),
+        ("postgres_pool_limit".into(), serde_json::json!(2)),
         (
             "postgres_instance_class".into(),
             serde_json::json!("release-pg"),
@@ -107,22 +132,42 @@ fn portable(id: &str) -> LedgerRow {
         ("postgres_storage_class".into(), serde_json::json!("gp3")),
         (
             "topology".into(),
-            serde_json::json!("single-process+single-postgres+single-production-connection"),
+            serde_json::json!("single-process+single-postgres+two-production-connections"),
         ),
-        ("telemetry_enabled".into(), serde_json::json!(true)),
-        ("telemetry_sample_count".into(), serde_json::json!(3)),
-        ("topology_declared".into(), serde_json::json!(true)),
-        ("payload_bytes_min".into(), serde_json::json!(1024)),
-        ("payload_bytes_max".into(), serde_json::json!(1024)),
-        ("group_cardinality".into(), serde_json::json!(64)),
         (
-            "priority_profile".into(),
-            serde_json::json!("90pct_regular+10pct_high+sentinel_highest"),
+            "telemetry_surface".into(),
+            serde_json::json!("Pqueue::metrics+current_position+discover_active_scopes"),
+        ),
+        ("telemetry_sample_count".into(), serde_json::json!(3)),
+        (
+            "lifecycle_snapshots".into(),
+            serde_json::json!([
+                {"pending": 1000, "leased": 0, "complete": 0, "failed": 0, "resident_terminal_count": 0, "cursor": 1},
+                {"pending": 500, "leased": 0, "complete": 5_000_000, "failed": 0, "resident_terminal_count": 5_000_000, "cursor": 2},
+                {"pending": 0, "leased": 0, "complete": 10_000_000, "failed": 0, "resident_terminal_count": 10_000_000, "cursor": 3}
+            ]),
+        ),
+        ("topology_declared".into(), serde_json::json!(true)),
+        (
+            "payload_size_counts".into(),
+            serde_json::json!({"512": 3_333_334, "1024": 3_333_333, "2048": 3_333_333}),
+        ),
+        (
+            "group_item_counts".into(),
+            serde_json::json!(vec![156_250_u64; 64]),
+        ),
+        (
+            "priority_class_counts".into(),
+            serde_json::json!({"regular": 8_981_000, "high": 999_000, "sentinel": 20_000}),
+        ),
+        (
+            "workload_operation_mix".into(),
+            serde_json::json!({"push_batches": 20_000, "claim_batches": 20_000, "finalize_batches": 20_000}),
         ),
         (
             "resource_measurement_source".into(),
             serde_json::json!(
-                "linux_procfs+cgroup_limits+postgres_pg_stat_activity+in_process_operation_counter"
+                "linux_procfs+declared_workload_caps+postgres_pg_stat_activity+natural_operation_counter"
             ),
         ),
     ]);
@@ -155,6 +200,32 @@ fn portable(id: &str) -> LedgerRow {
         values.insert("probe_accepted_items".into(), serde_json::json!(1101));
         values.insert("probe_claimed_items".into(), serde_json::json!(1101));
         values.insert("probe_finalized_items".into(), serde_json::json!(1101));
+        values.insert("probe_unique_accepted_ids".into(), serde_json::json!(1101));
+        values.insert("probe_unique_claimed_ids".into(), serde_json::json!(1101));
+        values.insert("probe_unique_finalized_ids".into(), serde_json::json!(1101));
+        values.insert("probe_identity_exact".into(), serde_json::json!(true));
+        values.insert("post_probe_pending".into(), serde_json::json!(0));
+        values.insert("post_probe_leased".into(), serde_json::json!(0));
+        values.insert("post_probe_complete".into(), serde_json::json!(10_001_101));
+        values.insert("post_probe_failed".into(), serde_json::json!(0));
+        values.insert(
+            "post_probe_resident_terminal_count".into(),
+            serde_json::json!(10_001_101),
+        );
+        values.insert(
+            "probe_operation_mix".into(),
+            serde_json::json!({"push_items": 1101, "push_batches": 10, "update_item_calls": 1000, "claim_items": 1101, "claim_batches": 10, "finalize_items": 1101, "finalize_batches": 10}),
+        );
+        values.insert("post10m_concurrent_probe".into(), serde_json::json!(true));
+        values.insert("post10m_overlap_observed".into(), serde_json::json!(true));
+        values.insert(
+            "post10m_max_in_flight_observed".into(),
+            serde_json::json!(2),
+        );
+        values.insert(
+            "post10m_active_pending_before".into(),
+            serde_json::json!(1000),
+        );
         values.insert("total_accepted_items".into(), serde_json::json!(10_001_101));
         values.insert("total_claimed_items".into(), serde_json::json!(10_001_101));
         values.insert(
@@ -239,14 +310,43 @@ fn e0_e1_reject_resources_over_bounds_and_non_maximum_batch_probe() {
 #[test]
 fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
     let common_mutations = [
-        ("sentinel_latency_samples_ms", serde_json::json!([60_001])),
+        (
+            "progress_identity_sample_count",
+            serde_json::json!(9_999_999),
+        ),
+        ("progress_latency_upper_max_ms", serde_json::json!(60_001)),
+        (
+            "progress_latency_upper_buckets",
+            serde_json::json!({"le_1000": 9_999_999, "gt_60000": 1}),
+        ),
         ("progress_bound_violations", serde_json::json!(1)),
         ("cursor_samples", serde_json::json!([1, 3, 2])),
+        ("checkout_revision", serde_json::json!("wrong")),
+        ("identity_bijection", serde_json::json!(false)),
+        ("identity_counter_max", serde_json::json!(9_999_999)),
         ("configured_concurrency", serde_json::json!(1)),
-        ("telemetry_enabled", serde_json::json!(false)),
-        ("payload_bytes_min", serde_json::json!(0)),
+        ("workers_started", serde_json::json!(1)),
+        ("shared_workers_peak", serde_json::json!(1)),
+        ("max_connections_observed", serde_json::json!(1)),
+        ("pending_work_items_peak", serde_json::json!(2001)),
+        ("telemetry_surface", serde_json::json!("literal")),
+        ("lifecycle_snapshots", serde_json::json!([])),
+        (
+            "payload_size_counts",
+            serde_json::json!({"1024": 10_000_000}),
+        ),
+        ("group_item_counts", serde_json::json!(vec![10_000_000_u64])),
+        (
+            "priority_class_counts",
+            serde_json::json!({"regular": 10_000_000}),
+        ),
+        (
+            "workload_operation_mix",
+            serde_json::json!({"push_batches": 1, "claim_batches": 2, "finalize_batches": 1}),
+        ),
         ("checkpoint_complete", serde_json::json!(9_999_999)),
         ("postgres_instance_class", serde_json::json!("")),
+        ("topology_declared", serde_json::json!(false)),
     ];
     for (key, value) in common_mutations {
         let mut row = portable("E0");
@@ -261,6 +361,20 @@ fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
         ("oversize_push_rejected", serde_json::json!(false)),
         ("update_window_sizes", serde_json::json!([1, 100])),
         ("probe_claimed_items", serde_json::json!(1100)),
+        ("probe_unique_claimed_ids", serde_json::json!(1100)),
+        ("probe_identity_exact", serde_json::json!(false)),
+        ("post_probe_complete", serde_json::json!(10_001_100)),
+        (
+            "post_probe_resident_terminal_count",
+            serde_json::json!(10_001_100),
+        ),
+        ("post_probe_pending", serde_json::json!(1)),
+        (
+            "probe_operation_mix",
+            serde_json::json!({"push_items": 1101, "push_batches": 10, "update_item_calls": 0, "claim_items": 1101, "claim_batches": 10, "finalize_items": 1101, "finalize_batches": 10}),
+        ),
+        ("post10m_concurrent_probe", serde_json::json!(false)),
+        ("post10m_overlap_observed", serde_json::json!(false)),
         ("total_finalized_items", serde_json::json!(10_001_100)),
     ] {
         let mut row = portable("E1");

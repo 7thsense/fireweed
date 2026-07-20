@@ -33,9 +33,9 @@
 //! is the provisioned perf-env run. Wall-clock capacity remains visible without making evidence depend on
 //! a quiet or specially fast host.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -49,39 +49,50 @@ use pqueue_engine::{ControlPlaneStore, DiscoveryGranularity, EngineError, QueueK
 use pqueue_postgres::PostgresRelationalBackend;
 
 const CONFIGURED_MAX_BATCH_SIZE: u64 = 1_000;
-const CONNECTION_LIMIT: u64 = 1;
-const IN_FLIGHT_OPERATION_LIMIT: u64 = 2;
 const CONFIGURED_CONCURRENCY: u64 = 2;
 const PROGRESS_BOUND_MS: u64 = 60_000;
-const PAYLOAD_BYTES: usize = 1024;
 const GROUP_CARDINALITY: u64 = 64;
 
-fn numeric_limit(path: &str) -> Option<u64> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+#[derive(Clone, Copy)]
+struct RunCaps {
+    threads: u64,
+    rss_bytes: u64,
+    connections: u64,
+    workers: u64,
+    pending_items: u64,
+    in_flight_operations: u64,
+    explicitly_declared: bool,
 }
 
-fn thread_limit() -> u64 {
-    numeric_limit("/sys/fs/cgroup/pids.max")
-        .or_else(|| numeric_limit("/proc/sys/kernel/threads-max"))
-        .expect("release evidence requires an enforced cgroup or kernel thread limit")
-}
-
-fn memory_limit_bytes() -> u64 {
-    numeric_limit("/sys/fs/cgroup/memory.max")
-        .or_else(|| {
-            std::fs::read_to_string("/proc/meminfo")
-                .ok()?
-                .lines()
-                .find_map(|line| {
-                    line.strip_prefix("MemTotal:")?
-                        .split_whitespace()
-                        .next()?
-                        .parse::<u64>()
-                        .ok()
-                })
-                .map(|kib| kib * 1024)
-        })
-        .expect("release evidence requires an enforced memory limit")
+impl RunCaps {
+    fn from_env(release: bool) -> Self {
+        let read = |key: &str, default: u64| match std::env::var(key) {
+            Ok(value) => value
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .unwrap_or_else(|| panic!("{key} must be a positive integer")),
+            Err(_) if release => panic!("release evidence requires explicit {key}"),
+            Err(_) => default,
+        };
+        let keys = [
+            "PQUEUE_E0E1_THREAD_CAP",
+            "PQUEUE_E0E1_RSS_CAP_BYTES",
+            "PQUEUE_E0E1_CONNECTION_CAP",
+            "PQUEUE_E0E1_WORKER_CAP",
+            "PQUEUE_E0E1_PENDING_ITEM_CAP",
+            "PQUEUE_E0E1_IN_FLIGHT_CAP",
+        ];
+        Self {
+            threads: read(keys[0], 64),
+            rss_bytes: read(keys[1], 2 * 1024 * 1024 * 1024),
+            connections: read(keys[2], 2),
+            workers: read(keys[3], 2),
+            pending_items: read(keys[4], 2_000),
+            in_flight_operations: read(keys[5], 2),
+            explicitly_declared: keys.iter().all(|key| std::env::var(key).is_ok()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -111,6 +122,32 @@ impl Drop for OperationGuard<'_> {
 }
 
 #[derive(Default)]
+struct WorkerProbe {
+    active: AtomicU64,
+    peak: AtomicU64,
+    started: AtomicU64,
+    completed: AtomicU64,
+}
+
+struct WorkerGuard<'a>(&'a WorkerProbe);
+
+impl WorkerProbe {
+    fn start(&self) -> WorkerGuard<'_> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        WorkerGuard(self)
+    }
+}
+
+impl Drop for WorkerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+        self.0.completed.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Default)]
 struct ResourceObservations {
     samples: u64,
     max_threads: u64,
@@ -126,7 +163,7 @@ struct ResourceObservations {
 }
 
 impl ResourceObservations {
-    fn sample(&mut self, observer_url: &str, application_name: &str) {
+    fn sample(&mut self, observer_url: &str, application_name_prefix: &str) {
         let status = std::fs::read_to_string("/proc/self/status")
             .expect("release evidence requires Linux /proc process accounting");
         let value = |name: &str| -> u64 {
@@ -138,13 +175,13 @@ impl ResourceObservations {
                 .unwrap_or_else(|| panic!("/proc/self/status is missing {name}"))
         };
         let threads = value("Threads:");
-        let rss_bytes = value("VmRSS:") * 1024;
+        let rss_bytes = value("VmHWM:") * 1024;
         let mut observer = postgres::Client::connect(observer_url, postgres::NoTls)
             .expect("connect Postgres resource observer");
         let connections: i64 = observer
             .query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
-                &[&application_name],
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE $1",
+                &[&format!("{application_name_prefix}%")],
             )
             .expect("sample producer Postgres connections")
             .get(0);
@@ -173,16 +210,18 @@ impl ResourceObservations {
         self.postgres_blocks_hit = stats.get::<_, i64>(2) as u64;
     }
 
-    fn within_bounds(&self, max_in_flight: u64) -> bool {
+    fn within_bounds(&self, max_in_flight: u64, pending_items_peak: u64, caps: RunCaps) -> bool {
         self.samples >= 3
             && self.max_threads > 0
-            && self.max_threads <= thread_limit()
+            && self.max_threads <= caps.threads
             && self.max_connections > 0
-            && self.max_connections <= CONNECTION_LIMIT
+            && self.max_connections <= caps.connections
             && self.max_rss_bytes > 0
-            && self.max_rss_bytes <= memory_limit_bytes()
+            && self.max_rss_bytes <= caps.rss_bytes
             && max_in_flight > 0
-            && max_in_flight <= IN_FLIGHT_OPERATION_LIMIT
+            && max_in_flight <= caps.in_flight_operations
+            && pending_items_peak > 0
+            && pending_items_peak <= caps.pending_items
     }
 }
 
@@ -193,9 +232,19 @@ struct MeasuredContract<'a> {
     finalized_samples: &'a [u64],
     cursor_samples: &'a [u64],
     oldest_eligible_age_samples_ms: &'a [u64],
-    sentinel_latency_samples_ms: &'a [u64],
+    progress_identity_sample_count: u64,
+    progress_latency_lower_max_ms: u64,
+    progress_latency_upper_max_ms: u64,
+    progress_bound_violations: u64,
+    progress_latency_upper_buckets: &'a BTreeMap<String, u64>,
+    lifecycle_snapshots: &'a [serde_json::Value],
+    discovery_query_count: u64,
+    discovery_nonempty_count: u64,
     resources: &'a ResourceObservations,
     max_in_flight: u64,
+    pending_items_peak: u64,
+    caps: RunCaps,
+    workers: &'a WorkerProbe,
 }
 
 fn insert_measured_contract(
@@ -209,9 +258,19 @@ fn insert_measured_contract(
         finalized_samples,
         cursor_samples,
         oldest_eligible_age_samples_ms,
-        sentinel_latency_samples_ms,
+        progress_identity_sample_count,
+        progress_latency_lower_max_ms,
+        progress_latency_upper_max_ms,
+        progress_bound_violations,
+        progress_latency_upper_buckets,
+        lifecycle_snapshots,
+        discovery_query_count,
+        discovery_nonempty_count,
         resources,
         max_in_flight,
+        pending_items_peak,
+        caps,
+        workers,
     } = measured;
     values.extend([
         ("exact_outcomes".into(), serde_json::json!(exact_outcomes)),
@@ -236,15 +295,36 @@ fn insert_measured_contract(
             "oldest_eligible_age_samples_ms".into(),
             serde_json::json!(oldest_eligible_age_samples_ms),
         ),
+        ("discovery_query_count".into(), serde_json::json!(discovery_query_count)),
+        ("discovery_nonempty_count".into(), serde_json::json!(discovery_nonempty_count)),
         (
-            "sentinel_latency_samples_ms".into(),
-            serde_json::json!(sentinel_latency_samples_ms),
+            "progress_identity_sample_count".into(),
+            serde_json::json!(progress_identity_sample_count),
+        ),
+        (
+            "progress_latency_lower_max_ms".into(),
+            serde_json::json!(progress_latency_lower_max_ms),
+        ),
+        (
+            "progress_latency_upper_max_ms".into(),
+            serde_json::json!(progress_latency_upper_max_ms),
         ),
         (
             "progress_bound_ms".into(),
             serde_json::json!(PROGRESS_BOUND_MS),
         ),
-        ("progress_bound_violations".into(), serde_json::json!(0)),
+        (
+            "progress_bound_violations".into(),
+            serde_json::json!(progress_bound_violations),
+        ),
+        (
+            "progress_measurement".into(),
+            serde_json::json!("per-item accepted and claimed timestamp intervals"),
+        ),
+        (
+            "progress_latency_upper_buckets".into(),
+            serde_json::json!(progress_latency_upper_buckets),
+        ),
         (
             "resource_sample_count".into(),
             serde_json::json!(resources.samples),
@@ -253,14 +333,14 @@ fn insert_measured_contract(
             "max_threads_observed".into(),
             serde_json::json!(resources.max_threads),
         ),
-        ("thread_limit".into(), serde_json::json!(thread_limit())),
+        ("thread_limit".into(), serde_json::json!(caps.threads)),
         (
             "max_connections_observed".into(),
             serde_json::json!(resources.max_connections),
         ),
         (
             "connection_limit".into(),
-            serde_json::json!(CONNECTION_LIMIT),
+            serde_json::json!(caps.connections),
         ),
         (
             "max_rss_bytes_observed".into(),
@@ -268,7 +348,7 @@ fn insert_measured_contract(
         ),
         (
             "rss_limit_bytes".into(),
-            serde_json::json!(memory_limit_bytes()),
+            serde_json::json!(caps.rss_bytes),
         ),
         (
             "max_in_flight_operations_observed".into(),
@@ -280,11 +360,13 @@ fn insert_measured_contract(
         ),
         (
             "shared_workers_peak".into(),
-            serde_json::json!(max_in_flight),
+            serde_json::json!(workers.peak.load(Ordering::SeqCst)),
         ),
+        ("workers_started".into(), serde_json::json!(workers.started.load(Ordering::SeqCst))),
+        ("workers_completed".into(), serde_json::json!(workers.completed.load(Ordering::SeqCst))),
         (
             "shared_workers_limit".into(),
-            serde_json::json!(CONFIGURED_CONCURRENCY),
+            serde_json::json!(caps.workers),
         ),
         (
             "connections_peak".into(),
@@ -292,15 +374,15 @@ fn insert_measured_contract(
         ),
         (
             "connections_limit".into(),
-            serde_json::json!(CONNECTION_LIMIT),
+            serde_json::json!(caps.connections),
         ),
         (
-            "pending_tasks_peak".into(),
-            serde_json::json!(max_in_flight),
+            "pending_work_items_peak".into(),
+            serde_json::json!(pending_items_peak),
         ),
         (
-            "pending_tasks_limit".into(),
-            serde_json::json!(IN_FLIGHT_OPERATION_LIMIT),
+            "pending_work_items_limit".into(),
+            serde_json::json!(caps.pending_items),
         ),
         (
             "memory_peak_bytes".into(),
@@ -308,7 +390,7 @@ fn insert_measured_contract(
         ),
         (
             "memory_limit_bytes".into(),
-            serde_json::json!(memory_limit_bytes()),
+            serde_json::json!(caps.rss_bytes),
         ),
         (
             "postgres_server_version".into(),
@@ -380,7 +462,7 @@ fn insert_measured_contract(
                 std::env::var("PQUEUE_PG_MEMORY_LIMIT_BYTES")
                     .ok()
                     .and_then(|v| v.parse::<u64>().ok())
-                    .unwrap_or(memory_limit_bytes())
+                    .unwrap_or(caps.rss_bytes)
             ),
         ),
         (
@@ -399,16 +481,16 @@ fn insert_measured_contract(
         ),
         (
             "postgres_pool_limit".into(),
-            serde_json::json!(CONNECTION_LIMIT),
+            serde_json::json!(caps.connections),
         ),
         (
             "topology".into(),
-            serde_json::json!("single-process+single-postgres+single-production-connection"),
+            serde_json::json!("single-process+single-postgres+two-production-connections"),
         ),
         (
             "topology_declared".into(),
             serde_json::json!(
-                [
+                caps.explicitly_declared && [
                     "PQUEUE_PG_INSTANCE_CLASS",
                     "PQUEUE_PG_CPU_LIMIT",
                     "PQUEUE_PG_MEMORY_LIMIT_BYTES",
@@ -419,19 +501,26 @@ fn insert_measured_contract(
                 .all(|key| std::env::var(key).is_ok())
             ),
         ),
-        ("telemetry_enabled".into(), serde_json::json!(true)),
+        (
+            "telemetry_surface".into(),
+            serde_json::json!("Pqueue::metrics+current_position+discover_active_scopes"),
+        ),
         (
             "telemetry_sample_count".into(),
-            serde_json::json!(finalized_samples.len()),
+            serde_json::json!(lifecycle_snapshots.len()),
+        ),
+        (
+            "lifecycle_snapshots".into(),
+            serde_json::json!(lifecycle_snapshots),
         ),
         (
             "in_flight_operation_limit".into(),
-            serde_json::json!(IN_FLIGHT_OPERATION_LIMIT),
+            serde_json::json!(caps.in_flight_operations),
         ),
         (
             "resource_measurement_source".into(),
             serde_json::json!(
-                "linux_procfs+cgroup_limits+postgres_pg_stat_activity+in_process_operation_counter"
+                "linux_procfs+declared_workload_caps+postgres_pg_stat_activity+natural_operation_counter"
             ),
         ),
     ]);
@@ -449,6 +538,15 @@ fn fresh_schema() -> String {
         std::process::id(),
         N.fetch_add(1, Ordering::SeqCst)
     )
+}
+
+fn checkout_revision() -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("resolve checkout revision");
+    assert!(output.status.success(), "git rev-parse HEAD must succeed");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 fn sk(tenant: &str, queue: &str) -> QueueKey {
@@ -501,24 +599,13 @@ fn representative_item(sequence: u64, sentinel: bool) -> NewItem {
             (sequence % 100) as i64
         })),
         group_key: Some(GroupKey::new(format!("group-{}", sequence % GROUP_CARDINALITY)).unwrap()),
-        payload: Some(Bytes::from(vec![b'x'; PAYLOAD_BYTES])),
+        payload: Some(Bytes::from(vec![
+            b'x';
+            [512, 1024, 2048][sequence as usize % 3]
+        ])),
         fields,
         ..Default::default()
     }
-}
-
-async fn yield_once() {
-    let mut yielded = false;
-    futures::future::poll_fn(move |cx| {
-        if yielded {
-            std::task::Poll::Ready(())
-        } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
-            std::task::Poll::Pending
-        }
-    })
-    .await
 }
 
 async fn push_batch(
@@ -529,7 +616,6 @@ async fn push_batch(
     operations: &OperationProbe,
 ) -> Vec<ItemId> {
     let _operation = operations.begin();
-    yield_once().await;
     let items = (0..n)
         .map(|k| representative_item(base + k, k + 1 == n))
         .collect();
@@ -546,7 +632,6 @@ async fn claim(
     operations: &OperationProbe,
 ) -> Vec<ItemId> {
     let _operation = operations.begin();
-    yield_once().await;
     pq.claim(shard, n, 3_600_000)
         .await
         .expect("facade claim")
@@ -563,7 +648,6 @@ async fn finalize(
     operations: &OperationProbe,
 ) {
     let _operation = operations.begin();
-    yield_once().await;
     pq.ack(shard, ids.iter().copied())
         .await
         .expect("facade ack");
@@ -578,6 +662,42 @@ fn pct(latencies_ms: &mut [f64], p: f64) -> f64 {
         .saturating_sub(1)
         .min(latencies_ms.len() - 1);
     latencies_ms[idx]
+}
+
+struct ProducerResult {
+    accepted: u64,
+    duplicate_ids: u64,
+    seen_ids: Vec<bool>,
+    identity_prefix: Option<u64>,
+    counter_min: u64,
+    counter_max: u64,
+    payload_size_counts: BTreeMap<u64, u64>,
+    group_counts: Vec<u64>,
+    priority_counts: BTreeMap<String, u64>,
+    push_batches: u64,
+}
+
+struct ConsumerResult {
+    claimed: u64,
+    finalized: u64,
+    duplicate_claims: u64,
+    seen_ids: Vec<bool>,
+    identity_prefix: Option<u64>,
+    counter_min: u64,
+    counter_max: u64,
+    progress_identity_sample_count: u64,
+    progress_latency_lower_max_ms: u64,
+    progress_latency_upper_max_ms: u64,
+    progress_bound_violations: u64,
+    progress_latency_upper_buckets: BTreeMap<String, u64>,
+    finalized_samples: Vec<u64>,
+    cursor_samples: Vec<u64>,
+    oldest_eligible_age_samples_ms: Vec<u64>,
+    lifecycle_snapshots: Vec<serde_json::Value>,
+    discovery_query_count: u64,
+    discovery_nonempty_count: u64,
+    claim_batches: u64,
+    finalize_batches: u64,
 }
 
 #[test]
@@ -607,112 +727,321 @@ fn performance_single_deployment_baseline_tests() {
     let shard = sk("e0e1", "hot");
     let application_name = format!("pqueue_e0e1_evidence_{}", std::process::id());
     let separator = if observer_url.contains('?') { '&' } else { '?' };
-    let url = format!("{observer_url}{separator}application_name={application_name}");
+    let url = format!("{observer_url}{separator}application_name={application_name}_producer");
     let b = Arc::new(
         PostgresRelationalBackend::connect_in_schema(&url, &schema)
             .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)"),
     );
     let pq = Arc::new(Pqueue::new(Arc::clone(&b), Arc::new(SystemClock)));
-    let operations = OperationProbe::default();
-    let mut resources = ResourceObservations::default();
-    let mut finalized_samples = Vec::new();
-    let mut cursor_samples = Vec::new();
-    let mut oldest_eligible_age_samples_ms = Vec::new();
-    let mut sentinel_latency_samples_ms = Vec::new();
+    let operations = Arc::new(OperationProbe::default());
+    let workers = Arc::new(WorkerProbe::default());
+    let caps = RunCaps::from_env(perf_env);
 
     futures::executor::block_on(async {
         pq.create_queue(big_qdef("e0e1", "hot")).await.unwrap();
         let persisted = b.queue_definition(&shard).await.unwrap();
         assert_eq!(persisted.max_push_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.max_claim_batch_size, CONFIGURED_MAX_BATCH_SIZE);
-        resources.sample(&observer_url, &application_name);
-        finalized_samples.push(0);
-        cursor_samples.push(0);
+        let consumer_url =
+            format!("{observer_url}{separator}application_name={application_name}_consumer");
+        let consumer_backend = Arc::new(
+            PostgresRelationalBackend::connect_in_schema(&consumer_url, &schema)
+                .expect("connect independent Postgres claimant"),
+        );
+        let consumer_pq = Arc::new(Pqueue::new(consumer_backend, Arc::new(SystemClock)));
 
-        // E0 retains exactly ten million terminal rows while producer and claimant operate concurrently.
+        // E0: two independent production connections and worker loops overlap naturally. The bounded
+        // accepted-but-not-yet-claimed map is also the identity/timestamp authority for progress.
         let t_e0 = Instant::now();
-        let mut accepted = 0u64;
-        let mut claimed = 0u64;
-        let mut finalized = 0u64;
-        let mut duplicate_claims = 0u64;
-        let mut seen_claims = vec![false; resident as usize + 2];
-        let mut sentinels: BTreeMap<ItemId, Instant> = BTreeMap::new();
+        let pending = Arc::new(Mutex::new(HashMap::<ItemId, (Instant, Instant)>::new()));
+        let pending_peak = Arc::new(AtomicU64::new(0));
+        let producer_done = Arc::new(AtomicBool::new(false));
+        let consumer_done = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (signal_tx, signal_rx) = std::sync::mpsc::sync_channel::<()>(2);
 
-        let first_n = resident.min(load_batch);
-        let first_ids = push_batch(&pq, &shard, 0, first_n, &operations).await;
-        accepted += first_ids.len() as u64;
-        if let Some(id) = first_ids.last() {
-            sentinels.insert(*id, Instant::now());
-        }
+        let (producer_result, consumer_result, mut resources) = std::thread::scope(|scope| {
+            let producer = scope.spawn({
+                let pq = Arc::clone(&pq);
+                let shard = shard.clone();
+                let operations = Arc::clone(&operations);
+                let workers = Arc::clone(&workers);
+                let pending = Arc::clone(&pending);
+                let pending_peak = Arc::clone(&pending_peak);
+                let producer_done = Arc::clone(&producer_done);
+                let barrier = Arc::clone(&barrier);
+                move || {
+                    let _worker = workers.start();
+                    barrier.wait();
+                    let mut result = ProducerResult {
+                        accepted: 0,
+                        duplicate_ids: 0,
+                        seen_ids: vec![false; resident as usize + 2],
+                        identity_prefix: None,
+                        counter_min: u64::MAX,
+                        counter_max: 0,
+                        payload_size_counts: BTreeMap::new(),
+                        group_counts: vec![0; GROUP_CARDINALITY as usize],
+                        priority_counts: BTreeMap::new(),
+                        push_batches: 0,
+                    };
+                    while result.accepted < resident {
+                        let n = (resident - result.accepted).min(load_batch);
+                        let accept_started = Instant::now();
+                        let ids = futures::executor::block_on(push_batch(
+                            &pq,
+                            &shard,
+                            result.accepted,
+                            n,
+                            &operations,
+                        ));
+                        let accept_completed = Instant::now();
+                        {
+                            let mut map = pending.lock().unwrap();
+                            for id in &ids {
+                                map.insert(*id, (accept_started, accept_completed));
+                            }
+                            pending_peak.fetch_max(map.len() as u64, Ordering::SeqCst);
+                        }
+                        for offset in 0..n {
+                            let sequence = result.accepted + offset;
+                            *result
+                                .payload_size_counts
+                                .entry([512, 1024, 2048][sequence as usize % 3] as u64)
+                                .or_default() += 1;
+                            result.group_counts[sequence as usize % GROUP_CARDINALITY as usize] +=
+                                1;
+                            let class = if offset + 1 == n {
+                                "sentinel"
+                            } else if sequence.is_multiple_of(10) {
+                                "high"
+                            } else {
+                                "regular"
+                            };
+                            *result.priority_counts.entry(class.into()).or_default() += 1;
+                        }
+                        for id in ids {
+                            let raw = id.as_u64();
+                            let prefix = raw >> 32;
+                            if result
+                                .identity_prefix
+                                .replace(prefix)
+                                .is_some_and(|seen| seen != prefix)
+                            {
+                                result.duplicate_ids += 1;
+                            }
+                            let counter = (id.as_u64() & u32::MAX as u64) as usize;
+                            result.counter_min = result.counter_min.min(counter as u64);
+                            result.counter_max = result.counter_max.max(counter as u64);
+                            if counter >= result.seen_ids.len() || result.seen_ids[counter] {
+                                result.duplicate_ids += 1;
+                            } else {
+                                result.seen_ids[counter] = true;
+                            }
+                        }
+                        result.accepted += n;
+                        result.push_batches += 1;
+                        signal_tx.send(()).expect("claimant remains live");
+                    }
+                    producer_done.store(true, Ordering::SeqCst);
+                    result
+                }
+            });
 
-        while accepted < resident {
-            let n = (resident - accepted).min(load_batch);
-            let claim_n = load_batch.min(accepted - finalized) as usize;
-            let (new_ids, claimed_ids) = futures::join!(
-                push_batch(&pq, &shard, accepted, n, &operations),
-                claim(&pq, &shard, claim_n, &operations)
-            );
-            accepted += new_ids.len() as u64;
-            if let Some(id) = new_ids.last()
-                && !claimed_ids.contains(id)
-            {
-                sentinels.insert(*id, Instant::now());
-            }
-            for id in &claimed_ids {
-                let counter = (id.as_u64() & u32::MAX as u64) as usize;
-                if counter >= seen_claims.len() || seen_claims[counter] {
-                    duplicate_claims += 1;
-                } else {
-                    seen_claims[counter] = true;
+            let consumer = scope.spawn({
+                let pq = Arc::clone(&consumer_pq);
+                let shard = shard.clone();
+                let operations = Arc::clone(&operations);
+                let workers = Arc::clone(&workers);
+                let pending = Arc::clone(&pending);
+                let producer_done = Arc::clone(&producer_done);
+                let consumer_done = Arc::clone(&consumer_done);
+                let barrier = Arc::clone(&barrier);
+                move || {
+                    let _worker = workers.start();
+                    barrier.wait();
+                    let mut result = ConsumerResult {
+                        claimed: 0,
+                        finalized: 0,
+                        duplicate_claims: 0,
+                        seen_ids: vec![false; resident as usize + 2],
+                        identity_prefix: None,
+                        counter_min: u64::MAX,
+                        counter_max: 0,
+                        progress_identity_sample_count: 0,
+                        progress_latency_lower_max_ms: 0,
+                        progress_latency_upper_max_ms: 0,
+                        progress_bound_violations: 0,
+                        progress_latency_upper_buckets: BTreeMap::from([
+                            ("le_1000".into(), 0),
+                            ("le_10000".into(), 0),
+                            ("le_60000".into(), 0),
+                            ("gt_60000".into(), 0),
+                        ]),
+                        finalized_samples: vec![0],
+                        cursor_samples: vec![0],
+                        oldest_eligible_age_samples_ms: Vec::new(),
+                        lifecycle_snapshots: Vec::new(),
+                        discovery_query_count: 0,
+                        discovery_nonempty_count: 0,
+                        claim_batches: 0,
+                        finalize_batches: 0,
+                    };
+                    let sample_stride = resident.clamp(1, 100_000);
+                    let mut next_scope_sample = 0;
+                    loop {
+                        let _ = signal_rx.try_recv();
+                        if result.claimed >= next_scope_sample
+                            && !pending.lock().unwrap().is_empty()
+                        {
+                            let scopes = futures::executor::block_on(
+                                pq.discover_active_scopes(&shard, DiscoveryGranularity::Group),
+                            )
+                            .unwrap();
+                            result.discovery_query_count += 1;
+                            result.discovery_nonempty_count += u64::from(!scopes.is_empty());
+                            result
+                                .oldest_eligible_age_samples_ms
+                                .extend(scopes.iter().map(|scope| scope.oldest_eligible_age_ms));
+                            next_scope_sample += sample_stride;
+                        }
+                        let claim_started = Instant::now();
+                        let ids = futures::executor::block_on(claim(
+                            &pq,
+                            &shard,
+                            load_batch as usize,
+                            &operations,
+                        ));
+                        let claim_completed = Instant::now();
+                        if ids.is_empty() {
+                            if producer_done.load(Ordering::SeqCst)
+                                && pending.lock().unwrap().is_empty()
+                            {
+                                break;
+                            }
+                            let _ = signal_rx.recv_timeout(std::time::Duration::from_millis(10));
+                            continue;
+                        }
+                        result.claim_batches += 1;
+                        for id in &ids {
+                            let identity_deadline = Instant::now()
+                                + std::time::Duration::from_millis(PROGRESS_BOUND_MS);
+                            let accepted = loop {
+                                if let Some(interval) = pending.lock().unwrap().remove(id) {
+                                    break interval;
+                                }
+                                assert!(
+                                    Instant::now() < identity_deadline,
+                                    "claimed phantom or duplicate identity {id} without a matching accepted interval"
+                                );
+                                std::thread::yield_now();
+                            };
+                            let lower = claim_started
+                                .checked_duration_since(accepted.1)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let upper = claim_completed
+                                .checked_duration_since(accepted.0)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            result.progress_identity_sample_count += 1;
+                            result.progress_latency_lower_max_ms =
+                                result.progress_latency_lower_max_ms.max(lower);
+                            result.progress_latency_upper_max_ms =
+                                result.progress_latency_upper_max_ms.max(upper);
+                            result.progress_bound_violations +=
+                                u64::from(upper > PROGRESS_BOUND_MS);
+                            let bucket = if upper <= 1_000 {
+                                "le_1000"
+                            } else if upper <= 10_000 {
+                                "le_10000"
+                            } else if upper <= PROGRESS_BOUND_MS {
+                                "le_60000"
+                            } else {
+                                "gt_60000"
+                            };
+                            *result
+                                .progress_latency_upper_buckets
+                                .entry(bucket.into())
+                                .or_default() += 1;
+                            let counter = (id.as_u64() & u32::MAX as u64) as usize;
+                            let prefix = id.as_u64() >> 32;
+                            if result.identity_prefix.replace(prefix).is_some_and(|seen| seen != prefix) {
+                                result.duplicate_claims += 1;
+                            }
+                            result.counter_min = result.counter_min.min(counter as u64);
+                            result.counter_max = result.counter_max.max(counter as u64);
+                            if counter >= result.seen_ids.len() || result.seen_ids[counter] {
+                                result.duplicate_claims += 1;
+                            } else {
+                                result.seen_ids[counter] = true;
+                            }
+                        }
+                        result.claimed += ids.len() as u64;
+                        futures::executor::block_on(finalize(&pq, &shard, &ids, &operations));
+                        result.finalized += ids.len() as u64;
+                        result.finalize_batches += 1;
+                        if result.finalized.is_multiple_of(100_000) || result.finalized == resident
+                        {
+                            let metrics = futures::executor::block_on(pq.metrics(&shard)).unwrap();
+                            let cursor = futures::executor::block_on(pq.current_position(&shard))
+                                .unwrap()
+                                .sequence;
+                            let scopes = futures::executor::block_on(
+                                pq.discover_active_scopes(&shard, DiscoveryGranularity::Group),
+                            )
+                            .unwrap();
+                            result.discovery_query_count += 1;
+                            result.discovery_nonempty_count += u64::from(!scopes.is_empty());
+                            result.finalized_samples.push(result.finalized);
+                            result.cursor_samples.push(cursor);
+                            result
+                                .oldest_eligible_age_samples_ms
+                                .extend(scopes.iter().map(|scope| scope.oldest_eligible_age_ms));
+                            result.lifecycle_snapshots.push(serde_json::json!({
+                                "pending": metrics.pending,
+                                "leased": metrics.leased,
+                                "complete": metrics.complete,
+                                "failed": metrics.failed,
+                                "resident_terminal_count": metrics.resident_terminal_count,
+                                "cursor": cursor,
+                            }));
+                        }
+                    }
+                    consumer_done.store(true, Ordering::SeqCst);
+                    result
                 }
-                if let Some(started) = sentinels.remove(id) {
-                    sentinel_latency_samples_ms.push(started.elapsed().as_millis() as u64);
-                }
-            }
-            claimed += claimed_ids.len() as u64;
-            finalize(&pq, &shard, &claimed_ids, &operations).await;
-            finalized += claimed_ids.len() as u64;
+            });
 
-            if accepted.is_multiple_of(100_000) || accepted == resident {
-                let metrics = pq.metrics(&shard).await.unwrap();
-                assert_eq!(
-                    metrics.pending + metrics.leased + metrics.complete + metrics.failed,
-                    accepted
-                );
-                finalized_samples.push(finalized);
-                cursor_samples.push(pq.current_position(&shard).await.unwrap().sequence);
-                let scopes = pq
-                    .discover_active_scopes(&shard, DiscoveryGranularity::Queue)
-                    .await
-                    .unwrap();
-                oldest_eligible_age_samples_ms
-                    .extend(scopes.iter().map(|s| s.oldest_eligible_age_ms));
-                resources.sample(&observer_url, &application_name);
-            }
-        }
-        loop {
-            let ids = claim(&pq, &shard, load_batch as usize, &operations).await;
-            if ids.is_empty() {
-                break;
-            }
-            for id in &ids {
-                let counter = (id.as_u64() & u32::MAX as u64) as usize;
-                if counter >= seen_claims.len() || seen_claims[counter] {
-                    duplicate_claims += 1;
-                } else {
-                    seen_claims[counter] = true;
+            let sampler = scope.spawn({
+                let consumer_done = Arc::clone(&consumer_done);
+                let observer_url = observer_url.clone();
+                let application_name = application_name.clone();
+                move || {
+                    let mut observations = ResourceObservations::default();
+                    while !consumer_done.load(Ordering::SeqCst) || observations.samples < 3 {
+                        observations.sample(&observer_url, &application_name);
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
+                    observations
                 }
-                if let Some(started) = sentinels.remove(id) {
-                    sentinel_latency_samples_ms.push(started.elapsed().as_millis() as u64);
-                }
-            }
-            claimed += ids.len() as u64;
-            finalize(&pq, &shard, &ids, &operations).await;
-            finalized += ids.len() as u64;
-        }
+            });
+            (
+                producer.join().unwrap(),
+                consumer.join().unwrap(),
+                sampler.join().unwrap(),
+            )
+        });
+        let accepted = producer_result.accepted;
+        let claimed = consumer_result.claimed;
+        let finalized = consumer_result.finalized;
+        let duplicate_claims = consumer_result.duplicate_claims;
+        let mut finalized_samples = consumer_result.finalized_samples;
+        let mut cursor_samples = consumer_result.cursor_samples;
+        let oldest_eligible_age_samples_ms = consumer_result.oldest_eligible_age_samples_ms;
         let e0_elapsed = t_e0.elapsed().as_secs_f64();
-        let ingest_per_s = accepted as f64 / e0_elapsed;
-        let claim_finalize_per_s = finalized as f64 / e0_elapsed;
+        let pipeline_accepted_per_s = accepted as f64 / e0_elapsed;
+        let pipeline_finalized_per_s = finalized as f64 / e0_elapsed;
         let checkpoint = pq.metrics(&shard).await.unwrap();
         finalized_samples.push(finalized);
         cursor_samples.push(pq.current_position(&shard).await.unwrap().sequence);
@@ -731,7 +1060,9 @@ fn performance_single_deployment_baseline_tests() {
             (accepted, claimed, finalized, duplicate_claims),
             (resident, resident, resident, 0)
         );
-        assert!(sentinels.is_empty(), "every sentinel must be claimed");
+        assert_eq!(producer_result.duplicate_ids, 0);
+        assert_eq!(producer_result.seen_ids, consumer_result.seen_ids);
+        assert!(pending.lock().unwrap().is_empty());
 
         // E1 representative control/load/control probes against the retained ten-million-row state.
         let base_cycles: usize = std::env::var("PQUEUE_E1_CYCLES")
@@ -744,10 +1075,112 @@ fn performance_single_deployment_baseline_tests() {
         let mut probe_accepted = 0u64;
         let mut probe_claimed = 0u64;
         let mut probe_finalized = 0u64;
+        let mut probe_push_batches = 0u64;
+        let mut probe_update_item_calls = 0u64;
+        let mut probe_claim_batches = 0u64;
+        let mut probe_finalize_batches = 0u64;
         let mut actual_push_sizes = BTreeSet::new();
         let mut actual_update_window_sizes = BTreeSet::new();
         let mut actual_claim_sizes = BTreeSet::new();
         let mut actual_finalize_sizes = BTreeSet::new();
+        let mut probe_accepted_ids = BTreeSet::new();
+        let mut probe_claimed_ids = BTreeSet::new();
+        let mut probe_finalized_ids = BTreeSet::new();
+
+        // At the exact 10M resident checkpoint, prove that a max-batch write overlaps a max-batch
+        // claim/finalize on the two independent production connections. The first batch is an active
+        // pending window; the second write happens while that window is being claimed.
+        let control_seed = push_batch(&pq, &shard, next_id, 1_000, &operations).await;
+        next_id += 1_000;
+        probe_push_batches += 1;
+        probe_accepted += 1_000;
+        probe_accepted_ids.extend(control_seed.iter().copied());
+        for id in &control_seed {
+            let mut ops = BTreeMap::new();
+            ops.insert("probe".into(), Some(Bytes::from_static(b"updated")));
+            pq.update_fields(&shard, *id, ops, PayloadUpdate::Keep, None, None)
+                .await
+                .expect("post-10M update_fields");
+            probe_update_item_calls += 1;
+        }
+        let active_pending_before = pq.metrics(&shard).await.unwrap().pending;
+        let control_barrier = Arc::new(std::sync::Barrier::new(2));
+        let control_operations = Arc::new(OperationProbe::default());
+        let (
+            (write_started, write_completed, control_write),
+            (claim_started, claim_completed, first_claim),
+        ) = std::thread::scope(|scope| {
+            let barrier = Arc::clone(&control_barrier);
+            let producer_operations = Arc::clone(&control_operations);
+            let producer_pq = Arc::clone(&pq);
+            let producer_shard = shard.clone();
+            let producer = scope.spawn(move || {
+                barrier.wait();
+                let started = Instant::now();
+                let ids = futures::executor::block_on(push_batch(
+                    &producer_pq,
+                    &producer_shard,
+                    next_id,
+                    1_000,
+                    &producer_operations,
+                ));
+                (started, Instant::now(), ids)
+            });
+            let barrier = Arc::clone(&control_barrier);
+            let claimant_operations = Arc::clone(&control_operations);
+            let claimant_pq = Arc::clone(&consumer_pq);
+            let claimant_shard = shard.clone();
+            let claimant = scope.spawn(move || {
+                barrier.wait();
+                let started = Instant::now();
+                let ids = futures::executor::block_on(claim(
+                    &claimant_pq,
+                    &claimant_shard,
+                    1_000,
+                    &claimant_operations,
+                ));
+                futures::executor::block_on(finalize(
+                    &claimant_pq,
+                    &claimant_shard,
+                    &ids,
+                    &claimant_operations,
+                ));
+                (started, Instant::now(), ids)
+            });
+            (producer.join().unwrap(), claimant.join().unwrap())
+        });
+        next_id += 1_000;
+        probe_push_batches += 1;
+        probe_claim_batches += 1;
+        probe_finalize_batches += 1;
+        probe_accepted += control_write.len() as u64;
+        probe_claimed += first_claim.len() as u64;
+        probe_finalized += first_claim.len() as u64;
+        probe_accepted_ids.extend(control_write.iter().copied());
+        probe_claimed_ids.extend(first_claim.iter().copied());
+        probe_finalized_ids.extend(first_claim.iter().copied());
+        let second_claim = claim(&consumer_pq, &shard, 1_000, &operations).await;
+        finalize(&consumer_pq, &shard, &second_claim, &operations).await;
+        probe_claim_batches += 1;
+        probe_finalize_batches += 1;
+        probe_claimed += second_claim.len() as u64;
+        probe_finalized += second_claim.len() as u64;
+        probe_claimed_ids.extend(second_claim.iter().copied());
+        probe_finalized_ids.extend(second_claim.iter().copied());
+        let post10m_concurrent_probe = active_pending_before == 1_000
+            && control_write.len() == 1_000
+            && first_claim.len() == 1_000
+            && second_claim.len() == 1_000
+            && write_started < claim_completed
+            && claim_started < write_completed
+            && control_operations.max_observed() >= 2;
+        let post10m_overlap_observed =
+            write_started < claim_completed && claim_started < write_completed;
+        actual_push_sizes.insert(1_000);
+        actual_update_window_sizes.insert(1_000);
+        actual_claim_sizes.insert(1_000);
+        actual_finalize_sizes.insert(1_000);
+
         for &bsz in batch_sizes {
             let cycles = if bsz == 1 {
                 base_cycles
@@ -756,6 +1189,7 @@ fn performance_single_deployment_baseline_tests() {
             };
             samples.insert(format!("samples_per_op_b{bsz}"), serde_json::json!(cycles));
             for _ in 0..cycles {
+                probe_push_batches += 1;
                 let t = Instant::now();
                 let pushed_ids = push_batch(&pq, &shard, next_id, bsz, &operations).await;
                 lat.entry(format!("push_b{bsz}_ms"))
@@ -763,6 +1197,7 @@ fn performance_single_deployment_baseline_tests() {
                     .push(ms(t));
                 next_id += bsz;
                 probe_accepted += pushed_ids.len() as u64;
+                probe_accepted_ids.extend(pushed_ids.iter().copied());
                 actual_push_sizes.insert(pushed_ids.len() as u64);
 
                 let t = Instant::now();
@@ -772,6 +1207,7 @@ fn performance_single_deployment_baseline_tests() {
                     pq.update_fields(&shard, *id, ops, PayloadUpdate::Keep, None, None)
                         .await
                         .expect("facade update_fields");
+                    probe_update_item_calls += 1;
                 }
                 lat.entry(format!("update_window_b{bsz}_ms"))
                     .or_default()
@@ -789,6 +1225,8 @@ fn performance_single_deployment_baseline_tests() {
                     "claim must return the requested batch"
                 );
                 probe_claimed += ids.len() as u64;
+                probe_claim_batches += 1;
+                probe_claimed_ids.extend(ids.iter().copied());
                 actual_claim_sizes.insert(ids.len() as u64);
 
                 let t = Instant::now();
@@ -797,6 +1235,8 @@ fn performance_single_deployment_baseline_tests() {
                     .or_default()
                     .push(ms(t));
                 probe_finalized += ids.len() as u64;
+                probe_finalize_batches += 1;
+                probe_finalized_ids.extend(ids.iter().copied());
                 actual_finalize_sizes.insert(ids.len() as u64);
             }
             let metrics = pq.metrics(&shard).await.unwrap();
@@ -818,6 +1258,10 @@ fn performance_single_deployment_baseline_tests() {
                 .await,
             Err(EngineError::BatchTooLarge)
         );
+        let post_probe = pq.metrics(&shard).await.unwrap();
+        let probe_identity_exact = probe_accepted_ids.len() as u64 == probe_accepted
+            && probe_accepted_ids == probe_claimed_ids
+            && probe_claimed_ids == probe_finalized_ids;
 
         let monotonic_progress = finalized_samples.first() == Some(&0)
             && finalized_samples.last() == Some(&resident)
@@ -829,22 +1273,30 @@ fn performance_single_deployment_baseline_tests() {
                 .any(|window| window[1] > window[0])
             && cursor_samples.windows(2).all(|w| w[1] >= w[0])
             && cursor_samples.windows(2).any(|w| w[1] > w[0]);
-        let progress_within_bound = !sentinel_latency_samples_ms.is_empty()
-            && sentinel_latency_samples_ms
-                .iter()
-                .all(|v| *v <= PROGRESS_BOUND_MS)
+        let progress_within_bound = consumer_result.progress_identity_sample_count == resident
+            && consumer_result.progress_bound_violations == 0
+            && consumer_result.progress_latency_upper_max_ms <= PROGRESS_BOUND_MS
+            && consumer_result.discovery_query_count > 0
             && oldest_eligible_age_samples_ms
                 .iter()
                 .all(|v| *v <= PROGRESS_BOUND_MS);
         let max_in_flight = operations.max_observed();
-        let bounded_resources = resources.within_bounds(max_in_flight);
+        let pending_items_peak = pending_peak.load(Ordering::SeqCst);
+        let bounded_resources = resources.within_bounds(max_in_flight, pending_items_peak, caps)
+            && workers.peak.load(Ordering::SeqCst) <= caps.workers
+            && workers.started.load(Ordering::SeqCst) == CONFIGURED_CONCURRENCY
+            && workers.completed.load(Ordering::SeqCst) == CONFIGURED_CONCURRENCY;
         assert!(
             monotonic_progress,
             "measured finalized-count and command-position samples must advance monotonically"
         );
         assert!(
             progress_within_bound,
-            "sentinel and discovery samples must meet progress bound"
+            "identity/discovery progress: identities={} violations={} upper_max={} oldest_samples={:?}",
+            consumer_result.progress_identity_sample_count,
+            consumer_result.progress_bound_violations,
+            consumer_result.progress_latency_upper_max_ms,
+            oldest_eligible_age_samples_ms,
         );
         assert!(
             bounded_resources,
@@ -873,17 +1325,18 @@ fn performance_single_deployment_baseline_tests() {
             && batch_sizes == [1, 100, CONFIGURED_MAX_BATCH_SIZE]
             && batch_sizes.last() == Some(&CONFIGURED_MAX_BATCH_SIZE);
         let source_revision = std::env::var("PQUEUE_SOURCE_REVISION").unwrap_or_default();
-        let revision_bound = source_revision.len() == 40
-            && source_revision.bytes().all(|byte| byte.is_ascii_hexdigit());
-        let topology_declared = [
-            "PQUEUE_PG_INSTANCE_CLASS",
-            "PQUEUE_PG_CPU_LIMIT",
-            "PQUEUE_PG_MEMORY_LIMIT_BYTES",
-            "PQUEUE_PG_IOPS_PROFILE",
-            "PQUEUE_PG_STORAGE_CLASS",
-        ]
-        .iter()
-        .all(|key| std::env::var(key).is_ok());
+        let checkout_revision = checkout_revision();
+        let revision_bound = source_revision == checkout_revision;
+        let topology_declared = caps.explicitly_declared
+            && [
+                "PQUEUE_PG_INSTANCE_CLASS",
+                "PQUEUE_PG_CPU_LIMIT",
+                "PQUEUE_PG_MEMORY_LIMIT_BYTES",
+                "PQUEUE_PG_IOPS_PROFILE",
+                "PQUEUE_PG_STORAGE_CLASS",
+            ]
+            .iter()
+            .all(|key| std::env::var(key).is_ok());
         let exact_outcomes = accepted == resident
             && claimed == resident
             && finalized == resident
@@ -891,7 +1344,13 @@ fn performance_single_deployment_baseline_tests() {
             && checkpoint.pending == 0
             && checkpoint.leased == 0
             && checkpoint.complete == resident
-            && checkpoint.failed == 0;
+            && checkpoint.failed == 0
+            && producer_result.duplicate_ids == 0
+            && producer_result.seen_ids == consumer_result.seen_ids
+            && producer_result.identity_prefix == consumer_result.identity_prefix
+            && producer_result.counter_min == consumer_result.counter_min
+            && producer_result.counter_max == consumer_result.counter_max
+            && producer_result.counter_max - producer_result.counter_min + 1 == resident;
         let e0_pass = full_shape
             && revision_bound
             && topology_declared
@@ -902,6 +1361,11 @@ fn performance_single_deployment_baseline_tests() {
         let e1_pass = e0_pass
             && probe_accepted == probe_claimed
             && probe_claimed == probe_finalized
+            && probe_identity_exact
+            && post_probe.pending == 0
+            && post_probe.leased == 0
+            && post_probe.complete == resident + probe_finalized
+            && post_probe.failed == 0
             && actual_push_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
             && actual_update_window_sizes
                 .iter()
@@ -911,22 +1375,23 @@ fn performance_single_deployment_baseline_tests() {
             && actual_claim_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
             && actual_finalize_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
             && oversize_push_rejected
-            && oversize_claim_rejected;
+            && oversize_claim_rejected
+            && post10m_concurrent_probe;
 
         println!(
             "\nTP-002 E0/E1 postgres_native single-deployment baseline (resident={resident}, perf_env={perf_env}):"
         );
         println!(
-            "  E0 ingest         : {ingest_per_s:.0} items/s (floor {FLOOR_ITEMS_PER_SEC:.0}) -> {}",
-            if ingest_per_s >= FLOOR_ITEMS_PER_SEC {
+            "  E0 pipeline accepted : {pipeline_accepted_per_s:.0} items/s (reference {FLOOR_ITEMS_PER_SEC:.0}) -> {}",
+            if pipeline_accepted_per_s >= FLOOR_ITEMS_PER_SEC {
                 "PASS"
             } else {
                 "UNDER"
             }
         );
         println!(
-            "  E0 claim+finalize : {claim_finalize_per_s:.0} items/s -> {}",
-            if claim_finalize_per_s >= FLOOR_ITEMS_PER_SEC {
+            "  E0 pipeline finalized: {pipeline_finalized_per_s:.0} items/s -> {}",
+            if pipeline_finalized_per_s >= FLOOR_ITEMS_PER_SEC {
                 "PASS"
             } else {
                 "UNDER"
@@ -950,15 +1415,26 @@ fn performance_single_deployment_baseline_tests() {
             "live postgres_native (TD-002 PostgresRelationalBackend), single deployment, resident={resident}, perf_env={perf_env}; the full TP-002 E1 shape is a provisioned instance with PQUEUE_E1_RESIDENT=10000000 + PQUEUE_PERF_ENV=1"
         );
         let tier = |pass: bool| if pass { "release" } else { "smoke" }.to_string();
+        let lost_items = producer_result
+            .seen_ids
+            .iter()
+            .zip(&consumer_result.seen_ids)
+            .filter(|(accepted, claimed)| **accepted && !**claimed)
+            .count() as u64;
+        let workload_operation_mix = serde_json::json!({
+            "push_batches": producer_result.push_batches,
+            "claim_batches": consumer_result.claim_batches,
+            "finalize_batches": consumer_result.finalize_batches,
+        });
 
         let mut e0_vals = std::collections::BTreeMap::from([
             (
-                "ingest_per_s".to_string(),
-                serde_json::json!(ingest_per_s.round()),
+                "pipeline_accepted_per_s".to_string(),
+                serde_json::json!(pipeline_accepted_per_s.round()),
             ),
             (
-                "claim_finalize_per_s".to_string(),
-                serde_json::json!(claim_finalize_per_s.round()),
+                "pipeline_finalized_per_s".to_string(),
+                serde_json::json!(pipeline_finalized_per_s.round()),
             ),
             (
                 "resident_set_items".to_string(),
@@ -984,6 +1460,10 @@ fn performance_single_deployment_baseline_tests() {
                 "source_revision".to_string(),
                 serde_json::json!(source_revision),
             ),
+            (
+                "checkout_revision".to_string(),
+                serde_json::json!(checkout_revision),
+            ),
             ("accepted_items".to_string(), serde_json::json!(accepted)),
             ("claimed_items".to_string(), serde_json::json!(claimed)),
             ("finalized_items".to_string(), serde_json::json!(finalized)),
@@ -1003,26 +1483,42 @@ fn performance_single_deployment_baseline_tests() {
                 "checkpoint_failed".to_string(),
                 serde_json::json!(checkpoint.failed),
             ),
-            ("lost_items".to_string(), serde_json::json!(0)),
+            ("lost_items".to_string(), serde_json::json!(lost_items)),
+            (
+                "identity_epoch_node_prefix".to_string(),
+                serde_json::json!(producer_result.identity_prefix),
+            ),
+            (
+                "identity_counter_min".to_string(),
+                serde_json::json!(producer_result.counter_min),
+            ),
+            (
+                "identity_counter_max".to_string(),
+                serde_json::json!(producer_result.counter_max),
+            ),
+            (
+                "identity_bijection".to_string(),
+                serde_json::json!(exact_outcomes),
+            ),
             (
                 "duplicate_claims".to_string(),
                 serde_json::json!(duplicate_claims),
             ),
             (
-                "payload_bytes_min".to_string(),
-                serde_json::json!(PAYLOAD_BYTES),
+                "payload_size_counts".to_string(),
+                serde_json::json!(producer_result.payload_size_counts),
             ),
             (
-                "payload_bytes_max".to_string(),
-                serde_json::json!(PAYLOAD_BYTES),
+                "group_item_counts".to_string(),
+                serde_json::json!(producer_result.group_counts),
             ),
             (
-                "group_cardinality".to_string(),
-                serde_json::json!(GROUP_CARDINALITY),
+                "priority_class_counts".to_string(),
+                serde_json::json!(producer_result.priority_counts),
             ),
             (
-                "priority_profile".to_string(),
-                serde_json::json!("90pct_regular+10pct_high+sentinel_highest"),
+                "workload_operation_mix".to_string(),
+                workload_operation_mix.clone(),
             ),
         ]);
         insert_measured_contract(
@@ -1034,9 +1530,19 @@ fn performance_single_deployment_baseline_tests() {
                 finalized_samples: &finalized_samples,
                 cursor_samples: &cursor_samples,
                 oldest_eligible_age_samples_ms: &oldest_eligible_age_samples_ms,
-                sentinel_latency_samples_ms: &sentinel_latency_samples_ms,
+                progress_identity_sample_count: consumer_result.progress_identity_sample_count,
+                progress_latency_lower_max_ms: consumer_result.progress_latency_lower_max_ms,
+                progress_latency_upper_max_ms: consumer_result.progress_latency_upper_max_ms,
+                progress_bound_violations: consumer_result.progress_bound_violations,
+                progress_latency_upper_buckets: &consumer_result.progress_latency_upper_buckets,
+                lifecycle_snapshots: &consumer_result.lifecycle_snapshots,
+                discovery_query_count: consumer_result.discovery_query_count,
+                discovery_nonempty_count: consumer_result.discovery_nonempty_count,
                 resources: &resources,
                 max_in_flight,
+                pending_items_peak,
+                caps,
+                workers: &workers,
             },
         );
         emit(
@@ -1086,16 +1592,19 @@ fn performance_single_deployment_baseline_tests() {
             "checkpoint_failed".into(),
             serde_json::json!(checkpoint.failed),
         );
-        e1_vals.insert("payload_bytes_min".into(), serde_json::json!(PAYLOAD_BYTES));
-        e1_vals.insert("payload_bytes_max".into(), serde_json::json!(PAYLOAD_BYTES));
         e1_vals.insert(
-            "group_cardinality".into(),
-            serde_json::json!(GROUP_CARDINALITY),
+            "payload_size_counts".into(),
+            serde_json::json!(producer_result.payload_size_counts),
         );
         e1_vals.insert(
-            "priority_profile".into(),
-            serde_json::json!("90pct_regular+10pct_high+sentinel_highest"),
+            "group_item_counts".into(),
+            serde_json::json!(producer_result.group_counts),
         );
+        e1_vals.insert(
+            "priority_class_counts".into(),
+            serde_json::json!(producer_result.priority_counts),
+        );
+        e1_vals.insert("workload_operation_mix".into(), workload_operation_mix);
         e1_vals.insert(
             "worst_op_p99_ms".into(),
             serde_json::json!((worst_p99 * 1000.0).round() / 1000.0),
@@ -1106,6 +1615,10 @@ fn performance_single_deployment_baseline_tests() {
         e1_vals.insert("host_speed_gate".into(), serde_json::json!(false));
         e1_vals.insert("wall_clock_capacity_only".into(), serde_json::json!(true));
         e1_vals.insert("source_revision".into(), serde_json::json!(source_revision));
+        e1_vals.insert(
+            "checkout_revision".into(),
+            serde_json::json!(checkout_revision),
+        );
         e1_vals.insert(
             "push_batch_sizes".into(),
             serde_json::json!(actual_push_sizes),
@@ -1155,6 +1668,70 @@ fn performance_single_deployment_baseline_tests() {
             serde_json::json!(probe_finalized),
         );
         e1_vals.insert(
+            "probe_unique_accepted_ids".into(),
+            serde_json::json!(probe_accepted_ids.len()),
+        );
+        e1_vals.insert(
+            "probe_unique_claimed_ids".into(),
+            serde_json::json!(probe_claimed_ids.len()),
+        );
+        e1_vals.insert(
+            "probe_unique_finalized_ids".into(),
+            serde_json::json!(probe_finalized_ids.len()),
+        );
+        e1_vals.insert(
+            "probe_identity_exact".into(),
+            serde_json::json!(probe_identity_exact),
+        );
+        e1_vals.insert(
+            "post_probe_pending".into(),
+            serde_json::json!(post_probe.pending),
+        );
+        e1_vals.insert(
+            "post_probe_leased".into(),
+            serde_json::json!(post_probe.leased),
+        );
+        e1_vals.insert(
+            "post_probe_complete".into(),
+            serde_json::json!(post_probe.complete),
+        );
+        e1_vals.insert(
+            "post_probe_failed".into(),
+            serde_json::json!(post_probe.failed),
+        );
+        e1_vals.insert(
+            "post_probe_resident_terminal_count".into(),
+            serde_json::json!(post_probe.resident_terminal_count),
+        );
+        e1_vals.insert(
+            "probe_operation_mix".into(),
+            serde_json::json!({
+                "push_items": probe_accepted,
+                "push_batches": probe_push_batches,
+                "update_item_calls": probe_update_item_calls,
+                "claim_items": probe_claimed,
+                "claim_batches": probe_claim_batches,
+                "finalize_items": probe_finalized,
+                "finalize_batches": probe_finalize_batches,
+            }),
+        );
+        e1_vals.insert(
+            "post10m_concurrent_probe".into(),
+            serde_json::json!(post10m_concurrent_probe),
+        );
+        e1_vals.insert(
+            "post10m_overlap_observed".into(),
+            serde_json::json!(post10m_overlap_observed),
+        );
+        e1_vals.insert(
+            "post10m_max_in_flight_observed".into(),
+            serde_json::json!(control_operations.max_observed()),
+        );
+        e1_vals.insert(
+            "post10m_active_pending_before".into(),
+            serde_json::json!(active_pending_before),
+        );
+        e1_vals.insert(
             "total_accepted_items".into(),
             serde_json::json!(accepted + probe_accepted),
         );
@@ -1166,8 +1743,27 @@ fn performance_single_deployment_baseline_tests() {
             "total_finalized_items".into(),
             serde_json::json!(finalized + probe_finalized),
         );
-        e1_vals.insert("lost_items".into(), serde_json::json!(0));
-        e1_vals.insert("duplicate_claims".into(), serde_json::json!(0));
+        e1_vals.insert("lost_items".into(), serde_json::json!(lost_items));
+        e1_vals.insert(
+            "duplicate_claims".into(),
+            serde_json::json!(duplicate_claims),
+        );
+        e1_vals.insert(
+            "identity_epoch_node_prefix".into(),
+            serde_json::json!(producer_result.identity_prefix),
+        );
+        e1_vals.insert(
+            "identity_counter_min".into(),
+            serde_json::json!(producer_result.counter_min),
+        );
+        e1_vals.insert(
+            "identity_counter_max".into(),
+            serde_json::json!(producer_result.counter_max),
+        );
+        e1_vals.insert(
+            "identity_bijection".into(),
+            serde_json::json!(exact_outcomes),
+        );
         e1_vals.extend(samples); // samples_per_op_b<sz> — percentile fidelity is visible in the row
         insert_measured_contract(
             &mut e1_vals,
@@ -1178,9 +1774,19 @@ fn performance_single_deployment_baseline_tests() {
                 finalized_samples: &finalized_samples,
                 cursor_samples: &cursor_samples,
                 oldest_eligible_age_samples_ms: &oldest_eligible_age_samples_ms,
-                sentinel_latency_samples_ms: &sentinel_latency_samples_ms,
+                progress_identity_sample_count: consumer_result.progress_identity_sample_count,
+                progress_latency_lower_max_ms: consumer_result.progress_latency_lower_max_ms,
+                progress_latency_upper_max_ms: consumer_result.progress_latency_upper_max_ms,
+                progress_bound_violations: consumer_result.progress_bound_violations,
+                progress_latency_upper_buckets: &consumer_result.progress_latency_upper_buckets,
+                lifecycle_snapshots: &consumer_result.lifecycle_snapshots,
+                discovery_query_count: consumer_result.discovery_query_count,
+                discovery_nonempty_count: consumer_result.discovery_nonempty_count,
                 resources: &resources,
                 max_in_flight,
+                pending_items_peak,
+                caps,
+                workers: &workers,
             },
         );
         emit(
