@@ -727,62 +727,50 @@ pub(crate) fn refresh_group_summary(
     group_key: &GroupKey,
     now: UtcTimestamp,
 ) -> EngineResult<()> {
+    refresh_group_summaries(tx, shard, std::slice::from_ref(group_key), now)
+}
+
+/// Refresh an arbitrary number of group summaries with one set-based statement.  The target CTE is
+/// deliberately authoritative: groups which now have no eligible items are still upserted with a zero
+/// count, so callers never need a per-group cleanup loop.
+pub(crate) fn refresh_group_summaries(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    group_keys: &[GroupKey],
+    now: UtcTimestamp,
+) -> EngineResult<()> {
+    if group_keys.is_empty() {
+        return Ok(());
+    }
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
-    // Eligible aggregate: pending, not superseded, due at `now`.
-    let (count, oldest): (i64, Option<i64>) = st(tx.query_row(
-        "SELECT COUNT(*), MIN(eligible_since) FROM pqueue_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-         AND lifecycle_state='Pending' AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
-             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id)",
-        params![t, q, group_key.as_str(), now_n],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ))?;
-    // Representative = first-claimable eligible item of the group.
-    let rep: Option<(Vec<u8>, i64, String)> = st(tx
-        .query_row(
-            "SELECT priority_sort, created_at, item_id FROM pqueue_items \
-             WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-             AND lifecycle_state='Pending' AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
-                 ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-                 WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-                 AND ig.item_id=pqueue_items.item_id) \
-             ORDER BY priority_sort, created_seq LIMIT 1",
-            params![t, q, group_key.as_str(), now_n],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional())?;
-    let (rep_psort, rep_created, rep_item): (Option<Vec<u8>>, Option<i64>, Option<String>) =
-        match rep {
-            Some((p, c, i)) => (Some(p), Some(c), Some(i)),
-            None => (None, None, None),
-        };
+    let targets =
+        serde_json::to_string(&group_keys.iter().map(GroupKey::as_str).collect::<Vec<_>>())
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
     st(tx.execute(
-        "INSERT INTO pqueue_group_summary \
+        "WITH target(group_key) AS (SELECT DISTINCT value FROM json_each(?3)), \
+         eligible AS (SELECT i.group_key,i.eligible_since,i.priority_sort,i.created_at,i.item_id,i.created_seq \
+           FROM pqueue_items i JOIN target t ON t.group_key=i.group_key \
+           WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' AND i.superseded=0 \
+           AND (i.not_before IS NULL OR i.not_before<=?4) AND NOT EXISTS (SELECT 1 \
+             FROM pqueue_item_gates ig JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+             AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
+             AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id)), \
+         ranked AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY priority_sort,created_seq) AS rn FROM eligible), \
+         aggregate AS (SELECT group_key,COUNT(*) AS item_count,MIN(eligible_since) AS oldest FROM eligible GROUP BY group_key) \
+         INSERT INTO pqueue_group_summary \
          (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
           rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
-         VALUES (?1,?2,?3,?4,NULL,?5,?6,?7,?8,0,?9) \
+         SELECT ?1,?2,t.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id,COALESCE(a.item_count,0),0,?4 \
+         FROM target t LEFT JOIN aggregate a ON a.group_key=t.group_key \
+         LEFT JOIN ranked r ON r.group_key=t.group_key AND r.rn=1 WHERE true \
          ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
           oldest_eligible_at=excluded.oldest_eligible_at, \
           rep_progress_guard_sort=excluded.rep_progress_guard_sort, \
           rep_priority_sort=excluded.rep_priority_sort, rep_created_at=excluded.rep_created_at, \
           rep_item_id=excluded.rep_item_id, eligible_item_count=excluded.eligible_item_count, \
           at_risk_count=excluded.at_risk_count, updated_at=excluded.updated_at",
-        params![
-            t,
-            q,
-            group_key.as_str(),
-            oldest,
-            rep_psort,
-            rep_created,
-            rep_item,
-            count,
-            now_n,
-        ],
+        params![t, q, targets, now_n],
     ))?;
     Ok(())
 }

@@ -10,7 +10,6 @@ use pqueue_engine::{
     ClaimRef, CommandPosition, CommitEntryOutcome, CommitEntryStatus, CommitTransitionEntry,
     EngineError, EngineResult, EntryRecovery, PushItem, PushSpec, QueueKey,
 };
-use pqueue_projection::{InMemoryProjection, ProjectionImage};
 pub(crate) use pqueue_relational::*;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -825,17 +824,6 @@ pub(crate) fn parts(shard: &QueueKey) -> (String, String) {
         shard.tenant_id.as_str().to_string(),
         shard.queue_id.as_str().to_string(),
     )
-}
-
-pub(crate) fn query_projection_image<R>(
-    definition: &QueueDefinition,
-    image: ProjectionImage,
-    f: impl FnOnce(&InMemoryProjection, &QueueKey) -> EngineResult<R>,
-) -> EngineResult<R> {
-    let mut projection = InMemoryProjection::new();
-    projection.hydrate_shard(definition, image)?;
-    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    f(&projection, &shard)
 }
 
 // ---------------------------------------------------------------------------

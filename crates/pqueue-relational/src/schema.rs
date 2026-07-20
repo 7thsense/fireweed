@@ -189,6 +189,13 @@ CREATE TABLE IF NOT EXISTS pqueue_item_index (
 );
 CREATE INDEX IF NOT EXISTS pqueue_item_index_key_idx
     ON pqueue_item_index (tenant_id, queue_id, index_name, index_key);
+-- API-004 hot scans use `(index_key,item_id)` as their stable keyset.  Keep both
+-- physical directions because reversing an ASC index also reverses `item_id`, while
+-- the public cursor contract always uses item id ascending as its final tiebreaker.
+CREATE INDEX IF NOT EXISTS pqueue_item_index_key_item_asc_idx
+    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key ASC, item_id ASC);
+CREATE INDEX IF NOT EXISTS pqueue_item_index_key_item_desc_idx
+    ON pqueue_item_index (tenant_id, queue_id, index_name, index_key DESC, item_id ASC);
 -- objectlog/hybrid-async logical checkpoint lineage (bead pqueue-16b85e28, plan §Snapshot Authority).
 -- The async SQLite checkpoint worker records, per queue, the object-log lineage the durable SQLite
 -- projection was last advanced from: the LOGICAL high-water it reached (relational_cursor.next_seq at

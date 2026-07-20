@@ -17,7 +17,7 @@ pqueue-engine = { path = "../pqueue-engine" }
 pqueue-projection = { path = "../pqueue-projection" }
 pqueue-relational = { path = "../pqueue-relational" }
 axon-esf.workspace = true
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "hooks", "trace"] }
 serde = "1"
 serde_json = "1"
 bytes = "1"
