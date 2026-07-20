@@ -265,6 +265,24 @@ fn validate_hot_query_order(
     Ok(direction)
 }
 
+fn resolving_query_index<'a>(
+    definition: &'a QueueDefinition,
+    preferred: &'a pqueue_core::QueueIndex,
+    filters: &[pqueue_core::QueryFilter],
+) -> EngineResult<&'a pqueue_core::QueueIndex> {
+    std::iter::once(preferred)
+        .chain(
+            definition
+                .typed_indexes
+                .iter()
+                .filter(|candidate| candidate.name != preferred.name),
+        )
+        .find(|candidate| hot_query_shape(candidate, filters).is_ok())
+        .ok_or(EngineError::Invalid(
+            "no declared index resolves the predicate shape",
+        ))
+}
+
 fn entity_matches_filters(
     entity: &JsonValue,
     filters: &[pqueue_core::QueryFilter],
@@ -428,7 +446,7 @@ fn hot_query_candidates(
                 .as_ref()
                 .map(|(key, id)| (key.as_slice(), id.as_str())),
             PAGE,
-            false,
+            true,
         )?;
         let done = page.len() < PAGE;
         if let Some(last) = page.last() {
@@ -462,7 +480,7 @@ fn for_each_hot_query_candidate(
                 .as_ref()
                 .map(|(key, id)| (key.as_slice(), id.as_str())),
             MAX_SCAN_ROWS,
-            false,
+            true,
         )?;
         let done = page.len() < MAX_SCAN_ROWS;
         if let Some(last) = page.last() {
@@ -1861,6 +1879,46 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 return Err(EngineError::Invalid("cursor-invalidated"));
             }
 
+            if let Some(state) = &cursor_state {
+                let (tenant, queue) = parts(shard);
+                let anchor: Option<(Vec<u8>, Option<String>)> = st(g.conn.query_row(
+                    "SELECT x.index_key,i.entity_document FROM pqueue_item_index x \
+                     JOIN pqueue_items i ON i.tenant_id=x.tenant_id AND i.queue_id=x.queue_id AND i.item_id=x.item_id \
+                     WHERE x.tenant_id=?1 AND x.queue_id=?2 AND x.index_name=?3 AND x.item_id=?4",
+                    params![tenant, queue, spec.name, state.anchor_item_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional())?;
+                let (index_key, entity_json) =
+                    anchor.ok_or(EngineError::Invalid("cursor-invalidated"))?;
+                if state.anchor_index_key.as_ref() != Some(&index_key) {
+                    return Err(EngineError::Invalid("cursor-invalidated"));
+                }
+                let entity: JsonValue = serde_json::from_str(
+                    entity_json
+                        .as_deref()
+                        .ok_or(EngineError::Invalid("cursor-invalidated"))?,
+                )
+                .map_err(|_| EngineError::Invalid("cursor-invalidated"))?;
+                if !entity_matches_filters(&entity, &request.filters)? {
+                    return Err(EngineError::Invalid("cursor-invalidated"));
+                }
+                let row = typed_index_row_from_entity(spec, state.anchor_item_id, &entity)?
+                    .ok_or(EngineError::Invalid("cursor-invalidated"))?;
+                let values = request
+                    .order_by
+                    .iter()
+                    .map(|field| {
+                        row.fields
+                            .get(&field.field)
+                            .cloned()
+                            .ok_or(EngineError::Invalid("cursor-invalidated"))
+                    })
+                    .collect::<EngineResult<Vec<_>>>()?;
+                if values != state.anchor_values {
+                    return Err(EngineError::Invalid("cursor-invalidated"));
+                }
+            }
+
             let cursor_key = cursor_state
                 .as_ref()
                 .and_then(|state| state.anchor_index_key.as_ref())
@@ -2236,43 +2294,52 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 None => definition.typed_indexes.first(),
             }
             .ok_or(EngineError::Invalid("unknown secondary index"))?;
+            let scan_spec = resolving_query_index(&definition, spec, &request.filters)?;
             let mut groups: BTreeMap<String, (BTreeMap<String, TypedValue>, u64)> = BTreeMap::new();
-            for_each_hot_query_candidate(&g.conn, shard, spec, &request.filters, |candidate| {
-                let mut key = BTreeMap::new();
-                for group in &request.group_by {
-                    let index_type = index_field_type(spec, &group.field)
-                        .ok_or(EngineError::Invalid("unindexed-field"))?;
-                    let Some(mut value) = typed_value_for_json(
-                        candidate
-                            .entity
-                            .get(&group.field)
-                            .unwrap_or(&JsonValue::Null),
-                        index_type,
-                    )?
-                    else {
-                        return Ok(());
-                    };
-                    if let Some(bucket) = group.time_bucket {
-                        value = match value {
-                            TypedValue::DateTime(value) => {
-                                TypedValue::DateTime(truncate_query_timestamp(value, bucket))
-                            }
-                            _ => return Err(EngineError::Invalid("unsupported time bucket")),
+            for_each_hot_query_candidate(
+                &g.conn,
+                shard,
+                scan_spec,
+                &request.filters,
+                |candidate| {
+                    let mut key = BTreeMap::new();
+                    for group in &request.group_by {
+                        let index_type = index_field_type(spec, &group.field)
+                            .ok_or(EngineError::Invalid("unindexed-field"))?;
+                        let Some(mut value) = typed_value_for_json(
+                            candidate
+                                .entity
+                                .get(&group.field)
+                                .unwrap_or(&JsonValue::Null),
+                            index_type,
+                        )?
+                        else {
+                            return Ok(());
                         };
+                        if let Some(bucket) = group.time_bucket {
+                            value = match value {
+                                TypedValue::DateTime(value) => {
+                                    TypedValue::DateTime(truncate_query_timestamp(value, bucket))
+                                }
+                                _ => return Err(EngineError::Invalid("unsupported time bucket")),
+                            };
+                        }
+                        key.insert(group.field.clone(), value);
                     }
-                    key.insert(group.field.clone(), value);
-                }
-                if key.len() != request.group_by.len() {
-                    return Ok(());
-                }
-                let serialized =
-                    serde_json::to_string(&key).map_err(|e| EngineError::Storage(e.to_string()))?;
-                if !groups.contains_key(&serialized) && groups.len() as u32 >= request.max_groups {
-                    return Err(EngineError::Invalid("aggregate-too-large"));
-                }
-                groups.entry(serialized).or_insert((key, 0)).1 += 1;
-                Ok(())
-            })?;
+                    if key.len() != request.group_by.len() {
+                        return Ok(());
+                    }
+                    let serialized = serde_json::to_string(&key)
+                        .map_err(|e| EngineError::Storage(e.to_string()))?;
+                    if !groups.contains_key(&serialized)
+                        && groups.len() as u32 >= request.max_groups
+                    {
+                        return Err(EngineError::Invalid("aggregate-too-large"));
+                    }
+                    groups.entry(serialized).or_insert((key, 0)).1 += 1;
+                    Ok(())
+                },
+            )?;
             Ok(GroupedAggregateResponse {
                 groups: groups
                     .into_values()
@@ -2299,26 +2366,26 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 None => definition.typed_indexes.first(),
             }
             .ok_or(EngineError::Invalid("unknown secondary index"))?;
-            if request.filters.iter().any(|filter| {
-                !index_fields(spec)
-                    .iter()
-                    .any(|(field, _)| *field == filter.field)
-            }) {
-                return Err(EngineError::Invalid("unindexed-field"));
-            }
+            let scan_spec = resolving_query_index(&definition, spec, &request.filters)?;
             let mut metrics = QueueMetrics::default();
-            for_each_hot_query_candidate(&g.conn, shard, spec, &request.filters, |candidate| {
-                if candidate.superseded {
-                    return Ok(());
-                }
-                match parse_state(&candidate.lifecycle_state)? {
-                    ItemState::Pending => metrics.pending += 1,
-                    ItemState::Leased => metrics.leased += 1,
-                    ItemState::Complete => metrics.complete += 1,
-                    ItemState::Failed => metrics.failed += 1,
-                }
-                Ok(())
-            })?;
+            for_each_hot_query_candidate(
+                &g.conn,
+                shard,
+                scan_spec,
+                &request.filters,
+                |candidate| {
+                    if candidate.superseded {
+                        return Ok(());
+                    }
+                    match parse_state(&candidate.lifecycle_state)? {
+                        ItemState::Pending => metrics.pending += 1,
+                        ItemState::Leased => metrics.leased += 1,
+                        ItemState::Complete => metrics.complete += 1,
+                        ItemState::Failed => metrics.failed += 1,
+                    }
+                    Ok(())
+                },
+            )?;
             metrics.resident_terminal_count = metrics.complete + metrics.failed;
             Ok(metrics)
         })();
@@ -2349,44 +2416,27 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             if !matches!(index_type, IndexType::Integer | IndexType::Float) {
                 return Err(EngineError::Invalid("unsupported bucket field"));
             }
+            let scan_spec = resolving_query_index(&definition, spec, &request.filters)?;
             let mut counts = vec![0_u64; request.buckets.len()];
             let mut null_count = 0_u64;
-            // Sparse secondary indexes cannot define the NULL complement.  Walk the authoritative item
-            // population in bounded PK-keyset pages and apply the typed predicates before bucketing.
-            let (tenant, queue) = parts(shard);
-            let mut anchor = String::new();
-            loop {
-                let mut stmt = st(g.conn.prepare(
-                    "SELECT item_id,entity_document FROM pqueue_items \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id>?3 ORDER BY item_id LIMIT 1000",
-                ))?;
-                let rows = st(stmt.query_map(params![tenant, queue, anchor], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-                }))?;
-                let mut page = Vec::new();
-                for row in rows {
-                    page.push(st(row)?);
-                }
-                if page.is_empty() {
-                    break;
-                }
-                anchor = page.last().expect("nonempty").0.clone();
-                for (_, entity_json) in &page {
-                    let Some(entity_json) = entity_json else {
-                        continue;
-                    };
-                    let entity: JsonValue = serde_json::from_str(entity_json)
-                        .map_err(|e| EngineError::Storage(e.to_string()))?;
-                    if !entity_matches_filters(&entity, &request.filters)? {
-                        continue;
-                    }
+            // Resolve the authoritative base population through a dense-enough declared predicate
+            // index.  The bucket field's own index may be sparse and therefore cannot supply NULLs.
+            for_each_hot_query_candidate(
+                &g.conn,
+                shard,
+                scan_spec,
+                &request.filters,
+                |candidate| {
                     let Some(value) = typed_value_for_json(
-                        entity.get(&request.field).unwrap_or(&JsonValue::Null),
+                        candidate
+                            .entity
+                            .get(&request.field)
+                            .unwrap_or(&JsonValue::Null),
                         index_type,
                     )?
                     else {
                         null_count += 1;
-                        continue;
+                        return Ok(());
                     };
                     if let Some((position, _)) = request
                         .buckets
@@ -2396,11 +2446,9 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     {
                         counts[position] += 1;
                     }
-                }
-                if page.len() < 1_000 {
-                    break;
-                }
-            }
+                    Ok(())
+                },
+            )?;
             let mut buckets = request
                 .buckets
                 .into_iter()
@@ -2425,7 +2473,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
         request: BoundedMutationRequest,
     ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
         let result = (|| {
-            if request.max_scan_rows == 0 || request.max_scan_rows > 1_000 {
+            if request.max_scan_rows == 0 {
                 return Err(EngineError::Invalid("invalid page size"));
             }
 
@@ -2444,16 +2492,31 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     .ok_or(EngineError::Invalid("unknown secondary index"))?
             };
             hot_query_shape(spec, &request.filters)?;
-            let mut matches = hot_query_candidate_page(
-                &g.conn,
-                shard,
-                spec,
-                &request.filters,
-                pqueue_core::SortDirection::Ascending,
-                None,
-                request.max_scan_rows as usize,
-                true,
-            )?;
+            let page_size = (request.max_scan_rows as usize).min(1_000);
+            let mut matches = Vec::new();
+            let mut scan_cursor: Option<(Vec<u8>, String)> = None;
+            loop {
+                let page = hot_query_candidate_page(
+                    &g.conn,
+                    shard,
+                    spec,
+                    &request.filters,
+                    pqueue_core::SortDirection::Ascending,
+                    scan_cursor
+                        .as_ref()
+                        .map(|(key, id)| (key.as_slice(), id.as_str())),
+                    page_size,
+                    true,
+                )?;
+                let done = page.len() < page_size;
+                if let Some(last) = page.last() {
+                    scan_cursor = Some((last.index_key.clone(), last.item_id.to_string()));
+                }
+                matches.extend(page);
+                if done {
+                    break;
+                }
+            }
             matches.sort_by_key(|candidate| candidate.item_id);
 
             struct PlannedMutation {
@@ -2566,11 +2629,14 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     "CREATE TEMP TABLE IF NOT EXISTS pqueue_hot_mutation_stage(ordinal INTEGER PRIMARY KEY,item_id TEXT NOT NULL UNIQUE,item_version INTEGER NOT NULL,fields TEXT NOT NULL,entity TEXT NOT NULL); \
                      DELETE FROM pqueue_hot_mutation_stage;",
                 ))?;
-                let values_clause = std::iter::repeat_n("(?,?,?,?,?)", planned.len())
+            }
+            for planned_chunk in planned.chunks(1_000) {
+                st(tx.execute("DELETE FROM pqueue_hot_mutation_stage", []))?;
+                let values_clause = std::iter::repeat_n("(?,?,?,?,?)", planned_chunk.len())
                     .collect::<Vec<_>>()
                     .join(",");
-                let mut values = Vec::with_capacity(planned.len() * 5);
-                for (ordinal, mutation) in planned.iter().enumerate() {
+                let mut values = Vec::with_capacity(planned_chunk.len() * 5);
+                for (ordinal, mutation) in planned_chunk.iter().enumerate() {
                     values.push(SqlValue::Integer(ordinal as i64));
                     values.push(SqlValue::Text(mutation.candidate.item_id.to_string()));
                     values.push(SqlValue::Integer(mutation.candidate.item_version));
@@ -2595,22 +2661,34 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     .query_map(params![ts_nanos(now), seq, tenant, queue], |row| {
                         row.get::<_, String>(0)
                     }))?;
+                let mut chunk_updated = HashSet::new();
                 for row in rows {
-                    updated.insert(st(row)?);
+                    let item_id = st(row)?;
+                    chunk_updated.insert(item_id.clone());
+                    updated.insert(item_id);
                 }
                 drop(statement);
 
-                if !updated.is_empty() {
+                if !chunk_updated.is_empty() {
+                    if chunk_updated.len() != planned_chunk.len() {
+                        let placeholders = std::iter::repeat_n("?", chunk_updated.len())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        st(tx.execute(
+                            &format!("DELETE FROM pqueue_hot_mutation_stage WHERE item_id NOT IN ({placeholders})"),
+                            params_from_iter(chunk_updated.iter()),
+                        ))?;
+                    }
                     st(tx.execute(
                         "DELETE FROM pqueue_item_index WHERE rowid IN (SELECT x.rowid FROM pqueue_hot_mutation_stage m \
                          JOIN pqueue_item_index x ON x.tenant_id=?1 AND x.queue_id=?2 AND x.item_id=m.item_id)",
                         params![tenant, queue],
                     ))?;
 
-                    let index_rows = planned
+                    let index_rows = planned_chunk
                         .iter()
                         .filter(|mutation| {
-                            updated.contains(&mutation.candidate.item_id.to_string())
+                            chunk_updated.contains(&mutation.candidate.item_id.to_string())
                         })
                         .flat_map(|mutation| {
                             mutation.keys.iter().map(move |(name, key)| {
@@ -2654,8 +2732,8 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 .map(|mutation| mutation.candidate.item_id.to_string())
                 .collect::<Vec<_>>();
             let mut existing = HashSet::new();
-            if !unresolved.is_empty() {
-                let placeholders = std::iter::repeat_n("?", unresolved.len())
+            for unresolved_chunk in unresolved.chunks(1_000) {
+                let placeholders = std::iter::repeat_n("?", unresolved_chunk.len())
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
@@ -2666,7 +2744,7 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                     SqlValue::Text(tenant.clone()),
                     SqlValue::Text(queue.clone()),
                 ];
-                values.extend(unresolved.into_iter().map(SqlValue::Text));
+                values.extend(unresolved_chunk.iter().cloned().map(SqlValue::Text));
                 let mut statement = st(tx.prepare(&sql))?;
                 let rows =
                     st(statement
@@ -3367,6 +3445,182 @@ mod hot_query_sql_tests {
         assert_eq!((one, hundred, thousand), (one, one, one));
     }
 
+    #[tokio::test]
+    async fn bounded_mutation_keyset_loops_past_each_internal_scan_page() {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                (0..250)
+                    .map(|_| PushSpec {
+                        entity: Some(serde_json::json!({"status":"ready"})),
+                        ..PushSpec::default()
+                    })
+                    .collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let response = backend
+            .bounded_mutation(
+                &shard,
+                BoundedMutationRequest {
+                    index: Some("by_status".into()),
+                    filters: vec![QueryFilter {
+                        field: "status".into(),
+                        op: FilterOp::Eq,
+                        value: TypedValue::String("ready".into()),
+                    }],
+                    set_fields: BTreeMap::from([(
+                        "status".into(),
+                        TypedValue::String("done".into()),
+                    )]),
+                    max_scan_rows: 17,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.results.len(), 250);
+        assert!(
+            response
+                .results
+                .iter()
+                .all(|result| result.outcome == MutationOutcome::Updated)
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_mutation_cas_loser_keeps_old_index_rows() {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let ids = backend
+            .push(
+                &shard,
+                (0..2)
+                    .map(|_| PushSpec {
+                        entity: Some(serde_json::json!({"status":"ready"})),
+                        ..PushSpec::default()
+                    })
+                    .collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let loser = ids[1];
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .execute_batch(&format!(
+                "CREATE TEMP TRIGGER skip_hot_mutation BEFORE UPDATE ON pqueue_items \
+             WHEN OLD.item_id='{}' BEGIN SELECT RAISE(IGNORE); END;",
+                loser
+            ))
+            .unwrap();
+        let response = backend
+            .bounded_mutation(
+                &shard,
+                BoundedMutationRequest {
+                    index: Some("by_status".into()),
+                    filters: vec![QueryFilter {
+                        field: "status".into(),
+                        op: FilterOp::Eq,
+                        value: TypedValue::String("ready".into()),
+                    }],
+                    set_fields: BTreeMap::from([(
+                        "status".into(),
+                        TypedValue::String("done".into()),
+                    )]),
+                    max_scan_rows: 10,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .results
+                .iter()
+                .find(|result| result.item_id == loser)
+                .unwrap()
+                .outcome,
+            MutationOutcome::Conflict
+        );
+        let key = axon_esf::encode_compound_index_key(&[(
+            &JsonValue::String("ready".into()),
+            &IndexType::String,
+        )])
+        .unwrap()
+        .unwrap();
+        let retained: i64 = backend.inner.lock().unwrap().conn.query_row(
+            "SELECT COUNT(*) FROM pqueue_item_index WHERE tenant_id='tenant' AND queue_id='queue' AND index_name='by_status' AND item_id=?1 AND index_key=?2",
+            params![loser.to_string(), key], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retained, 1);
+    }
+
+    #[tokio::test]
+    async fn range_cursor_rejects_a_deleted_anchor() {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                (0..3)
+                    .map(|_| PushSpec {
+                        entity: Some(serde_json::json!({"status":"ready"})),
+                        ..PushSpec::default()
+                    })
+                    .collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let request = RangeScanRequest {
+            index: Some("by_status".into()),
+            filters: vec![QueryFilter {
+                field: "status".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("ready".into()),
+            }],
+            order_by: vec![pqueue_core::OrderField {
+                field: "status".into(),
+                direction: pqueue_core::SortDirection::Ascending,
+            }],
+            page_size: 1,
+            cursor: None,
+        };
+        let first = backend.range_scan(&shard, request.clone()).await.unwrap();
+        let cursor = first.next_cursor.clone().unwrap();
+        let state: RangeScanCursorState = serde_json::from_str(&cursor.0).unwrap();
+        backend.inner.lock().unwrap().conn.execute(
+            "DELETE FROM pqueue_item_index WHERE tenant_id='tenant' AND queue_id='queue' AND index_name='by_status' AND item_id=?1",
+            params![state.anchor_item_id.to_string()],
+        ).unwrap();
+        assert!(matches!(
+            backend
+                .range_scan(
+                    &shard,
+                    RangeScanRequest {
+                        cursor: Some(cursor),
+                        ..request
+                    }
+                )
+                .await,
+            Err(EngineError::Invalid("cursor-invalidated"))
+        ));
+    }
+
     #[test]
     fn invalid_index_shapes_are_rejected_before_sql() {
         let spec = QueueIndex {
@@ -3423,6 +3677,48 @@ mod hot_query_sql_tests {
                     direction: pqueue_core::SortDirection::Ascending,
                 }]
             ),
+            Err(EngineError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn aggregate_ports_reject_unresolvable_predicate_shapes() {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let filters = vec![QueryFilter {
+            field: "not_declared".into(),
+            op: FilterOp::Eq,
+            value: TypedValue::String("x".into()),
+        }];
+        assert!(matches!(
+            backend
+                .metrics_by_query(
+                    &shard,
+                    MetricsByQueryRequest {
+                        index: Some("by_status".into()),
+                        filters: filters.clone(),
+                    }
+                )
+                .await,
+            Err(EngineError::Invalid(_))
+        ));
+        assert!(matches!(
+            backend
+                .grouped_aggregate(
+                    &shard,
+                    GroupedAggregateRequest {
+                        index: Some("by_status".into()),
+                        filters,
+                        group_by: vec![pqueue_core::GroupByField {
+                            field: "status".into(),
+                            time_bucket: None
+                        }],
+                        max_groups: 10,
+                    }
+                )
+                .await,
             Err(EngineError::Invalid(_))
         ));
     }

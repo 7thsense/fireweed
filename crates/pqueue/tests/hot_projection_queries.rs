@@ -1057,11 +1057,23 @@ fn recycling_preview_request() -> GroupedAggregateRequest {
 fn engagement_probability_request() -> DeclaredBucketSegmentRequest {
     DeclaredBucketSegmentRequest {
         index: Some("by_engagement_probability".to_string()),
-        filters: vec![QueryFilter {
-            field: "action_type".to_string(),
-            op: FilterOp::Eq,
-            value: TypedValue::String("message.send".to_string()),
-        }],
+        filters: vec![
+            QueryFilter {
+                field: "tenant_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("tenant_7s".to_string()),
+            },
+            QueryFilter {
+                field: "run_id".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("job_9001".to_string()),
+            },
+            QueryFilter {
+                field: "action_type".to_string(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("message.send".to_string()),
+            },
+        ],
         field: "engagement_probability".to_string(),
         buckets: vec![
             pqueue::BucketRule {
