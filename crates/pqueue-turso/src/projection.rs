@@ -209,6 +209,144 @@ fn index_is_unique(index: &QueueIndex) -> bool {
     }
 }
 
+// Stay below SQLite's conservative 999-variable profile even when Turso is
+// configured with a larger limit. Each accepted push lowers to one statement
+// per bounded chunk, never one future/statement per item, gate, or index row.
+const PUSH_ITEM_CHUNK: usize = 47; // 47 * 19 binds = 893
+const PUSH_GATE_CHUNK: usize = 225; // 225 * 4 binds = 900
+const PUSH_INDEX_CHUNK: usize = 180; // 180 * 5 binds = 900
+const UNIQUE_CHECK_CHUNK: usize = 448; // 2 common + 448 * 2 binds = 898
+
+fn values_rows(rows: usize, columns: usize) -> String {
+    let row = format!("({})", vec!["?"; columns].join(","));
+    vec![row; rows].join(",")
+}
+
+async fn insert_push_items_batched(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    definition: &QueueDefinition,
+    items: &[PushItem],
+    incoming: i64,
+    base: i64,
+    now: i64,
+) -> EngineResult<()> {
+    const COLUMNS: &str = "tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,\
+        priority_sort,not_before,eligible_since,group_key,cohort_size,recurrence_until,payload,\
+        fields,metadata,entity_document,retry_count,item_version,lease_token_hash,lease_expires_at,\
+        worker_id,last_command_sequence,created_at,updated_at,terminal_at,terminal_command_epoch,\
+        fenced,superseded,max_attempts,created_seq";
+    const ROW: &str =
+        "(?,?,?,?,'Pending',?,?,?,?,?,?,NULL,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
+
+    for (chunk_index, chunk) in items.chunks(PUSH_ITEM_CHUNK).enumerate() {
+        let mut parameters: Vec<Value> = Vec::with_capacity(chunk.len() * 19);
+        let chunk_base = chunk_index * PUSH_ITEM_CHUNK;
+        for (offset, item) in chunk.iter().enumerate() {
+            let priority = item
+                .priority
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(storage)?;
+            let not_before = ts_nanos_opt(item.not_before);
+            let cohort_size = item
+                .cohort_size
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| EngineError::Conflict)?;
+            let entity = item
+                .entity_document
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(storage)?;
+            let ordinal = chunk_base
+                .checked_add(offset)
+                .ok_or_else(|| storage("item sequence overflow"))?;
+            let created_seq = base
+                .checked_add(i64::try_from(ordinal).map_err(storage)?)
+                .ok_or_else(|| storage("item sequence overflow"))?;
+            parameters.extend([
+                tenant.to_string().into(),
+                queue.to_string().into(),
+                item.item_id.to_string().into(),
+                item.client_item_key.as_str().to_string().into(),
+                priority.map_or(Value::Null, Value::Text),
+                Value::Blob(elig_sort(&item.priority, &definition.priority_model)),
+                not_before.map_or(Value::Null, Value::Integer),
+                Value::Integer(not_before.unwrap_or(now)),
+                item.group_key
+                    .as_ref()
+                    .map_or(Value::Null, |group| Value::Text(group.as_str().to_string())),
+                cohort_size.map_or(Value::Null, Value::Integer),
+                item.payload
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Blob(value.to_vec())),
+                Value::Text(fields_to_json(&item.fields)?),
+                Value::Text(metadata_to_json(&item.metadata)?),
+                entity.map_or(Value::Null, Value::Text),
+                Value::Integer(incoming),
+                Value::Integer(now),
+                Value::Integer(now),
+                Value::Integer(i64::from(item.max_attempts)),
+                Value::Integer(created_seq),
+            ]);
+        }
+        transaction
+            .execute(
+                format!(
+                    "INSERT INTO pqueue_items ({COLUMNS}) VALUES {}",
+                    vec![ROW; chunk.len()].join(",")
+                ),
+                parameters,
+            )
+            .await
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
+async fn insert_push_gates_batched(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    items: &[PushItem],
+) -> EngineResult<()> {
+    let rows: Vec<_> = items
+        .iter()
+        .flat_map(|item| {
+            item.gate_keys
+                .iter()
+                .map(move |gate| (item.item_id, gate.as_str()))
+        })
+        .collect();
+    for chunk in rows.chunks(PUSH_GATE_CHUNK) {
+        let mut parameters: Vec<Value> = Vec::with_capacity(chunk.len() * 4);
+        for (item_id, gate) in chunk {
+            parameters.extend([
+                tenant.to_string().into(),
+                queue.to_string().into(),
+                item_id.to_string().into(),
+                gate.to_string().into(),
+            ]);
+        }
+        transaction
+            .execute(
+                format!(
+                    "INSERT INTO pqueue_item_gates (tenant_id,queue_id,item_id,gate_key) \
+                     VALUES {} ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
+                    values_rows(chunk.len(), 4)
+                ),
+                parameters,
+            )
+            .await
+            .map_err(storage)?;
+    }
+    Ok(())
+}
+
 fn typed_index_keys(
     indexes: &[QueueIndex],
     entity: Option<&serde_json::Value>,
@@ -331,10 +469,10 @@ async fn maintain_typed_indexes_on_insert(
 ) -> EngineResult<()> {
     let mut batch_unique: HashMap<(String, Vec<u8>), String> = HashMap::new();
     let mut rows = Vec::with_capacity(items.len());
+    let mut unique_rows = Vec::new();
     for item in items {
         let item_id = item.item_id.to_string();
         let keys = typed_index_keys(indexes, item.entity_document.as_ref())?;
-        check_typed_unique_conflicts(transaction, tenant, queue, indexes, &keys).await?;
         for (name, key) in &keys {
             let unique = indexes
                 .iter()
@@ -350,11 +488,62 @@ async fn maintain_typed_indexes_on_insert(
             {
                 return Err(EngineError::Conflict);
             }
+            unique_rows.push((name.clone(), key.clone()));
         }
         rows.push((item_id, keys));
     }
-    for (item_id, keys) in rows {
-        insert_typed_index_rows(transaction, tenant, queue, &item_id, &keys).await?;
+
+    for chunk in unique_rows.chunks(UNIQUE_CHECK_CHUNK) {
+        let mut parameters: Vec<Value> = Vec::with_capacity(2 + chunk.len() * 2);
+        for (name, key) in chunk {
+            parameters.push(name.clone().into());
+            parameters.push(Value::Blob(key.clone()));
+        }
+        parameters.push(tenant.to_string().into());
+        parameters.push(queue.to_string().into());
+        let query = format!(
+            "WITH incoming(index_name,index_key) AS (VALUES {}) \
+             SELECT 1 FROM pqueue_item_index existing JOIN incoming \
+             ON existing.index_name=incoming.index_name AND existing.index_key=incoming.index_key \
+             WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1",
+            values_rows(chunk.len(), 2)
+        );
+        if one_row(transaction, &query, parameters).await?.is_some() {
+            return Err(EngineError::Conflict);
+        }
+    }
+
+    let rows: Vec<_> = rows
+        .into_iter()
+        .flat_map(|(item_id, keys)| {
+            keys.into_iter()
+                .map(move |(name, key)| (item_id.clone(), name, key))
+        })
+        .collect();
+    for chunk in rows.chunks(PUSH_INDEX_CHUNK) {
+        let mut parameters: Vec<Value> = Vec::with_capacity(chunk.len() * 5);
+        for (item_id, name, key) in chunk {
+            parameters.extend([
+                tenant.to_string().into(),
+                queue.to_string().into(),
+                name.clone().into(),
+                Value::Blob(key.clone()),
+                item_id.clone().into(),
+            ]);
+        }
+        transaction
+            .execute(
+                format!(
+                    "INSERT INTO pqueue_item_index \
+                     (tenant_id,queue_id,index_name,index_key,item_id) VALUES {} \
+                     ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
+                     index_key=excluded.index_key",
+                    values_rows(chunk.len(), 5)
+                ),
+                parameters,
+            )
+            .await
+            .map_err(storage)?;
     }
     Ok(())
 }
@@ -1267,73 +1456,18 @@ async fn apply_owned(
                     .await
                     .map_err(storage)?;
                 let now = ts_nanos(envelope.created_at);
-                for (offset, item) in push.items.iter().enumerate() {
-                    let priority = item
-                        .priority
-                        .as_ref()
-                        .map(serde_json::to_string)
-                        .transpose()
-                        .map_err(storage)?;
-                    let not_before = ts_nanos_opt(item.not_before);
-                    let cohort_size = item
-                        .cohort_size
-                        .map(i64::try_from)
-                        .transpose()
-                        .map_err(|_| EngineError::Conflict)?;
-                    let entity = item
-                        .entity_document
-                        .as_ref()
-                        .map(serde_json::to_string)
-                        .transpose()
-                        .map_err(storage)?;
-                    transaction
-                        .execute(
-                            sql::INSERT_ITEM,
-                            vec![
-                                tenant.clone().into(),
-                                queue.clone().into(),
-                                item.item_id.to_string().into(),
-                                item.client_item_key.as_str().to_string().into(),
-                                priority.map_or(Value::Null, Value::Text),
-                                Value::Blob(elig_sort(&item.priority, &definition.priority_model)),
-                                not_before.map_or(Value::Null, Value::Integer),
-                                Value::Integer(not_before.unwrap_or(now)),
-                                item.group_key.as_ref().map_or(Value::Null, |group| {
-                                    Value::Text(group.as_str().to_string())
-                                }),
-                                cohort_size.map_or(Value::Null, Value::Integer),
-                                item.payload
-                                    .as_ref()
-                                    .map_or(Value::Null, |value| Value::Blob(value.to_vec())),
-                                Value::Text(fields_to_json(&item.fields)?),
-                                Value::Text(metadata_to_json(&item.metadata)?),
-                                entity.map_or(Value::Null, Value::Text),
-                                Value::Integer(incoming),
-                                Value::Integer(now),
-                                Value::Integer(i64::from(item.max_attempts)),
-                                Value::Integer(
-                                    base.checked_add(i64::try_from(offset).map_err(storage)?)
-                                        .ok_or_else(|| storage("item sequence overflow"))?,
-                                ),
-                            ],
-                        )
-                        .await
-                        .map_err(storage)?;
-                    for gate in &item.gate_keys {
-                        transaction
-                            .execute(
-                                sql::INSERT_ITEM_GATE,
-                                vec![
-                                    Value::Text(tenant.clone()),
-                                    Value::Text(queue.clone()),
-                                    Value::Text(item.item_id.to_string()),
-                                    Value::Text(gate.as_str().to_string()),
-                                ],
-                            )
-                            .await
-                            .map_err(storage)?;
-                    }
-                }
+                insert_push_items_batched(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    &definition,
+                    &push.items,
+                    incoming,
+                    base,
+                    now,
+                )
+                .await?;
+                insert_push_gates_batched(&transaction, &tenant, &queue, &push.items).await?;
                 upsert_cohorts(&transaction, &tenant, &queue, &push.items, now).await?;
                 maintain_typed_indexes_on_insert(
                     &transaction,
@@ -3530,6 +3664,103 @@ impl AsyncProjectionStore for TursoRelational {
                 .map(|row| serde_json::from_str(&text(&row.values[0])?).map_err(storage))
                 .collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod push_batch_lowering_tests {
+    use pqueue_conformance::item;
+    use pqueue_core::{IndexDeclaration, IndexDef, IndexType, ItemId, QueueIndex};
+
+    use super::{
+        PUSH_GATE_CHUNK, PUSH_INDEX_CHUNK, PUSH_ITEM_CHUNK, UNIQUE_CHECK_CHUNK, index_is_unique,
+        typed_index_keys,
+    };
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct StatementShape {
+        item_inserts: usize,
+        gate_inserts: usize,
+        unique_checks: usize,
+        index_inserts: usize,
+    }
+
+    fn statement_shape(
+        items: &[pqueue_engine::PushItem],
+        indexes: &[QueueIndex],
+    ) -> StatementShape {
+        let gate_rows = items.iter().map(|item| item.gate_keys.len()).sum::<usize>();
+        let keys = items
+            .iter()
+            .flat_map(|item| typed_index_keys(indexes, item.entity_document.as_ref()).unwrap())
+            .collect::<Vec<_>>();
+        let unique_rows = keys
+            .iter()
+            .filter(|(name, _)| {
+                indexes
+                    .iter()
+                    .find(|index| index.name == *name)
+                    .is_some_and(index_is_unique)
+            })
+            .count();
+        StatementShape {
+            item_inserts: items.len().div_ceil(PUSH_ITEM_CHUNK),
+            gate_inserts: gate_rows.div_ceil(PUSH_GATE_CHUNK),
+            unique_checks: unique_rows.div_ceil(UNIQUE_CHECK_CHUNK),
+            index_inserts: keys.len().div_ceil(PUSH_INDEX_CHUNK),
+        }
+    }
+
+    fn indexed_gated_items(count: usize) -> (Vec<pqueue_engine::PushItem>, Vec<QueueIndex>) {
+        let items = (0..count)
+            .map(|offset| {
+                let mut item = item(
+                    &ItemId::from_u64(offset as u64 + 1).to_string(),
+                    &format!("batch-{offset}"),
+                    0,
+                );
+                item.gate_keys = vec![format!("gate-{offset}")];
+                item.entity_document = Some(serde_json::json!({
+                    "email": format!("user-{offset}@example.com")
+                }));
+                item
+            })
+            .collect();
+        let indexes = vec![QueueIndex {
+            name: "by_email".to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "email".to_string(),
+                index_type: IndexType::String,
+                unique: true,
+            }),
+        }];
+        (items, indexes)
+    }
+
+    #[test]
+    fn accepted_push_statement_count_is_constant_within_item_chunk() {
+        let (one, indexes) = indexed_gated_items(1);
+        let (full_chunk, _) = indexed_gated_items(PUSH_ITEM_CHUNK);
+        let expected = StatementShape {
+            item_inserts: 1,
+            gate_inserts: 1,
+            unique_checks: 1,
+            index_inserts: 1,
+        };
+        assert_eq!(statement_shape(&one, &indexes), expected);
+        assert_eq!(statement_shape(&full_chunk, &indexes), expected);
+
+        let (over_chunk, _) = indexed_gated_items(PUSH_ITEM_CHUNK + 1);
+        assert_eq!(
+            statement_shape(&over_chunk, &indexes),
+            StatementShape {
+                item_inserts: 2,
+                gate_inserts: 1,
+                unique_checks: 1,
+                index_inserts: 1,
+            },
+            "only crossing the declared bind-safe chunk adds an item statement"
+        );
     }
 }
 
