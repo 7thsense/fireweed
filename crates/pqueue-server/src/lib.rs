@@ -1196,7 +1196,50 @@ where
     }
 
     pub async fn renew_sessions(&self, now: UtcTimestamp) -> EngineResult<()> {
-        self.advertise_and_refresh_owner_endpoints(now).await?;
+        // Endpoint refresh and lease renewal are independent node-level work. Preserve the first
+        // error for the caller, but never let a discovery failure suppress healthy lease renewals.
+        let mut first_error = self.advertise_and_refresh_owner_endpoints(now).await.err();
+        // Renew cached sessions FIRST. Assignment polling and drain maintenance are independently fallible;
+        // one unhealthy queue must never suppress every healthy queue's lease extension.
+        let renewals: Vec<pqueue_engine::LeaseRenewal> = self
+            .sessions
+            .lock()
+            .expect("poisoned")
+            .values()
+            .map(|session| pqueue_engine::LeaseRenewal {
+                queue: session.queue.clone(),
+                owner: self.owner.clone(),
+                expected_epoch: session.lease_epoch,
+            })
+            .collect();
+        if !renewals.is_empty() {
+            let outcomes = self.cp_renew_batch(renewals.clone(), now).await?;
+            if outcomes.len() != renewals.len() {
+                return Err(EngineError::Storage(format!(
+                    "control-plane batch renewal returned {} outcomes for {} inputs",
+                    outcomes.len(),
+                    renewals.len()
+                )));
+            }
+            for (renewal, outcome) in renewals.into_iter().zip(outcomes) {
+                match outcome {
+                    pqueue_engine::LeaseRenewalOutcome::Renewed(_) => {}
+                    pqueue_engine::LeaseRenewalOutcome::Fenced
+                    | pqueue_engine::LeaseRenewalOutcome::Missing => {
+                        self.sessions
+                            .lock()
+                            .expect("poisoned")
+                            .remove(&renewal.queue);
+                    }
+                    pqueue_engine::LeaseRenewalOutcome::Error(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+        }
+
         let mut queues: std::collections::BTreeSet<QueueKey> = self
             .managed_queues
             .lock()
@@ -1205,9 +1248,16 @@ where
             .cloned()
             .collect();
         queues.extend(self.sessions.lock().expect("poisoned").keys().cloned());
-        let mut renewals = Vec::new();
-        for queue in queues {
-            let resolution = self.cp_resolve(queue.clone(), now).await?;
+        let queues: Vec<QueueKey> = queues.into_iter().collect();
+        let resolutions = self.cp_resolve_batch(queues.clone(), now).await?;
+        if resolutions.len() != queues.len() {
+            return Err(EngineError::Storage(format!(
+                "control-plane batch resolution returned {} outcomes for {} inputs",
+                resolutions.len(),
+                queues.len()
+            )));
+        }
+        for (queue, resolution) in queues.into_iter().zip(resolutions) {
             if resolution.active_owner.as_ref() == Some(&self.owner)
                 && resolution
                     .target_owner
@@ -1215,42 +1265,42 @@ where
                     .is_some_and(|target| target != &self.owner)
                 && resolution.state == LeaseState::Assigned
                 && let Some(active_epoch) = resolution.assignment_epoch
-            {
-                let _ = self
+                && let Err(error) = self
                     .cp_begin_drain(
                         queue.clone(),
                         active_epoch,
                         resolution.target_owner.as_ref().expect("checked").clone(),
                         now,
                     )
-                    .await?;
+                    .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
             }
             let session = self.sessions.lock().expect("poisoned").get(&queue).cloned();
             match (resolution.state, resolution.active_owner.as_ref(), session) {
-                (LeaseState::Assigned, Some(owner), Some(session)) if owner == &self.owner => {
-                    renewals.push(pqueue_engine::LeaseRenewal {
-                        queue,
-                        owner: self.owner.clone(),
-                        expected_epoch: session.lease_epoch,
-                    });
-                }
+                (LeaseState::Assigned, Some(owner), Some(_)) if owner == &self.owner => {}
                 (LeaseState::Draining, Some(owner), Some(session)) if owner == &self.owner => {
-                    let metrics = self.backend.metrics(&queue).await?;
+                    let metrics = match self.backend.metrics(&queue).await {
+                        Ok(metrics) => metrics,
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                            continue;
+                        }
+                    };
                     if metrics.leased == 0 {
-                        self.cp_release(
-                            queue.clone(),
-                            self.owner.clone(),
-                            session.lease_epoch,
-                            now,
-                        )
-                        .await?;
-                        self.sessions.lock().expect("poisoned").remove(&queue);
-                    } else {
-                        renewals.push(pqueue_engine::LeaseRenewal {
-                            queue,
-                            owner: self.owner.clone(),
-                            expected_epoch: session.lease_epoch,
-                        });
+                        if let Err(error) = self
+                            .cp_release(queue.clone(), self.owner.clone(), session.lease_epoch, now)
+                            .await
+                        {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        } else {
+                            self.sessions.lock().expect("poisoned").remove(&queue);
+                        }
                     }
                 }
                 (LeaseState::Unassigned, None, _)
@@ -1258,35 +1308,18 @@ where
                 {
                     match self.acquire_queue(&queue, now).await {
                         Ok(()) | Err(EngineError::Unavailable) => {}
-                        Err(e) => return Err(e),
+                        Err(error) => {
+                            if first_error.is_none() {
+                                first_error = Some(error);
+                            }
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        if renewals.is_empty() {
-            return Ok(());
-        }
-        let outcomes = self.cp_renew_batch(renewals.clone(), now).await?;
-        if outcomes.len() != renewals.len() {
-            return Err(EngineError::Storage(format!(
-                "control-plane batch renewal returned {} outcomes for {} inputs",
-                outcomes.len(),
-                renewals.len()
-            )));
-        }
-        for (renewal, outcome) in renewals.into_iter().zip(outcomes) {
-            match outcome {
-                pqueue_engine::LeaseRenewalOutcome::Renewed(_) => {}
-                pqueue_engine::LeaseRenewalOutcome::Fenced
-                | pqueue_engine::LeaseRenewalOutcome::Missing => {
-                    self.sessions
-                        .lock()
-                        .expect("poisoned")
-                        .remove(&renewal.queue);
-                }
-                pqueue_engine::LeaseRenewalOutcome::Error(error) => return Err(error),
-            }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(())
     }
@@ -1500,6 +1533,15 @@ where
     ) -> EngineResult<pqueue_engine::OwnerResolution> {
         let cp = self.control_plane.clone();
         blocking_control_plane(move || cp.resolve_queue_owner(&queue, now)).await
+    }
+
+    async fn cp_resolve_batch(
+        &self,
+        queues: Vec<QueueKey>,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<pqueue_engine::OwnerResolution>> {
+        let cp = self.control_plane.clone();
+        blocking_control_plane(move || cp.resolve_queue_owners(&queues, now)).await
     }
 
     async fn cp_acquire(

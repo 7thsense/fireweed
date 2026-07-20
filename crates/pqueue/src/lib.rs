@@ -1545,6 +1545,7 @@ impl<B: LibBackend> Pqueue<B> {
                 owned.len()
             )));
         }
+        let mut first_error = None;
         for ((queue, _lease_epoch), outcome) in owned.into_iter().zip(outcomes) {
             match outcome {
                 pqueue_engine::LeaseRenewalOutcome::Renewed(lease) => {
@@ -1559,14 +1560,20 @@ impl<B: LibBackend> Pqueue<B> {
                 }
                 // Superseded (or epoch-stale): drop the stale session so the next op re-resolves.
                 pqueue_engine::LeaseRenewalOutcome::Fenced
-                | pqueue_engine::LeaseRenewalOutcome::Missing
-                | pqueue_engine::LeaseRenewalOutcome::Error(_) => {
+                | pqueue_engine::LeaseRenewalOutcome::Missing => {
                     draining.lock().expect("poisoned").remove(&queue);
                     self.invalidate_session(&queue);
                 }
+                // A transient per-row storage error is not fencing evidence. Keep the cached
+                // session, finish processing every outcome, and surface the first error.
+                pqueue_engine::LeaseRenewalOutcome::Error(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
             }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Whether this owner has observed `queue` as `Draining` (drain split): new claims are refused while

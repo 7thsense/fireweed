@@ -202,8 +202,15 @@ pub fn lease_decide_renew(
     {
         return Err(EngineError::EpochFenced);
     }
+    let requested_expiry = add_millis(now, lease_ttl_ms);
     Ok(QueueLease {
-        lease_expires_at: Some(add_millis(now, lease_ttl_ms)),
+        // Concurrent node-level batches may reach the authority in a different order from the
+        // clocks they sampled. A valid renewal must never shorten an already-extended lease.
+        lease_expires_at: Some(
+            current
+                .lease_expires_at
+                .map_or(requested_expiry, |expiry| expiry.max(requested_expiry)),
+        ),
         ..current.clone()
     })
 }
@@ -401,6 +408,19 @@ pub trait QueueControlPlane: Send + Sync {
         queue: &QueueKey,
         now: UtcTimestamp,
     ) -> EngineResult<OwnerResolution>;
+
+    /// Resolve a node's queue inventory in input order. Durable implementations override this so one
+    /// assignment poll uses a fixed number of statements rather than one round trip per queue.
+    fn resolve_queue_owners(
+        &self,
+        queues: &[QueueKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerResolution>> {
+        queues
+            .iter()
+            .map(|queue| self.resolve_queue_owner(queue, now))
+            .collect()
+    }
 
     /// Acquire the queue at a strictly-greater, durably-recorded epoch (TD-003 acquire). Rejects if a
     /// DIFFERENT owner holds a live (`assigned`/`draining`, non-expired) lease. The caller MUST be a live
@@ -688,6 +708,27 @@ impl QueueControlPlane for InMemoryControlPlane {
             .cloned()
             .unwrap_or_else(QueueLease::unassigned);
         Ok(lease_resolution(&current, target, now))
+    }
+
+    fn resolve_queue_owners(
+        &self,
+        queues: &[QueueKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerResolution>> {
+        let state = self.state.lock().expect("poisoned");
+        let live = self.live_owners(&state.owners, now);
+        Ok(queues
+            .iter()
+            .map(|queue| {
+                let target = resolve_target(queue, live.iter().copied());
+                let current = state
+                    .leases
+                    .get(queue)
+                    .cloned()
+                    .unwrap_or_else(QueueLease::unassigned);
+                lease_resolution(&current, target, now)
+            })
+            .collect())
     }
 
     fn acquire_queue_lease(

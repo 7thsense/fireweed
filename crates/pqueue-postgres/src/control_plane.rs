@@ -133,7 +133,7 @@ locked AS MATERIALIZED (
 ),
 updated AS (
     UPDATE pqueue_queue_owner q
-       SET lease_expires_at = $6
+       SET lease_expires_at = GREATEST(q.lease_expires_at, $6)
       FROM input i, locked l
      WHERE q.tenant = i.tenant AND q.queue = i.queue
        AND l.tenant = q.tenant AND l.queue = q.queue
@@ -159,6 +159,46 @@ SELECT i.ord,
   LEFT JOIN updated u ON u.tenant = i.tenant AND u.queue = i.queue
  ORDER BY i.ord
 "#;
+
+const BATCH_RESOLVE_SQL: &str = r#"
+WITH input AS MATERIALIZED (
+    SELECT tenant, queue, ord
+    FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS i(tenant, queue, ord)
+)
+SELECT i.ord, q.state, q.active_owner_id, q.target_owner_id,
+       q.assignment_epoch, q.lease_expires_at
+  FROM input i
+  LEFT JOIN pqueue_queue_owner q ON q.tenant = i.tenant AND q.queue = i.queue
+ ORDER BY i.ord
+"#;
+
+fn optional_lease(
+    state: Option<String>,
+    active: Option<String>,
+    target: Option<String>,
+    epoch: Option<i64>,
+    expires: Option<i64>,
+) -> EngineResult<QueueLease> {
+    let Some(state) = state else {
+        return Ok(QueueLease::unassigned());
+    };
+    let owner = |value: Option<String>| -> EngineResult<Option<OwnerId>> {
+        value
+            .map(|value| {
+                OwnerId::new(value).map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .transpose()
+    };
+    Ok(QueueLease {
+        state: parse_state(&state)?,
+        active_owner_id: owner(active)?,
+        target_owner_id: owner(target)?,
+        assignment_epoch: epoch
+            .ok_or_else(|| EngineError::Storage("authority row omitted assignment epoch".into()))?
+            as u64,
+        lease_expires_at: expires.map(nanos_ts),
+    })
+}
 
 /// Persist a (possibly mutated) authority record under `tx` (UPSERT on the queue key).
 fn upsert_lease(
@@ -432,6 +472,58 @@ impl QueueControlPlane for PostgresControlPlane {
         Ok(lease_resolution(&current, target, now))
     }
 
+    fn resolve_queue_owners(
+        &self,
+        queues: &[QueueKey],
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<OwnerResolution>> {
+        if queues.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tenants: Vec<String> = queues
+            .iter()
+            .map(|queue| queue.tenant_id.as_str().to_string())
+            .collect();
+        let queue_ids: Vec<String> = queues
+            .iter()
+            .map(|queue| queue.queue_id.as_str().to_string())
+            .collect();
+        let cutoff =
+            ts_nanos(now) - (self.config.heartbeat_ttl_ms as i64).saturating_mul(1_000_000);
+        let mut client = self.inner.lock().expect("poisoned");
+        let live_rows = st(client.query(
+            "SELECT owner_id FROM pqueue_workers WHERE heartbeat_at > $1",
+            &[&cutoff],
+        ))?;
+        let live: Vec<OwnerId> = live_rows
+            .into_iter()
+            .map(|row| {
+                OwnerId::new(row.get::<_, String>(0))
+                    .map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .collect::<EngineResult<_>>()?;
+        let rows = st(client.query(BATCH_RESOLVE_SQL, &[&tenants, &queue_ids]))?;
+        if rows.len() != queues.len() {
+            return Err(EngineError::Storage(format!(
+                "batch owner resolution returned {} rows for {} inputs",
+                rows.len(),
+                queues.len()
+            )));
+        }
+        rows.into_iter()
+            .zip(queues)
+            .map(|(row, queue)| {
+                let current =
+                    optional_lease(row.get(1), row.get(2), row.get(3), row.get(4), row.get(5))?;
+                Ok(lease_resolution(
+                    &current,
+                    resolve_target(queue, live.iter()),
+                    now,
+                ))
+            })
+            .collect()
+    }
+
     fn acquire_queue_lease(
         &self,
         queue: &QueueKey,
@@ -664,7 +756,15 @@ mod sql_shape_tests {
         );
         assert!(BATCH_RENEW_SQL.contains("ORDER BY q.tenant, q.queue"));
         assert!(BATCH_RENEW_SQL.contains("FOR UPDATE OF q"));
+        assert!(BATCH_RENEW_SQL.contains("GREATEST(q.lease_expires_at, $6)"));
         assert!(BATCH_RENEW_SQL.contains("ORDER BY i.ord"));
+    }
+
+    #[test]
+    fn batch_resolution_is_fixed_statement_set_and_preserves_order() {
+        assert_eq!(BATCH_RESOLVE_SQL.matches("SELECT").count(), 2);
+        assert!(BATCH_RESOLVE_SQL.contains("unnest($1::text[], $2::text[])"));
+        assert!(BATCH_RESOLVE_SQL.contains("ORDER BY i.ord"));
     }
 
     #[test]
