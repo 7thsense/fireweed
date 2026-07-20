@@ -18,6 +18,11 @@ fn portable(id: &str) -> LedgerRow {
         ("checkout_revision".into(), serde_json::json!(REV)),
         ("checkout_root".into(), serde_json::json!("/src/pqueue")),
         ("checkout_clean".into(), serde_json::json!(true)),
+        (
+            "compile_source_root".into(),
+            serde_json::json!("/src/pqueue"),
+        ),
+        ("compile_source_root_bound".into(), serde_json::json!(true)),
         ("source_root_explicit".into(), serde_json::json!(true)),
         (
             "producer_ingest_completion_per_s".into(),
@@ -354,6 +359,11 @@ fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
         ("cursor_samples", serde_json::json!([1, 3, 2])),
         ("checkout_revision", serde_json::json!("wrong")),
         ("checkout_clean", serde_json::json!(false)),
+        ("compile_source_root_bound", serde_json::json!(false)),
+        (
+            "compile_source_root",
+            serde_json::json!("/src/another-worktree"),
+        ),
         ("source_root_explicit", serde_json::json!(false)),
         ("producer_ingest_completion_per_s", serde_json::json!(0.0)),
         (

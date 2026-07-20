@@ -540,7 +540,7 @@ fn fresh_schema() -> String {
     )
 }
 
-fn checkout_provenance() -> (String, String, bool) {
+fn checkout_provenance() -> (String, String, bool, String, bool) {
     let explicit_root = std::env::var_os("PQUEUE_SOURCE_ROOT").map(std::path::PathBuf::from);
     let probe_dir = explicit_root
         .clone()
@@ -574,7 +574,21 @@ fn checkout_provenance() -> (String, String, bool) {
         &root_path,
         &["status", "--porcelain=v1", "--untracked-files=normal"],
     );
-    (root, revision, status.is_empty())
+    let compile_manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .canonicalize()
+        .expect("canonicalize compile-time CARGO_MANIFEST_DIR");
+    let compile_source_root = run(&compile_manifest_dir, &["rev-parse", "--show-toplevel"]);
+    let compile_source_root = std::path::Path::new(&compile_source_root)
+        .canonicalize()
+        .expect("canonicalize compile-time source root");
+    let compile_source_root_bound = compile_source_root == root_path;
+    (
+        root_path.to_string_lossy().into_owned(),
+        revision,
+        status.is_empty(),
+        compile_source_root.to_string_lossy().into_owned(),
+        compile_source_root_bound,
+    )
 }
 
 fn sk(tenant: &str, queue: &str) -> QueueKey {
@@ -1372,10 +1386,18 @@ fn performance_single_deployment_baseline_tests() {
             && batch_sizes == [1, 100, CONFIGURED_MAX_BATCH_SIZE]
             && batch_sizes.last() == Some(&CONFIGURED_MAX_BATCH_SIZE);
         let source_revision = std::env::var("PQUEUE_SOURCE_REVISION").unwrap_or_default();
-        let (checkout_root, checkout_revision, checkout_clean) = checkout_provenance();
+        let (
+            checkout_root,
+            checkout_revision,
+            checkout_clean,
+            compile_source_root,
+            compile_source_root_bound,
+        ) = checkout_provenance();
         let source_root_explicit = std::env::var_os("PQUEUE_SOURCE_ROOT").is_some();
-        let revision_bound =
-            source_revision == checkout_revision && checkout_clean && source_root_explicit;
+        let revision_bound = source_revision == checkout_revision
+            && checkout_clean
+            && source_root_explicit
+            && compile_source_root_bound;
         let topology_declared = caps.explicitly_declared
             && [
                 "PQUEUE_PG_INSTANCE_CLASS",
@@ -1536,6 +1558,14 @@ fn performance_single_deployment_baseline_tests() {
             (
                 "checkout_clean".to_string(),
                 serde_json::json!(checkout_clean),
+            ),
+            (
+                "compile_source_root".to_string(),
+                serde_json::json!(compile_source_root),
+            ),
+            (
+                "compile_source_root_bound".to_string(),
+                serde_json::json!(compile_source_root_bound),
             ),
             (
                 "source_root_explicit".to_string(),
@@ -1722,6 +1752,14 @@ fn performance_single_deployment_baseline_tests() {
         );
         e1_vals.insert("checkout_root".into(), serde_json::json!(checkout_root));
         e1_vals.insert("checkout_clean".into(), serde_json::json!(checkout_clean));
+        e1_vals.insert(
+            "compile_source_root".into(),
+            serde_json::json!(compile_source_root),
+        );
+        e1_vals.insert(
+            "compile_source_root_bound".into(),
+            serde_json::json!(compile_source_root_bound),
+        );
         e1_vals.insert(
             "source_root_explicit".into(),
             serde_json::json!(source_root_explicit),

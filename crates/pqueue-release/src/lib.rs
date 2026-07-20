@@ -406,14 +406,25 @@ pub mod single_deployment {
         }
         if !true_value(row, "checkout_clean")
             || !true_value(row, "source_root_explicit")
+            || !true_value(row, "compile_source_root_bound")
             || row
                 .measurements
                 .values
                 .get("checkout_root")
                 .and_then(serde_json::Value::as_str)
                 .is_none_or(str::is_empty)
+            || row
+                .measurements
+                .values
+                .get("compile_source_root")
+                .and_then(serde_json::Value::as_str)
+                != row
+                    .measurements
+                    .values
+                    .get("checkout_root")
+                    .and_then(serde_json::Value::as_str)
         {
-            errors.push("release evidence requires an exact clean producing checkout root".into());
+            errors.push("release evidence requires an exact clean producing checkout root bound to the compiled source root".into());
         }
         for key in [
             "producer_ingest_completion_per_s",
