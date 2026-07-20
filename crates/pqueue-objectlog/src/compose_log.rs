@@ -18,8 +18,9 @@
 //! commit_transition) — exactly the monolith's capability set.
 
 use pqueue_engine::{
-    CommandEnvelope, CommandPage, CommandPosition, ComposedBackend, DurabilityClass, EngineResult,
-    InProcessControlPlane, LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
+    CommandEnvelope, CommandPage, CommandPosition, ComposedBackend, DefinitionCursor,
+    DefinitionPage, DurabilityClass, EngineResult, InProcessControlPlane, LogStore,
+    ProjectionSnapshot, QueueKey, SnapshotRef,
 };
 use pqueue_projection::InMemoryProjection;
 
@@ -637,6 +638,16 @@ impl LogStore for ObjectLog {
 
     fn recover_definitions(&self) -> EngineResult<Vec<pqueue_core::QueueDefinition>> {
         self.log.recover_definitions()
+    }
+
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<DefinitionPage> {
+        self.log
+            .recover_definitions_page(cursor, limit, worker_partition)
     }
 
     // -- group-commit facet: delegate to the substrate's existing &self primitives (ADR-012 P2) -----------

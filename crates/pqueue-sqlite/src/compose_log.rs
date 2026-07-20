@@ -11,8 +11,9 @@
 
 use pqueue_core::QueueDefinition;
 use pqueue_engine::{
-    CommandEnvelope, CommandPage, CommandPosition, EngineError, EngineResult, LogStore,
-    ProjectionSnapshot, QueueKey, SnapshotRef,
+    CommandEnvelope, CommandPage, CommandPosition, DefinitionCursor, DefinitionPage, EngineError,
+    EngineResult, LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
+    definition_page_from_storage_rows,
 };
 use std::fmt::Write as _;
 
@@ -526,6 +527,46 @@ impl LogStore for SqliteLog {
             out.push(serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?);
         }
         Ok(out)
+    }
+
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<DefinitionPage> {
+        if limit == 0 {
+            return Err(EngineError::Invalid(
+                "definition page limit must be nonzero",
+            ));
+        }
+        let (tenant, queue) = cursor
+            .map(DefinitionCursor::queue_parts)
+            .transpose()?
+            .unwrap_or_default();
+        let mut stmt = st(self.conn.prepare(
+            "SELECT definition FROM queue_defs \
+             WHERE (?1 = '' OR tenant > ?1 OR (tenant = ?1 AND queue > ?2)) \
+             ORDER BY tenant, queue LIMIT ?3",
+        ))?;
+        let mapped = st(stmt.query_map(
+            params![tenant, queue, limit.saturating_add(1) as i64],
+            |row| row.get::<_, String>(0),
+        ))?;
+        let mut rows = Vec::with_capacity(limit.saturating_add(1));
+        for row in mapped {
+            rows.push(
+                serde_json::from_str(&st(row)?)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+            );
+        }
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        Ok(definition_page_from_storage_rows(
+            rows,
+            has_more,
+            worker_partition,
+        ))
     }
 }
 

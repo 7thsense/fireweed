@@ -7387,6 +7387,20 @@ impl ProjectionStore for PostgresRelational {
         Ok(self.lock().queues.values().cloned().collect())
     }
 
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&pqueue_engine::DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::DefinitionPage> {
+        pqueue_engine::definition_page_from_sorted_rows(
+            self.lock().queues.values().cloned(),
+            cursor,
+            limit,
+            worker_partition,
+        )
+    }
+
     fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         LogStore::high_water(self, shard)
     }

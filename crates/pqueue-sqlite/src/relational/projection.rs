@@ -978,6 +978,20 @@ impl ProjectionStore for SqliteProjectionStore {
         Ok(self.lock().queues.values().cloned().collect())
     }
 
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&pqueue_engine::DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::DefinitionPage> {
+        pqueue_engine::definition_page_from_sorted_rows(
+            self.lock().queues.values().cloned(),
+            cursor,
+            limit,
+            worker_partition,
+        )
+    }
+
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         self.observe_item_counters(shard, counters)
     }
