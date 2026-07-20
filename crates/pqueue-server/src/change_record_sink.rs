@@ -132,6 +132,36 @@ where
     }
 }
 
+impl<B> ChangeRecordEmissionBackend for crate::PostgresWholeOperationAdapter<B>
+where
+    B: ChangeRecordEmissionBackend + pqueue_resp::RespBackend,
+{
+    fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+        &self,
+        shard: &QueueKey,
+        sink: &S,
+        limit: usize,
+        emitted_at: UtcTimestamp,
+        source_owner_id: Option<pqueue_core::OwnerId>,
+    ) -> EngineResult<usize> {
+        self.backend_for_queue(shard).emit_change_record_tail(
+            shard,
+            sink,
+            limit,
+            emitted_at,
+            source_owner_id,
+        )
+    }
+
+    fn supports_change_record_emission_cursor(&self) -> bool {
+        self.backend_for_queue(&QueueKey::new(
+            pqueue_core::TenantId::new("pqueue-internal").expect("valid tenant"),
+            pqueue_core::QueueId::new("emission-capability").expect("valid queue"),
+        ))
+        .supports_change_record_emission_cursor()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ParsedEndpoint {
     host: String,
@@ -782,13 +812,21 @@ where
             tick.tick().await;
             match resolve_change_record_queues(backend.as_ref(), &queues).await {
                 Ok(current_queues) => {
-                    if let Err(e) = emit_change_record_tick(
-                        backend.as_ref(),
-                        sink.as_ref(),
-                        &current_queues,
-                        config.batch_size,
-                    ) {
-                        eprintln!("[change-record] emission tick failed: {e}");
+                    let emit_backend = Arc::clone(&backend);
+                    let emit_sink = Arc::clone(&sink);
+                    match tokio::task::spawn_blocking(move || {
+                        emit_change_record_tick(
+                            emit_backend.as_ref(),
+                            emit_sink.as_ref(),
+                            &current_queues,
+                            config.batch_size,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => eprintln!("[change-record] emission tick failed: {e}"),
+                        Err(e) => eprintln!("[change-record] emission task failed: {e}"),
                     }
                 }
                 Err(e) => {
@@ -892,10 +930,22 @@ where
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
-            if let Err(e) =
-                emit_change_record_tick(backend.as_ref(), sink.as_ref(), &queues, batch_size)
+            let emit_backend = Arc::clone(&backend);
+            let emit_sink = Arc::clone(&sink);
+            let emit_queues = queues.clone();
+            match tokio::task::spawn_blocking(move || {
+                emit_change_record_tick(
+                    emit_backend.as_ref(),
+                    emit_sink.as_ref(),
+                    &emit_queues,
+                    batch_size,
+                )
+            })
+            .await
             {
-                eprintln!("[change-record] emission tick failed: {e}");
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => eprintln!("[change-record] emission tick failed: {e}"),
+                Err(e) => eprintln!("[change-record] emission task failed: {e}"),
             }
         }
     })))

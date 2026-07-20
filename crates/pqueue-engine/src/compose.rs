@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -1259,6 +1260,18 @@ pub struct ComposedBackend<L, P, C> {
     /// `supports_group_commit()`, `push` co-buffers + acks-after-seal and read-modify-write ops force-seal the
     /// buffered batch before they select/apply (so they observe applied state under the one composed lock).
     group_commit: bool,
+    worker_partition: Option<(usize, usize)>,
+}
+
+/// Stable queue affinity for fixed-size composed worker pools.
+pub fn queue_worker_partition(queue: &QueueKey, partitions: usize) -> usize {
+    assert!(
+        partitions > 0,
+        "queue worker partition count must be nonzero"
+    );
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    queue.hash(&mut hasher);
+    (hasher.finish() as usize) % partitions
 }
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> {
@@ -1295,7 +1308,22 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             group_commit_flush_interval_ms,
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             group_commit: false,
+            worker_partition: None,
         }
+    }
+
+    /// Assign this instance one member of a fixed worker pool. Queue-local calls are routed by the outer
+    /// dispatcher; this affinity also prevents node-wide maintenance from processing recovered queues on
+    /// more than one connection.
+    pub fn with_worker_partition(mut self, index: usize, partitions: usize) -> Self {
+        assert!(partitions > 0 && index < partitions);
+        self.worker_partition = Some((index, partitions));
+        self
+    }
+
+    fn owns_worker_queue(&self, queue: &QueueKey) -> bool {
+        self.worker_partition
+            .is_none_or(|(index, count)| queue_worker_partition(queue, count) == index)
     }
 
     /// Install (or clear, with `None`) a TEST-ONLY composed-layer fault hook that strikes the two
@@ -4134,7 +4162,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
             let expired = g.projection.all_expired_leases(now);
             let definitions = Self::durable_definitions_locked(&g)?;
             let mut report = TickReport::default();
-            for (shard, ids) in expired {
+            for (shard, ids) in expired
+                .into_iter()
+                .filter(|(shard, _)| self.owns_worker_queue(shard))
+            {
                 let env = Self::make_envelope(
                     &mut g,
                     self.node_id,
@@ -4153,6 +4184,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
             }
             for def in definitions {
                 let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+                if !self.owns_worker_queue(&shard) {
+                    continue;
+                }
                 if def.emit_change_records {
                     Self::reap_terminal_items_locked(
                         &mut g,

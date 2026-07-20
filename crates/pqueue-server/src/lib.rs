@@ -67,10 +67,10 @@ mod env_config;
 #[cfg(feature = "env-config")]
 pub use env_config::ConfigError;
 
-#[cfg(feature = "postgres")]
 mod postgres_native;
-#[cfg(feature = "postgres")]
-pub use postgres_native::{PostgresNativeBackend, PostgresWholeOperationAdapter};
+pub use postgres_native::{
+    PostgresBlockingLifecycle, PostgresNativeBackend, PostgresWholeOperationAdapter,
+};
 
 /// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
 /// epoch/fence authority. One half of a [`BackendSpec`].
@@ -1747,6 +1747,10 @@ pub struct Server {
     reclaim_task: Option<JoinHandle<()>>,
     ownership_task: Option<JoinHandle<()>>,
     fjord_task: Option<JoinHandle<()>>,
+    /// Storage maintenance tasks (segment sealers and deferred projection flushers). Kept so shutdown
+    /// cannot silently detach accepted durable work from the server lifecycle.
+    maintenance_tasks: Vec<JoinHandle<()>>,
+    blocking_lifecycles: Vec<PostgresBlockingLifecycle>,
     /// Signals the RESP serve loop to stop accepting and drain in-flight connection handlers.
     cancel: CancellationToken,
     reclaim: Arc<ReclaimCounters>,
@@ -1795,6 +1799,9 @@ impl Server {
     /// in-flight connection handlers to drain. Being sync, it is safe to call from [`Drop`] and from the
     /// existing non-async call sites. For a bounded graceful drain, use [`Server::shutdown_and_drain`].
     pub fn shutdown(&self) {
+        for lifecycle in &self.blocking_lifecycles {
+            lifecycle.close();
+        }
         self.cancel.cancel();
         if let Some(t) = &self.serve_task {
             t.abort();
@@ -1808,6 +1815,9 @@ impl Server {
         if let Some(t) = &self.fjord_task {
             t.abort();
         }
+        for task in &self.maintenance_tasks {
+            task.abort();
+        }
     }
 
     /// Gracefully stop: signal the serve loop to stop accepting and **drain** in-flight connection
@@ -1816,6 +1826,9 @@ impl Server {
     /// it drops the set and hard-aborts any handler still running — so the bound is real, not best-effort.
     /// The reclaim ticker is aborted (it holds no client work). Consumes the server.
     pub async fn shutdown_and_drain(mut self, timeout: Duration) {
+        for lifecycle in &self.blocking_lifecycles {
+            lifecycle.close();
+        }
         self.cancel.cancel();
         if let Some(mut serve) = self.serve_task.take()
             && tokio::time::timeout(timeout, &mut serve).await.is_err()
@@ -1830,6 +1843,15 @@ impl Server {
         }
         if let Some(fjord) = self.fjord_task.take() {
             fjord.abort();
+        }
+        // Segment sealers remain live until every accepted mutation has crossed its response barrier.
+        // Otherwise a graceful shutdown could abort the only task capable of resolving a started push.
+        for lifecycle in &self.blocking_lifecycles {
+            let _ = tokio::time::timeout(timeout, lifecycle.drain_started()).await;
+        }
+        for task in self.maintenance_tasks.drain(..) {
+            task.abort();
+            let _ = task.await;
         }
     }
 }
@@ -1945,11 +1967,27 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         (LogSpec::Sqlite { path }, ProjectionSpec::InMemory) => {
             let p = path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let backend = Arc::new(composed_sqlite_backend(p)?.with_node_id(node_id));
-            run_owned(
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
+            let backends = tokio::task::spawn_blocking(move || {
+                (0..8)
+                    .map(|index| {
+                        composed_sqlite_backend(&p).map(|backend| {
+                            backend
+                                .with_node_id(node_id)
+                                .with_worker_partition(index, 8)
+                        })
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("sqlite open task failed: {e}")))??;
+            let (backend, lifecycle) =
+                blocking_backend_pool(backends.into_iter().map(Arc::new).collect());
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -1963,21 +2001,40 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         (LogSpec::ObjectLog(spec), ProjectionSpec::InMemory) => {
             // The segmented group-commit object log (the object log's only production form) over an in-memory
             // projection rebuilt by `read_all` replay on open.
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = Arc::new(
-                SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, segment_config)?
-                    .with_byte_admission(
-                        objectlog_byte_budget.clone(),
-                        config_objectlog_queue_limit,
-                    )
-                    .with_debug_segments(debug_segments)
-                    .with_node_id(node_id),
-            );
+            let backends = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                (0..8)
+                    .map(|index| {
+                        SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+                            Arc::clone(&store),
+                            segment_config,
+                        )
+                        .map(|backend| {
+                            backend
+                                .with_byte_admission(
+                                    objectlog_byte_budget.clone(),
+                                    config_objectlog_queue_limit,
+                                )
+                                .with_debug_segments(debug_segments)
+                                .with_node_id(node_id)
+                                .with_worker_partition(index, 8)
+                        })
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("object-log open task failed: {e}")))??;
+            let backends: Vec<_> = backends.into_iter().map(Arc::new).collect();
             // The flusher seals latency-due segments so a buffer below `target_bytes` still acks promptly.
-            backend.spawn_flusher();
-            run_owned(
+            let flushers: Vec<_> = backends
+                .iter()
+                .map(|backend| backend.spawn_flusher())
+                .collect();
+            let (backend, lifecycle) = blocking_backend_pool(backends);
+            let mut server = run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -1986,30 +2043,55 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 interval,
                 &queues,
             )
-            .await
+            .await?;
+            server.maintenance_tasks.extend(flushers);
+            Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::Sqlite { path }) => {
             // The segmented group-commit object log driving the derived SQLite projection: concurrent pushes
             // co-buffer into one sealed segment (one durable object + one manifest-CAS + one batched SQLite
             // apply), and a reopen replays the object-log tail beyond the projection snapshot high-water.
             let p = path
-                .to_str()
-                .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?;
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = Arc::new(
-                SegmentedObjectLogSqliteBackend::open_with_blob_store(store, p, segment_config)?
-                    .with_byte_admission(
-                        objectlog_byte_budget.clone(),
-                        config_objectlog_queue_limit,
-                    )
-                    .with_node_id(node_id)
-                    .with_recovery_max_tail(recovery_max_tail)
-                    .with_debug_segments(debug_segments),
-            );
-            backend.spawn_flusher();
-            run_owned(
+                .into_os_string()
+                .into_string()
+                .map_err(|_| EngineError::Storage("non-utf8 path".into()))?;
+            let backends = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                (0..8)
+                    .map(|index| {
+                        SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                            Arc::clone(&store),
+                            &p,
+                            segment_config,
+                        )
+                        .map(|backend| {
+                            backend
+                                .with_byte_admission(
+                                    objectlog_byte_budget.clone(),
+                                    config_objectlog_queue_limit,
+                                )
+                                .with_node_id(node_id)
+                                .with_recovery_max_tail(recovery_max_tail)
+                                .with_debug_segments(debug_segments)
+                                .with_worker_partition(index, 8)
+                        })
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+            })
+            .await
+            .map_err(|e| {
+                EngineError::Storage(format!("object-log/sqlite open task failed: {e}"))
+            })??;
+            let backends: Vec<_> = backends.into_iter().map(Arc::new).collect();
+            let flushers: Vec<_> = backends
+                .iter()
+                .map(|backend| backend.spawn_flusher())
+                .collect();
+            let (backend, lifecycle) = blocking_backend_pool(backends);
+            let mut server = run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2018,7 +2100,9 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 interval,
                 &queues,
             )
-            .await
+            .await?;
+            server.maintenance_tasks.extend(flushers);
+            Ok(server)
         }
         #[cfg(feature = "turso-projection")]
         (LogSpec::ObjectLog(spec), ProjectionSpec::Turso { path }) => {
@@ -2044,21 +2128,34 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             "PQUEUE_PROJECTION_BACKEND=turso requires a pqueue-server build with the `turso-projection` cargo feature",
         )),
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = open_objectlog_hybrid_backend(
-                store,
-                &path,
-                segment_config,
-                recovery_max_tail,
-                node_id,
-                deferred_flush_chunk,
-                false,
-                None,
-                objectlog_byte_budget.clone(),
-                config_objectlog_queue_limit,
-            )?;
-            spawn_hybrid_flusher(&backend, debug_segments);
+            let backends = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                (0..8)
+                    .map(|index| {
+                        open_objectlog_hybrid_backend(
+                            Arc::clone(&store),
+                            &path,
+                            segment_config,
+                            recovery_max_tail,
+                            node_id,
+                            deferred_flush_chunk,
+                            false,
+                            None,
+                            objectlog_byte_budget.clone(),
+                            config_objectlog_queue_limit,
+                            Some((index, 8)),
+                        )
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("hybrid open task failed: {e}")))??;
+            let flushers: Vec<_> = backends
+                .iter()
+                .map(|backend| spawn_hybrid_flusher(backend, debug_segments))
+                .collect();
+            let (backend, lifecycle) = blocking_backend_pool(backends);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2066,14 +2163,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let _change_record_emitter =
-                change_record_sink::spawn_change_record_emitter_if_enabled(
-                    backend.clone(),
-                    &queues,
-                    &change_record_sink,
-                    fjord_log.clone(),
-                )?;
-            run_owned_with_fjord_task(
+            let emitter_backend = backend.clone();
+            let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
@@ -2084,7 +2175,19 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
                 fjord_task,
             )
-            .await
+            .await?;
+            server.blocking_lifecycles.push(lifecycle);
+            server.maintenance_tasks.extend(flushers);
+            let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
+                emitter_backend,
+                &queues,
+                &change_record_sink,
+                fjord_log.clone(),
+            )?;
+            if let Some(task) = change_record_emitter {
+                server.maintenance_tasks.push(task);
+            }
+            Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridStrict { path }) => {
             // The `objectlog/hybrid-strict` profile (TD-004): the same object-log group-commit substrate as
@@ -2094,21 +2197,34 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // poison cut on the real server write pipeline: a SQLite failure returns no success and replays
             // the object-log tail, and a poisoned store fails closed until a restart rehydrates memory from
             // the durable SQLite `ProjectionImage`.
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = open_objectlog_hybrid_backend(
-                store,
-                &path,
-                segment_config,
-                recovery_max_tail,
-                node_id,
-                deferred_flush_chunk,
-                true,
-                None,
-                objectlog_byte_budget.clone(),
-                config_objectlog_queue_limit,
-            )?;
-            spawn_hybrid_flusher(&backend, debug_segments);
+            let backends = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                (0..8)
+                    .map(|index| {
+                        open_objectlog_hybrid_backend(
+                            Arc::clone(&store),
+                            &path,
+                            segment_config,
+                            recovery_max_tail,
+                            node_id,
+                            deferred_flush_chunk,
+                            true,
+                            None,
+                            objectlog_byte_budget.clone(),
+                            config_objectlog_queue_limit,
+                            Some((index, 8)),
+                        )
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("hybrid-strict open task failed: {e}")))??;
+            let flushers: Vec<_> = backends
+                .iter()
+                .map(|backend| spawn_hybrid_flusher(backend, debug_segments))
+                .collect();
+            let (backend, lifecycle) = blocking_backend_pool(backends);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2116,14 +2232,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let _change_record_emitter =
-                change_record_sink::spawn_change_record_emitter_if_enabled(
-                    backend.clone(),
-                    &queues,
-                    &change_record_sink,
-                    fjord_log.clone(),
-                )?;
-            run_owned_with_fjord_task(
+            let emitter_backend = backend.clone();
+            let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
@@ -2134,7 +2244,19 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
                 fjord_task,
             )
-            .await
+            .await?;
+            server.blocking_lifecycles.push(lifecycle);
+            server.maintenance_tasks.extend(flushers);
+            let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
+                emitter_backend,
+                &queues,
+                &change_record_sink,
+                fjord_log.clone(),
+            )?;
+            if let Some(task) = change_record_emitter {
+                server.maintenance_tasks.push(task);
+            }
+            Ok(server)
         }
         (LogSpec::ObjectLog(spec), ProjectionSpec::HybridAsync { path }) => {
             // The `objectlog/hybrid-async` profile runs the same object-log + hybrid (hot-memory serving,
@@ -2154,21 +2276,34 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 hybrid_async.oldest_unapplied_max_ms,
                 hybrid_async.apply_poison_retry_threshold,
             );
-            let segment_config = spec.segment_config();
-            let store = spec.open_blob_store()?;
-            let backend = open_objectlog_hybrid_backend(
-                store,
-                &path,
-                segment_config,
-                recovery_max_tail,
-                node_id,
-                deferred_flush_chunk,
-                false,
-                Some(hybrid_async),
-                objectlog_byte_budget.clone(),
-                config_objectlog_queue_limit,
-            )?;
-            spawn_hybrid_flusher(&backend, debug_segments);
+            let backends = tokio::task::spawn_blocking(move || {
+                let segment_config = spec.segment_config();
+                let store = spec.open_blob_store()?;
+                (0..8)
+                    .map(|index| {
+                        open_objectlog_hybrid_backend(
+                            Arc::clone(&store),
+                            &path,
+                            segment_config,
+                            recovery_max_tail,
+                            node_id,
+                            deferred_flush_chunk,
+                            false,
+                            Some(hybrid_async),
+                            objectlog_byte_budget.clone(),
+                            config_objectlog_queue_limit,
+                            Some((index, 8)),
+                        )
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
+            })
+            .await
+            .map_err(|e| EngineError::Storage(format!("hybrid-async open task failed: {e}")))??;
+            let flushers: Vec<_> = backends
+                .iter()
+                .map(|backend| spawn_hybrid_flusher(backend, debug_segments))
+                .collect();
+            let (backend, lifecycle) = blocking_backend_pool(backends);
             let fjord_task = maybe_spawn_embedded_broker(
                 &fjord_surface,
                 fjord_broker_listen.as_deref(),
@@ -2176,14 +2311,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
             )
             .await?;
-            let _change_record_emitter =
-                change_record_sink::spawn_change_record_emitter_if_enabled(
-                    backend.clone(),
-                    &queues,
-                    &change_record_sink,
-                    fjord_log.clone(),
-                )?;
-            run_owned_with_fjord_task(
+            let emitter_backend = backend.clone();
+            let mut server = run_owned_with_fjord_task(
                 backend,
                 control_plane,
                 advertise_addr.as_deref(),
@@ -2194,7 +2323,19 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 &queues,
                 fjord_task,
             )
-            .await
+            .await?;
+            server.blocking_lifecycles.push(lifecycle);
+            server.maintenance_tasks.extend(flushers);
+            let change_record_emitter = change_record_sink::spawn_change_record_emitter_if_enabled(
+                emitter_backend,
+                &queues,
+                &change_record_sink,
+                fjord_log.clone(),
+            )?;
+            if let Some(task) = change_record_emitter {
+                server.maintenance_tasks.push(task);
+            }
+            Ok(server)
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
@@ -2218,9 +2359,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
-            run_owned(
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2257,9 +2399,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres/sqlite connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
-            run_owned(
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2298,9 +2441,10 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres/postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
-            run_owned(
+            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            run_owned_with_blocking_lifecycle(
                 backend,
+                lifecycle,
                 control_plane,
                 advertise_addr.as_deref(),
                 owner_id.clone(),
@@ -2337,6 +2481,7 @@ fn open_objectlog_hybrid_backend(
     async_monitor: Option<HybridAsyncThresholds>,
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
+    worker_partition: Option<(usize, usize)>,
 ) -> EngineResult<Arc<ObjectLogHybridBackend>> {
     let p = path
         .to_str()
@@ -2351,18 +2496,22 @@ fn open_objectlog_hybrid_backend(
     if let Some(thresholds) = async_monitor {
         projection = projection.with_async_monitor(thresholds);
     }
-    Ok(Arc::new(
-        ComposedBackend::new(
-            ObjectLog::open_group_commit_with_blob_store(store, segment_config)?,
-            projection,
-            InProcessControlPlane::new(),
-        )
-        .with_group_commit(true)
-        .with_byte_admission(byte_budget, queue_byte_limit)
-        .with_recovery_max_tail(recovery_max_tail)
-        .recover()?
-        .with_node_id(node_id),
-    ))
+    let backend = ComposedBackend::new(
+        ObjectLog::open_group_commit_with_blob_store(store, segment_config)?,
+        projection,
+        InProcessControlPlane::new(),
+    )
+    .with_group_commit(true)
+    .with_byte_admission(byte_budget, queue_byte_limit)
+    .with_recovery_max_tail(recovery_max_tail)
+    .recover()?
+    .with_node_id(node_id);
+    let backend = if let Some((index, count)) = worker_partition {
+        backend.with_worker_partition(index, count)
+    } else {
+        backend
+    };
+    Ok(Arc::new(backend))
 }
 
 fn spawn_hybrid_flusher(
@@ -2387,36 +2536,44 @@ fn spawn_hybrid_flusher(
             let Some(backend) = weak.upgrade() else {
                 break;
             };
-            match kind {
-                FlushKind::GroupCommit => {
-                    let now_ms =
-                        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            let emit_debug = debug_segments && dbg_last.elapsed() >= Duration::from_secs(1);
+            if emit_debug {
+                dbg_last = std::time::Instant::now();
+            }
+            let join = tokio::task::spawn_blocking(move || {
+                let result = match kind {
+                    FlushKind::GroupCommit => {
+                        let now_ms = match std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                        {
                             Ok(d) => d.as_millis().min(i64::MAX as u128) as i64,
                             Err(_) => 0,
                         };
-                    if let Err(e) = backend.flush_tick(now_ms) {
-                        eprintln!("[objectlog/hybrid] group-commit flush failed: {e}");
+                        backend.flush_tick(now_ms).map(|_| ())
                     }
-                }
-                FlushKind::DeferredProjection => {
-                    if let Err(e) = backend.try_flush_deferred_projection() {
-                        eprintln!("[objectlog/hybrid] deferred projection flush failed: {e}");
+                    FlushKind::DeferredProjection => {
+                        backend.try_flush_deferred_projection().map(|_| ())
                     }
+                };
+                if emit_debug {
+                    let c = backend.with_log(|log| log.counters());
+                    let admission = hybrid_byte_admission_telemetry(&backend);
+                    eprintln!(
+                        "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
+                        c.segments_sealed,
+                        c.commands_committed,
+                        c.mean_batch_size(),
+                        c.max_batch_size(),
+                        c.objects_put,
+                        admission,
+                    );
                 }
-            }
-            if debug_segments && dbg_last.elapsed() >= Duration::from_secs(1) {
-                dbg_last = std::time::Instant::now();
-                let c = backend.with_log(|log| log.counters());
-                let admission = hybrid_byte_admission_telemetry(&backend);
-                eprintln!(
-                    "[seg] profile=objectlog/hybrid sealed={} commands={} mean_batch={:.1} max_batch={} objects_put={} {}",
-                    c.segments_sealed,
-                    c.commands_committed,
-                    c.mean_batch_size(),
-                    c.max_batch_size(),
-                    c.objects_put,
-                    admission,
-                );
+                result
+            });
+            match join.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => eprintln!("[objectlog/hybrid] maintenance flush failed: {e}"),
+                Err(e) => eprintln!("[objectlog/hybrid] maintenance task failed: {e}"),
             }
         }
     })
@@ -2468,6 +2625,56 @@ async fn run_owned<B: RespBackend>(
         queues,
     )
     .await
+}
+
+#[cfg(feature = "postgres")]
+fn blocking_backend<B: RespBackend>(
+    inner: Arc<B>,
+) -> (
+    Arc<PostgresWholeOperationAdapter<B>>,
+    PostgresBlockingLifecycle,
+) {
+    let adapter = PostgresWholeOperationAdapter::from_arc(inner);
+    let lifecycle = adapter.lifecycle();
+    (Arc::new(adapter), lifecycle)
+}
+
+fn blocking_backend_pool<B: RespBackend>(
+    inner: Vec<Arc<B>>,
+) -> (
+    Arc<PostgresWholeOperationAdapter<B>>,
+    PostgresBlockingLifecycle,
+) {
+    let adapter = PostgresWholeOperationAdapter::from_arcs(inner);
+    let lifecycle = adapter.lifecycle();
+    (Arc::new(adapter), lifecycle)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_owned_with_blocking_lifecycle<B: RespBackend>(
+    backend: Arc<B>,
+    lifecycle: PostgresBlockingLifecycle,
+    control_plane: Arc<dyn QueueControlPlane>,
+    advertise_addr: Option<&str>,
+    owner: OwnerId,
+    clock: Arc<dyn Clock>,
+    listen: &str,
+    reclaim_interval: Duration,
+    queues: &[QueueDefinition],
+) -> EngineResult<Server> {
+    let mut server = run_owned(
+        backend,
+        control_plane,
+        advertise_addr,
+        owner,
+        clock,
+        listen,
+        reclaim_interval,
+        queues,
+    )
+    .await?;
+    server.blocking_lifecycles.push(lifecycle);
+    Ok(server)
 }
 
 // The Fjord variant carries the same explicit composition-root inputs as `run_owned`, plus the
@@ -2536,6 +2743,8 @@ pub async fn start_with<B: RespBackend>(
         reclaim_task: Some(reclaim_task),
         ownership_task: None,
         fjord_task: None,
+        maintenance_tasks: Vec::new(),
+        blocking_lifecycles: Vec::new(),
         cancel,
         reclaim,
         ownership,
@@ -2646,6 +2855,8 @@ where
         reclaim_task: Some(reclaim_task),
         ownership_task: Some(ownership_task),
         fjord_task: None,
+        maintenance_tasks: Vec::new(),
+        blocking_lifecycles: Vec::new(),
         cancel,
         reclaim,
         ownership,
@@ -2894,6 +3105,7 @@ mod byte_admission_wiring_tests {
             None,
             budget,
             2_048,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2931,6 +3143,7 @@ mod byte_admission_wiring_tests {
             None,
             budget.clone(),
             8_192,
+            None,
         )
         .unwrap();
         let definition = queue_definition();

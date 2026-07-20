@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -808,6 +808,22 @@ struct CoordState {
     waiters: Vec<oneshot::Sender<EngineResult<()>>>,
 }
 
+/// Removes a queue from the flusher's in-flight set on every exit path, including unwinding from a
+/// provider panic. The backend remains strongly owned by the blocking job for the guard's lifetime.
+struct FlushInflightGuard<'a> {
+    inflight: &'a Mutex<HashSet<QueueKey>>,
+    shard: QueueKey,
+}
+
+impl Drop for FlushInflightGuard<'_> {
+    fn drop(&mut self) {
+        self.inflight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.shard);
+    }
+}
+
 /// Group-committing object-log authority (`SegmentedObjectLog<LocalFsBlobStore>`) + SQLite materialized
 /// projection. Eventual-apply durability class.
 pub struct SegmentedObjectLogSqliteBackend {
@@ -825,6 +841,9 @@ pub struct SegmentedObjectLogSqliteBackend {
     node_id: u8,
     /// How often the flusher polls each queue for a latency-due seal (a fraction of `max_latency_ms`).
     flush_interval: Duration,
+    flush_slots: Arc<tokio::sync::Semaphore>,
+    flush_cursor: AtomicUsize,
+    flush_inflight: Mutex<HashSet<QueueKey>>,
     /// Recovery-window budget (max tail commands) before a reopen logs a recovery-window warning.
     recovery_max_tail: u64,
     /// Opt-in group-commit telemetry: when set, the flusher logs the segment counters ~1x/s. Set by the
@@ -896,6 +915,9 @@ impl SegmentedObjectLogSqliteBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             flush_interval: Duration::from_millis(flush_ms),
+            flush_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            flush_cursor: AtomicUsize::new(0),
+            flush_inflight: Mutex::new(HashSet::new()),
             recovery_max_tail: DEFAULT_RECOVERY_MAX_TAIL,
             debug_segments: false,
             recovery_stats: Mutex::new(HashMap::new()),
@@ -915,6 +937,10 @@ impl SegmentedObjectLogSqliteBackend {
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
+        self
+    }
+
+    pub fn with_worker_partition(self, _index: usize, _partitions: usize) -> Self {
         self
     }
 
@@ -1184,7 +1210,7 @@ impl SegmentedObjectLogSqliteBackend {
                     admission,
                 );
             }
-            let shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
+            let mut shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
                 this.coords
                     .lock()
                     .expect("segmented coords poisoned")
@@ -1192,20 +1218,40 @@ impl SegmentedObjectLogSqliteBackend {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
             };
+            if !shards.is_empty() {
+                let start = this.flush_cursor.fetch_add(1, Ordering::Relaxed) % shards.len();
+                shards.rotate_left(start);
+            }
             let now_ms = system_now_ms();
             for (shard, coord) in shards {
-                let epoch = this.cached_epoch(&shard);
-                let mut state = coord.state.lock().await;
-                if state.pending.is_empty() {
-                    continue;
-                }
-                match this.log.flush_due(&shard, epoch, now_ms) {
-                    Ok(positions) if !positions.is_empty() => {
-                        this.distribute(&mut state, positions)
+                let Ok(slot) = this.flush_slots.clone().try_acquire_owned() else {
+                    break;
+                };
+                {
+                    let mut inflight = this.flush_inflight.lock().expect("flush inflight poisoned");
+                    if !inflight.insert(shard.clone()) {
+                        continue;
                     }
-                    Ok(_) => {}
-                    Err(e) => Self::fail_all(&mut state, e),
                 }
+                let backend = Arc::clone(&this);
+                tokio::task::spawn_blocking(move || {
+                    let _slot = slot;
+                    let _inflight = FlushInflightGuard {
+                        inflight: &backend.flush_inflight,
+                        shard: shard.clone(),
+                    };
+                    let epoch = backend.cached_epoch(&shard);
+                    let mut state = coord.state.blocking_lock();
+                    if !state.pending.is_empty() {
+                        match backend.log.flush_due(&shard, epoch, now_ms) {
+                            Ok(positions) if !positions.is_empty() => {
+                                backend.distribute(&mut state, positions)
+                            }
+                            Ok(_) => {}
+                            Err(e) => Self::fail_all(&mut state, e),
+                        }
+                    }
+                });
             }
         }
     }
@@ -1773,6 +1819,9 @@ pub struct SegmentedObjectLogInMemoryBackend {
     command_seq: AtomicU64,
     node_id: u8,
     flush_interval: Duration,
+    flush_slots: Arc<tokio::sync::Semaphore>,
+    flush_cursor: AtomicUsize,
+    flush_inflight: Mutex<HashSet<QueueKey>>,
     /// Observed full-log replay telemetry for the intentionally ephemeral projection.
     recovery_stats: Mutex<HashMap<QueueKey, RecoveryStats>>,
     /// Per-queue request-id replay/conflict cache (API-001 / TD-007 §4): a retried `request_id` with the
@@ -1785,6 +1834,11 @@ pub struct SegmentedObjectLogInMemoryBackend {
 }
 
 impl SegmentedObjectLogInMemoryBackend {
+    /// Install the deterministic object-log fault seam used by blocking/fencing conformance tests.
+    pub fn set_object_log_fault_hook(&self, hook: Option<Arc<dyn FaultHook>>) {
+        self.log.set_fault_hook(hook);
+    }
+
     /// Open (or recover) a segmented object log rooted at `object_root` with `config`, paired with in-memory
     /// projections. Recovery replays committed segments into each queue's `ProjectionData` in `create_queue`.
     pub fn open(object_root: impl Into<PathBuf>, config: SegmentConfig) -> EngineResult<Self> {
@@ -1811,6 +1865,9 @@ impl SegmentedObjectLogInMemoryBackend {
             command_seq: AtomicU64::new(0),
             node_id: 0,
             flush_interval: Duration::from_millis(flush_ms),
+            flush_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            flush_cursor: AtomicUsize::new(0),
+            flush_inflight: Mutex::new(HashSet::new()),
             recovery_stats: Mutex::new(HashMap::new()),
             idempotency: Mutex::new(HashMap::new()),
             byte_budget: default_objectlog_byte_budget(),
@@ -1839,6 +1896,10 @@ impl SegmentedObjectLogInMemoryBackend {
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
+        self
+    }
+
+    pub fn with_worker_partition(self, _index: usize, _partitions: usize) -> Self {
         self
     }
 
@@ -2093,7 +2154,7 @@ impl SegmentedObjectLogInMemoryBackend {
                     admission,
                 );
             }
-            let shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
+            let mut shards: Vec<(QueueKey, Arc<ShardCoord>)> = {
                 this.coords
                     .lock()
                     .expect("segmented coords poisoned")
@@ -2101,20 +2162,40 @@ impl SegmentedObjectLogInMemoryBackend {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect()
             };
+            if !shards.is_empty() {
+                let start = this.flush_cursor.fetch_add(1, Ordering::Relaxed) % shards.len();
+                shards.rotate_left(start);
+            }
             let now_ms = system_now_ms();
             for (shard, coord) in shards {
-                let epoch = this.cached_epoch(&shard);
-                let mut state = coord.state.lock().await;
-                if state.pending.is_empty() {
-                    continue;
-                }
-                match this.log.flush_due(&shard, epoch, now_ms) {
-                    Ok(positions) if !positions.is_empty() => {
-                        this.distribute(&mut state, positions)
+                let Ok(slot) = this.flush_slots.clone().try_acquire_owned() else {
+                    break;
+                };
+                {
+                    let mut inflight = this.flush_inflight.lock().expect("flush inflight poisoned");
+                    if !inflight.insert(shard.clone()) {
+                        continue;
                     }
-                    Ok(_) => {}
-                    Err(e) => Self::fail_all(&mut state, e),
                 }
+                let backend = Arc::clone(&this);
+                tokio::task::spawn_blocking(move || {
+                    let _slot = slot;
+                    let _inflight = FlushInflightGuard {
+                        inflight: &backend.flush_inflight,
+                        shard: shard.clone(),
+                    };
+                    let epoch = backend.cached_epoch(&shard);
+                    let mut state = coord.state.blocking_lock();
+                    if !state.pending.is_empty() {
+                        match backend.log.flush_due(&shard, epoch, now_ms) {
+                            Ok(positions) if !positions.is_empty() => {
+                                backend.distribute(&mut state, positions)
+                            }
+                            Ok(_) => {}
+                            Err(e) => Self::fail_all(&mut state, e),
+                        }
+                    }
+                });
             }
         }
     }
