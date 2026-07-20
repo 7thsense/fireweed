@@ -71,6 +71,7 @@ turso-projection = ["dep:pqueue-turso", "pqueue-turso/local"]
 
 [dev-dependencies]
 pqueue-core = { path = "../pqueue-core" }
+pqueue-conformance = { path = "../pqueue-conformance" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "test-util"] }
 redis = { version = "1", features = ["tokio-comp"] }
 # The TP-002 E3 live object-log ack/recovery benchmark harness emits + strict-validates release-ledger rows.

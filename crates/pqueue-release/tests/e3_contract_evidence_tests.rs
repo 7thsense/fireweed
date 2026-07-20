@@ -113,6 +113,23 @@ fn rejects_marker_only_recovery_and_recorder_controls() {
 }
 
 #[test]
+fn rejects_profile_incorrect_canonical_recovery_command_count() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"recovery_command_count\":10001",
+        "\"recovery_command_count\":10000",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("exact streaming 10M recovery with monotonic replay progress")
+    );
+}
+
+#[test]
 fn rejects_unbounded_cardinality_dependent_work_and_inexact_recovery_state() {
     let fixture = Fixture::new();
     let path = fixture.root.join("e3.jsonl");

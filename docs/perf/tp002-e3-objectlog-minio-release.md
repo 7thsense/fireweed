@@ -65,6 +65,12 @@ tasks, replays at most 256 commands per production page, caps object-list pages
 at 1,000 keys, and bounds concurrent object-store requests independently of
 resident cardinality. Replay progress and peak work/page counts come from the
 production recovery loops. Recovery wall time is capacity evidence only.
+The in-memory profile loads 10,000 commands. The SQLite profile loads 9,999,999
+items in 10,000 commands, then commits one deliberately unacknowledged tail
+command, so its governed recovery command count is 10,001. Concurrent loader
+scheduling does not define queue order: the proof validates that the complete
+authoritative order is a duplicate-free permutation of the verified live state
+and that its page-for-page digest is identical before and after recovery.
 
 ## Exclusions and claim boundary
 

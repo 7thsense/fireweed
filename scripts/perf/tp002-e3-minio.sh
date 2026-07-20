@@ -31,6 +31,8 @@ fi
 
 : "${PQUEUE_S3_TEST_ENDPOINT:?set PQUEUE_S3_TEST_ENDPOINT to the MinIO endpoint, e.g. http://<container-ip>:9000}"
 : "${PQUEUE_E3_MINIO_CONTAINER:?set PQUEUE_E3_MINIO_CONTAINER to the fresh MinIO container name}"
+: "${PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL:?set the Postgres DSN used for the executed no-CAS pointer fence proof}"
+: "${PQUEUE_E3_FENCE_EVIDENCE_OUT:?set the output path for source-bound fencing.json evidence}"
 
 MINIO_IP=$(docker inspect "$PQUEUE_E3_MINIO_CONTAINER" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
 MINIO_TMPFS=$(docker inspect "$PQUEUE_E3_MINIO_CONTAINER" --format '{{index .HostConfig.Tmpfs "/data"}}')
@@ -55,6 +57,8 @@ PQUEUE_E3_STORAGE_TOPOLOGY="wrapper-verified MinIO /data 8g tmpfs; live HTTP/S3 
 PQUEUE_E3_STORAGE_TOPOLOGY_ID=minio-tmpfs-8g \
 PQUEUE_E3_STORAGE_DURABILITY_CLAIM=excluded \
 PQUEUE_E3_SOURCE_REVISION="$SOURCE_REVISION" \
+PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL="$PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL" \
+PQUEUE_E3_FENCE_EVIDENCE_OUT="$PQUEUE_E3_FENCE_EVIDENCE_OUT" \
 PQUEUE_S3_TEST_ENDPOINT="$PQUEUE_S3_TEST_ENDPOINT" \
 PQUEUE_S3_TEST_BUCKET=${PQUEUE_S3_TEST_BUCKET:-pqueue-test} \
 PQUEUE_S3_TEST_ACCESS_KEY=${PQUEUE_S3_TEST_ACCESS_KEY:-minioadmin} \

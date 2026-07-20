@@ -3184,32 +3184,6 @@ fn segmented_object_log_commits_through_minio() {
         "owner A sealed two segments before being fenced"
     );
     assert_eq!(c.commands_committed, 10);
-
-    // The live lane may opt into a structured, source-pinned fence artifact. Merely running this test
-    // never writes governed evidence: the caller must provide both an explicit output path and the exact
-    // revision under test.
-    if let Ok(output) = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT") {
-        let source_revision = std::env::var("PQUEUE_E3_SOURCE_REVISION")
-            .expect("PQUEUE_E3_SOURCE_REVISION is required when emitting E3 fence evidence");
-        assert_eq!(
-            std::env::var("PQUEUE_E3_POSTGRES_POINTER_FENCE_PROVEN").as_deref(),
-            Ok("1"),
-            "combined E3 fence evidence requires the source-matched Postgres pointer fallback proof"
-        );
-        let row = pqueue_release::e3_contract::build_e3_fence_evidence(
-            pqueue_release::e3_contract::E3FenceObservation {
-                source_revision,
-                stale_epoch_rejected: true,
-                current_epoch_committed: true,
-                no_cas_stale_epoch_rejected: true,
-                no_cas_current_epoch_committed: true,
-                no_cas_pointer_and_epoch_atomic: true,
-            },
-        )
-        .expect("build source-pinned E3 fence evidence");
-        pqueue_release::e3_contract::write_e3_fence_evidence(std::path::Path::new(&output), &row)
-            .expect("write E3 fence evidence");
-    }
 }
 
 // ---------------------------------------------------------------------------

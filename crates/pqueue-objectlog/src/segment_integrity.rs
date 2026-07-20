@@ -220,6 +220,22 @@ pub(crate) fn decode(
     locator: &str,
     expected: &ManifestIntegrity,
 ) -> EngineResult<(u64, u64, Vec<CommandEnvelope>)> {
+    let (epoch, first_seq, _, commands) =
+        decode_range(bytes, manifest_index, locator, expected, 0, usize::MAX)?;
+    Ok((epoch, first_seq, commands))
+}
+
+/// Validate the complete segment frame, but deserialize only the requested command range.
+/// The object bytes are already bounded by `MAX_SEGMENT_BYTES`; this additionally prevents recovery
+/// paging from allocating a resident-sized `Vec<CommandEnvelope>` for a large physical segment.
+pub(crate) fn decode_range(
+    bytes: &[u8],
+    manifest_index: u64,
+    locator: &str,
+    expected: &ManifestIntegrity,
+    skip: usize,
+    limit: usize,
+) -> EngineResult<(u64, u64, usize, Vec<CommandEnvelope>)> {
     let fail = |stage, detail| SegmentIntegrityError::new(stage, manifest_index, locator, detail);
     if bytes.len() > MAX_SEGMENT_BYTES {
         return Err(fail(DurableIntegrityStage::Bounds, "segment_too_large").into());
@@ -302,19 +318,23 @@ pub(crate) fn decode(
     // proven bounded. GET has already materialized the object; these bounds
     // prevent secondary allocations from attacker-controlled length fields.
     cursor = records_start;
-    let mut commands = Vec::with_capacity(count);
-    for _ in 0..count {
+    let selected = count.saturating_sub(skip).min(limit);
+    let mut commands = Vec::with_capacity(selected);
+    for index in 0..count {
         let len = read_u32(bytes, &mut cursor, records_end, &fail)? as usize;
         if matches!(expected, ManifestIntegrity::V3 { .. }) {
             let _ = read_u32(bytes, &mut cursor, records_end, &fail)?;
         }
         let end = cursor + len;
-        let command = serde_json::from_slice(&bytes[cursor..end])
-            .map_err(|_| EngineError::from(fail(DurableIntegrityStage::Payload, "invalid_json")))?;
-        commands.push(command);
+        if index >= skip && commands.len() < selected {
+            let command = serde_json::from_slice(&bytes[cursor..end]).map_err(|_| {
+                EngineError::from(fail(DurableIntegrityStage::Payload, "invalid_json"))
+            })?;
+            commands.push(command);
+        }
         cursor = end;
     }
-    Ok((epoch, first_seq, commands))
+    Ok((epoch, first_seq, count, commands))
 }
 
 fn read_u32(

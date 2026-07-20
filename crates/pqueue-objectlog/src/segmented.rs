@@ -4033,6 +4033,60 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         result
     }
 
+    fn decode_manifest_segment_range(
+        &self,
+        entry: &ManifestEntry,
+        segment_key: &str,
+        bytes: &[u8],
+        is_committed_branch: bool,
+        skip: usize,
+        limit: usize,
+    ) -> EngineResult<(u64, u64, usize, Vec<CommandEnvelope>)> {
+        let locator = object_locator(segment_key);
+        let integrity = entry.manifest_integrity()?;
+        let decoded = crate::segment_integrity::decode_range(
+            bytes,
+            entry.index,
+            &locator,
+            &integrity,
+            skip,
+            limit,
+        );
+        let result = decoded.and_then(|(epoch, first_seq, count, commands)| {
+            let expected_epoch = entry.segment_epoch.or_else(|| {
+                (!is_committed_branch || entry.segment_format.is_some()).then_some(entry.epoch)
+            });
+            let count_u64 = u64::try_from(count).map_err(|_| EngineError::DurableDataCorrupt {
+                stage: pqueue_engine::DurableIntegrityStage::Position,
+                manifest_index: entry.index,
+                locator: locator.clone(),
+            })?;
+            let decoded_last = first_seq.checked_add(count_u64.saturating_sub(1));
+            if expected_epoch.is_some_and(|expected| epoch != expected)
+                || first_seq != entry.first_seq
+                || count == 0
+                || decoded_last != Some(entry.last_seq)
+            {
+                return Err(EngineError::DurableDataCorrupt {
+                    stage: pqueue_engine::DurableIntegrityStage::Position,
+                    manifest_index: entry.index,
+                    locator: locator.clone(),
+                });
+            }
+            Ok((epoch, first_seq, count, commands))
+        });
+        if self.store.effective_recorder().is_enabled() {
+            let validation: EngineResult<()> = result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| (*error).clone());
+            self.store
+                .effective_recorder()
+                .record_segment_validation(self.store.backend_kind(), &validation);
+        }
+        result
+    }
+
     fn validate_live_segment_locator(
         &self,
         shard: &QueueKey,
@@ -4263,12 +4317,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let bytes = self
             .store_get(seg_key)?
             .ok_or(EngineError::Storage(format!("missing segment {seg_key}")))?;
-        let (epoch, first_seq, commands) =
-            self.decode_manifest_segment(entry, seg_key, &bytes, is_committed_branch)?;
-        for (index, envelope) in commands.into_iter().enumerate() {
-            let sequence = first_seq + index as u64;
-            if sequence < from_seq || sequence > visible_last_seq {
-                continue;
+        let skip = from_seq.saturating_sub(entry.first_seq) as usize;
+        let remaining = RECOVERY_COMMAND_PAGE_LIMIT.saturating_sub(out.len());
+        let (epoch, first_seq, _count, commands) = self.decode_manifest_segment_range(
+            entry,
+            seg_key,
+            &bytes,
+            is_committed_branch,
+            skip,
+            remaining,
+        )?;
+        for (offset, envelope) in commands.into_iter().enumerate() {
+            let sequence = first_seq + skip as u64 + offset as u64;
+            if sequence > visible_last_seq {
+                break;
             }
             out.push((
                 CommandPosition::new(shard.clone(), epoch, sequence),

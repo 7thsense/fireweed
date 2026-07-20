@@ -67,7 +67,8 @@ use pqueue_objectlog::object_store_observability::{
     BlobBackendKind, BlobMetricsRecorder, BlobPhysicalTotals, InstrumentedBlobStore,
 };
 use pqueue_objectlog::segmented::{
-    BlobStore, FaultCutPoint, S3_LIST_PAGE_MAX_KEYS, S3BlobStore, SegmentConfig, SegmentCounters,
+    BlobStore, FaultCutPoint, PointerFencedBlobStore, S3_LIST_PAGE_MAX_KEYS, S3BlobStore,
+    SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use pqueue_server::{
     RecoveryStats, SegmentedObjectLogInMemoryBackend, SegmentedObjectLogSqliteBackend,
@@ -80,6 +81,72 @@ const RELEASE_ACK_CONCURRENCY: u64 = 384;
 const RELEASE_LOAD_BATCH: u64 = 1_000;
 const RELEASE_LOAD_CONCURRENCY: u64 = 8;
 const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
+
+fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {
+    use pqueue_conformance::{envelope, item, qdef as conformance_qdef, shard};
+    use pqueue_engine::{PushCommand, QueueCommand};
+
+    let postgres_url = std::env::var("PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL")
+        .expect("governed no-CAS proof requires PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL");
+    let objects: Arc<dyn BlobStore> = Arc::new(
+        S3BlobStore::new(
+            &s3.endpoint,
+            &s3.bucket,
+            &s3.access,
+            &s3.secret,
+            "us-east-1",
+        )
+        .expect("build no-CAS S3 object store"),
+    );
+    // Independent clients are essential: a process-local mutex is not the fence under test.
+    let pointer_a = Arc::new(
+        pqueue_postgres::PostgresManifestPointer::open(&postgres_url)
+            .expect("open owner-A Postgres pointer"),
+    );
+    let pointer_b = Arc::new(
+        pqueue_postgres::PostgresManifestPointer::open(&postgres_url)
+            .expect("open owner-B Postgres pointer"),
+    );
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let shard = shard();
+    let push = |suffix: &str| {
+        vec![envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item(suffix, &format!("e3-pg-{suffix}"), 0)],
+            }),
+            vec![],
+        )]
+    };
+    let owner_a =
+        SegmentedObjectLog::open(PointerFencedBlobStore::new(objects.clone(), pointer_a), cfg);
+    owner_a.create_queue(&conformance_qdef()).unwrap();
+    assert_eq!(owner_a.fence_epoch(&shard, 0, 1).unwrap(), 0);
+    owner_a.enqueue(&shard, &push("a"), 0, 2).unwrap();
+    owner_a.seal(&shard, 0, 3).unwrap();
+
+    let owner_b = SegmentedObjectLog::open(PointerFencedBlobStore::new(objects, pointer_b), cfg);
+    owner_b.create_queue(&conformance_qdef()).unwrap();
+    assert_eq!(owner_b.acquire_epoch(&shard, 4).unwrap(), 1);
+    owner_b.enqueue(&shard, &push("b"), 1, 5).unwrap();
+    owner_b.seal(&shard, 1, 6).unwrap();
+    owner_a.enqueue(&shard, &push("stale"), 0, 7).unwrap();
+    assert_eq!(owner_a.seal(&shard, 0, 8), Err(EngineError::EpochFenced));
+    assert_eq!(owner_b.read_all(&shard).unwrap().len(), 2);
+
+    let row = pqueue_release::e3_contract::build_e3_fence_evidence(
+        pqueue_release::e3_contract::E3FenceObservation {
+            source_revision: source_revision.to_owned(),
+            stale_epoch_rejected: true,
+            current_epoch_committed: true,
+            no_cas_stale_epoch_rejected: true,
+            no_cas_current_epoch_committed: true,
+            no_cas_pointer_and_epoch_atomic: true,
+        },
+    )
+    .expect("build executed Postgres-pointer fence evidence");
+    pqueue_release::e3_contract::write_e3_fence_evidence(output, &row)
+        .expect("write executed Postgres-pointer fence evidence");
+}
 
 const E3_BOUND_CONFIGS: [BoundConfig; 4] = [
     BoundConfig {
@@ -744,7 +811,11 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
     let identity_path = projection_path("recovery-identity-index");
     let mut identity_db = rusqlite::Connection::open(&identity_path).unwrap();
     identity_db
-        .execute_batch("PRAGMA journal_mode=OFF; CREATE TABLE seen_ids (id INTEGER PRIMARY KEY)")
+        .execute_batch(
+            "PRAGMA journal_mode=OFF; \
+             CREATE TABLE seen_ids (id INTEGER PRIMARY KEY, client_key TEXT NOT NULL UNIQUE); \
+             CREATE TABLE seen_order_ids (id INTEGER PRIMARY KEY)",
+        )
         .unwrap();
     let mut identity_domain = None;
     let mut duplicates = 0u64;
@@ -786,8 +857,11 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
             } else {
                 let inserted = tx
                     .execute(
-                        "INSERT OR IGNORE INTO seen_ids(id) VALUES (?1)",
-                        [view.item_id.as_u64() as i64],
+                        "INSERT OR IGNORE INTO seen_ids(id, client_key) VALUES (?1, ?2)",
+                        rusqlite::params![
+                            view.item_id.as_u64() as i64,
+                            view.client_item_key.as_str()
+                        ],
                     )
                     .unwrap();
                 if inserted != 1 {
@@ -819,8 +893,6 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
     if unique_ids != verified {
         duplicates = duplicates.saturating_add(verified.abs_diff(unique_ids));
     }
-    drop(identity_db);
-    let _ = std::fs::remove_file(identity_path);
     digest.update(&id_xor.to_le_bytes());
     digest.update(&id_sum.to_le_bytes());
     let mut order_offset = 0usize;
@@ -835,7 +907,21 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
         }
         for (index, item) in page.iter().enumerate() {
             let ordinal = order_offset + index;
-            if item.client_item_key.as_str() != format!("i{ordinal}") {
+            let belongs_to_verified_state = identity_db
+                .query_row(
+                    "SELECT 1 FROM seen_ids WHERE id=?1 AND client_key=?2",
+                    rusqlite::params![item.item_id.as_u64() as i64, item.client_item_key.as_str()],
+                    |_| Ok(()),
+                )
+                .is_ok();
+            let first_in_order = identity_db
+                .execute(
+                    "INSERT OR IGNORE INTO seen_order_ids(id) VALUES (?1)",
+                    [item.item_id.as_u64() as i64],
+                )
+                .unwrap()
+                == 1;
+            if !belongs_to_verified_state || !first_in_order {
                 invalid += 1;
             }
             digest.update(b"authoritative-order");
@@ -848,6 +934,14 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
         order_cursor = page.last().map(|item| item.item_id);
         order_offset += page.len();
     }
+    let ordered_unique: u64 = identity_db
+        .query_row("SELECT COUNT(*) FROM seen_order_ids", [], |row| row.get(0))
+        .unwrap();
+    if ordered_unique != resident {
+        invalid = invalid.saturating_add(resident.abs_diff(ordered_unique));
+    }
+    drop(identity_db);
+    let _ = std::fs::remove_file(identity_path);
     StateFingerprint {
         digest: digest.finish(),
         verified,
@@ -872,6 +966,18 @@ async fn push_with_retry<B: PushPort>(backend: &B, shard: &QueueKey, items: Vec<
             Err(e) => panic!("push failed after {attempt} retries: {e:?}"),
         }
     }
+}
+
+fn concurrent_load_command_count(resident: u64, load_batch: u64, concurrency: u64) -> u64 {
+    let concurrency = concurrency.max(1);
+    let share = resident.div_ceil(concurrency);
+    (0..concurrency)
+        .map(|worker| {
+            let start = worker * share;
+            let end = (start + share).min(resident);
+            end.saturating_sub(start).div_ceil(load_batch)
+        })
+        .sum()
 }
 
 /// Load `resident` items over MinIO, then reopen and measure the projection-specific rebuild contract.
@@ -949,6 +1055,11 @@ where
         for h in handles {
             command_count += h.await.expect("load task joined");
         }
+        assert_eq!(
+            command_count,
+            concurrent_load_command_count(load_resident, load_batch, load_concurrency),
+            "concurrent recovery loader command accounting"
+        );
 
         // Let the flusher seal any trailing buffered command so the projection is fully caught up before we
         // snapshot (a clean shutdown). Poll until pending == resident or a generous deadline (> the cap).
@@ -1763,6 +1874,10 @@ async fn performance_object_log_e3_live_tests() {
             env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000),
             1_000_000
         );
+        let fence_output = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT").expect(
+            "release E3 requires an output path for executed Postgres-pointer fence evidence",
+        );
+        prove_postgres_pointer_fence(&s3, &source_revision, std::path::Path::new(&fence_output));
     }
 
     let runs = [
@@ -2137,5 +2252,27 @@ fn e3_matrix_rejects_recovery_digest_drift() {
             .iter()
             .any(|error| error.contains("exact complete state")),
         "{errors:?}"
+    );
+}
+
+#[test]
+fn canonical_recovery_command_counts_include_the_sqlite_crash_tail() {
+    assert_eq!(
+        concurrent_load_command_count(
+            RELEASE_RESIDENT,
+            RELEASE_LOAD_BATCH,
+            RELEASE_LOAD_CONCURRENCY
+        ),
+        10_000,
+        "in-memory genesis profile loads exactly 10,000 commands"
+    );
+    assert_eq!(
+        concurrent_load_command_count(
+            RELEASE_RESIDENT - 1,
+            RELEASE_LOAD_BATCH,
+            RELEASE_LOAD_CONCURRENCY
+        ) + 1,
+        10_001,
+        "SQLite snapshot load plus its committed crash tail is 10,001 commands"
     );
 }

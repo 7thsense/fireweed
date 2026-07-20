@@ -792,7 +792,12 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
             .and_then(serde_json::Value::as_str)
             != Some("fnv1a128+disk-unique-id-index")
         || require_u64(row, "recovery_resident", errors) != Some(10_000_000)
-        || require_u64(row, "recovery_command_count", errors) != Some(10_000)
+        || require_u64(row, "recovery_command_count", errors)
+            != Some(if row.backend_profile == "object_log_sqlite_projection" {
+                10_001
+            } else {
+                10_000
+            })
         || require_u64(row, "recovery_pending_after", errors) != Some(10_000_000)
         || require_u64(row, "recovery_load_task_count", errors) != Some(8)
         || require_u64(row, "recovery_load_task_limit", errors) != Some(8)

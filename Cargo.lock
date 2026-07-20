@@ -2762,6 +2762,7 @@ dependencies = [
  "heimq",
  "heimq-broker",
  "heimq-protocol",
+ "pqueue-conformance",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-memory",
