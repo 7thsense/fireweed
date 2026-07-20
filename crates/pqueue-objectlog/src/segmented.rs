@@ -8601,6 +8601,51 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         Ok(out)
     }
+
+    /// Read one bounded provider LIST page of the durable queue catalog. The cursor is the last raw object
+    /// key, not the last matching `queue.json`, so stores with many non-catalog objects still make bounded
+    /// forward progress without materializing the namespace.
+    pub fn recover_definitions_page(
+        &self,
+        cursor: Option<&pqueue_engine::DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::DefinitionPage> {
+        if limit == 0 {
+            return Err(EngineError::Invalid(
+                "definition page limit must be nonzero",
+            ));
+        }
+        let mut keys = self.store.list_page(
+            "t/",
+            cursor.map(|cursor| cursor.storage_key.as_str()),
+            limit.saturating_add(1),
+        )?;
+        let has_more = keys.len() > limit;
+        keys.truncate(limit);
+        let next = has_more.then(|| pqueue_engine::DefinitionCursor {
+            storage_key: keys.last().expect("continued page is nonempty").clone(),
+        });
+        let mut definitions = Vec::new();
+        for key in keys {
+            if !key.ends_with("/queue.json") {
+                continue;
+            }
+            let Some(bytes) = self.store_get(&key)? else {
+                return Err(EngineError::Storage(format!(
+                    "missing durable queue definition {key}"
+                )));
+            };
+            let definition: QueueDefinition = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            if worker_partition.is_none_or(|(index, partitions)| {
+                pqueue_engine::queue_worker_partition(&shard, partitions) == index
+            }) {
+                definitions.push(definition);
+            }
+        }
+        Ok(pqueue_engine::DefinitionPage { definitions, next })
+    }
 }
 
 /// Durable high-water blob (the explicit command-position high-water; TD-007 §4).

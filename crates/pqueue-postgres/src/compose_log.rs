@@ -35,8 +35,9 @@ use std::cell::RefCell;
 use postgres::Client;
 use pqueue_core::QueueDefinition;
 use pqueue_engine::{
-    CommandEnvelope, CommandPage, CommandPosition, EngineError, EngineResult, LogStore,
-    ProjectionSnapshot, QueueKey, SnapshotRef,
+    CommandEnvelope, CommandPage, CommandPosition, DefinitionCursor, DefinitionPage, EngineError,
+    EngineResult, LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
+    definition_page_from_storage_rows,
 };
 
 use crate::connect::{PostgresConnectConfig, connect};
@@ -487,6 +488,43 @@ impl LogStore for PostgresLog {
             out.push(serde_json::from_str(&json).map_err(|e| EngineError::Storage(e.to_string()))?);
         }
         Ok(out)
+    }
+
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<DefinitionPage> {
+        if limit == 0 {
+            return Err(EngineError::Invalid(
+                "definition page limit must be nonzero",
+            ));
+        }
+        let (tenant, queue) = cursor
+            .map(DefinitionCursor::queue_parts)
+            .transpose()?
+            .unwrap_or_default();
+        let rows = st(self.client.borrow_mut().query(
+            "SELECT definition FROM queue_defs \
+             WHERE ($1 = '' OR tenant > $1 OR (tenant = $1 AND queue > $2)) \
+             ORDER BY tenant, queue LIMIT $3",
+            &[&tenant, &queue, &(limit.saturating_add(1) as i64)],
+        ))?;
+        let has_more = rows.len() > limit;
+        let mut definitions = Vec::with_capacity(limit);
+        for row in rows.into_iter().take(limit) {
+            let json: String = row.get(0);
+            definitions.push(
+                serde_json::from_str(&json)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+            );
+        }
+        Ok(definition_page_from_storage_rows(
+            definitions,
+            has_more,
+            worker_partition,
+        ))
     }
 }
 
