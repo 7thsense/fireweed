@@ -1,7 +1,7 @@
 //! pqueue performance / e2e harness (TP-002 + data-shape baseline).
 //!
 //! Drives SIX backends across BOTH projection families through ingest / claim+ack / lifecycle / recovery /
-//! density workloads over a representative SET of data SHAPES, and reports throughput vs the E0 floor
+//! density workloads over a representative SET of data SHAPES, and reports diagnostic throughput/capacity
 //! (>=10,000,000 accepted items/hr per queue == 2,777.78 items/s) plus per-batch latency percentiles.
 //!
 //! Projection families:
@@ -133,7 +133,7 @@ impl Config {
                 .join(", ")
         );
         println!(
-            "  E0 floor    = {:.0} items/hr ({:.0} items/s)\n",
+            "  capacity reference (diagnostic, not a gate) = {:.0} items/hr ({:.0} items/s)\n",
             FLOOR_ITEMS_PER_HR, FLOOR_ITEMS_PER_SEC
         );
         print_table_header();
@@ -143,7 +143,7 @@ impl Config {
 fn print_table_header() {
     println!(
         "{:<20} {:<11} {:<16} {:<9} {:>9} {:>11} {:>6} {:>9} {:>9} {:>9}",
-        "backend", "family", "shape", "op", "items", "items/hr", "floor", "p50", "p95", "p99"
+        "backend", "family", "shape", "op", "items", "items/hr", "vs-ref", "p50", "p95", "p99"
     );
     println!("{}", "-".repeat(116));
 }
@@ -153,7 +153,11 @@ fn print_table_header() {
 // ---------------------------------------------------------------------------
 
 fn print_row(backend: &str, family: &str, shape: &str, stats: &mut OpStats) {
-    let pass = if stats.passes_floor() { "PASS" } else { "FAIL" };
+    let reference = if stats.meets_capacity_reference() {
+        "above"
+    } else {
+        "below"
+    };
     let (p50, p95, p99) = (stats.pct(0.50), stats.pct(0.95), stats.pct(0.99));
     println!(
         "{:<20} {:<11} {:<16} {:<9} {:>9} {:>11} {:>6} {:>9} {:>9} {:>9}",
@@ -163,7 +167,7 @@ fn print_row(backend: &str, family: &str, shape: &str, stats: &mut OpStats) {
         stats.op,
         fmt_count(stats.items),
         fmt_rate(stats.items_per_hr()),
-        pass,
+        reference,
         fmt_dur(p50),
         fmt_dur(p95),
         fmt_dur(p99),
@@ -468,7 +472,7 @@ async fn report_recovery<B: pqueue::LibBackend>(
     );
 }
 
-/// Queue density: many concurrently-resident queues on one node; the hot queue still hits the floor.
+/// Queue density: many concurrently-resident queues on one node; the hot queue still progresses.
 async fn density(cfg: &Config) {
     println!("\nqueue density (single node, memory backend, minimal shape):");
     let shape = all_shapes()[0]; // minimal
@@ -503,7 +507,7 @@ async fn density(cfg: &Config) {
     c.op = "hot-claim";
     print_row("density", LOG_FAMILY, "minimal", &mut c);
     println!(
-        "  -> hot queue floor check with {} other active queues resident.\n",
+        "  -> hot queue progress/capacity diagnostic with {} other active queues resident.\n",
         cfg.queues
     );
 }

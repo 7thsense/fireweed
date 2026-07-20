@@ -25,9 +25,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{Clock, QueueKey};
 
-/// The E0 per-queue throughput floor: 10,000,000 accepted items/hr.
+/// Historical E0 product-capacity reference: 10,000,000 accepted items/hr. Diagnostic only.
 pub const FLOOR_ITEMS_PER_HR: f64 = 10_000_000.0;
-/// The E0 floor expressed per-second (2,777.78/s).
+/// Historical capacity reference expressed per-second (2,777.78/s).
 pub const FLOOR_ITEMS_PER_SEC: f64 = FLOOR_ITEMS_PER_HR / 3600.0;
 
 // ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ impl OpStats {
     pub fn items_per_hr(&self) -> f64 {
         self.items_per_sec() * 3600.0
     }
-    pub fn passes_floor(&self) -> bool {
+    pub fn meets_capacity_reference(&self) -> bool {
         self.items_per_sec() >= FLOOR_ITEMS_PER_SEC
     }
     /// The `p`-quantile (0.0..=1.0) batch latency. Sorts `lat` in place.
