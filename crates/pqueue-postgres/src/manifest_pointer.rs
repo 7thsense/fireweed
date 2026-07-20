@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS pqueue_objectlog_manifest_pointer (
     version BIGINT NOT NULL,
     assignment_epoch BIGINT NOT NULL,
     head_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pqueue_objectlog_immutable_claim (
+    object_key TEXT PRIMARY KEY,
+    content_sha256 TEXT NOT NULL
 )";
 
 /// Postgres-held TD-004 manifest pointer for object stores without conditional writes.
@@ -98,6 +102,31 @@ impl ManifestPointerStore for PostgresManifestPointer {
         };
         transaction.commit().map_err(storage)?;
         Ok(changed == 1)
+    }
+
+    fn claim_immutable(&self, key: &str, content_sha256: &str) -> EngineResult<bool> {
+        let mut client = self
+            .client
+            .lock()
+            .expect("manifest pointer client poisoned");
+        let changed = client
+            .execute(
+                "INSERT INTO pqueue_objectlog_immutable_claim(object_key,content_sha256) \
+                 VALUES($1,$2) ON CONFLICT(object_key) DO NOTHING",
+                &[&key, &content_sha256],
+            )
+            .map_err(storage)?;
+        if changed == 1 {
+            return Ok(true);
+        }
+        let existing: String = client
+            .query_one(
+                "SELECT content_sha256 FROM pqueue_objectlog_immutable_claim WHERE object_key=$1",
+                &[&key],
+            )
+            .map_err(storage)?
+            .get(0);
+        Ok(existing == content_sha256)
     }
 }
 

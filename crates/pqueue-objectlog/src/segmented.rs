@@ -82,6 +82,7 @@ pub trait ManifestPointerStore: Send + Sync {
         expected_version: Option<u64>,
         value: &ManifestHeadBlob,
     ) -> EngineResult<bool>;
+    fn claim_immutable(&self, key: &str, content_sha256: &str) -> EngineResult<bool>;
 }
 
 /// Blob-store adapter for the TD-004 no-CAS mode. Immutable bodies remain in object storage; manifest-head
@@ -103,12 +104,20 @@ impl BlobStore for PointerFencedBlobStore {
     }
 
     fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+        let digest = hex_lower(&Sha256::digest(body));
+        if !self.pointers.claim_immutable(key, &digest)? {
+            return Ok(false);
+        }
         match self.objects.get(key)? {
-            Some(existing) => Ok(existing == body),
-            None => {
-                self.objects.put(key, body)?;
-                Ok(true)
-            }
+            Some(existing) if existing == body => Ok(true),
+            Some(_) => Err(EngineError::Storage(
+                "immutable object content disagrees with transactional claim".into(),
+            )),
+            None => self.objects.put(key, body).map(|()| true).map_err(|error| {
+                EngineError::Storage(format!(
+                    "immutable claim committed but object mirror incomplete; retry repairs it: {error}"
+                ))
+            }),
         }
     }
 
@@ -141,7 +150,20 @@ impl BlobStore for PointerFencedBlobStore {
         &self,
         prefix: &str,
     ) -> EngineResult<Option<VersionedHead<ManifestHeadBlob>>> {
-        self.pointers.read(prefix)
+        let head = self.pointers.read(prefix)?;
+        if let Some(head) = &head {
+            self.objects
+                .put(
+                    &format!("{prefix}{:020}.json", head.version),
+                    &serde_json::to_vec(&head.value).map_err(store_err)?,
+                )
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "manifest pointer committed but object mirror incomplete; retry repairs it: {error}"
+                    ))
+                })?;
+        }
+        Ok(head)
     }
 
     fn update_manifest_head_if_version(
@@ -155,10 +177,16 @@ impl BlobStore for PointerFencedBlobStore {
             .compare_and_swap(prefix, expected_version, value)?;
         if won {
             let version = expected_version.map_or(0, |version| version + 1);
-            self.objects.put(
-                &format!("{prefix}{version:020}.json"),
-                &serde_json::to_vec(value).map_err(store_err)?,
-            )?;
+            self.objects
+                .put(
+                    &format!("{prefix}{version:020}.json"),
+                    &serde_json::to_vec(value).map_err(store_err)?,
+                )
+                .map_err(|error| {
+                    EngineError::Storage(format!(
+                        "manifest pointer committed but object mirror incomplete; retry repairs it: {error}"
+                    ))
+                })?;
         }
         Ok(won)
     }
@@ -8405,6 +8433,7 @@ mod manifest_deletion_watermark_tests {
     #[derive(Default)]
     struct TransactionalPointer {
         heads: Mutex<BTreeMap<String, VersionedHead<ManifestHeadBlob>>>,
+        immutable: Mutex<BTreeMap<String, String>>,
     }
 
     impl ManifestPointerStore for TransactionalPointer {
@@ -8432,6 +8461,96 @@ mod manifest_deletion_watermark_tests {
             );
             Ok(true)
         }
+
+        fn claim_immutable(&self, key: &str, content_sha256: &str) -> EngineResult<bool> {
+            let mut claims = self.immutable.lock().unwrap();
+            match claims.get(key) {
+                Some(existing) => Ok(existing == content_sha256),
+                None => {
+                    claims.insert(key.to_owned(), content_sha256.to_owned());
+                    Ok(true)
+                }
+            }
+        }
+    }
+
+    struct FailNextPutStore {
+        inner: InMemoryBlobStore,
+        fail_next: AtomicBool,
+    }
+
+    impl FailNextPutStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemoryBlobStore::new(),
+                fail_next: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl BlobStore for FailNextPutStore {
+        fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+            if self.fail_next.swap(false, AtomicOrdering::SeqCst) {
+                return Err(EngineError::Storage("injected mirror failure".into()));
+            }
+            self.inner.put(key, body)
+        }
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+            self.inner.put_if_absent(key, body)
+        }
+        fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+        fn delete(&self, key: &str) -> EngineResult<bool> {
+            self.inner.delete(key)
+        }
+        fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+            self.inner.list(prefix)
+        }
+    }
+
+    #[test]
+    fn pointer_commit_unknown_and_immutable_claim_are_retry_repairable() {
+        let objects = Arc::new(FailNextPutStore::new());
+        let pointers = Arc::new(TransactionalPointer::default());
+        let adapter = PointerFencedBlobStore::new(objects.clone(), pointers.clone());
+        let head = ManifestHeadBlob {
+            current_epoch: 7,
+            next_seq: 9,
+            next_manifest_index: 4,
+            retention_floor_through: None,
+            tail_candidate_key: Some("candidate".into()),
+            legacy_next_manifest_index: 0,
+        };
+        objects.fail_next.store(true, AtomicOrdering::SeqCst);
+        let error = adapter
+            .update_manifest_head_if_version("authority/", None, &head)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("committed but object mirror incomplete")
+        );
+        assert_eq!(pointers.read("authority/").unwrap().unwrap().value, head);
+        assert_eq!(
+            adapter
+                .read_manifest_head("authority/")
+                .unwrap()
+                .unwrap()
+                .value,
+            head
+        );
+        assert!(
+            !adapter
+                .update_manifest_head_if_version("authority/", None, &head)
+                .unwrap()
+        );
+
+        objects.fail_next.store(true, AtomicOrdering::SeqCst);
+        assert!(adapter.put_if_absent("immutable/key", b"one").is_err());
+        assert!(adapter.put_if_absent("immutable/key", b"one").unwrap());
+        assert!(!adapter.put_if_absent("immutable/key", b"two").unwrap());
+        assert_eq!(objects.get("immutable/key").unwrap().unwrap(), b"one");
     }
 
     #[test]
