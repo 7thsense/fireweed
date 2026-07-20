@@ -1,5 +1,14 @@
 # Build Plan — Queue Is the Unit of Sharding (code phase, P0–P4)
 
+> **Historical build record.** This untracked-frontmatter plan records the
+> implementation sequence and measurements used during the queue-as-shard
+> migration. Its fixed throughput, latency, and cross-node efficiency bars are
+> superseded by product-vision/PRD and TP-002 E0–E3 portable qualification:
+> exact outcomes, queue-global logical progress, structural complexity, bounded
+> shared resources, and interleaved same-run comparisons. Absolute rates and
+> percentiles below remain capacity observations for their declared historical
+> topology only.
+
 **Status:** plan (code-build phase). Governs a `/loop` over the **source tree**.
 **Branch:** `build/queue-as-unit-of-sharding` (off the ADR-008 spec cascade).
 **Supersedes:** BUILD-001's "Multi-Shard Sub-Decomposition" and its multi-shard beads (B-072 et al.),

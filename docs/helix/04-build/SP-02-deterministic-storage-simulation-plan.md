@@ -6,12 +6,12 @@ ddx:
     - {kind: part_of, to: build-slatedb-pattern-adoption-roadmap}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 822bd8ebd2a9e07bdec818a12eb2ea8c21a2feca965422830eae41a839a407c8
+    self_hash: b25a30432dff7ec1d44e7c1951d3d0552937636ed43582e1a26b549e560571e5
     deps:
-      build-sp01-global-buffer-byte-admission: 5cfbe42a94ec4813e4855e431f0319152c6c8d11c5b081dcc77954a1ecf933b7
-      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
-      td-sharding-and-shard-ownership: b3983f017f7907e900d79cfb08a8cd7ff66786835e66c5d2c1a87589a9db57db
-    reviewed_at: "2026-07-18T19:52:55Z"
+      build-sp01-global-buffer-byte-admission: 97d1032e2b1bbd9ecae2df5daed4350d88364b2bb4d9e7b3c643677f665d8280
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+      td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
+    reviewed_at: "2026-07-20T00:01:31Z"
 ---
 
 # Technical Spike Plan: SP-02 Deterministic Storage Simulation

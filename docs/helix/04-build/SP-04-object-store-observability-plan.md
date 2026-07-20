@@ -6,11 +6,11 @@ ddx:
     - {kind: part_of, to: build-slatedb-pattern-adoption-roadmap}
     - {kind: verified_by, to: tp-scale-substantiation}
   review:
-    self_hash: 7fc689fb0f1334fee08304160a66d3215372c754dddf679ae4411c4c0d625926
+    self_hash: b75fdf641cb7d51d5baedf66abe2569b7ae19d2722fec456710c887204508706
     deps:
       build-sp03-sequenced-metadata-boundary: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
-      td-s3-object-log-sqlite-projection-mode: 94855c909aac4f1a362bce18f1720e58d524945eba5a4dda495e46ed9a0c1116
-    reviewed_at: "2026-07-18T22:13:09Z"
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+    reviewed_at: "2026-07-20T00:01:31Z"
 ---
 
 # Implementation Plan: SP-04 Object-Store Observability Below Retries

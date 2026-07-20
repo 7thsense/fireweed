@@ -16,14 +16,15 @@ ddx:
     - {kind: informed_by, to: td-object-log-turso-projection}
     - {kind: informed_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 2563a637d70eba065d6825ecbeeb25864c64e539f5709299de409f3781998627
+    self_hash: 7297e95a6d2b447ba76ed6dd6c306be2b80b51f86f61df74d5a4947c026acdd9
     deps:
+      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
       adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
-      td-object-log-turso-projection: ef2026084d244dee4376217af4e3c5d9b9d80628edac3a8aeffc0876660d286f
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-      tp-verification-acceptance-criteria: 8e7afb90dddf5324683ca8fb2781089bda204d71a65e62a0696ef28570e312a6
-    reviewed_at: "2026-07-18T02:36:05Z"
+      td-object-log-turso-projection: 1e3623771c800e9d2c6874c19e94103d00c165f1afdd27ece4760fb43f6f7f69
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
+    reviewed_at: "2026-07-20T00:01:30Z"
 ---
 
 # Build Plan: Full-Async Storage and Turso Projection

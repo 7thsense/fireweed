@@ -7,13 +7,13 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-verification-acceptance-criteria
   review:
-    self_hash: eefa6005730f6a31933ab8d9c7ddee9412a09d88d252b1b3bbb91f2d2febea06
+    self_hash: 8eeb5f778b64b94c12e1487b1072e335ebf6c73bcfe924bb924eca20634d149e
     deps:
-      adr-orthogonal-log-projection-composition: 72e7c4701c344732c61b2b63043e70024bbff6228b841b8d76dffbb2d5bc4fd5
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-      tp-verification-acceptance-criteria: 8e7afb90dddf5324683ca8fb2781089bda204d71a65e62a0696ef28570e312a6
-    reviewed_at: "2026-07-18T02:36:05Z"
+      adr-orthogonal-log-projection-composition: 778fdbadeadce6b52e101bda39921f88b193c5737ea96d4b8ae8e8a424a4e743
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
+    reviewed_at: "2026-07-20T00:01:29Z"
 ---
 
 # Hybrid SQLite + In-Memory Projection Implementation Plan
@@ -256,28 +256,34 @@ Hot serving must remain in-memory for claim selection, `peek`, `pending`,
 `metrics`, live-item lookup, secondary-index lookup, and pre-commit validation.
 SQLite work must be amortized on sealed segment apply, not on every read. The
 load tests must compare hybrid to `objectlog/inmemory` and `objectlog/sqlite`
-with the same segment configuration and report:
+with identical seeded work and segment configuration, using interleaved same-run
+control windows, and prove:
 
-- push throughput and p50/p95/p99 acknowledgement latency within 20% of
-  `objectlog/inmemory` for the same segment settings in the release-tier run;
-- claim/finalize p95 latency within 20% of `objectlog/inmemory` for hot reads
-  after the initial SQLite apply cost is amortized;
+- exact operation counts, monotonic progress, and hot reads served from memory;
+- shared tasks, queues, memory, and async debt remain within declared bounds;
+- relative degradation stays inside the workload-declared same-run envelope;
+- push throughput, p50/p95/p99 acknowledgement latency, and claim/finalize
+  latency are reported as capacity evidence for the declared topology;
 - segment batch density and object PUT count;
 - recovery elapsed time and tail length after a large resident set, with normal
   owner-local restart avoiding full-genesis replay;
 - max memory rehydrate time from SQLite snapshot.
 
-Recovery has numeric gates:
+Recovery has exact-state and bounded-work gates:
 
 - smoke gate: 100k resident items, local SQLite file present, restart hydrate +
-  object-log tail replay completes in <= 5 seconds and replays <= 1,000
-  object-log commands;
-- release-tier gate: 10M resident items, local SQLite file present, restart
-  hydrate + object-log tail replay completes in <= 60 seconds and replays <=
-  max(10,000 commands, 0.1% of resident items);
+  contiguous object-log tail replay reconstructs exact counts, checksums,
+  indexes, leases, and request-id replay state with monotonic replay progress;
+- release-tier gate: exactly 10M resident items, local SQLite file present,
+  snapshot + contiguous tail reconstructs the same exact state while replayed
+  commands, memory, and pending work remain within declared snapshot/tail and
+  resource bounds;
 - disk-loss gate: with the SQLite projection file removed, recovery from the
   retained object log may be slower, but it must reconstruct exact metrics,
   indexes, leases, and request-id replay state with zero invariant violations.
+
+Recovery wall time is reported as declared-topology capacity, never as a
+quiet-host or fixed-speed support gate.
 
 ## Work Breakdown
 

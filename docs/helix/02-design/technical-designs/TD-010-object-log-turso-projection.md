@@ -21,16 +21,17 @@ ddx:
     - {kind: informed_by, to: concerns}
   status: accepted
   review:
-    self_hash: ef2026084d244dee4376217af4e3c5d9b9d80628edac3a8aeffc0876660d286f
+    self_hash: 1e3623771c800e9d2c6874c19e94103d00c165f1afdd27ece4760fb43f6f7f69
     deps:
+      adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       adr-full-async-storage-boundaries: 26d2c37c96eb0801dbb99e4a02213ecfa747aa533572acde3917801a13cebfcd
       adr-log-single-source-of-truth: 35052eb1b94371aa8abb8e8b348a21b459522c7d5feaba04b7146745a04bda62
       adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
-      api-native-client-interface: 852a753af558d8b8a21e4a86e87915b14c030fefcb4a27473bcbb08cfe044580
-      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
-      td-s3-object-log-sqlite-projection-mode: f77b249de99163d5b3031b174f2ff1a7833b45d1a68646a1a9da206e847a5fd0
-      td-storage-architecture-backend-contracts: f77d88cfdd2f4ad3c23d7f0310c5164eaecc57742f469cdc062accda44484a54
-    reviewed_at: "2026-07-18T02:36:05Z"
+      api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
+      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+    reviewed_at: "2026-07-20T00:01:28Z"
 ---
 
 # Technical Design: TD-010 Object-log + Turso Projection
@@ -179,7 +180,10 @@ upgrade refuses a newer/unknown schema until the compatibility probe and migrati
 
 - No blocking driver call on a Tokio worker; a single-thread heartbeat must advance throughout DB work.
 - No connection, task, or loop per queue. Connections and background apply are bounded shared resources.
-- Turso must meet the existing sub-second operation targets before default enablement; initial production
+- Turso must preserve exact operation outcomes, monotonic progress, structural
+  query bounds, and declared resource ceilings under load before default enablement;
+  throughput and latency are compared with interleaved same-run SQLite controls
+  and reported as declared-topology capacity. Initial production
   status does not claim improvement over SQLite.
 - CI adds one focused/path-filtered Turso job, not a projection-by-kind matrix multiplication.
 

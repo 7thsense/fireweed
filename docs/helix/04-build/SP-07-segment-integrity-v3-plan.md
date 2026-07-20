@@ -7,12 +7,12 @@ ddx:
     - {kind: informed_by, to: td-s3-object-log-sqlite-projection-mode}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 8186965f01064cec092a73c0496971d809e1a8c3740d39acfd0c34bc9893be11
+    self_hash: 49c08ce56b6158236b4a73ac874df73f80eda761377782e711e58c8bed022698
     deps:
-      build-sp02-deterministic-storage-simulation: 822bd8ebd2a9e07bdec818a12eb2ea8c21a2feca965422830eae41a839a407c8
+      build-sp02-deterministic-storage-simulation: b25a30432dff7ec1d44e7c1951d3d0552937636ed43582e1a26b549e560571e5
       build-sp03-sequenced-metadata-boundary: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
-      td-s3-object-log-sqlite-projection-mode: a88fb07f8275de066ab5f7a65f815e2da511774a164a20b464ebabf0a6e9d369
-    reviewed_at: "2026-07-19T03:37:52Z"
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+    reviewed_at: "2026-07-20T00:01:31Z"
 ---
 
 # Implementation Plan: SP-07 Segment Integrity Version 3

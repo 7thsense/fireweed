@@ -8,12 +8,12 @@ ddx:
     - {kind: verified_by, to: tp-scale-substantiation}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 5cfbe42a94ec4813e4855e431f0319152c6c8d11c5b081dcc77954a1ecf933b7
+    self_hash: 97d1032e2b1bbd9ecae2df5daed4350d88364b2bb4d9e7b3c643677f665d8280
     deps:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
-      build-slatedb-pattern-adoption-roadmap: 5f066b91ba58eec79c056ec7cd1922682dbfb5d8f0607920d34273661350a196
-      td-s3-object-log-sqlite-projection-mode: f3ce514406d6394b25a637b03b4661e5cd112ef18dbb0d86b0a7d372526dfa4e
-    reviewed_at: "2026-07-18T18:16:01Z"
+      build-slatedb-pattern-adoption-roadmap: 55aa54bb9ccb2fe1d905655831b26e3676590c1a88528bba4d9349f63572ad54
+      td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
+    reviewed_at: "2026-07-20T00:01:30Z"
 ---
 
 # Implementation Plan: SP-01 Global Buffer Byte Admission

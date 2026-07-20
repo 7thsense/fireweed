@@ -30,6 +30,14 @@ with `storage.controlPlane.backend=postgres` and `storage.projection.backend=sql
 Unsupported chart combinations render statically and fail loudly at server startup
 until their composition roots are wired.
 
+`objectlog/hybrid-strict` is a separate experimental runtime path, not an
+unsupported chart combination awaiting an implicit startup check. It is
+env/direct-config-only, intentionally omitted from the chart schema, live-kind
+matrix, and production support contract. Setting
+`storage.projection.backend=hybrid-strict` must fail Helm schema validation; do
+not treat the server's `PQUEUE_PROJECTION_BACKEND=hybrid-strict` wiring as a
+public deployment claim.
+
 `objectlog/hybrid` is the SQLite-first plus hot-memory object-log profile. It
 uses `PQUEUE_SQLITE_PROJECTION_PATH`, treats the object log as the
 authority, hydrates memory from SQLite `ProjectionImage` before serving from a

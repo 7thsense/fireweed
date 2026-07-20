@@ -8,11 +8,11 @@ ddx:
     - {kind: informed_by, to: api-operator-repair-contract}
     - {kind: verified_by, to: tp-verification-acceptance-criteria}
   review:
-    self_hash: 19aa494aeeef8822839e5dc70dee309c87a9ad5d3d9d094adb26e4e4a03f64c8
+    self_hash: 1d89282c8fae482f99334b909d45dea15768f6b4ab5ddf7dd57180092e19d8e9
     deps:
       build-sp03-sequenced-metadata-boundary: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
-      build-sp04-object-store-observability: 7fc689fb0f1334fee08304160a66d3215372c754dddf679ae4411c4c0d625926
-    reviewed_at: "2026-07-19T01:26:09Z"
+      build-sp04-object-store-observability: b75fdf641cb7d51d5baedf66abe2569b7ae19d2722fec456710c887204508706
+    reviewed_at: "2026-07-20T00:01:31Z"
 ---
 
 # Implementation Plan: SP-05 Maintenance Policy and Execution Separation

@@ -14,20 +14,20 @@ ddx:
     - prd
     - concerns
   review:
-    self_hash: a88fb07f8275de066ab5f7a65f815e2da511774a164a20b464ebabf0a6e9d369
+    self_hash: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
-      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
+      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
       adr-granularity-mapping-and-claim-domain: 29444ade97bb5bce95a3f9d3c8878f5dc1ec2ea0bfe562f914ae17ff84984a18
-      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
       adr-rust-workspace-and-toolchain-policy: 7d743ad4ee99e4fb53736f83eb854924be3af511a439d1e510eb1135351461eb
       api-native-client-interface: ae6c682dbf6e269b6792351f1677477f2324fb24cb4cc4f85392f6369fd43b0b
-      concerns: 73756937e564b8120ca99407bacbd1fa67a06c6021a822c2cb321f7c9d95056e
-      prd: 6cbaa8249fac452e44d8cbde9f63982fc2fc5f9f04f1eeeba68b0b1a9c86291f
-      td-postgres-native-reference-mode: b58232f3c0b56c50bc1e5f01e13afc71ed1c333987498bbabc88c322f80b36e0
-      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
-      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-19T03:37:52Z"
+      concerns: 52b6bbb92cff001a75227115afb20f4d0a73781ec98f49ab446a6866c17284dc
+      prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
+      td-postgres-native-reference-mode: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
+      td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+    reviewed_at: "2026-07-20T00:01:26Z"
 ---
 
 # Technical Design: TD-004 S3 Object-Log + SQLite Projection Mode
@@ -831,33 +831,36 @@ eligibility, FR-10).
 
 ## Performance
 
-- Inherits PRD scale targets: 10M items in a hot queue, the per-queue throughput floor (TP-002 E0: >=10M items/hr per queue, preserved for every queue at any scale), and queue density (>=1000 concurrently active queues per node, TP-002 E2).
-- **Queue density (>=1000 active queues/node).** A node hosts the SQLite projections for many queues at once. Per-queue SQLite databases MUST be opened lazily and bounded by an LRU (or equivalent) cap on open handles/memory, NOT held open per owned queue indefinitely; idle queues are closed and reopened on demand. Group-commit batching, the lease-expiry sweeper, snapshotting, and retention/expiry MUST run as bounded shared per-node jobs across many queues per pass, never one loop/task/connection per queue. A node MUST sustain >=1000 concurrently active queues with each meeting its progress bound and any one able to reach the per-queue floor; aggregate single-node throughput is bounded by the node (multi-node provides headroom). Validated by `queue_density_single_node_tests` (TP-002 E2).
+- Inherits PRD scale targets: 10M items in a hot queue, E0 exact-outcome and queue-global progress invariants under load, and the canonical queue-density shape of at least 1,000 cold queues plus one hot queue per node (TP-002 E2).
+- **Queue density (at least 1,001 active queues/node).** A node hosts the SQLite projections for many queues at once. Per-queue SQLite databases MUST be opened lazily and bounded by an LRU (or equivalent) cap on open handles/memory, NOT held open per owned queue indefinitely; idle queues are closed and reopened on demand. Group-commit batching, the lease-expiry sweeper, snapshotting, and retention/expiry MUST run as bounded shared per-node jobs across many queues per pass, never one loop/task/connection per queue. The canonical run uses one hot queue plus 1,000 cold queues; every cold queue retains eligible work and completes a non-empty claim/finalize operation while exact hot sustain windows keep load active until all cold queues progress. Hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and absolute rates and latency remain topology-bound capacity evidence. Validated by `queue_density_single_node_tests` and the live E2 density evidence (TP-002).
 - Acknowledgement latency intentionally includes group-commit time and is governed by
-  `segment_max_latency_ms` + write + manifest-commit latency. p95/p99 ack targets for this profile are
-  stated relative to the configured window, not the sub-second small-commit target of `postgres_native`.
+  `segment_max_latency_ms` + write + manifest-commit latency. p95/p99 ack values
+  are reported for the configured window and declared topology; portable
+  qualification uses exact outcomes, bounded work/resources, and interleaved
+  same-run comparisons rather than an absolute small-commit target.
 - SQLite claim/lease/metric/gate reads MUST use indexes equivalent to TD-002's required indexes so a
   10M-item queue does not full-scan for claim, lease expiry, idempotency, gate anti-join, or progress
   metrics.
 - Snapshot + log-tail replay time at 10M-item queue scale MUST be measured (Testing) and MUST bound
   recovery time; `snapshot_interval_*` is tuned against the measured replay rate.
-- `objectlog/hybrid-strict` and `objectlog/hybrid-async` performance gates are
-  concrete and release-blocking: push throughput and p50/p95/p99
-  acknowledgement latency MUST be within 20% of `objectlog/inmemory` under the
-  same segment settings; claim/finalize p95 latency MUST be within 20% of
-  `objectlog/inmemory` for hot reads. Strict evidence reports SQLite apply
-  amortization; async evidence reports max/p99 SQLite lag and request_id
-  unknown-outcome replay convergence. Both modes report segment batch density,
-  object PUT count, recovery elapsed time, replayed tail length, and maximum
-  memory rehydrate time from SQLite `ProjectionImage`.
-- `objectlog/hybrid-strict` and `objectlog/hybrid-async` recovery gates: smoke
-  restart with 100k resident items and local SQLite present MUST complete hydrate
-  plus tail replay in <= 5 seconds and replay <= 1,000 object-log commands;
-  release-tier restart with 10M resident items and local SQLite present MUST
-  complete in <= 60 seconds and replay <= max(10,000 commands, 0.1% of resident
-  items); disk-loss recovery from retained object log MUST reconstruct exact
-  metrics, indexes, leases, and request-id replay state with zero invariant
-  violations.
+- `objectlog/hybrid-strict` and `objectlog/hybrid-async` performance gates use
+  identical seeded work and segment settings with interleaved same-run
+  `objectlog/inmemory` and `objectlog/sqlite` controls. They require exact
+  operation counts, hot reads served from memory, monotonic progress, bounded
+  shared resources/debt, and a declared relative degradation envelope. Strict
+  evidence reports SQLite apply amortization; async evidence reports max/p99
+  SQLite lag and `request_id` unknown-outcome replay convergence. Both modes
+  report throughput, p50/p95/p99, segment batch density, object PUT count,
+  recovery elapsed time, replayed tail length, and maximum memory rehydrate time
+  as declared-topology capacity.
+- `objectlog/hybrid-strict` and `objectlog/hybrid-async` recovery gates exercise
+  100k smoke and exact 10M release resident sets with local SQLite present.
+  Snapshot plus contiguous tail MUST reconstruct exact counts, checksums,
+  indexes, leases, and request-id replay state; replay progress is monotonic;
+  replayed commands, memory, and pending work remain within the declared
+  snapshot/tail/resource bounds. Disk-loss recovery from retained object log
+  proves the same exact state from genesis. Recovery time is reported only as
+  declared-topology capacity.
 - Telemetry overhead MUST be included in performance tests.
 - SP-06 handoff evidence uses dedicated recorder deltas around the post-fence hydration plus first-claim
   window. The full explicit matrix is `sp06_full_handoff_profile_classifies_metadata_and_required_tail`;
@@ -988,9 +991,9 @@ The following cases define the required evidence surface:
 - Conformance parity: this backend passes the SAME TD-001 shared backend conformance suite as
   `postgres_native`, including the object-log–specific rows added to TD-001.
 - **Scale/cost evidence (D4(d)):** the object-log scale/cost + recovery evidence record is TP-002 **E3**
-  (object-log latency/cost + recovery), measured against the per-queue throughput floor TP-002 **E0**
-  (>=10M items/hr per queue, preserved for every queue at any scale). E3 MUST report sustained items/hr
-  at or above the E0 floor, ack-latency distribution at the configured window,
+  (object-log latency/cost + recovery), evaluated against E0's portable exact-outcome,
+  progress, and bounded-resource contract. E3 MUST report sustained items/hr
+  and ack-latency distribution at the configured window as topology-bound capacity,
   durable-commit cost per million commands, and 10M-item recovery (snapshot + replay) time. A recurrence
   scale row (G5) runs under this profile as well. (Evidence-record IDs E0–E3 are owned by TP-002 / G8;
   TD-004 uses them, it does not mint new evidence IDs.)

@@ -8,14 +8,14 @@ ddx:
     - td-storage-architecture-backend-contracts
     - td-sharding-and-shard-ownership
   review:
-    self_hash: 8f3f7109a1e0183ed6a05cf3fa0041ca72277159a68c6683d546ac87b1453ebd
+    self_hash: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
     deps:
-      adr-cqrs-log-projection-storage-model: ef1295e9f2858b2d286c27e1d571aefc5bf4b1614e848d3c8958e3f6af5f68b8
-      adr-queue-as-shard-unit-and-projection-families: ec3e51c1da5d66a2601bbe593a4a45b721eaa0db2284e6bfc27d2222c1ffe0c8
+      adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
+      adr-queue-as-shard-unit-and-projection-families: 50fb11c85cbf40fa182469b036ef5210b304f330171a17ab371ae485524cb924
       prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
-      td-sharding-and-shard-ownership: bbb831efc281b902cc54122b99e39ea67da87dd2db8be0a8c144064d54c2ec17
-      td-storage-architecture-backend-contracts: 53b17202dcf527948da8d8508639ba6077197c7fd2df1e9888833ca69a9f9f2f
-    reviewed_at: "2026-07-19T23:13:10Z"
+      td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
+      td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
+    reviewed_at: "2026-07-20T00:01:25Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation
@@ -316,7 +316,7 @@ P0 items are referenced by name (not number) to stay robust to PRD renumbering.
 |-------------|--------------------|------------------------|
 | PRD P0 horizontal-distribution item | PRD / TD-001 / TD-003 / ADR-008 | E2 cross-queue scale-out: exact work and logical progress remain monotonic as owner count rises; the portable E0 contract holds for every queue under K-queue concurrency; single lease across owner reassignment. |
 | PRD P0 performance-at-scale item | PRD / TD-001 / TD-002 / TD-004 | E1 and E2 preserve exact outcomes, queue-global progress, and bounded resources while distributing queues across owners. Throughput and latency remain declared-topology capacity evidence. |
-| PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density: at least 1000 cold queues plus one hot queue on one node, all progress-eligible with exact counts, bounded same-run degradation, and background work multiplexed onto bounded shared pools (`queue_density_single_node_tests`). |
+| PRD P0 queue-density item | PRD / TD-001 / TD-002 / TD-003 / TD-004 | E2 queue density: the release command `scripts/perf/tp002-e2-density-kind.sh` proves exactly 1,000 cold queues plus one hot queue on one live objectlog/SQLite node using canonical 300,000-item hot windows, 8 hot connections, 8 cold workers, 4 server workers, and seed 42. Every cold queue retains an eligible item and completes a non-empty claim/finalize operation during loaded hot work; additional exact hot sustain windows keep load active until all 1,000 queues progress. Hot baseline/load/baseline counts reconcile, shared workers/tasks/connections stay within declared bounds, and quiet-host or fixed-speed gates are forbidden. Absolute rates, latency, and retention remain declared-topology capacity evidence. |
 | TD-003 queue ownership | TD-003 | Deterministic queue-to-owner assignment, epoch fencing of a stale owner, graceful drain without loss/duplication, recovery, and stalled-queue visibility. |
 | TD-004 object-log backend | TD-004 / ADR-001 | E3 latency/cost/recovery; commit-latency-bound sweep; manifest-CAS (or Postgres-pointer fallback) current-epoch fencing; passes the shared TD-001 backend conformance suite. |
 | Per-queue local progress (D1) | TD-001 / TD-003 | Each queue's oldest-eligible age is computed locally on its owner (gate-aware); the oldest item is claimed before the bound; no cross-shard aggregation. |

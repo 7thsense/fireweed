@@ -136,8 +136,15 @@ The chart exposes separate storage axes:
 
 - log backend: `objectlog` or `postgres`
 - projection backend: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or
-  `postgres`; `hybrid-strict` remains an explicit pending product decision
+  `postgres`
 
-The current live-kind matrix covers `objectlog` plus `inmemory`, and `postgres`
-plus `inmemory`, `sqlite`, or `postgres`. Other rendered combinations remain
-outside the live deployment claim until their matrix entries and evidence land.
+`objectlog/hybrid-strict` is deliberately absent from that chart enum. It is an
+experimental runtime path selectable only through environment or direct
+configuration, not a chart-selectable or production-supported profile. The
+static Helm gate names and verifies the exact schema rejection, so runtime
+wiring cannot be mistaken for public deployment support.
+
+The current live-kind matrix covers `objectlog` plus `inmemory`, `sqlite`,
+`hybrid`, or `hybrid-async`, and `postgres` plus `inmemory`, `sqlite`, or
+`postgres`. Other rendered combinations remain outside the live deployment
+claim until their matrix entries and evidence land.
