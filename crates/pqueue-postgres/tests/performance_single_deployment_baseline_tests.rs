@@ -1,9 +1,9 @@
-//! TP-002 **E0 (per-queue floor) + E1 (single-deployment latency)** evidence on `postgres_native`
+//! TP-002 **E0 portable per-queue progress/capacity contract + E1 single-deployment envelope** evidence on `postgres_native`
 //! (TD-002, the DB-authoritative `PostgresRelationalBackend`).
 //!
 //! ENV-GATED on `PQUEUE_PG_TEST_URL` (a live database). Without it the test prints a LOUD skip and returns —
-//! a green run is then VISIBLY partial (the E0/E1 evidence is DEFERRED, never a hidden/fabricated pass). No
-//! release claims are derived from measured values against the live DB.
+//! a green run is then VISIBLY partial (the E0/E1 evidence is DEFERRED, never a hidden/fabricated pass), and
+//! no release claim is produced for the skipped live-DB run.
 //!
 //! To run live:
 //!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
