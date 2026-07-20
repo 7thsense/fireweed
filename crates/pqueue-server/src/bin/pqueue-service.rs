@@ -52,6 +52,10 @@ fn main() {
         }
     };
     let runtime_resource_metrics_path = config.runtime_resource_metrics_path.clone();
+    if runtime_resource_metrics_path.is_some() {
+        pqueue_resp::set_max_live_connections(32);
+        pqueue_resp::set_max_runtime_tasks(64);
+    }
 
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
@@ -69,7 +73,7 @@ async fn run(config: Config, runtime_resource_metrics_path: Option<PathBuf>) {
     match start(config).await {
         Ok(server) => {
             if let Some(path) = runtime_resource_metrics_path {
-                tokio::spawn(report_runtime_resources(path));
+                pqueue_resp::spawn_governed(report_runtime_resources(path));
             }
             eprintln!(
                 "pqueue-service {} listening on {} (configured listen={})",
@@ -95,9 +99,25 @@ async fn report_runtime_resources(path: PathBuf) {
     loop {
         tick.tick().await;
         let metrics = tokio::runtime::Handle::current().metrics();
+        let alive_tasks = metrics.num_alive_tasks();
+        let max_alive_tasks = pqueue_resp::max_observed_runtime_tasks();
+        let (live_connections, max_connections, connection_limit) =
+            pqueue_resp::connection_resource_counts();
+        if metrics.num_workers() > 4 || alive_tasks > 64 || max_connections > connection_limit {
+            eprintln!(
+                "density resource bound exceeded: workers={} tasks={alive_tasks}/64 connections={max_connections}/{connection_limit}",
+                metrics.num_workers()
+            );
+            std::process::abort();
+        }
         let snapshot = serde_json::json!({
             "tokio_worker_threads": metrics.num_workers(),
-            "tokio_alive_tasks": metrics.num_alive_tasks(),
+            "tokio_alive_tasks": alive_tasks,
+            "tokio_max_alive_tasks": max_alive_tasks,
+            "live_connections": live_connections,
+            "max_live_connections": max_connections,
+            "connection_limit": connection_limit,
+            "resource_enforcement_active": true,
         });
         if std::fs::write(&tmp, snapshot.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, &path);

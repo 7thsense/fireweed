@@ -9,8 +9,9 @@
 //! commands return `-ERR`, never a silent stub.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, MetadataValue, PriorityValue, QueueId,
@@ -23,6 +24,56 @@ use pqueue_engine::{
     UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+static MAX_LIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(usize::MAX);
+static MAX_RUNTIME_TASKS: AtomicUsize = AtomicUsize::new(usize::MAX);
+static MAX_OBSERVED_TASKS: AtomicUsize = AtomicUsize::new(0);
+static TASK_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+static LIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static MAX_OBSERVED_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Install a process-wide allocation bound for RESP handlers. Production leaves this unlimited; the
+/// density harness enables a governed bound before the listener starts so no sampling interval can miss
+/// an over-limit connection spike.
+pub fn set_max_live_connections(limit: usize) {
+    assert!(limit > 0, "RESP connection limit must be positive");
+    MAX_LIVE_CONNECTIONS.store(limit, Ordering::SeqCst);
+}
+
+pub fn set_max_runtime_tasks(limit: usize) {
+    assert!(limit > 0, "runtime task limit must be positive");
+    MAX_RUNTIME_TASKS.store(limit, Ordering::SeqCst);
+}
+
+pub fn connection_resource_counts() -> (usize, usize, usize) {
+    (
+        LIVE_CONNECTIONS.load(Ordering::SeqCst),
+        MAX_OBSERVED_CONNECTIONS.load(Ordering::SeqCst),
+        MAX_LIVE_CONNECTIONS.load(Ordering::SeqCst),
+    )
+}
+
+pub fn max_observed_runtime_tasks() -> usize {
+    MAX_OBSERVED_TASKS.load(Ordering::SeqCst)
+}
+
+pub fn spawn_governed<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
+    let alive = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    let limit = MAX_RUNTIME_TASKS.load(Ordering::SeqCst);
+    assert!(
+        alive < limit,
+        "runtime task allocation would exceed governed limit {limit}"
+    );
+    MAX_OBSERVED_TASKS.fetch_max(alive + 1, Ordering::SeqCst);
+    tokio::spawn(future)
+}
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -323,6 +374,18 @@ pub async fn serve_with_shutdown_and_hooks<B: RespBackend, H: RespHooks>(
                 let Ok((stream, _)) = accepted else {
                     break;
                 };
+                let live = LIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst) + 1;
+                let limit = MAX_LIVE_CONNECTIONS.load(Ordering::SeqCst);
+                let task_limit = MAX_RUNTIME_TASKS.load(Ordering::SeqCst);
+                let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
+                let alive_tasks = tokio::runtime::Handle::current().metrics().num_alive_tasks();
+                if live > limit || alive_tasks >= task_limit {
+                    LIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
+                    drop(stream);
+                    continue;
+                }
+                MAX_OBSERVED_CONNECTIONS.fetch_max(live, Ordering::SeqCst);
+                MAX_OBSERVED_TASKS.fetch_max(alive_tasks + 1, Ordering::SeqCst);
                 // RESP is a small-message request/reply protocol: leaving Nagle on coalesces each tiny
                 // reply and, paired with the peer's delayed-ACK, stalls a pipelined connection ~40ms per
                 // command over a real (non-loopback) link. Disable it so replies flush immediately.
@@ -333,6 +396,7 @@ pub async fn serve_with_shutdown_and_hooks<B: RespBackend, H: RespHooks>(
                 let conn_cancel = cancel.clone();
                 conns.spawn(async move {
                     let _ = handle_conn(stream, backend, hooks, state, conn_cancel).await;
+                    LIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
                 });
             }
         }

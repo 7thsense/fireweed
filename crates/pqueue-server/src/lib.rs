@@ -682,7 +682,7 @@ pub async fn spawn_embedded_fjord_broker(
     .map_err(|e| EngineError::Storage(format!("build embedded fjord server: {e}")))?;
 
     let bootstrap = format!("{host}:{port}");
-    let handle = tokio::spawn(async move {
+    let handle = pqueue_resp::spawn_governed(async move {
         if let Err(e) = server.run().await {
             eprintln!("[fjord] embedded broker terminated: {e}");
         }
@@ -2542,7 +2542,7 @@ fn spawn_hybrid_flusher(
 ) -> JoinHandle<()> {
     let interval_ms = backend.group_commit_flush_interval_ms();
     let weak = Arc::downgrade(backend);
-    tokio::spawn(async move {
+    pqueue_resp::spawn_governed(async move {
         let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
         let mut deferred_tick = tokio::time::interval(Duration::from_millis(250));
         let mut dbg_last = std::time::Instant::now();
@@ -2747,13 +2747,13 @@ pub async fn start_with<B: RespBackend>(
     let reclaim = Arc::new(ReclaimCounters::default());
     let ownership = Arc::new(OwnershipCounters::default());
     let cancel = CancellationToken::new();
-    let serve_task = tokio::spawn(serve_with_shutdown(
+    let serve_task = pqueue_resp::spawn_governed(serve_with_shutdown(
         listener,
         backend.clone(),
         clock.clone(),
         cancel.clone(),
     ));
-    let reclaim_task = tokio::spawn(reclaim_loop(
+    let reclaim_task = pqueue_resp::spawn_governed(reclaim_loop(
         backend,
         clock,
         reclaim_interval,
@@ -2852,20 +2852,20 @@ where
     let reclaim = Arc::new(ReclaimCounters::default());
     let ownership = Arc::new(OwnershipCounters::default());
     let cancel = CancellationToken::new();
-    let serve_task = tokio::spawn(serve_with_shutdown_and_hooks(
+    let serve_task = pqueue_resp::spawn_governed(serve_with_shutdown_and_hooks(
         listener,
         backend.clone(),
         hooks.clone(),
         clock.clone(),
         cancel.clone(),
     ));
-    let reclaim_task = tokio::spawn(reclaim_loop(
+    let reclaim_task = pqueue_resp::spawn_governed(reclaim_loop(
         backend,
         clock.clone(),
         reclaim_interval,
         reclaim.clone(),
     ));
-    let ownership_task = tokio::spawn(ownership_loop(
+    let ownership_task = pqueue_resp::spawn_governed(ownership_loop(
         hooks,
         clock,
         reclaim_interval,

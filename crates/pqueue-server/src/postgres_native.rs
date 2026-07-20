@@ -284,7 +284,7 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
             // Admission is the ownership boundary. From this point onward an owned task holds the request
             // and both queued permits, so dropping the caller cannot silently discard an accepted mutation.
             // Shutdown cancels tasks still waiting for their queue/running slot and drains tasks that started.
-            tokio::spawn(async move {
+            pqueue_resp::spawn_governed(async move {
                 let gate = capacity.gate(&queue);
                 let queue_guard = tokio::select! {
                     biased;

@@ -286,7 +286,14 @@ read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_
     END { print threads+0, connections+0, tasks+0, samples+0, first+0, last+0 }
   ' "$RESOURCE_FILE"
 )
-(( HOT_PHASE_RESOURCE_SAMPLES > 0 ))
+# Release bounds come from allocation-time enforcement and process-lifetime high-water counters, not
+# sampling luck. The phase sampler is retained as diagnostics only and may legitimately capture zero
+# samples on a fast host.
+FINAL_RUNTIME=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/pqueue-runtime-resources.json)
+OBSERVED_THREADS=$(jq -r '.tokio_worker_threads' <<<"$FINAL_RUNTIME")
+OBSERVED_CONNECTIONS=$(jq -r '.max_live_connections' <<<"$FINAL_RUNTIME")
+OBSERVED_TASKS=$(jq -r '.tokio_max_alive_tasks' <<<"$FINAL_RUNTIME")
+jq -e '.resource_enforcement_active == true and .connection_limit == 32' <<<"$FINAL_RUNTIME" >/dev/null
 
 mkdir -p "$(dirname "$LEDGER_OUT")"
 assert_source_unchanged

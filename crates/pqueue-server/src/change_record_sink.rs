@@ -805,7 +805,7 @@ pub fn spawn_change_record_emitter<B>(
 where
     B: ChangeRecordEmissionBackend + ControlPlaneStore + Send + Sync + 'static,
 {
-    tokio::spawn(async move {
+    pqueue_resp::spawn_governed(async move {
         let mut tick = tokio::time::interval(config.tick_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -925,7 +925,7 @@ where
     };
     let tick_interval = config.tick_interval;
     let batch_size = config.batch_size;
-    Ok(Some(tokio::spawn(async move {
+    Ok(Some(pqueue_resp::spawn_governed(async move {
         let mut tick = tokio::time::interval(tick_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {

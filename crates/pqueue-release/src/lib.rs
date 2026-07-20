@@ -1585,6 +1585,7 @@ pub mod density {
     pub const MAX_SERVER_CONNECTIONS: usize = 32;
     pub const MAX_SERVER_TASKS: usize = 64;
     pub const QUEUE_ACTIVITY_DEFINITION: &str = "a cold queue is active only when final XLEN is >0, and progress-eligible only when a non-empty claim/finalize operation started after HOT_START, completed before HOT_END, and completed before the item was reseeded; elapsed latency is capacity evidence only";
+    pub const CANONICAL_PASS_BAR: &str = "exactly 1000 cold queues plus one hot queue on one live objectlog/sqlite node; exact accepted/claimed/finalized/pending reconciliation with zero lost or duplicate transitions; every cold queue claims/finalizes during active hot work with zero empty claims or progress violations; allocation-enforced shared resource caps; bracketed same-run measurements are complete and internally consistent; elapsed time, latency, and throughput are capacity evidence only; failover excluded (pqueue-0a1d4386)";
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DensityMeasurement {
@@ -1599,6 +1600,16 @@ pub mod density {
         pub cold_queues_active: usize,
         pub cold_queues_progress_eligible: usize,
         pub cold_empty_claim_responses: usize,
+        pub hot_accepted_items: u64,
+        pub hot_claimed_items: u64,
+        pub hot_finalized_items: u64,
+        pub cold_accepted_items: u64,
+        pub cold_claimed_items: u64,
+        pub cold_finalized_items: u64,
+        pub cold_pending_items: u64,
+        pub lost_items: u64,
+        pub duplicate_transitions: u64,
+        pub queue_global_progress_violations: u64,
         pub baseline_before_ingest_per_s: f64,
         pub baseline_before_claim_finalize_per_s: f64,
         pub baseline_after_ingest_per_s: f64,
@@ -1617,6 +1628,7 @@ pub mod density {
         pub connection_limit: usize,
         pub task_count: usize,
         pub task_limit: usize,
+        pub resource_enforcement_active: bool,
         pub hot_phase_resource_samples: usize,
         pub first_hot_resource_sample_unix_ms: u64,
         pub last_hot_resource_sample_unix_ms: u64,
@@ -1681,6 +1693,22 @@ pub mod density {
             && m.cold_queues_active == cold
             && m.cold_queues_progress_eligible == cold
             && m.cold_empty_claim_responses == 0
+            && m.hot_accepted_items
+                == m.control_items
+                    .checked_mul(2)
+                    .and_then(|controls| controls.checked_add(m.hot_sustain_items))
+                    .unwrap_or(0)
+            && m.hot_claimed_items == m.hot_accepted_items
+            && m.hot_finalized_items == m.hot_claimed_items
+            && m.cold_accepted_items
+                == m.cold_finalized_items
+                    .checked_add(m.cold_pending_items)
+                    .unwrap_or(0)
+            && m.cold_claimed_items == m.cold_finalized_items
+            && m.cold_pending_items == cold as u64
+            && m.lost_items == 0
+            && m.duplicate_transitions == 0
+            && m.queue_global_progress_violations == 0
             && finite_positive(m.baseline_before_ingest_per_s)
             && finite_positive(m.baseline_before_claim_finalize_per_s)
             && finite_positive(m.baseline_after_ingest_per_s)
@@ -1723,12 +1751,9 @@ pub mod density {
             && m.task_limit == MAX_SERVER_TASKS
             && m.task_count > 0
             && m.task_count <= m.task_limit
-            && m.hot_phase_resource_samples > 0
+            && m.resource_enforcement_active
             && m.hot_phase_started_unix_ms > 0
             && m.hot_phase_ended_unix_ms > m.hot_phase_started_unix_ms
-            && m.first_hot_resource_sample_unix_ms >= m.hot_phase_started_unix_ms
-            && m.last_hot_resource_sample_unix_ms >= m.first_hot_resource_sample_unix_ms
-            && m.last_hot_resource_sample_unix_ms <= m.hot_phase_ended_unix_ms
     }
 
     pub fn build_release_row(m: &DensityMeasurement, meta: &DensityMetadata) -> LedgerRow {
@@ -1773,6 +1798,43 @@ pub mod density {
             (
                 "cold_empty_claim_responses".into(),
                 serde_json::json!(m.cold_empty_claim_responses),
+            ),
+            (
+                "hot_accepted_items".into(),
+                serde_json::json!(m.hot_accepted_items),
+            ),
+            (
+                "hot_claimed_items".into(),
+                serde_json::json!(m.hot_claimed_items),
+            ),
+            (
+                "hot_finalized_items".into(),
+                serde_json::json!(m.hot_finalized_items),
+            ),
+            (
+                "cold_accepted_items".into(),
+                serde_json::json!(m.cold_accepted_items),
+            ),
+            (
+                "cold_claimed_items".into(),
+                serde_json::json!(m.cold_claimed_items),
+            ),
+            (
+                "cold_finalized_items".into(),
+                serde_json::json!(m.cold_finalized_items),
+            ),
+            (
+                "cold_pending_items".into(),
+                serde_json::json!(m.cold_pending_items),
+            ),
+            ("lost_items".into(), serde_json::json!(m.lost_items)),
+            (
+                "duplicate_transitions".into(),
+                serde_json::json!(m.duplicate_transitions),
+            ),
+            (
+                "queue_global_progress_violations".into(),
+                serde_json::json!(m.queue_global_progress_violations),
             ),
             (
                 "baseline_before_ingest_per_s".into(),
@@ -1841,6 +1903,10 @@ pub mod density {
             ("task_count".into(), serde_json::json!(m.task_count)),
             ("task_limit".into(), serde_json::json!(m.task_limit)),
             (
+                "resource_enforcement_active".into(),
+                serde_json::json!(m.resource_enforcement_active),
+            ),
+            (
                 "hot_phase_resource_samples".into(),
                 serde_json::json!(m.hot_phase_resource_samples),
             ),
@@ -1894,9 +1960,12 @@ pub mod density {
             exit_status: 0,
             ac_ids: vec![],
             inv_ids: vec![],
-            pass_bar: ">=1001 generated active queues on one live objectlog/sqlite node; every cold queue claims/finalizes during hot load with zero empty claims; fixed shared resource caps; bracketed same-run baseline/load measurements are complete and internally consistent; wall-clock rates are capacity evidence only; failover excluded (pqueue-0a1d4386)".into(),
+            pass_bar: CANONICAL_PASS_BAR.into(),
             evidence_tier: tier.into(),
-            measurements: Measurements { tp002_evidence_ids: vec!["E2".into()], values },
+            measurements: Measurements {
+                tp002_evidence_ids: vec!["E2".into()],
+                values,
+            },
         }
     }
 
@@ -1934,6 +2003,9 @@ pub mod density {
                 "pass_bar must not require a quiet host or absolute host-speed threshold".into(),
             );
         }
+        if row.pass_bar != CANONICAL_PASS_BAR {
+            errors.push("pass_bar must equal the governed canonical density pass bar".into());
+        }
         let total = integer("total_queues").unwrap_or(0);
         if total != MIN_TOTAL_QUEUES as u64 {
             errors.push("total_queues must equal canonical 1001".into());
@@ -1947,6 +2019,39 @@ pub mod density {
         }
         if integer("cold_empty_claim_responses") != Some(0) {
             errors.push("cold_empty_claim_responses must be zero".into());
+        }
+        let expected_hot = integer("control_items")
+            .and_then(|control| control.checked_mul(2))
+            .and_then(|control| control.checked_add(integer("hot_sustain_items")?));
+        if integer("hot_accepted_items") != expected_hot
+            || integer("hot_claimed_items") != expected_hot
+            || integer("hot_finalized_items") != expected_hot
+        {
+            errors.push("hot accepted/claimed/finalized counts must reconcile exactly".into());
+        }
+        let cold_accepted = integer("cold_accepted_items");
+        let cold_claimed = integer("cold_claimed_items");
+        let cold_finalized = integer("cold_finalized_items");
+        let cold_pending = integer("cold_pending_items");
+        if cold_accepted.is_none_or(|accepted| {
+            cold_finalized
+                .and_then(|finalized| finalized.checked_add(cold_pending.unwrap_or(u64::MAX)))
+                != Some(accepted)
+        }) || cold_claimed != cold_finalized
+            || cold_pending != Some(cold)
+        {
+            errors.push(
+                "cold accepted/claimed/finalized/pending counts must reconcile exactly".into(),
+            );
+        }
+        for key in [
+            "lost_items",
+            "duplicate_transitions",
+            "queue_global_progress_violations",
+        ] {
+            if integer(key) != Some(0) {
+                errors.push(format!("{key} must be zero"));
+            }
         }
         for key in [
             "baseline_before_ingest_per_s",
@@ -2029,9 +2134,6 @@ pub mod density {
         if row.seed != CANONICAL_SEED {
             errors.push(format!("seed must equal canonical {CANONICAL_SEED}"));
         }
-        if integer("hot_phase_resource_samples").is_none_or(|v| v == 0) {
-            errors.push("hot_phase_resource_samples must be positive".into());
-        }
         match (
             integer("hot_phase_started_unix_ms"),
             integer("hot_phase_ended_unix_ms"),
@@ -2039,15 +2141,12 @@ pub mod density {
             (Some(start), Some(end)) if start > 0 && end > start => {}
             _ => errors.push("hot-phase timestamps must be ordered and positive".into()),
         }
-        match (
-            integer("hot_phase_started_unix_ms"),
-            integer("first_hot_resource_sample_unix_ms"),
-            integer("last_hot_resource_sample_unix_ms"),
-            integer("hot_phase_ended_unix_ms"),
-        ) {
-            (Some(start), Some(first), Some(last), Some(end))
-                if start <= first && first <= last && last <= end => {}
-            _ => errors.push("resource sample timestamps must fall inside the hot phase".into()),
+        if values
+            .get("resource_enforcement_active")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            errors.push("resource_enforcement_active must be true".into());
         }
         for (key, expected) in [
             ("portable_gate", true),
