@@ -19,9 +19,9 @@ ddx:
       adr-async-commit-strategy-and-dispatch: 61bf761b8f8b84581b174eb8f1c64a8893ede0dce9353707fb284f751fb82b5e
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
       td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
-      tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
-      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
-    reviewed_at: "2026-07-20T00:01:29Z"
+      tp-scale-substantiation: d53cfdf392d96b96925ca6f409d6e19ab29e16e138679827d5c56d98d49ad364
+      tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
+    reviewed_at: "2026-07-20T19:53:11Z"
 ---
 
 # Build Roadmap: SlateDB Pattern Adoption

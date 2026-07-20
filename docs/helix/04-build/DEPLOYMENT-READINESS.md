@@ -9,15 +9,15 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: a5bc77bb3caf55efa12ebbd5c3513278de3791f7034189034b8c9afe270e4639
+    self_hash: 9eda74d0eed34c17b8275e4ac101a2644439450dff7003fe46da12a678a63516
     deps:
-      build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
+      build-implementation-plan: 4ddbeab6da535522d8253e3ce6018c89b901556e2e179453df6de86b3c02363e
       td-postgres-native-reference-mode: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
-      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
-    reviewed_at: "2026-07-20T00:59:35Z"
+      tp-scale-substantiation: d53cfdf392d96b96925ca6f409d6e19ab29e16e138679827d5c56d98d49ad364
+      tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
+    reviewed_at: "2026-07-20T19:53:11Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -228,6 +228,9 @@ Release evidence must record:
 - command, exit status, environment variables, storage combination, scale, seed,
   and ledger paths for source and deployment validation;
 - TP-002 E0-E3 source-backed evidence references;
+- each E0/E1 queue's declared positive `progress_bound_ms`, the persisted
+  queue-definition value read back from the release candidate, and zero
+  accepted-to-claim or discovery-age violations of that declaration;
 - TP-003 external transaction-contract evidence for the exact storage
   combinations claimed by the release;
 - configured object-log commit-latency bound values and measured latency/cost

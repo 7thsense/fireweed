@@ -12,8 +12,8 @@ ddx:
       adr-orthogonal-log-projection-composition: 778fdbadeadce6b52e101bda39921f88b193c5737ea96d4b8ae8e8a424a4e743
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
-    reviewed_at: "2026-07-20T00:01:29Z"
+      tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
+    reviewed_at: "2026-07-20T19:53:11Z"
 ---
 
 # Hybrid SQLite + In-Memory Projection Implementation Plan
