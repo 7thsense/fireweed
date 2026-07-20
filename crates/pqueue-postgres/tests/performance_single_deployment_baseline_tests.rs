@@ -19,11 +19,11 @@
 //!
 //! TWO LANES (honest perf-environment gating):
 //!   - SMOKE (default, any DB): MEASURES + reports + emits SMOKE-tier ledger rows (recorded + gate-visible,
-//!     but never satisfy a release E0/E1 requirement). CORRECTNESS invariants are asserted, but the perf bars
-//!     are NOT hard-failed — a casual/bridge-networked DB is not a valid E0/E1 perf environment (TP-002 E1
-//!     requires a stated instance class). The row's `measurements.bars_met` records pass/fail honestly.
+//!     but never satisfy a release E0/E1 requirement). Exact outcomes, configured progress, and bounded-resource
+//!     invariants are asserted. Capacity rates and percentiles are reported without becoming host-speed gates.
 //!   - PERF (`PQUEUE_PERF_ENV=1`, a provisioned instance): emits RELEASE-tier rows only when exact outcomes,
-//!     progress bounds, declared topology, full shape, and bounded resources are all measured and met.
+//!     the explicitly declared and persisted progress bound, declared topology, full shape, and bounded resources
+//!     are all measured and met.
 //!
 //! A row's `exit_status` is always 0 (the measurement run completed; the strict verifier requires it) and so
 //! carries NO pass/fail signal — pass/fail lives in `measurements.bars_met` and `evidence_tier`.
@@ -776,7 +776,8 @@ fn performance_single_deployment_baseline_tests() {
     let Ok(observer_url) = std::env::var("PQUEUE_PG_TEST_URL") else {
         eprintln!(
             "POSTGRES E0/E1 SINGLE-DEPLOYMENT BASELINE SKIPPED — set PQUEUE_PG_TEST_URL to a live DB. \
-             The E0 floor + E1 latency evidence is DEFERRED (not measured), not a hidden pass."
+             Portable correctness, configured-progress, bounded-resource, and capacity evidence is \
+             DEFERRED (not measured), not a hidden pass."
         );
         return;
     };

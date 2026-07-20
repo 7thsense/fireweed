@@ -406,6 +406,10 @@ fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
         ("persisted_progress_bound_ms", serde_json::json!(60_000)),
         ("progress_bound_ms", serde_json::json!(0)),
         ("oldest_eligible_age_samples_ms", serde_json::json!([])),
+        (
+            "oldest_eligible_age_samples_ms",
+            serde_json::json!([1, 300_001]),
+        ),
         ("discovery_nonempty_count", serde_json::json!(0)),
         ("progress_latency_upper_max_ms", serde_json::json!(300_001)),
         (
