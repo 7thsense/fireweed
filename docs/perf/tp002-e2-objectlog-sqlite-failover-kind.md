@@ -10,10 +10,12 @@ PQUEUE_E2_SEED=2002 bash scripts/perf/tp002-e2-failover-kind.sh
 
 The harness builds the exact committed source, creates a disposable kind cluster, installs the shared-S3 Helm profile, executes the fault schedule, runs the live fencing and snapshot-tail seams, emits JSON only after every assertion passes, and validates that JSON with `pqueue-verify-e2-failover`.
 
-`PQUEUE_TEST_COORDINATION_TIMEOUT_SECS` controls only the deadlock watchdog around
-the paused-write handoff and the new-owner acknowledgement. It defaults to 300
-seconds in the release harness, must be a positive integer, and is not a latency,
-throughput, quiet-host, or host-speed acceptance bar.
+`PQUEUE_TEST_COORDINATION_TIMEOUT_SECS` is an opt-in operational deadlock watchdog
+around the complete paused-write handoff seam. It is unset by default, accepts a
+canonical positive integer up to 86,400 seconds, and is not a latency, throughput,
+quiet-host, or host-speed acceptance bar. Expiry is reported as retryable
+`infrastructure_indeterminate` at the last named seam stage, aborts the harness,
+and cannot emit release evidence.
 
 ## Environment
 

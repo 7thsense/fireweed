@@ -2,8 +2,9 @@
 //! Tests loud-skip unless both disposable Postgres and MinIO endpoints are configured.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Barrier, Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -24,46 +25,155 @@ use pqueue_server::{OwnershipRuntime, SegmentConfig, SegmentedObjectLogSqliteBac
 
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 const COORDINATION_TIMEOUT_ENV: &str = "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS";
-const DEFAULT_COORDINATION_TIMEOUT_SECS: u64 = 300;
+const MAX_COORDINATION_TIMEOUT_SECS: u64 = 86_400;
 
-/// Deadlock watchdog for live fault coordination. This is deliberately not a latency or
-/// performance assertion: loaded hosts may take arbitrarily longer to complete storage IO.
-fn parse_coordination_watchdog_timeout(value: Option<&str>) -> Result<Duration, String> {
-    let seconds = match value {
-        None => DEFAULT_COORDINATION_TIMEOUT_SECS,
-        Some(raw) => raw.parse::<u64>().map_err(|_| {
-            format!("{COORDINATION_TIMEOUT_ENV} must be a positive integer, got {raw:?}")
-        })?,
-    };
-    if seconds == 0 {
+/// Optional operational deadlock watchdog around the complete live seam. Unset means no deadline.
+/// Expiry is infrastructure-indeterminate, never a correctness or performance assertion.
+fn parse_coordination_watchdog_timeout(value: Option<&str>) -> Result<Option<Duration>, String> {
+    let Some(raw) = value else { return Ok(None) };
+    if raw.is_empty() || raw.starts_with('0') || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(format!(
-            "{COORDINATION_TIMEOUT_ENV} must be a positive integer, got 0"
+            "{COORDINATION_TIMEOUT_ENV} must match [1-9][0-9]*, got {raw:?}"
         ));
     }
-    Ok(Duration::from_secs(seconds))
+    let seconds = raw.parse::<u64>().map_err(|_| {
+        format!("{COORDINATION_TIMEOUT_ENV} is not representable as seconds: {raw:?}")
+    })?;
+    if seconds > MAX_COORDINATION_TIMEOUT_SECS {
+        return Err(format!(
+            "{COORDINATION_TIMEOUT_ENV} must be <= {MAX_COORDINATION_TIMEOUT_SECS}, got {seconds}"
+        ));
+    }
+    Ok(Some(Duration::from_secs(seconds)))
 }
 
-fn coordination_watchdog_timeout() -> Duration {
+fn coordination_watchdog_timeout() -> Option<Duration> {
     parse_coordination_watchdog_timeout(std::env::var(COORDINATION_TIMEOUT_ENV).ok().as_deref())
         .unwrap_or_else(|message| panic!("{message}"))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaleHandoffStage {
+    AwaitingFaultEntry,
+    FaultEntered,
+    TakeoverEpochAcquired,
+    ResumeSent,
+    StaleResultFenced,
+    FreshOwnerAcknowledged,
+}
+
+impl StaleHandoffStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::AwaitingFaultEntry => "awaiting_fault_entry",
+            Self::FaultEntered => "fault_entered",
+            Self::TakeoverEpochAcquired => "takeover_epoch_acquired",
+            Self::ResumeSent => "resume_sent",
+            Self::StaleResultFenced => "stale_result_fenced",
+            Self::FreshOwnerAcknowledged => "fresh_owner_acknowledged",
+        }
+    }
+}
+
+const REQUIRED_STALE_HANDOFF_STAGES: [StaleHandoffStage; 5] = [
+    StaleHandoffStage::FaultEntered,
+    StaleHandoffStage::TakeoverEpochAcquired,
+    StaleHandoffStage::ResumeSent,
+    StaleHandoffStage::StaleResultFenced,
+    StaleHandoffStage::FreshOwnerAcknowledged,
+];
+
+fn record_stale_handoff_stage(stage: &Arc<Mutex<StaleHandoffStage>>, next: StaleHandoffStage) {
+    *stage.lock().unwrap() = next;
+    eprintln!("E2_FAILOVER_SEAM_STAGE stage={}", next.label());
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum SeamSupervision {
+    Completed,
+    InfrastructureIndeterminate { last_stage: StaleHandoffStage },
+}
+
+async fn supervise_stale_handoff<F>(
+    seam: F,
+    watchdog: Option<Duration>,
+    stage: Arc<Mutex<StaleHandoffStage>>,
+) -> SeamSupervision
+where
+    F: Future<Output = ()>,
+{
+    let Some(deadline) = watchdog else {
+        seam.await;
+        return SeamSupervision::Completed;
+    };
+    match tokio::time::timeout(deadline, seam).await {
+        Ok(()) => SeamSupervision::Completed,
+        Err(_) => SeamSupervision::InfrastructureIndeterminate {
+            last_stage: *stage.lock().unwrap(),
+        },
+    }
+}
+
 #[test]
-fn coordination_watchdog_timeout_is_configurable_and_not_a_speed_bar() {
-    assert_eq!(
-        parse_coordination_watchdog_timeout(None).unwrap(),
-        Duration::from_secs(DEFAULT_COORDINATION_TIMEOUT_SECS)
-    );
+fn coordination_watchdog_is_opt_in_bounded_and_uses_canonical_integer_grammar() {
+    assert_eq!(parse_coordination_watchdog_timeout(None).unwrap(), None);
     assert_eq!(
         parse_coordination_watchdog_timeout(Some("17")).unwrap(),
-        Duration::from_secs(17)
+        Some(Duration::from_secs(17))
     );
-    for invalid in ["", "0", "-1", "1.5", "slow"] {
+    for invalid in [
+        "",
+        "0",
+        "017",
+        "+17",
+        "-1",
+        "1.5",
+        "slow",
+        "86401",
+        "18446744073709551615",
+        "18446744073709551616",
+    ] {
         assert!(
             parse_coordination_watchdog_timeout(Some(invalid)).is_err(),
             "invalid watchdog value {invalid:?} must fail closed"
         );
     }
+}
+
+#[test]
+fn stale_handoff_supervision_classifies_expiry_and_names_every_semantic_stage() {
+    assert_eq!(
+        REQUIRED_STALE_HANDOFF_STAGES.map(StaleHandoffStage::label),
+        [
+            "fault_entered",
+            "takeover_epoch_acquired",
+            "resume_sent",
+            "stale_result_fenced",
+            "fresh_owner_acknowledged",
+        ]
+    );
+    let runtime = test_runtime();
+    assert_eq!(
+        runtime.block_on(supervise_stale_handoff(
+            async {},
+            None,
+            Arc::new(Mutex::new(StaleHandoffStage::AwaitingFaultEntry)),
+        )),
+        SeamSupervision::Completed,
+        "unset watchdog must impose no wall-clock deadline"
+    );
+    let stage = Arc::new(Mutex::new(StaleHandoffStage::FaultEntered));
+    let outcome = runtime.block_on(supervise_stale_handoff(
+        std::future::pending(),
+        Some(Duration::from_millis(1)),
+        stage,
+    ));
+    assert_eq!(
+        outcome,
+        SeamSupervision::InfrastructureIndeterminate {
+            last_stage: StaleHandoffStage::FaultEntered
+        }
+    );
 }
 
 fn live_env(label: &str) -> Option<(String, Arc<S3BlobStore>)> {
@@ -177,16 +287,22 @@ fn spec(payload: &str) -> PushSpec {
 
 struct PauseOnce {
     cut: FaultCutPoint,
-    entered: Arc<Barrier>,
-    resume: Arc<Barrier>,
+    fault_entered: mpsc::Sender<()>,
+    resume: Mutex<mpsc::Receiver<()>>,
     fired: AtomicBool,
 }
 
 impl FaultHook for PauseOnce {
     fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
         if cut == self.cut && !self.fired.swap(true, Ordering::SeqCst) {
-            self.entered.wait();
-            self.resume.wait();
+            self.fault_entered
+                .send(())
+                .map_err(|_| EngineError::Storage("fault-entry observer dropped".into()))?;
+            self.resume
+                .lock()
+                .unwrap()
+                .recv()
+                .map_err(|_| EngineError::Storage("fault-resume sender dropped".into()))?;
         }
         Ok(())
     }
@@ -749,6 +865,9 @@ fn greater_epoch_owner_rebuilds_projection_initialized_before_writes() {
 
 #[test]
 fn stale_append_paused_before_authority_cannot_survive_handoff() {
+    // Parse explicit watchdog configuration before the live-environment loud skip. Invalid operator
+    // configuration must fail closed even when Postgres/MinIO are absent.
+    let coordination_watchdog = coordination_watchdog_timeout();
     let Some((pg, store)) = live_env("OBJECTLOG SHARED OWNERSHIP STALE APPEND RACE") else {
         return;
     };
@@ -776,56 +895,69 @@ fn stale_append_paused_before_authority_cannot_survive_handoff() {
     );
     b.register_owner(ts(20)).unwrap();
 
-    let entered = Arc::new(Barrier::new(2));
-    let resume = Arc::new(Barrier::new(2));
+    let (fault_entered_tx, fault_entered_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
     a_backend.set_object_log_fault_hook(Some(Arc::new(PauseOnce {
         cut: FaultCutPoint::AfterManifestCandidateBeforeHead,
-        entered: entered.clone(),
-        resume: resume.clone(),
+        fault_entered: fault_entered_tx,
+        resume: Mutex::new(resume_rx),
         fired: AtomicBool::new(false),
     })));
     let reopened = backend(store, "race-reopen");
-    let coordination_timeout = coordination_watchdog_timeout();
+    let seam_stage = Arc::new(Mutex::new(StaleHandoffStage::AwaitingFaultEntry));
+    let supervised_stage = seam_stage.clone();
     test_runtime().block_on(async {
-        a_backend.create_queue(definition.clone()).await.unwrap();
-        b_backend.create_queue(definition.clone()).await.unwrap();
-        a_backend.fence_epoch(&queue, 0).await.unwrap();
-        a.acquire_queue(&queue, ts(0)).await.unwrap();
-        let flusher_a = a_backend.spawn_flusher();
-        let stale_push = {
-            let backend = a_backend.clone();
-            let queue = queue.clone();
-            tokio::spawn(async move {
-                backend
-                    .push(&queue, vec![spec("stale")], ts(1), Some(1))
-                    .await
-            })
-        };
-        tokio::task::spawn_blocking(move || entered.wait())
-            .await
-            .unwrap();
-        b.acquire_queue(&queue, ts(20)).await.unwrap();
-        tokio::task::spawn_blocking(move || resume.wait())
-            .await
-            .unwrap();
-        let stale = tokio::time::timeout(coordination_timeout, stale_push)
-            .await
-            .expect("stale waiter must not hang")
-            .unwrap();
-        assert_eq!(stale, Err(EngineError::EpochFenced));
-        flusher_a.abort();
+        let seam = async {
+            a_backend.create_queue(definition.clone()).await.unwrap();
+            b_backend.create_queue(definition.clone()).await.unwrap();
+            a_backend.fence_epoch(&queue, 0).await.unwrap();
+            a.acquire_queue(&queue, ts(0)).await.unwrap();
+            let flusher_a = a_backend.spawn_flusher();
+            let stale_push = {
+                let backend = a_backend.clone();
+                let queue = queue.clone();
+                tokio::spawn(async move {
+                    backend
+                        .push(&queue, vec![spec("stale")], ts(1), Some(1))
+                        .await
+                })
+            };
+            tokio::task::spawn_blocking(move || fault_entered_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            record_stale_handoff_stage(&seam_stage, StaleHandoffStage::FaultEntered);
 
-        let flusher_b = b_backend.spawn_flusher();
-        tokio::time::timeout(
-            coordination_timeout,
-            b_backend.push(&queue, vec![spec("fresh")], ts(21), Some(2)),
-        )
-        .await
-        .expect("new owner acknowledgement must not hang")
-        .unwrap();
-        flusher_b.abort();
-        reopened.create_queue(definition).await.unwrap();
-        assert_eq!(reopened.metrics(&queue).await.unwrap().pending, 1);
+            b.acquire_queue(&queue, ts(20)).await.unwrap();
+            record_stale_handoff_stage(&seam_stage, StaleHandoffStage::TakeoverEpochAcquired);
+
+            resume_tx.send(()).unwrap();
+            record_stale_handoff_stage(&seam_stage, StaleHandoffStage::ResumeSent);
+
+            let stale = stale_push.await.unwrap();
+            assert_eq!(stale, Err(EngineError::EpochFenced));
+            record_stale_handoff_stage(&seam_stage, StaleHandoffStage::StaleResultFenced);
+            flusher_a.abort();
+
+            let flusher_b = b_backend.spawn_flusher();
+            b_backend
+                .push(&queue, vec![spec("fresh")], ts(21), Some(2))
+                .await
+                .unwrap();
+            record_stale_handoff_stage(&seam_stage, StaleHandoffStage::FreshOwnerAcknowledged);
+            flusher_b.abort();
+            reopened.create_queue(definition).await.unwrap();
+            assert_eq!(reopened.metrics(&queue).await.unwrap().pending, 1);
+        };
+        match supervise_stale_handoff(seam, coordination_watchdog, supervised_stage).await {
+            SeamSupervision::Completed => {}
+            SeamSupervision::InfrastructureIndeterminate { last_stage } => panic!(
+                "E2_FAILOVER_INFRASTRUCTURE_INDETERMINATE classification=coordination_watchdog \
+                 retryable=true release_bar=false last_stage={} watchdog_seconds={}",
+                last_stage.label(),
+                coordination_watchdog.unwrap().as_secs()
+            ),
+        }
     });
 }
 

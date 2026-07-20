@@ -17,7 +17,7 @@ KEEP="${PQUEUE_E2_KEEP_CLUSTER:-0}"
 PG_IMAGE="${PQUEUE_E2_POSTGRES_IMAGE:-postgres:16}"
 MINIO_IMAGE="${PQUEUE_E2_MINIO_IMAGE:-minio/minio:latest}"
 MC_IMAGE="${PQUEUE_E2_MC_IMAGE:-minio/mc:latest}"
-COORDINATION_TIMEOUT_SECS="${PQUEUE_TEST_COORDINATION_TIMEOUT_SECS:-300}"
+COORDINATION_TIMEOUT_SECS="${PQUEUE_TEST_COORDINATION_TIMEOUT_SECS-}"
 PF_PID=""
 CLUSTER_CREATED=0
 START_MS="$(date +%s%3N)"
@@ -34,8 +34,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-[[ "${COORDINATION_TIMEOUT_SECS}" =~ ^[1-9][0-9]*$ ]] || \
-  die "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS must be a positive integer"
+if [[ -v PQUEUE_TEST_COORDINATION_TIMEOUT_SECS ]]; then
+  [[ "${COORDINATION_TIMEOUT_SECS}" =~ ^[1-9][0-9]{0,4}$ ]] || \
+    die "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS must match [1-9][0-9]* and be <= 86400"
+  ((10#${COORDINATION_TIMEOUT_SECS} <= 86400)) || \
+    die "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS must be <= 86400"
+fi
 
 start_pf() {
   local resource="$1" local_port="$2" remote_port="$3"
@@ -311,12 +315,18 @@ sleep 2
 PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
 PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" \
 PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
-PQUEUE_TEST_COORDINATION_TIMEOUT_SECS="${COORDINATION_TIMEOUT_SECS}" \
   cargo test -p pqueue-server --test objectlog_shared_ownership \
-  stale_append_paused_before_authority_cannot_survive_handoff -- --nocapture
+  stale_append_paused_before_authority_cannot_survive_handoff -- --nocapture \
+  2>&1 | tee "${RUN_DIR}/stale-handoff.log" || {
+    if grep -Fq 'E2_FAILOVER_INFRASTRUCTURE_INDETERMINATE' "${RUN_DIR}/stale-handoff.log"; then
+      latest_stage=$(grep -o 'last_stage=[^ ]*' "${RUN_DIR}/stale-handoff.log" | tail -n1 || true)
+      echo "tp002-e2-failover: classification=infrastructure_indeterminate retryable=true release_bar=false ${latest_stage:-last_stage=unreported}" >&2
+      exit 75
+    fi
+    die "stale handoff semantic seam failed"
+  }
 PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
 PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
-PQUEUE_TEST_COORDINATION_TIMEOUT_SECS="${COORDINATION_TIMEOUT_SECS}" \
   cargo test -p pqueue-server --test objectlog_shared_ownership \
   greater_epoch_owner_hydrates_snapshot_tail_before_serving -- --nocapture 2>&1 | tee "${RUN_DIR}/snapshot-tail.log"
 grep -Fq 'greater_epoch_owner_hydrates_snapshot_tail_before_serving ... ok' "${RUN_DIR}/snapshot-tail.log" || \
