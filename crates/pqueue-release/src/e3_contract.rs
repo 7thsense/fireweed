@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
+use crate::cost::{
+    PriceInputs, WorkloadAssumptions, build_release_cost_rows, release_cost_inputs,
+    validate_release_cost_rows,
+};
 use crate::transaction::TransactionEvidenceRow;
 use crate::{LedgerRow, verify_ledger};
 
@@ -29,7 +33,7 @@ pub const E3_PRODUCER_SUITE: &str = "performance_object_log_e3_live_tests";
 pub const E3_PRODUCER_COMMAND: &str = "scripts/perf/tp002-e3-minio.sh";
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E3ContractManifest {
     pub schema_version: u32,
@@ -41,7 +45,7 @@ pub struct E3ContractManifest {
     pub entries: Vec<E3ContractEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ac7Binding {
     pub suite: String,
@@ -51,7 +55,7 @@ pub struct Ac7Binding {
     pub request_id_timing: RequestIdTiming,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E3ContractEntry {
     pub profile: String,
@@ -61,7 +65,7 @@ pub struct E3ContractEntry {
     pub transaction_authorities: Vec<E3TransactionAuthority>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E3FenceAuthority {
     pub suite: String,
@@ -70,14 +74,14 @@ pub struct E3FenceAuthority {
     pub no_cas: NoCasDisposition,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestIdTiming {
     ForceSealedConfigIndependent,
     LatencyWindow,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct E3TransactionAuthority {
     pub ac: String,
@@ -85,7 +89,7 @@ pub struct E3TransactionAuthority {
     pub applicability: Applicability,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Applicability {
     Pass,
@@ -140,6 +144,74 @@ impl std::fmt::Display for E3ContractError {
 pub struct E3ContractSummary {
     pub entries: usize,
     pub transaction_rows: usize,
+    pub cost_rows: usize,
+}
+
+pub fn build_e3_contract_manifest(
+    source_revision: String,
+    e3_ledger: String,
+    transaction_evidence: String,
+    fencing_evidence: String,
+) -> Result<E3ContractManifest, E3ContractError> {
+    if !valid_revision(&source_revision) {
+        return Err(E3ContractError(
+            "contract source_revision must be a 40-character lowercase hex revision".into(),
+        ));
+    }
+    let no_cas = NoCasDisposition {
+        status: NoCasStatus::Excluded,
+        reason: NO_CAS_REASON.into(),
+    };
+    let entries = REQUIRED_E3_PROFILES
+        .into_iter()
+        .flat_map(|profile| {
+            let no_cas = no_cas.clone();
+            REQUIRED_BOUNDS_MS.into_iter().map(move |bound_ms| {
+                let transaction_authorities = REQUIRED_TXN_ACS
+                    .into_iter()
+                    .map(|ac| E3TransactionAuthority {
+                        ac: ac.into(),
+                        backend: governed_backend(profile, ac)
+                            .expect("governed profile/AC matrix is complete")
+                            .into(),
+                        applicability: Applicability::Pass,
+                    })
+                    .collect();
+                E3ContractEntry {
+                    profile: profile.into(),
+                    bound_ms,
+                    request_id_timing: RequestIdTiming::ForceSealedConfigIndependent,
+                    manifest_fence: E3FenceAuthority {
+                        suite: FENCE_SUITE.into(),
+                        store_profile: FENCE_PROFILE.into(),
+                        applicability: Applicability::Pass,
+                        no_cas: no_cas.clone(),
+                    },
+                    transaction_authorities,
+                }
+            })
+        })
+        .collect();
+    Ok(E3ContractManifest {
+        schema_version: E3_CONTRACT_SCHEMA_VERSION,
+        source_revision,
+        e3_ledger,
+        transaction_evidence,
+        fencing_evidence,
+        ac7_binding: Ac7Binding {
+            suite: TRANSACTION_SUITE.into(),
+            backend: "objectlog(force-seal|group-commit)".into(),
+            bounds_ms: REQUIRED_BOUNDS_MS.to_vec(),
+            latency_window_timing: RequestIdTiming::LatencyWindow,
+            request_id_timing: RequestIdTiming::ForceSealedConfigIndependent,
+        },
+        entries,
+    })
+}
+
+pub fn write_e3_contract(path: &Path, manifest: &E3ContractManifest) -> std::io::Result<()> {
+    let body = serde_json::to_vec_pretty(manifest).expect("E3ContractManifest serializes");
+    atomic_write_evidence(path, &body, "E3 contract")
 }
 
 pub fn build_e3_fence_evidence(
@@ -172,6 +244,11 @@ pub fn build_e3_fence_evidence(
 }
 
 pub fn write_e3_fence_evidence(path: &Path, row: &E3FenceEvidenceRow) -> std::io::Result<()> {
+    let body = serde_json::to_vec_pretty(row).expect("E3FenceEvidenceRow serializes");
+    atomic_write_evidence(path, &body, "fence evidence")
+}
+
+fn atomic_write_evidence(path: &Path, body: &[u8], label: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
         let mut cursor = PathBuf::new();
@@ -179,16 +256,16 @@ pub fn write_e3_fence_evidence(path: &Path, row: &E3FenceEvidenceRow) -> std::io
             cursor.push(component.as_os_str());
             if fs::symlink_metadata(&cursor).is_ok_and(|metadata| metadata.file_type().is_symlink())
             {
-                return Err(std::io::Error::other(
-                    "refusing a symlinked fence-evidence parent path",
-                ));
+                return Err(std::io::Error::other(format!(
+                    "refusing a symlinked {label} parent path"
+                )));
             }
         }
     }
     if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(std::io::Error::other(
-            "refusing to replace a symlink fence-evidence target",
-        ));
+        return Err(std::io::Error::other(format!(
+            "refusing to replace a symlink {label} target"
+        )));
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
@@ -208,8 +285,7 @@ pub fn write_e3_fence_evidence(path: &Path, row: &E3FenceEvidenceRow) -> std::io
             Err(error) => return Err(error),
         }
     };
-    let body = serde_json::to_vec_pretty(row).expect("E3FenceEvidenceRow serializes");
-    if let Err(error) = file.write_all(&body).and_then(|_| file.sync_all()) {
+    if let Err(error) = file.write_all(body).and_then(|_| file.sync_all()) {
         let _ = fs::remove_file(&temp);
         return Err(error);
     }
@@ -300,9 +376,11 @@ pub fn verify_e3_contract(
         &mut errors,
     );
 
-    if let Some(path) = ledger_path {
-        verify_e3_ledger(&path, &manifest.source_revision, &mut errors);
-    }
+    let e3_rows = ledger_path
+        .as_ref()
+        .map(|path| verify_e3_ledger(path, &manifest.source_revision, &mut errors))
+        .unwrap_or_default();
+    let cost_rows = verify_cost_contract(&e3_rows, &mut errors);
     let txn_rows = txn_path
         .as_ref()
         .map(|path| read_transaction_rows(path, &mut errors))
@@ -322,6 +400,7 @@ pub fn verify_e3_contract(
         Ok(E3ContractSummary {
             entries: manifest.entries.len(),
             transaction_rows: txn_rows.len(),
+            cost_rows,
         })
     } else {
         Err(errors)
@@ -394,14 +473,18 @@ fn resolve_authority(
     }
 }
 
-fn verify_e3_ledger(path: &Path, revision: &str, errors: &mut Vec<E3ContractError>) {
+fn verify_e3_ledger(
+    path: &Path,
+    revision: &str,
+    errors: &mut Vec<E3ContractError>,
+) -> Vec<LedgerRow> {
     if let Err(findings) = verify_ledger(path, true) {
         errors.extend(
             findings
                 .into_iter()
                 .map(|error| E3ContractError(format!("E3 ledger {}: {error}", path.display()))),
         );
-        return;
+        return Vec::new();
     }
     let body = match fs::read_to_string(path) {
         Ok(body) => body,
@@ -410,7 +493,7 @@ fn verify_e3_ledger(path: &Path, revision: &str, errors: &mut Vec<E3ContractErro
                 "cannot read E3 ledger {}: {error}",
                 path.display()
             )));
-            return;
+            return Vec::new();
         }
     };
     let mut rows = BTreeMap::new();
@@ -433,6 +516,7 @@ fn verify_e3_ledger(path: &Path, revision: &str, errors: &mut Vec<E3ContractErro
             )));
         }
     }
+    let source_rows = rows.values().cloned().collect::<Vec<_>>();
     for profile in REQUIRED_E3_PROFILES {
         let Some(row) = rows.remove(profile) else {
             errors.push(E3ContractError(format!(
@@ -484,12 +568,145 @@ fn verify_e3_ledger(path: &Path, revision: &str, errors: &mut Vec<E3ContractErro
                 serde_json::json!(true),
                 errors,
             );
+            require_value(
+                &row,
+                &format!("bound_{bound}ms_recorder_control_logical_match"),
+                serde_json::json!(true),
+                errors,
+            );
+            require_bounded_resources(&row, &format!("bound_{bound}ms"), errors);
+            require_u64(
+                &row,
+                &format!("bound_{bound}ms_store_request_bytes"),
+                errors,
+            );
+            require_u64(
+                &row,
+                &format!("bound_{bound}ms_store_response_bytes"),
+                errors,
+            );
         }
+        require_exact_recovery(&row, errors);
     }
     for profile in rows.keys() {
         errors.push(E3ContractError(format!(
             "unexpected E3 ledger profile {profile}"
         )));
+    }
+    source_rows
+}
+
+fn require_u64(row: &LedgerRow, key: &str, errors: &mut Vec<E3ContractError>) -> Option<u64> {
+    let value = row
+        .measurements
+        .values
+        .get(key)
+        .and_then(serde_json::Value::as_u64);
+    if value.is_none() {
+        errors.push(E3ContractError(format!(
+            "E3 ledger profile {} requires numeric {key}",
+            row.backend_profile
+        )));
+    }
+    value
+}
+
+fn require_bounded_resources(row: &LedgerRow, prefix: &str, errors: &mut Vec<E3ContractError>) {
+    let configured = require_u64(row, &format!("{prefix}_buffer_configured_bytes"), errors);
+    let current = require_u64(row, &format!("{prefix}_buffer_current_bytes"), errors);
+    let peak = require_u64(row, &format!("{prefix}_buffer_peak_bytes"), errors);
+    let waiters = require_u64(row, &format!("{prefix}_pending_waiters"), errors);
+    if current != Some(0)
+        || waiters != Some(0)
+        || peak
+            .zip(configured)
+            .is_none_or(|(peak, configured)| peak > configured)
+    {
+        errors.push(E3ContractError(format!(
+            "E3 ledger profile {} {prefix} violates bounded-resource accounting",
+            row.backend_profile
+        )));
+    }
+}
+
+fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
+    let values = &row.measurements.values;
+    let before = values
+        .get("recovery_state_digest_before")
+        .and_then(serde_json::Value::as_str);
+    let after = values
+        .get("recovery_state_digest_after")
+        .and_then(serde_json::Value::as_str);
+    let samples = values
+        .get("recovery_replay_progress_samples")
+        .and_then(serde_json::Value::as_array);
+    let start = require_u64(row, "recovery_start_seq", errors);
+    let tail = require_u64(row, "recovery_tail_replayed", errors);
+    let progress_monotonic = samples.is_some_and(|samples| {
+        samples.len() >= 2
+            && samples.windows(2).all(|pair| {
+                pair[0]
+                    .as_u64()
+                    .zip(pair[1].as_u64())
+                    .is_some_and(|(a, b)| a <= b)
+            })
+            && samples.first().and_then(serde_json::Value::as_u64) == start
+            && samples.last().and_then(serde_json::Value::as_u64)
+                == start
+                    .zip(tail)
+                    .map(|(start, tail)| start.saturating_add(tail))
+    });
+    if before.is_none()
+        || before != after
+        || require_u64(row, "recovery_verified_items", errors) != Some(10_000_000)
+        || require_u64(row, "recovery_missing_items", errors) != Some(0)
+        || require_u64(row, "recovery_duplicate_items", errors) != Some(0)
+        || require_u64(row, "recovery_queue_count", errors) != Some(1)
+        || require_u64(row, "recovery_verification_chunk_items", errors)
+            .is_none_or(|chunk| chunk == 0 || chunk > 512)
+        || !progress_monotonic
+    {
+        errors.push(E3ContractError(format!(
+            "E3 ledger profile {} does not prove exact streaming 10M recovery with monotonic replay progress",
+            row.backend_profile
+        )));
+    }
+    require_bounded_resources(row, "recovery", errors);
+    require_u64(row, "recovery_store_request_bytes", errors);
+    require_u64(row, "recovery_store_response_bytes", errors);
+}
+
+fn verify_cost_contract(rows: &[LedgerRow], errors: &mut Vec<E3ContractError>) -> usize {
+    let inputs = match release_cost_inputs(rows) {
+        Ok(inputs) => inputs,
+        Err(findings) => {
+            errors.extend(
+                findings
+                    .into_iter()
+                    .map(|finding| E3ContractError(format!("E3 cost/recovery source: {finding}"))),
+            );
+            return 0;
+        }
+    };
+    let prices = PriceInputs::adr_001_us_east_1();
+    let workload = WorkloadAssumptions::tp002_e3_push_baseline();
+    let cost_rows = match build_release_cost_rows(
+        &inputs,
+        &workload,
+        &prices,
+        "pqueue-build-e3-contract (semantic recomputation)",
+    ) {
+        Ok(rows) => rows,
+        Err(findings) => {
+            errors.extend(findings.into_iter().map(E3ContractError));
+            return 0;
+        }
+    };
+    if let Err(findings) = validate_release_cost_rows(&cost_rows) {
+        errors.extend(findings.into_iter().map(E3ContractError));
+        0
+    } else {
+        cost_rows.len()
     }
 }
 

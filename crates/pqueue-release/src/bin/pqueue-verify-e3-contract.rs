@@ -30,8 +30,8 @@ fn main() {
         &expected_revision.to_string_lossy(),
     ) {
         Ok(summary) => println!(
-            "E3 contract verified: {} entries, {} transaction rows",
-            summary.entries, summary.transaction_rows
+            "E3 contract verified: {} entries, {} transaction rows, {} recomputed cost rows",
+            summary.entries, summary.transaction_rows, summary.cost_rows
         ),
         Err(errors) => {
             for error in errors {

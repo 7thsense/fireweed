@@ -8,13 +8,14 @@
 //!   1. **>=4 commit-latency bounds** — each profile runs at `1ms`, `5ms`, `20ms`, and `100ms`
 //!      `SegmentConfig`s; per bound it reports the measured group-commit counters (segments sealed,
 //!      objects PUT, mean/max commands per sealed segment) plus throughput.
-//!   2. **Group-commit ack latency p50/p95/p99 vs the configured budget** — concurrent pushes co-buffer; each
-//!      push's wall-clock ack latency (returns only after seal+projection-apply) is recorded, and p50/p95/p99
-//!      are asserted bounded by the config's `segment_max_latency_ms` plus a stated tolerance (the flusher poll
-//!      interval `max_latency_ms/4` + a fixed seal-cost slack). The ack lands near the latency cap, not
-//!      wildly over.
+//!   2. **Group-commit ack behavior at each configured bound** — concurrent pushes co-buffer; each push's
+//!      wall-clock ack latency (returns only after seal+projection-apply) is recorded as declared-topology
+//!      capacity evidence. Portable bars require a valid distribution and exact logical equivalence between
+//!      interleaved enabled- and disabled-recorder arms, never an absolute machine-speed threshold.
 //!   3. **Projection-appropriate recovery within the recovery-window budget** — both variants load a resident
-//!      backlog (10,000,000 items in the release shape), reopen, and recover the exact pending count. SQLite
+//!      backlog (10,000,000 items in the release shape), reopen, and recover a streaming digest of every
+//!      identity, client key, version, lifecycle state, payload, and field with zero missing/duplicate items.
+//!      SQLite
 //!      MUST resume from its durable snapshot high-water and replay a bounded tail; the intentionally
 //!      ephemeral in-memory projection MUST report an exact bounded genesis replay (`start_seq=0`,
 //!      `tail_replayed=total_commands`, `snapshot_used=false`).
@@ -57,9 +58,9 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use pqueue_core::{
-    EligibilityPolicy, Metadata, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
-    UtcTimestamp,
+    ClientItemKey, EligibilityPolicy, ItemState, Metadata, OrderingMode, PriorityDirection,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
+    RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey};
 use pqueue_objectlog::object_store_observability::{
@@ -134,8 +135,12 @@ fn qdef(tenant: &str, queue: &str) -> QueueDefinition {
 }
 
 fn spec(payload: &str) -> PushSpec {
+    keyed_spec(payload, None)
+}
+
+fn keyed_spec(payload: &str, client_item_key: Option<ClientItemKey>) -> PushSpec {
     PushSpec {
-        client_item_key: None,
+        client_item_key,
         priority: None,
         not_before: None,
         group_key: None,
@@ -182,7 +187,10 @@ struct S3Env {
 }
 
 impl S3Env {
-    fn measured_store(&self) -> (Arc<dyn BlobStore>, Arc<BlobMetricsRecorder>) {
+    fn instrumented_store(
+        &self,
+        recorder_enabled: bool,
+    ) -> (Arc<dyn BlobStore>, Arc<BlobMetricsRecorder>) {
         let s3 = S3BlobStore::new(
             &self.endpoint,
             &self.bucket,
@@ -191,7 +199,11 @@ impl S3Env {
             "us-east-1",
         )
         .expect("build S3 client");
-        let recorder = Arc::new(BlobMetricsRecorder::new());
+        let recorder = Arc::new(if recorder_enabled {
+            BlobMetricsRecorder::new()
+        } else {
+            BlobMetricsRecorder::disabled()
+        });
         (
             Arc::new(InstrumentedBlobStore::new(
                 s3,
@@ -209,6 +221,8 @@ struct StoreOperations {
     gets: u64,
     lists: u64,
     deletes: u64,
+    request_bytes: u64,
+    response_bytes: u64,
 }
 
 impl From<BlobPhysicalTotals> for StoreOperations {
@@ -218,8 +232,20 @@ impl From<BlobPhysicalTotals> for StoreOperations {
             gets: value.gets,
             lists: value.lists,
             deletes: value.deletes,
+            request_bytes: value.request_bytes,
+            response_bytes: value.response_bytes,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ResourceBounds {
+    configured_global_bytes: u64,
+    current_bytes: u64,
+    peak_bytes: u64,
+    waiters: u64,
+    recorder_in_flight: u64,
+    recorder_peak_in_flight: u64,
 }
 
 trait E3Flusher {
@@ -280,10 +306,14 @@ struct AckResult {
     segments_sealed: u64,
     objects_put: u64,
     store_operations: StoreOperations,
+    resource_bounds: ResourceBounds,
     commands_committed: u64,
     mean_batch: f64,
     max_batch: usize,
     throughput_per_s: f64,
+    disabled_control_throughput_per_s: f64,
+    recorder_overhead_ratio: f64,
+    recorder_control_logical_match: bool,
     throughput_progress_met: bool,
     ack_p50_ms: f64,
     ack_p95_ms: f64,
@@ -292,6 +322,15 @@ struct AckResult {
     latency_distribution_met: bool,
     load_shape_met: bool,
     bar_met: bool,
+}
+
+struct AckArm {
+    counters: SegmentCounters,
+    store_operations: StoreOperations,
+    resource_bounds: ResourceBounds,
+    wall_s: f64,
+    latencies: Vec<f64>,
+    pending: u64,
 }
 
 struct ProfileRun {
@@ -307,17 +346,40 @@ trait E3Backend:
     ControlPlaneStore + PushPort + ProjectionRead + E3Flusher + Send + Sync + 'static
 {
     fn snapshot_segment_counters(&self) -> SegmentCounters;
+    fn resource_bounds(&self) -> ResourceBounds;
 }
 
 impl E3Backend for SegmentedObjectLogSqliteBackend {
     fn snapshot_segment_counters(&self) -> SegmentCounters {
         SegmentedObjectLogSqliteBackend::segment_counters(self)
     }
+
+    fn resource_bounds(&self) -> ResourceBounds {
+        let snapshot = self.byte_admission_snapshot();
+        ResourceBounds {
+            configured_global_bytes: snapshot.configured_global_bytes as u64,
+            current_bytes: snapshot.current_bytes as u64,
+            peak_bytes: snapshot.peak_bytes as u64,
+            waiters: snapshot.waiters as u64,
+            ..ResourceBounds::default()
+        }
+    }
 }
 
 impl E3Backend for SegmentedObjectLogInMemoryBackend {
     fn snapshot_segment_counters(&self) -> SegmentCounters {
         SegmentedObjectLogInMemoryBackend::segment_counters(self)
+    }
+
+    fn resource_bounds(&self) -> ResourceBounds {
+        let snapshot = self.byte_admission_snapshot();
+        ResourceBounds {
+            configured_global_bytes: snapshot.configured_global_bytes as u64,
+            current_bytes: snapshot.current_bytes as u64,
+            peak_bytes: snapshot.peak_bytes as u64,
+            waiters: snapshot.waiters as u64,
+            ..ResourceBounds::default()
+        }
     }
 }
 
@@ -343,39 +405,50 @@ impl E3RecoveryProbe for SegmentedObjectLogInMemoryBackend {
 
 /// Drive `pushes` single-item pushes through one backend/profile over MinIO at `concurrency`, with the
 /// flusher running, recording each push's ack latency and end-to-end throughput.
-async fn run_ack_config<B, F>(
+async fn run_ack_arm<B, F>(
     s3: &S3Env,
     profile: &'static str,
     bound: BoundConfig,
     pushes: u64,
     concurrency: u64,
+    recorder_enabled: bool,
     open: F,
-) -> AckResult
+) -> AckArm
 where
     B: E3Backend,
     F: Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
-    let qid = format!("e3ack-{profile}-{}-{}", bound.label, std::process::id());
+    let arm = if recorder_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    let qid = format!(
+        "e3ack-{profile}-{}-{arm}-{}",
+        bound.label,
+        std::process::id()
+    );
     let def = qdef("e3", &qid);
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-    let proj = projection_path(&format!("ack-{profile}-{}", bound.label));
+    let proj = projection_path(&format!("ack-{profile}-{}-{arm}", bound.label));
     let cfg = SegmentConfig::new(bound.target_bytes, bound.max_latency_ms).unwrap();
 
-    let (store, recorder) = s3.measured_store();
+    let (store, recorder) = s3.instrumented_store(recorder_enabled);
     let backend = Arc::new(open(store, &proj, cfg).expect("open segmented backend over S3"));
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
     let store_baseline = recorder.snapshot();
     let started = Instant::now();
 
-    let per_task = pushes.div_ceil(concurrency);
     let mut handles = Vec::new();
     for t in 0..concurrency {
+        let start_index = t * pushes / concurrency;
+        let end_index = (t + 1) * pushes / concurrency;
         let backend = backend.clone();
         let shard = shard.clone();
         handles.push(tokio::spawn(async move {
-            let mut lat = Vec::with_capacity(per_task as usize);
-            for i in 0..per_task {
+            let mut lat = Vec::with_capacity((end_index - start_index) as usize);
+            for i in start_index..end_index {
                 let start = Instant::now();
                 backend
                     .push(&shard, vec![spec(&format!("t{t}-{i}"))], ts(), None)
@@ -392,43 +465,100 @@ where
     }
     flusher.abort();
     let wall_s = started.elapsed().as_secs_f64();
-    let _wall_ms = wall_s * 1000.0;
-
     let c = backend.snapshot_segment_counters();
-    let throughput_per_s = pushes as f64 / wall_s.max(f64::MIN_POSITIVE);
-    let ack_p50 = pct(&mut latencies, 0.50);
-    let ack_p95 = pct(&mut latencies, 0.95);
-    let ack_p99 = pct(&mut latencies, 0.99);
-    let configured_window_ms = cfg.max_latency_ms as f64 + (cfg.max_latency_ms as f64 / 4.0);
+    let pending = backend.metrics(&shard).await.unwrap().pending;
+    let snapshot = recorder.snapshot();
+    let mut resource_bounds = backend.resource_bounds();
+    resource_bounds.recorder_in_flight = snapshot.in_flight;
+    resource_bounds.recorder_peak_in_flight = snapshot.peak_in_flight;
+    let store_operations = snapshot.delta(&store_baseline).physical_totals().into();
+    let _ = std::fs::remove_file(&proj);
+    AckArm {
+        counters: c,
+        store_operations,
+        resource_bounds,
+        wall_s,
+        latencies,
+        pending,
+    }
+}
+
+/// Interleave an enabled recorder arm with a disabled-recorder control over byte-identical seeded work.
+/// Logical equality is a release bar; elapsed-time ratio is only declared-topology capacity evidence.
+async fn run_ack_config<B, F>(
+    s3: &S3Env,
+    profile: &'static str,
+    bound: BoundConfig,
+    pushes: u64,
+    concurrency: u64,
+    open: F,
+) -> AckResult
+where
+    B: E3Backend,
+    F: Copy + Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
+{
+    let enabled_first = matches!(bound.max_latency_ms, 1 | 20);
+    let (mut enabled, disabled) = if enabled_first {
+        (
+            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, true, open).await,
+            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, false, open).await,
+        )
+    } else {
+        let disabled =
+            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, false, open).await;
+        let enabled =
+            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, true, open).await;
+        (enabled, disabled)
+    };
+
+    let c = enabled.counters;
+    let throughput_per_s = pushes as f64 / enabled.wall_s.max(f64::MIN_POSITIVE);
+    let disabled_control_throughput_per_s = pushes as f64 / disabled.wall_s.max(f64::MIN_POSITIVE);
+    let recorder_overhead_ratio = enabled.wall_s / disabled.wall_s.max(f64::MIN_POSITIVE);
+    let ack_p50 = pct(&mut enabled.latencies, 0.50);
+    let ack_p95 = pct(&mut enabled.latencies, 0.95);
+    let ack_p99 = pct(&mut enabled.latencies, 0.99);
+    let configured_window_ms = bound.max_latency_ms as f64 + (bound.max_latency_ms as f64 / 4.0);
     let throughput_progress_met = throughput_per_s.is_finite() && throughput_per_s > 0.0;
     let latency_distribution_met = ack_p50.is_finite()
         && ack_p95.is_finite()
         && ack_p99.is_finite()
         && ack_p50 <= ack_p95
         && ack_p95 <= ack_p99;
+    let recorder_control_logical_match = c.commands_committed
+        == disabled.counters.commands_committed
+        && enabled.pending == pushes
+        && disabled.pending == pushes;
+    let resources_met = enabled.resource_bounds.current_bytes == 0
+        && enabled.resource_bounds.waiters == 0
+        && enabled.resource_bounds.peak_bytes <= enabled.resource_bounds.configured_global_bytes
+        && enabled.resource_bounds.recorder_in_flight == 0
+        && enabled.resource_bounds.recorder_peak_in_flight <= concurrency;
     let load_shape_met = c.commands_committed >= pushes
         && c.segments_sealed > 0
         && c.objects_put > 0
-        && c.max_batch_size() > 1;
-    let bar_met = throughput_progress_met && latency_distribution_met && load_shape_met;
-
-    let _ = std::fs::remove_file(&proj);
+        && c.max_batch_size() > 1
+        && resources_met;
+    let bar_met = throughput_progress_met
+        && latency_distribution_met
+        && load_shape_met
+        && recorder_control_logical_match;
 
     AckResult {
         label: bound.label,
-        target_bytes: cfg.target_bytes,
-        max_latency_ms: cfg.max_latency_ms,
+        target_bytes: bound.target_bytes,
+        max_latency_ms: bound.max_latency_ms,
         segments_sealed: c.segments_sealed,
         objects_put: c.objects_put,
-        store_operations: recorder
-            .snapshot()
-            .delta(&store_baseline)
-            .physical_totals()
-            .into(),
+        store_operations: enabled.store_operations,
+        resource_bounds: enabled.resource_bounds,
         commands_committed: c.commands_committed,
         mean_batch: round3(c.mean_batch_size()),
         max_batch: c.max_batch_size(),
         throughput_per_s: round3(throughput_per_s),
+        disabled_control_throughput_per_s: round3(disabled_control_throughput_per_s),
+        recorder_overhead_ratio: round3(recorder_overhead_ratio),
+        recorder_control_logical_match,
         throughput_progress_met,
         ack_p50_ms: round3(ack_p50),
         ack_p95_ms: round3(ack_p95),
@@ -451,8 +581,142 @@ struct RecoveryResult {
     recovery_max_tail: u64,
     recovery_wall_ms: f64,
     pending_after: u64,
+    state_digest_before: String,
+    state_digest_after: String,
+    verified_items: u64,
+    missing_items: u64,
+    duplicate_items: u64,
+    invalid_items: u64,
+    replay_progress_samples: Vec<u64>,
+    verification_chunk_items: u64,
+    queue_count: u64,
+    resource_bounds: ResourceBounds,
     store_operations: StoreOperations,
     bar_met: bool,
+}
+
+#[derive(Clone, Copy)]
+struct StreamingDigest {
+    left: u64,
+    right: u64,
+}
+
+impl StreamingDigest {
+    fn new() -> Self {
+        Self {
+            left: 0xcbf2_9ce4_8422_2325,
+            right: 0x8422_2325_cbf2_9ce4,
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.left ^= u64::from(*byte);
+            self.left = self.left.wrapping_mul(0x100_0000_01b3);
+            self.right ^= u64::from(*byte).rotate_left(1);
+            self.right = self.right.wrapping_mul(0x100_0000_01b3 ^ 0x9e37_79b9);
+        }
+        self.left ^= 0xff;
+        self.right ^= 0x7f;
+    }
+
+    fn finish(self) -> String {
+        format!("fnv1a128:{:016x}{:016x}", self.left, self.right)
+    }
+}
+
+struct StateFingerprint {
+    digest: String,
+    verified: u64,
+    missing: u64,
+    duplicates: u64,
+    invalid: u64,
+}
+
+/// Verify the complete resident state without materializing another resident-sized collection. The
+/// deterministic client-key stream is queried in bounded chunks; every full live view contributes to a
+/// stable digest, while XOR/sum identity accumulators detect duplicate identities independently of count.
+async fn fingerprint_state<B: ProjectionRead>(
+    backend: &B,
+    shard: &QueueKey,
+    resident: u64,
+    chunk_items: u64,
+) -> StateFingerprint {
+    let mut digest = StreamingDigest::new();
+    let mut verified = 0u64;
+    let mut missing = 0u64;
+    let mut id_xor = 0u64;
+    let mut id_sum = 0u64;
+    let mut identity_bits = vec![0u64; resident.div_ceil(64) as usize];
+    let mut identity_domain = None;
+    let mut duplicates = 0u64;
+    let mut invalid = 0u64;
+    let mut start = 0u64;
+    while start < resident {
+        let end = (start + chunk_items).min(resident);
+        let keys = (start..end)
+            .map(|id| ClientItemKey::new(format!("i{id}")).unwrap())
+            .collect::<Vec<_>>();
+        let views = backend.live_items(shard, &keys).await.unwrap();
+        assert_eq!(views.len(), keys.len(), "live_items preserves input shape");
+        for (index, (key, view)) in keys.iter().zip(views).enumerate() {
+            let ordinal = start + index as u64;
+            let Some(view) = view else {
+                missing += 1;
+                continue;
+            };
+            verified += 1;
+            let expected_payload = format!("i{ordinal}");
+            if view.client_item_key != *key
+                || view.item_version != 1
+                || view.lifecycle_state != ItemState::Pending
+                || view.payload.as_deref() != Some(expected_payload.as_bytes())
+                || !view.fields.is_empty()
+            {
+                invalid += 1;
+            }
+            id_xor ^= view.item_id.as_u64();
+            id_sum = id_sum.wrapping_add(view.item_id.as_u64());
+            let domain = (view.item_id.epoch(), view.item_id.node());
+            if identity_domain.get_or_insert(domain) != &domain {
+                duplicates += 1;
+            } else {
+                let counter = u64::from(view.item_id.counter());
+                if counter >= resident {
+                    duplicates += 1;
+                } else {
+                    let bit = counter;
+                    let word = &mut identity_bits[(bit / 64) as usize];
+                    let mask = 1u64 << (bit % 64);
+                    if *word & mask != 0 {
+                        duplicates += 1;
+                    }
+                    *word |= mask;
+                }
+            }
+            digest.update(&ordinal.to_le_bytes());
+            digest.update(key.as_str().as_bytes());
+            digest.update(&view.item_id.as_u64().to_le_bytes());
+            digest.update(&view.item_version.to_le_bytes());
+            digest.update(format!("{:?}", view.lifecycle_state).as_bytes());
+            digest.update(view.client_item_key.as_str().as_bytes());
+            digest.update(view.payload.as_deref().unwrap_or_default());
+            for (field, value) in view.fields {
+                digest.update(field.as_bytes());
+                digest.update(&value);
+            }
+        }
+        start = end;
+    }
+    digest.update(&id_xor.to_le_bytes());
+    digest.update(&id_sum.to_le_bytes());
+    StateFingerprint {
+        digest: digest.finish(),
+        verified,
+        missing,
+        duplicates,
+        invalid,
+    }
 }
 
 /// Push with a bounded retry on the substrate's documented same-epoch manifest-CAS `Conflict` (the seal doc
@@ -496,9 +760,10 @@ where
     // one tiny segment per push.
     let cfg = SegmentConfig::new(8_388_608, 10_000).unwrap();
     let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
-    let (store, recorder) = s3.measured_store();
+    let (store, recorder) = s3.instrumented_store(true);
+    let verification_chunk_items = env_u64("PQUEUE_E3_VERIFY_CHUNK_ITEMS", 512).clamp(1, 512);
 
-    let (command_count, total_commands, pending_loaded) = {
+    let (command_count, total_commands, pending_loaded, state_before) = {
         let backend = Arc::new(open(store.clone(), &proj, cfg).expect("open backend for load"));
         backend
             .create_queue(def.clone())
@@ -522,8 +787,12 @@ where
                 let mut id = start;
                 while id < end {
                     let n = (end - id).min(load_batch);
-                    let items: Vec<PushSpec> =
-                        (0..n).map(|k| spec(&format!("i{}", id + k))).collect();
+                    let items: Vec<PushSpec> = (0..n)
+                        .map(|k| {
+                            let key = format!("i{}", id + k);
+                            keyed_spec(&key, Some(ClientItemKey::new(key.clone()).unwrap()))
+                        })
+                        .collect();
                     push_with_retry(backend.as_ref(), &shard, items).await;
                     id += n;
                     commands += 1;
@@ -549,7 +818,9 @@ where
         flusher.abort();
         let total_commands = backend.snapshot_segment_counters().commands_committed;
         let pending = backend.metrics(&shard).await.unwrap().pending;
-        (command_count, total_commands, pending)
+        let state =
+            fingerprint_state(backend.as_ref(), &shard, resident, verification_chunk_items).await;
+        (command_count, total_commands, pending, state)
     };
     assert_eq!(
         pending_loaded, resident,
@@ -567,6 +838,13 @@ where
     let recovery_wall_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let pending_after = backend2.metrics(&shard).await.unwrap().pending;
+    let state_after = fingerprint_state(
+        backend2.as_ref(),
+        &shard,
+        resident,
+        verification_chunk_items,
+    )
+    .await;
     let recovery_max_tail = env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000);
     let (start_seq, tail_replayed, snapshot_used) = backend2.recovery_probe(&shard, total_commands);
 
@@ -577,7 +855,34 @@ where
     } else {
         !snapshot_used && start_seq == 0 && tail_replayed == total_commands
     };
-    let bar_met = mode_met && tail_replayed <= recovery_max_tail && pending_after == resident;
+    let mut replay_progress_samples = vec![start_seq];
+    replay_progress_samples.push(start_seq.saturating_add(tail_replayed));
+    let replay_progress_monotonic = replay_progress_samples
+        .windows(2)
+        .all(|pair| pair[0] <= pair[1]);
+    let state_exact = state_before.digest == state_after.digest
+        && state_before.verified == resident
+        && state_after.verified == resident
+        && state_before.missing == 0
+        && state_after.missing == 0
+        && state_before.duplicates == 0
+        && state_after.duplicates == 0
+        && state_before.invalid == 0
+        && state_after.invalid == 0;
+    let snapshot = recorder.snapshot();
+    let mut resource_bounds = backend2.resource_bounds();
+    resource_bounds.recorder_in_flight = snapshot.in_flight;
+    resource_bounds.recorder_peak_in_flight = snapshot.peak_in_flight;
+    let resources_met = resource_bounds.current_bytes == 0
+        && resource_bounds.waiters == 0
+        && resource_bounds.peak_bytes <= resource_bounds.configured_global_bytes
+        && resource_bounds.recorder_in_flight == 0;
+    let bar_met = mode_met
+        && tail_replayed <= recovery_max_tail
+        && pending_after == resident
+        && state_exact
+        && replay_progress_monotonic
+        && resources_met;
 
     let _ = std::fs::remove_file(&proj);
 
@@ -592,11 +897,17 @@ where
         recovery_max_tail,
         recovery_wall_ms: round3(recovery_wall_ms),
         pending_after,
-        store_operations: recorder
-            .snapshot()
-            .delta(&recovery_baseline)
-            .physical_totals()
-            .into(),
+        state_digest_before: state_before.digest,
+        state_digest_after: state_after.digest,
+        verified_items: state_after.verified,
+        missing_items: state_after.missing,
+        duplicate_items: state_after.duplicates,
+        invalid_items: state_after.invalid,
+        replay_progress_samples,
+        verification_chunk_items,
+        queue_count: 1,
+        resource_bounds,
+        store_operations: snapshot.delta(&recovery_baseline).physical_totals().into(),
         bar_met,
     }
 }
@@ -685,6 +996,12 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                     run.backend_profile, result.label
                 ));
             }
+            if !result.recorder_control_logical_match {
+                errors.push(format!(
+                    "profile {} bound {} enabled/disabled recorder controls diverged logically",
+                    run.backend_profile, result.label
+                ));
+            }
         }
         for bound in E3_BOUND_CONFIGS {
             if !seen_bounds.contains(bound.label) {
@@ -699,6 +1016,27 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                 if !recovery.bar_met {
                     errors.push(format!(
                         "profile {} recovery bar not met",
+                        run.backend_profile
+                    ));
+                }
+                if recovery.state_digest_before != recovery.state_digest_after
+                    || recovery.verified_items != recovery.resident
+                    || recovery.missing_items != 0
+                    || recovery.duplicate_items != 0
+                    || recovery.invalid_items != 0
+                {
+                    errors.push(format!(
+                        "profile {} recovery did not reproduce the exact complete state",
+                        run.backend_profile
+                    ));
+                }
+                if !recovery
+                    .replay_progress_samples
+                    .windows(2)
+                    .all(|pair| pair[0] <= pair[1])
+                {
+                    errors.push(format!(
+                        "profile {} recovery replay progress regressed",
                         run.backend_profile
                     ));
                 }
@@ -816,6 +1154,62 @@ fn profile_row(
                 serde_json::json!(recovery.pending_after),
             );
             values.insert(
+                "recovery_state_digest_algorithm".into(),
+                serde_json::json!("fnv1a128+identity-domain-bitset"),
+            );
+            values.insert(
+                "recovery_state_digest_before".into(),
+                serde_json::json!(recovery.state_digest_before),
+            );
+            values.insert(
+                "recovery_state_digest_after".into(),
+                serde_json::json!(recovery.state_digest_after),
+            );
+            values.insert(
+                "recovery_verified_items".into(),
+                serde_json::json!(recovery.verified_items),
+            );
+            values.insert(
+                "recovery_missing_items".into(),
+                serde_json::json!(recovery.missing_items),
+            );
+            values.insert(
+                "recovery_duplicate_items".into(),
+                serde_json::json!(recovery.duplicate_items),
+            );
+            values.insert(
+                "recovery_invalid_items".into(),
+                serde_json::json!(recovery.invalid_items),
+            );
+            values.insert(
+                "recovery_replay_progress_samples".into(),
+                serde_json::json!(recovery.replay_progress_samples),
+            );
+            values.insert(
+                "recovery_verification_chunk_items".into(),
+                serde_json::json!(recovery.verification_chunk_items),
+            );
+            values.insert(
+                "recovery_queue_count".into(),
+                serde_json::json!(recovery.queue_count),
+            );
+            values.insert(
+                "recovery_buffer_configured_bytes".into(),
+                serde_json::json!(recovery.resource_bounds.configured_global_bytes),
+            );
+            values.insert(
+                "recovery_buffer_current_bytes".into(),
+                serde_json::json!(recovery.resource_bounds.current_bytes),
+            );
+            values.insert(
+                "recovery_buffer_peak_bytes".into(),
+                serde_json::json!(recovery.resource_bounds.peak_bytes),
+            );
+            values.insert(
+                "recovery_pending_waiters".into(),
+                serde_json::json!(recovery.resource_bounds.waiters),
+            );
+            values.insert(
                 "recovery_store_put_requests".into(),
                 serde_json::json!(recovery.store_operations.puts),
             );
@@ -830,6 +1224,14 @@ fn profile_row(
             values.insert(
                 "recovery_store_delete_requests".into(),
                 serde_json::json!(recovery.store_operations.deletes),
+            );
+            values.insert(
+                "recovery_store_request_bytes".into(),
+                serde_json::json!(recovery.store_operations.request_bytes),
+            );
+            values.insert(
+                "recovery_store_response_bytes".into(),
+                serde_json::json!(recovery.store_operations.response_bytes),
             );
             values.insert(
                 "recovery_bar_met".into(),
@@ -881,6 +1283,14 @@ fn profile_row(
             serde_json::json!(result.store_operations.deletes),
         );
         values.insert(
+            format!("{prefix}_store_request_bytes"),
+            serde_json::json!(result.store_operations.request_bytes),
+        );
+        values.insert(
+            format!("{prefix}_store_response_bytes"),
+            serde_json::json!(result.store_operations.response_bytes),
+        );
+        values.insert(
             format!("{prefix}_commands_committed"),
             serde_json::json!(result.commands_committed),
         );
@@ -895,6 +1305,38 @@ fn profile_row(
         values.insert(
             format!("{prefix}_throughput_per_s"),
             serde_json::json!(result.throughput_per_s),
+        );
+        values.insert(
+            format!("{prefix}_disabled_control_throughput_per_s"),
+            serde_json::json!(result.disabled_control_throughput_per_s),
+        );
+        values.insert(
+            format!("{prefix}_recorder_overhead_ratio"),
+            serde_json::json!(result.recorder_overhead_ratio),
+        );
+        values.insert(
+            format!("{prefix}_recorder_control_logical_match"),
+            serde_json::json!(result.recorder_control_logical_match),
+        );
+        values.insert(
+            format!("{prefix}_buffer_configured_bytes"),
+            serde_json::json!(result.resource_bounds.configured_global_bytes),
+        );
+        values.insert(
+            format!("{prefix}_buffer_current_bytes"),
+            serde_json::json!(result.resource_bounds.current_bytes),
+        );
+        values.insert(
+            format!("{prefix}_buffer_peak_bytes"),
+            serde_json::json!(result.resource_bounds.peak_bytes),
+        );
+        values.insert(
+            format!("{prefix}_pending_waiters"),
+            serde_json::json!(result.resource_bounds.waiters),
+        );
+        values.insert(
+            format!("{prefix}_recorder_peak_in_flight"),
+            serde_json::json!(result.resource_bounds.recorder_peak_in_flight),
         );
         values.insert(
             format!("{prefix}_throughput_progress_met"),
@@ -964,7 +1406,7 @@ fn profile_row(
         ac_ids: vec![],
         inv_ids: vec![],
         pass_bar: format!(
-            "E3: 1/5/20/100ms bounds; sustained batched commits with a valid reported latency distribution; {recovery_contract}; recovered pending == resident; absolute capacity is reported for the declared topology, not used as a portable gate"
+            "E3: 1/5/20/100ms bounds; sustained batched commits with valid latency distributions and logically identical interleaved recorder controls; {recovery_contract}; streaming complete-state digests match with zero missing, duplicate, or invalid items; replay progress and bounded-resource samples are monotonic; absolute capacity is reported for the declared topology, not used as a portable gate"
         ),
         evidence_tier: tier,
         measurements: pqueue_release::Measurements {
@@ -1214,11 +1656,24 @@ fn synthetic_ack(
             gets: 1,
             lists: 1,
             deletes: 0,
+            request_bytes: 100,
+            response_bytes: 100,
+        },
+        resource_bounds: ResourceBounds {
+            configured_global_bytes: 1024,
+            current_bytes: 0,
+            peak_bytes: 512,
+            waiters: 0,
+            recorder_in_flight: 0,
+            recorder_peak_in_flight: 1,
         },
         commands_committed: 2,
         mean_batch: 2.0,
         max_batch: 2,
         throughput_per_s,
+        disabled_control_throughput_per_s: throughput_per_s,
+        recorder_overhead_ratio: 1.0,
+        recorder_control_logical_match: true,
         throughput_progress_met: progress,
         ack_p50_ms: 1.0,
         ack_p95_ms: 2.0,
@@ -1242,11 +1697,30 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
         recovery_max_tail: 1_000_000,
         recovery_wall_ms: 5.0,
         pending_after: 10_000_000,
+        state_digest_before: "fnv1a128:fixture".into(),
+        state_digest_after: "fnv1a128:fixture".into(),
+        verified_items: 10_000_000,
+        missing_items: 0,
+        duplicate_items: 0,
+        invalid_items: 0,
+        replay_progress_samples: vec![0, 100],
+        verification_chunk_items: 512,
+        queue_count: 1,
+        resource_bounds: ResourceBounds {
+            configured_global_bytes: 1024,
+            current_bytes: 0,
+            peak_bytes: 512,
+            waiters: 0,
+            recorder_in_flight: 0,
+            recorder_peak_in_flight: 1,
+        },
         store_operations: StoreOperations {
             puts: 20,
             gets: 10,
             lists: 2,
             deletes: 0,
+            request_bytes: 100,
+            response_bytes: 100,
         },
         bar_met,
     }
@@ -1329,6 +1803,35 @@ fn e3_matrix_rejects_invalid_latency_distribution() {
         errors
             .iter()
             .any(|error| error.contains("invalid latency distribution")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_recorder_control_divergence() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_control_logical_match = false;
+    run.ack_results[0].bar_met = false;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("recorder controls diverged logically")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_recovery_digest_drift() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let recovery = run.recovery.as_mut().unwrap();
+    recovery.state_digest_after = "fnv1a128:drift".into();
+    recovery.bar_met = false;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("exact complete state")),
         "{errors:?}"
     );
 }
