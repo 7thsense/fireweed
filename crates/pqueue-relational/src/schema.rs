@@ -76,6 +76,9 @@ CREATE TABLE IF NOT EXISTS pqueue_id_high_water (
     item_id TEXT NOT NULL,
     PRIMARY KEY (tenant, queue)
 );
+CREATE TABLE IF NOT EXISTS pqueue_schema_migrations (
+    migration_name TEXT NOT NULL PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS relational_emission_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     epoch INTEGER NOT NULL, seq INTEGER NOT NULL,

@@ -998,10 +998,7 @@ impl ProjectionStore for HybridProjectionStore {
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         self.require_hydrated(shard)?;
-        // Seed from the hydrated hot set (the surviving durable rows) AND from the durable mint-counter floor:
-        // terminal-item retention reaping deletes rows, so hot memory alone is no longer the complete minted
-        // set — without the floor a reopen after a full reap could re-mint a reaped id (ADR-009).
-        self.memory.observe_item_counters(shard, counters)?;
+        // Push apply advances the durable row atomically; retention reaping advances the same row.
         self.sqlite.observe_id_high_water(shard, counters)
     }
 

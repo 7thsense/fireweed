@@ -730,19 +730,7 @@ impl SqliteProjectionStore {
         shard: &QueueKey,
         counters: &QueueCounters,
     ) -> EngineResult<()> {
-        let g = self.inner.lock().expect("projection store poisoned");
-        let (t, q) = parts(shard);
-        let mut stmt = st(g
-            .conn
-            .prepare(pqueue_relational::SELECT_MATERIALIZED_ITEM_IDS))?;
-        let rows = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
-        for r in rows {
-            let id = ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?;
-            counters.observe(shard, id);
-        }
-        // Terminal-item reaping deletes rows, so the surviving set above is NOT the complete minted set;
-        // restore the durable mint-counter floor too, or a reopen after a full reap could re-mint a reaped id.
-        observe_id_high_water_sql(&g.conn, shard, counters)
+        observe_id_high_water_sql(&self.lock().conn, shard, counters)
     }
 
     /// Restore ONLY the durable item-id high-water (ADR-009 mint-counter recovery floor) into `counters`. The

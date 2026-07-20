@@ -351,17 +351,6 @@ impl ProjectionStore for SqliteRelational {
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         let g = self.lock();
-        let (t, q) = parts(shard);
-        let mut stmt = st(g
-            .conn
-            .prepare("SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2"))?;
-        let rows = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
-        for r in rows {
-            let id = ItemId::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?;
-            counters.observe(shard, id);
-        }
-        // Terminal-item reaping deletes rows, so the survivors above are not the complete minted set; also
-        // restore the durable mint-counter floor or a reopen after a full reap could re-mint a reaped id.
         observe_id_high_water_sql(&g.conn, shard, counters)
     }
 
