@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# release-gate.sh — pqueue release evidence gate (HONEST smoke lane).
+# release-gate.sh — pqueue release evidence gate.
 #
 # Crate map after the Phase-6 hexagonal migration (the ONLY crates this gate
 # references): pqueue-core / pqueue-engine / pqueue-projection /
@@ -8,10 +8,12 @@
 # pqueue-bench. The deleted pqueue-service / pqueue-storage / pqueue-kafka
 # crates are NOT referenced anywhere below.
 #
-# WHAT THIS GATE PROVES (green-local, SMOKE tier):
+# WHAT THIS GATE PROVES:
 #   - fmt clean, clippy clean (-D warnings), `cargo test --workspace` green.
-#   - Every row emitted into a CLEAN ledger dir is well-formed + strict-valid. The SMOKE-tier headline ids
-#     E2 (cross-queue scale-out + queue density) and E3 (object-log cost/ack + recovery) are required.
+#   - Every row emitted into a CLEAN ledger dir is well-formed + strict-valid. The fresh SMOKE-tier headline
+#     ids E2 (cross-queue scale-out + queue density) and E3 (object-log cost/ack + recovery) are required.
+#   - The exact files named by the governed TP-002 release manifest semantically satisfy E0-E3. The E3
+#     contract is additionally source-revision-bound and rejects quiet-host or absolute host-speed gates.
 #   - Repository-held TP-003 evidence snapshot contains passing required rows
 #     for AC-TXN-1/2/3/6 on both exact Postgres storage pairs. Fresh generation
 #     is enforced by CI/release workflows.
@@ -19,26 +21,36 @@
 #     pqueue-engine >=80% line (enforced below; this comment is not the
 #     authority — the check-lcov-coverage.py calls are).
 #
-# WHAT THIS GATE DOES *NOT* PROVE (RELEASE tier — never faked):
-#   This script creates a clean temporary ledger and validates only newly generated SMOKE-tier rows.
-#   Repository-held RELEASE-tier E0-E3
-#   evidence under docs/perf/evidence is not ingested or asserted here, so a
-#   green smoke lane is not a release-tier evidence verdict. Integrating the
-#   governed release evidence into the tag gate is tracked by pqueue-bf46289d.
+# The exact-tag freshness attestation is intentionally enforced by the tag workflow, where the resolved tag
+# and checked-out commit are available. This local gate proves semantic completeness and source binding; it
+# never scans docs/perf/evidence and cannot accept an unlisted replacement row.
 set -euo pipefail
 
 CARGO="rustup run 1.92.0 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+TP002_RELEASE_DIR="${PQUEUE_TP002_RELEASE_DIR:-${REPO_ROOT}/target/tp002-release}"
+TP002_RELEASE_MANIFEST="${TP002_RELEASE_DIR}/manifest.json"
+TP002_E3_CONTRACT="${TP002_RELEASE_DIR}/e3-contract.json"
 if (($# != 0)); then
     printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
     echo "usage: bash scripts/ci/release-gate.sh" >&2
     exit 64
 fi
 
-echo "=== pqueue release gate (SMOKE lane) ==="
-echo "    This gate validates newly generated SMOKE-tier evidence only."
-echo "    It does not assert repository-held RELEASE-tier E0-E3 evidence (pqueue-bf46289d)."
+SOURCE_REVISION="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+[[ "${SOURCE_REVISION}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "release-gate.sh: checked-out HEAD is not a full lowercase Git revision" >&2
+    exit 1
+}
+for required in "${TP002_RELEASE_MANIFEST}" "${TP002_E3_CONTRACT}"; do
+    [[ -s "${required}" ]] || {
+        echo "release-gate.sh: required exact-revision evidence is missing or empty: ${required}" >&2
+        exit 1
+    }
+done
+
+echo "=== pqueue release gate (fresh smoke + governed TP-002 release evidence) ==="
 
 echo "--- fmt ---"
 ${CARGO} fmt --all --check
@@ -76,6 +88,13 @@ ${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
     --strict \
     --require-smoke-evidence E2,E3
 
+echo "--- governed TP-002 E0-E3 semantic + portable E3 contract ---"
+bash "${SCRIPT_DIR}/governed-release-evidence-gate.sh" \
+    --mode semantic \
+    --manifest "${TP002_RELEASE_MANIFEST}" \
+    --e3-contract "${TP002_E3_CONTRACT}" \
+    --expected-revision "${SOURCE_REVISION}"
+
 echo "--- live coverage gate ---"
 mkdir -p "${REPO_ROOT}/target/coverage"
 # Clean instrumentation so artifacts from deleted crates can't contaminate.
@@ -107,6 +126,6 @@ bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
 echo "--- build-closure integrity ---"
 bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa
 
-echo "=== release gate (SMOKE lane) PASSED ==="
+echo "=== release gate PASSED ==="
 echo "    Required smoke evidence E2,E3 present + well-formed; coverage bars met."
-echo "    Repository-held RELEASE-tier E0-E3 evidence was not asserted by this lane."
+echo "    Governed release evidence E0-E3 is semantically complete; E3 is source-bound and portable."

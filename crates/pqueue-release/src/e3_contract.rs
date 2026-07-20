@@ -19,6 +19,7 @@ pub const REQUIRED_BOUNDS_MS: [u64; 4] = [1, 5, 20, 100];
 pub const REQUIRED_TXN_ACS: [&str; 6] = [
     "AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-4", "AC-TXN-6", "AC-TXN-7",
 ];
+pub const E3_CONTRACT_SCHEMA_VERSION: u32 = 2;
 pub const FENCE_SUITE: &str = "segmented_object_log_commits_through_minio";
 pub const FENCE_PROFILE: &str = "minio_create_only_cas";
 pub const FENCE_MODE: &str = "create_only_put_if_absent";
@@ -46,6 +47,7 @@ pub struct Ac7Binding {
     pub suite: String,
     pub backend: String,
     pub bounds_ms: Vec<u64>,
+    pub latency_window_timing: RequestIdTiming,
     pub request_id_timing: RequestIdTiming,
 }
 
@@ -55,7 +57,17 @@ pub struct E3ContractEntry {
     pub profile: String,
     pub bound_ms: u64,
     pub request_id_timing: RequestIdTiming,
+    pub manifest_fence: E3FenceAuthority,
     pub transaction_authorities: Vec<E3TransactionAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct E3FenceAuthority {
+    pub suite: String,
+    pub store_profile: String,
+    pub applicability: Applicability,
+    pub no_cas: NoCasDisposition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -231,10 +243,10 @@ pub fn verify_e3_contract(
         }
     };
     let mut errors = Vec::new();
-    if manifest.schema_version != 1 {
+    if manifest.schema_version != E3_CONTRACT_SCHEMA_VERSION {
         errors.push(E3ContractError(format!(
-            "unsupported schema_version {}",
-            manifest.schema_version
+            "unsupported schema_version {}; expected {E3_CONTRACT_SCHEMA_VERSION}",
+            manifest.schema_version,
         )));
     }
     if !valid_revision(&manifest.source_revision) {
@@ -295,13 +307,14 @@ pub fn verify_e3_contract(
         .as_ref()
         .map(|path| read_transaction_rows(path, &mut errors))
         .unwrap_or_default();
-    if let Some(path) = fence_path {
-        verify_fence(&path, &manifest.source_revision, &mut errors);
-    }
+    let fence = fence_path
+        .as_ref()
+        .and_then(|path| verify_fence(path, &manifest.source_revision, &mut errors));
     verify_entries(
         &manifest.entries,
         &manifest.ac7_binding,
         &txn_rows,
+        fence.as_ref(),
         &mut errors,
     );
 
@@ -445,6 +458,25 @@ fn verify_e3_ledger(path: &Path, revision: &str, errors: &mut Vec<E3ContractErro
         require_value(&row, "source_revision", serde_json::json!(revision), errors);
         require_value(&row, "bound_count", serde_json::json!(4), errors);
         require_value(&row, "bars_met", serde_json::json!(true), errors);
+        require_value(&row, "portable_gate", serde_json::json!(true), errors);
+        require_value(
+            &row,
+            "quiet_host_required",
+            serde_json::json!(false),
+            errors,
+        );
+        require_value(&row, "host_speed_gate", serde_json::json!(false), errors);
+        require_value(
+            &row,
+            "wall_clock_capacity_only",
+            serde_json::json!(true),
+            errors,
+        );
+        if contains_quiet_host_gate(&row.environment) || contains_quiet_host_gate(&row.pass_bar) {
+            errors.push(E3ContractError(format!(
+                "E3 ledger profile {profile} contains a non-portable quiet-host gate"
+            )));
+        }
         for bound in REQUIRED_BOUNDS_MS {
             require_value(
                 &row,
@@ -459,6 +491,13 @@ fn verify_e3_ledger(path: &Path, revision: &str, errors: &mut Vec<E3ContractErro
             "unexpected E3 ledger profile {profile}"
         )));
     }
+}
+
+fn contains_quiet_host_gate(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    ["quiet host", "quiet-host", "quiet window", "idle host"]
+        .iter()
+        .any(|needle| value.contains(needle))
 }
 
 fn require_value(
@@ -516,14 +555,16 @@ fn verify_entries(
     entries: &[E3ContractEntry],
     ac7_binding: &Ac7Binding,
     rows: &[TransactionEvidenceRow],
+    fence: Option<&E3FenceEvidenceRow>,
     errors: &mut Vec<E3ContractError>,
 ) {
     if ac7_binding.suite != TRANSACTION_SUITE
         || ac7_binding.backend != "objectlog(force-seal|group-commit)"
         || ac7_binding.bounds_ms.as_slice() != REQUIRED_BOUNDS_MS
+        || ac7_binding.latency_window_timing != RequestIdTiming::LatencyWindow
         || ac7_binding.request_id_timing != RequestIdTiming::ForceSealedConfigIndependent
     {
-        errors.push(E3ContractError("AC-TXN-7 binding must name the governed suite/backend, exact [1,5,20,100]ms bounds, and force-sealed config-independent request-id timing".into()));
+        errors.push(E3ContractError("AC-TXN-7 binding must name the governed suite/backend, exact [1,5,20,100]ms bounds, genuine latency-window timing, and force-sealed config-independent request-id timing".into()));
     }
     let mut pairs = BTreeSet::new();
     for entry in entries {
@@ -542,6 +583,7 @@ fn verify_entries(
                 "{context}: force-sealed request_id evidence must not be labeled latency-window timed"
             )));
         }
+        verify_entry_fence(&context, &entry.manifest_fence, fence, errors);
         let mut acs = BTreeSet::new();
         for authority in &entry.transaction_authorities {
             if !acs.insert(authority.ac.clone()) {
@@ -621,6 +663,29 @@ fn verify_entries(
     }
 }
 
+fn verify_entry_fence(
+    context: &str,
+    authority: &E3FenceAuthority,
+    fence: Option<&E3FenceEvidenceRow>,
+    errors: &mut Vec<E3ContractError>,
+) {
+    let Some(fence) = fence else {
+        errors.push(E3ContractError(format!(
+            "{context}: manifest fence authority has no valid evidence row"
+        )));
+        return;
+    };
+    if authority.suite != fence.suite
+        || authority.store_profile != fence.store_profile
+        || authority.no_cas != fence.no_cas
+        || !matches!(authority.applicability, Applicability::Pass)
+    {
+        errors.push(E3ContractError(format!(
+            "{context}: manifest fence authority does not link the passing stale-epoch fence and no-CAS disposition"
+        )));
+    }
+}
+
 fn governed_backend<'a>(profile: &str, ac: &str) -> Option<&'a str> {
     match (profile, ac) {
         ("object_log_inmemory_projection", "AC-TXN-1" | "AC-TXN-2" | "AC-TXN-3" | "AC-TXN-4") => {
@@ -636,7 +701,11 @@ fn governed_backend<'a>(profile: &str, ac: &str) -> Option<&'a str> {
     }
 }
 
-fn verify_fence(path: &Path, revision: &str, errors: &mut Vec<E3ContractError>) {
+fn verify_fence(
+    path: &Path,
+    revision: &str,
+    errors: &mut Vec<E3ContractError>,
+) -> Option<E3FenceEvidenceRow> {
     let body = match fs::read_to_string(path) {
         Ok(body) => body,
         Err(error) => {
@@ -644,7 +713,7 @@ fn verify_fence(path: &Path, revision: &str, errors: &mut Vec<E3ContractError>) 
                 "cannot read fencing evidence {}: {error}",
                 path.display()
             )));
-            return;
+            return None;
         }
     };
     let row: E3FenceEvidenceRow = match serde_json::from_str(&body) {
@@ -654,7 +723,7 @@ fn verify_fence(path: &Path, revision: &str, errors: &mut Vec<E3ContractError>) 
                 "malformed fencing evidence {}: {error}",
                 path.display()
             )));
-            return;
+            return None;
         }
     };
     if row.schema_version != 1
@@ -672,5 +741,8 @@ fn verify_fence(path: &Path, revision: &str, errors: &mut Vec<E3ContractError>) 
             "fencing evidence {} does not prove stale rejection/current commit under the release CAS profile with the authorized no-CAS exclusion",
             path.display()
         )));
+        None
+    } else {
+        Some(row)
     }
 }

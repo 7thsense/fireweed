@@ -124,6 +124,26 @@ jobs:
           curl -fsSLo kind https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64
           sudo install -m 0755 kind /usr/local/bin/kind
 
+      - name: Fresh smoke and governed TP-002 release gate
+        env:
+          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+        run: |
+          test -s target/tp002-release/manifest.json
+          test -s target/tp002-release/e3-contract.json
+          test -s target/tp002-release/attestation.json
+          bash scripts/ci/release-gate.sh
+
+      - name: Bind governed TP-002 evidence to exact release tag
+        shell: bash
+        run: |
+          bash scripts/ci/governed-release-evidence-gate.sh \
+            --mode exact-tag \
+            --manifest target/tp002-release/manifest.json \
+            --e3-contract target/tp002-release/e3-contract.json \
+            --attestation target/tp002-release/attestation.json \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --commit "${GITHUB_SHA}"
+
       - name: Deployment release gate
         env:
           KIND_NODE_IMAGE: kindest/node:v1.31.0
