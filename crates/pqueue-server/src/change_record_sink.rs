@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -15,10 +15,17 @@ use heimq_protocol::records::{
 };
 use pqueue_core::{QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
-    ChangeRecordSink, ComposedBackend, ControlPlane, ControlPlaneStore, EngineError, EngineResult,
-    LogStore, ProjectionStore, QueueKey,
+    BoundedBlockingExecutor, ChangeRecordSink, ComposedBackend, ControlPlane, ControlPlaneStore,
+    EngineError, EngineResult, LogStore, ProjectionStore, QueueKey,
 };
 use tokio::task::JoinHandle;
+
+// One stalled synchronous provider consumes one slot, not the emitter. If all slots stall, admission
+// pauses at this explicit resource bound until one returns. Dropping the emitter cancels unresolved
+// async lookups and prevents new admission; already-started blocking calls cannot be cancelled and may
+// finish detached, but their number remains bounded by this constant.
+const CHANGE_RECORD_EMISSION_CONCURRENCY: usize = 8;
+const CHANGE_RECORD_REGISTRY_PAGE: usize = 64;
 
 /// Delivery mode for the background change-record emission task (ADR-014). The mode is derived from the
 /// legacy `enabled` + `endpoint` fields so existing config plumbing keeps working:
@@ -752,6 +759,7 @@ fn enabled_change_record_queues<'a>(
     queues.iter().filter(|queue| queue.emit_change_records)
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_change_record_queues<B>(
     backend: &B,
     queues: &[QueueDefinition],
@@ -796,6 +804,79 @@ where
     Ok(total)
 }
 
+/// Stable, de-duplicated queue ring used by the emitter. A tick examines only a bounded page and
+/// advances the cursor by the number of entries examined, including entries already in flight.
+/// This prevents an early slow shard from pinning the scan while avoiding a full queue-list clone
+/// on every tick.
+struct ChangeRecordQueueRegistry {
+    queues: Vec<QueueKey>,
+    cursor: usize,
+}
+
+impl ChangeRecordQueueRegistry {
+    fn new(queues: Vec<QueueDefinition>) -> Self {
+        let mut seen = HashSet::with_capacity(queues.len());
+        let queues = queues
+            .into_iter()
+            .map(|definition| QueueKey::new(definition.tenant_id, definition.queue_id))
+            .filter(|shard| seen.insert(shard.clone()))
+            .collect();
+        Self { queues, cursor: 0 }
+    }
+
+    fn next_page(&mut self, active: &HashSet<QueueKey>, capacity: usize) -> Vec<QueueKey> {
+        if self.queues.is_empty() || capacity == 0 {
+            return Vec::new();
+        }
+        let inspect_limit = self.queues.len().min(CHANGE_RECORD_REGISTRY_PAGE);
+        let mut selected = Vec::with_capacity(capacity.min(inspect_limit));
+        let mut inspected = 0;
+        while inspected < inspect_limit && selected.len() < capacity {
+            let index = (self.cursor + inspected) % self.queues.len();
+            let shard = &self.queues[index];
+            inspected += 1;
+            if !active.contains(shard) {
+                selected.push(shard.clone());
+            }
+        }
+        self.cursor = (self.cursor + inspected) % self.queues.len();
+        selected
+    }
+}
+
+async fn emit_change_record_shard<B>(
+    backend: Arc<B>,
+    sink: Arc<dyn ChangeRecordSink>,
+    executor: BoundedBlockingExecutor,
+    shard: QueueKey,
+    batch_size: usize,
+) -> (QueueKey, EngineResult<usize>)
+where
+    B: ChangeRecordEmissionBackend + ControlPlaneStore + Send + Sync + 'static,
+{
+    let definition = match backend.queue_definition(&shard).await {
+        Ok(definition) => definition,
+        Err(error) => return (shard, Err(error)),
+    };
+    if !definition.emit_change_records {
+        return (shard, Ok(0));
+    }
+
+    let emit_shard = shard.clone();
+    let result = executor
+        .execute(move || {
+            backend.emit_change_record_tail(
+                &emit_shard,
+                sink.as_ref(),
+                batch_size,
+                now_timestamp(),
+                None,
+            )
+        })
+        .await;
+    (shard, result)
+}
+
 pub fn spawn_change_record_emitter<B>(
     backend: Arc<B>,
     sink: Arc<dyn ChangeRecordSink>,
@@ -806,31 +887,38 @@ where
     B: ChangeRecordEmissionBackend + ControlPlaneStore + Send + Sync + 'static,
 {
     pqueue_resp::spawn_governed(async move {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let executor = BoundedBlockingExecutor::new(CHANGE_RECORD_EMISSION_CONCURRENCY)
+            .expect("change-record emission concurrency is nonzero");
+        let mut registry = ChangeRecordQueueRegistry::new(queues);
+        let mut active = HashSet::new();
+        let mut in_flight = FuturesUnordered::new();
         let mut tick = tokio::time::interval(config.tick_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tick.tick().await;
-            match resolve_change_record_queues(backend.as_ref(), &queues).await {
-                Ok(current_queues) => {
-                    let emit_backend = Arc::clone(&backend);
-                    let emit_sink = Arc::clone(&sink);
-                    match tokio::task::spawn_blocking(move || {
-                        emit_change_record_tick(
-                            emit_backend.as_ref(),
-                            emit_sink.as_ref(),
-                            &current_queues,
+            tokio::select! {
+                _ = tick.tick() => {
+                    let capacity = CHANGE_RECORD_EMISSION_CONCURRENCY.saturating_sub(active.len());
+                    for shard in registry.next_page(&active, capacity) {
+                        active.insert(shard.clone());
+                        in_flight.push(emit_change_record_shard(
+                            Arc::clone(&backend),
+                            Arc::clone(&sink),
+                            executor.clone(),
+                            shard,
                             config.batch_size,
-                        )
-                    })
-                    .await
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => eprintln!("[change-record] emission tick failed: {e}"),
-                        Err(e) => eprintln!("[change-record] emission task failed: {e}"),
+                        ));
                     }
                 }
-                Err(e) => {
-                    eprintln!("[change-record] queue refresh failed: {e}");
+                Some((shard, result)) = in_flight.next(), if !in_flight.is_empty() => {
+                    active.remove(&shard);
+                    if let Err(error) = result {
+                        eprintln!(
+                            "[change-record] emission failed for {}:{}: {error}",
+                            shard.tenant_id, shard.queue_id
+                        );
+                    }
                 }
             }
         }
@@ -955,8 +1043,9 @@ where
 mod tests {
     use super::*;
     use pqueue_engine::ChangeRecordKind;
-    use std::sync::Mutex;
+    use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
 
     #[test]
     fn change_record_sink_defaults_disabled_until_endpoint_is_set() {
@@ -1768,6 +1857,285 @@ mod tests {
             typed_indexes: vec![],
             emit_change_records,
         }
+    }
+
+    struct FairEmissionBackend {
+        definitions: HashMap<QueueKey, QueueDefinition>,
+        blocked_shard: Option<QueueKey>,
+        blocked_definition: Option<QueueKey>,
+        definition_release: Arc<tokio::sync::Notify>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+        emitted: Mutex<HashSet<QueueKey>>,
+        current: AtomicUsize,
+        max_current: AtomicUsize,
+    }
+
+    impl FairEmissionBackend {
+        fn new(definitions: &[QueueDefinition], blocked_shard: Option<QueueKey>) -> Self {
+            Self {
+                definitions: definitions
+                    .iter()
+                    .cloned()
+                    .map(|definition| {
+                        (
+                            QueueKey::new(
+                                definition.tenant_id.clone(),
+                                definition.queue_id.clone(),
+                            ),
+                            definition,
+                        )
+                    })
+                    .collect(),
+                blocked_shard,
+                blocked_definition: None,
+                definition_release: Arc::new(tokio::sync::Notify::new()),
+                release: Arc::new((Mutex::new(false), Condvar::new())),
+                emitted: Mutex::new(HashSet::new()),
+                current: AtomicUsize::new(0),
+                max_current: AtomicUsize::new(0),
+            }
+        }
+
+        fn release_blocked(&self) {
+            let (released, wake) = self.release.as_ref();
+            *released.lock().expect("poisoned") = true;
+            wake.notify_all();
+        }
+
+        fn with_blocked_definition(mut self, shard: QueueKey) -> Self {
+            self.blocked_definition = Some(shard);
+            self
+        }
+    }
+
+    impl ChangeRecordEmissionBackend for FairEmissionBackend {
+        fn emit_change_record_tail<S: ChangeRecordSink + ?Sized>(
+            &self,
+            shard: &QueueKey,
+            _sink: &S,
+            _limit: usize,
+            _emitted_at: UtcTimestamp,
+            _source_owner_id: Option<pqueue_core::OwnerId>,
+        ) -> EngineResult<usize> {
+            let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_current.fetch_max(current, Ordering::SeqCst);
+            if self.blocked_shard.as_ref() == Some(shard) {
+                let (released, wake) = self.release.as_ref();
+                let mut released = released.lock().expect("poisoned");
+                while !*released {
+                    released = wake.wait(released).expect("poisoned");
+                }
+            }
+            self.emitted.lock().expect("poisoned").insert(shard.clone());
+            self.current.fetch_sub(1, Ordering::SeqCst);
+            Ok(1)
+        }
+    }
+
+    impl ControlPlaneStore for FairEmissionBackend {
+        fn create_queue(
+            &self,
+            _definition: QueueDefinition,
+        ) -> impl Future<Output = EngineResult<pqueue_engine::CreateQueueOutcome>> + Send {
+            std::future::ready(Err(EngineError::Unavailable))
+        }
+
+        fn queue_definition(
+            &self,
+            key: &QueueKey,
+        ) -> impl Future<Output = EngineResult<QueueDefinition>> + Send {
+            let blocked = self.blocked_definition.as_ref() == Some(key);
+            let release = Arc::clone(&self.definition_release);
+            let definition = self
+                .definitions
+                .get(key)
+                .cloned()
+                .ok_or(EngineError::Unavailable);
+            async move {
+                if blocked {
+                    release.notified().await;
+                }
+                definition
+            }
+        }
+
+        fn list_queues(
+            &self,
+            _tenant: &pqueue_core::TenantId,
+        ) -> impl Future<Output = EngineResult<Vec<pqueue_core::QueueId>>> + Send {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn current_epoch(
+            &self,
+            _shard: &QueueKey,
+        ) -> impl Future<Output = EngineResult<u64>> + Send {
+            std::future::ready(Err(EngineError::Unavailable))
+        }
+
+        fn acquire_epoch(
+            &self,
+            _shard: &QueueKey,
+        ) -> impl Future<Output = EngineResult<u64>> + Send {
+            std::future::ready(Err(EngineError::Unavailable))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_shard_does_not_block_later_change_record_queue() {
+        let definitions = vec![
+            queue_definition("tenant-a", "queue-a", true),
+            queue_definition("tenant-b", "queue-b", true),
+        ];
+        let blocked = QueueKey::new(
+            definitions[0].tenant_id.clone(),
+            definitions[0].queue_id.clone(),
+        );
+        let later = QueueKey::new(
+            definitions[1].tenant_id.clone(),
+            definitions[1].queue_id.clone(),
+        );
+        let backend = Arc::new(FairEmissionBackend::new(
+            &definitions,
+            Some(blocked.clone()),
+        ));
+        let handle = spawn_change_record_emitter(
+            Arc::clone(&backend),
+            Arc::new(RecordingSink::default()),
+            definitions,
+            ChangeRecordSinkConfig {
+                enabled: true,
+                tick_interval: Duration::from_millis(1),
+                ..ChangeRecordSinkConfig::default()
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let emitted = backend.emitted.lock().expect("poisoned");
+                if emitted.contains(&later) {
+                    assert!(!emitted.contains(&blocked));
+                    break;
+                }
+                drop(emitted);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("later queue must advance while the first shard is stalled");
+
+        backend.release_blocked();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if backend.emitted.lock().expect("poisoned").contains(&blocked) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("released blocking provider must finish before test shutdown");
+        handle.abort();
+        assert!(
+            handle
+                .await
+                .expect_err("emitter should be cancelled")
+                .is_cancelled()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_control_plane_lookup_does_not_block_later_queue() {
+        let definitions = vec![
+            queue_definition("tenant-a", "queue-a", true),
+            queue_definition("tenant-b", "queue-b", true),
+        ];
+        let blocked = QueueKey::new(
+            definitions[0].tenant_id.clone(),
+            definitions[0].queue_id.clone(),
+        );
+        let later = QueueKey::new(
+            definitions[1].tenant_id.clone(),
+            definitions[1].queue_id.clone(),
+        );
+        let backend = Arc::new(
+            FairEmissionBackend::new(&definitions, None).with_blocked_definition(blocked.clone()),
+        );
+        let handle = spawn_change_record_emitter(
+            Arc::clone(&backend),
+            Arc::new(RecordingSink::default()),
+            definitions,
+            ChangeRecordSinkConfig {
+                enabled: true,
+                tick_interval: Duration::from_millis(1),
+                ..ChangeRecordSinkConfig::default()
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let emitted = backend.emitted.lock().expect("poisoned");
+                if emitted.contains(&later) {
+                    assert!(!emitted.contains(&blocked));
+                    break;
+                }
+                drop(emitted);
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("later queue must advance while the first definition lookup is stalled");
+
+        // Aborting the emitter drops the unresolved async lookup. No synchronous provider work was
+        // started for this shard, and the scheduler cannot admit any new work after shutdown.
+        handle.abort();
+        assert!(
+            handle
+                .await
+                .expect_err("emitter should be cancelled")
+                .is_cancelled()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn change_record_registry_pages_all_queues_with_bounded_work() {
+        let definitions: Vec<_> = (0..CHANGE_RECORD_REGISTRY_PAGE + 5)
+            .map(|index| queue_definition("tenant", &format!("queue-{index:03}"), true))
+            .collect();
+        let backend = Arc::new(FairEmissionBackend::new(&definitions, None));
+        let handle = spawn_change_record_emitter(
+            Arc::clone(&backend),
+            Arc::new(RecordingSink::default()),
+            definitions.clone(),
+            ChangeRecordSinkConfig {
+                enabled: true,
+                tick_interval: Duration::from_millis(1),
+                ..ChangeRecordSinkConfig::default()
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if backend.emitted.lock().expect("poisoned").len() == definitions.len() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("persistent registry cursor must eventually visit queues beyond one page");
+        assert!(
+            backend.max_current.load(Ordering::SeqCst) <= CHANGE_RECORD_EMISSION_CONCURRENCY,
+            "synchronous provider work must remain within its fixed admission bound"
+        );
+
+        handle.abort();
+        assert!(
+            handle
+                .await
+                .expect_err("emitter should be cancelled")
+                .is_cancelled()
+        );
     }
 
     #[test]

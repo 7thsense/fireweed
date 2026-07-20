@@ -1735,6 +1735,8 @@ pub struct RecoveryCursor {
 struct RecoveryRootPin {
     store: Arc<dyn BlobStore>,
     key: String,
+    page_guard_key: String,
+    reclaim_key: String,
     owner: String,
     version: u64,
     root: Option<RecoveryIndexRoot>,
@@ -1746,6 +1748,10 @@ struct RecoveryRootPin {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct RecoveryRootPinRecord {
     owner: String,
+    /// Globally unique cursor identity used by the page/reclaim handshake. Records written before this
+    /// field existed fail closed under expiry maintenance and require proven-dead-owner cleanup.
+    #[serde(default)]
+    cursor_id: String,
     version: u64,
     /// Legacy field retained only for forward/backward decoding. Assignment fencing is not reader-death
     /// proof and is never used to reclaim a pin.
@@ -1759,9 +1765,37 @@ struct RecoveryRootPinRecord {
     root: Option<RecoveryIndexRoot>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecoveryPageGuardRecord {
+    owner: String,
+    cursor_id: String,
+    version: u64,
+}
+
+/// Durable proof that one synchronous recovery page is actively using the pinned COW root. Unlike the
+/// renewable between-page lease, this guard deliberately has no wall-clock expiry: a provider GET may take
+/// longer than any lease interval. Expiry maintenance first publishes a reclaim intent and then observes
+/// this guard, closing both possible orderings of the enter-vs-reclaim race. Healthy calls remove the guard
+/// through RAII; the reaper owns intent cleanup, and process-death cleanup uses the pin's exact owner identity.
+struct RecoveryPageGuard {
+    store: Arc<dyn BlobStore>,
+    key: String,
+}
+
+impl Drop for RecoveryPageGuard {
+    fn drop(&mut self) {
+        // End the protected interval. Reclaim intents are owned and cleared by the reaper: clearing one
+        // here could let the next page enter while a reaper that already observed this guard's removal is
+        // about to delete the pin.
+        let _ = self.store.delete(&self.key);
+    }
+}
+
 impl Drop for RecoveryRootPin {
     fn drop(&mut self) {
+        let _ = self.store.delete(&self.page_guard_key);
         let _ = self.store.delete(&self.key);
+        let _ = self.store.delete(&self.reclaim_key);
     }
 }
 
@@ -4806,6 +4840,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         format!("{}recovery_pins/v1/", shard_prefix(shard))
     }
 
+    fn recovery_page_guard_key(shard: &QueueKey, cursor_id: &str) -> String {
+        format!(
+            "{}recovery_page_guards/v1/{cursor_id}.json",
+            shard_prefix(shard)
+        )
+    }
+
+    fn recovery_pin_reclaim_key(shard: &QueueKey, cursor_id: &str) -> String {
+        format!(
+            "{}recovery_pin_reclaims/v1/{cursor_id}.json",
+            shard_prefix(shard)
+        )
+    }
+
     fn recovery_index_garbage_prefix(shard: &QueueKey) -> String {
         format!("{}recovery_index_gc/v1/", shard_prefix(shard))
     }
@@ -4838,6 +4886,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let bytes = self.store_get(&key)?.ok_or(EngineError::Conflict)?;
             let pin: RecoveryRootPinRecord = serde_json::from_slice(&bytes).map_err(store_err)?;
             if pin.owner == proven_dead_owner {
+                if !pin.cursor_id.is_empty() {
+                    let _ = self
+                        .store
+                        .delete(&Self::recovery_page_guard_key(shard, &pin.cursor_id))?;
+                    let _ = self
+                        .store
+                        .delete(&Self::recovery_pin_reclaim_key(shard, &pin.cursor_id))?;
+                }
                 let _ = self.store.delete(&key)?;
                 reaped += 1;
             }
@@ -4867,8 +4923,27 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             };
             let pin: RecoveryRootPinRecord = serde_json::from_slice(&bytes).map_err(store_err)?;
             if pin.expires_at_ms.is_some_and(|expiry| expiry <= now_ms) {
-                let _ = self.store.delete(&key)?;
-                reaped += 1;
+                // Old records have no cursor identity with which to perform the enter-vs-reclaim
+                // handshake. Preserve them rather than guessing that no page is using their root.
+                if pin.cursor_id.is_empty() {
+                    continue;
+                }
+                let reclaim_key = Self::recovery_pin_reclaim_key(shard, &pin.cursor_id);
+                let _ = self.store.put_if_absent(&reclaim_key, key.as_bytes())?;
+                let guard_key = Self::recovery_page_guard_key(shard, &pin.cursor_id);
+                if self.store_get(&guard_key)?.is_some() {
+                    // The guard wins this attempt. Clear our intent so a successful page that refreshes
+                    // onto a new, unexpired generation is not needlessly fenced on its next call.
+                    let _ = self.store.delete(&reclaim_key)?;
+                    continue;
+                }
+                // Re-read after publishing the intent and observing no guard. A page entering after our
+                // guard observation must see the still-present intent and fail closed before node use.
+                if self.store_get(&key)?.as_deref() == Some(bytes.as_slice()) {
+                    let _ = self.store.delete(&key)?;
+                    reaped += 1;
+                }
+                let _ = self.store.delete(&reclaim_key)?;
             }
         }
         Ok(reaped)
@@ -5003,6 +5078,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let owner = self.recovery_pin_owner()?.to_owned();
             let body = to_json(&RecoveryRootPinRecord {
                 owner: owner.clone(),
+                cursor_id: cursor_id.clone(),
                 version: observed_version,
                 authority_epoch: Some(observed_epoch),
                 expires_at_ms: Some(expires_at_ms),
@@ -5015,11 +5091,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let confirmed = self.read_authoritative_head(shard)?;
             if confirmed.as_ref().map(|head| head.version) == Some(observed_version) {
                 let store: Arc<dyn BlobStore> = self.store.clone();
+                let page_guard_key = Self::recovery_page_guard_key(shard, &cursor_id);
+                let reclaim_key = Self::recovery_pin_reclaim_key(shard, &cursor_id);
                 return Ok((
                     head,
                     Some(RecoveryRootPin {
                         store,
                         key,
+                        page_guard_key,
+                        reclaim_key,
                         owner,
                         version: observed_version,
                         root,
@@ -5032,6 +5112,49 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             let _ = self.store.delete(&key)?;
         }
         Err(EngineError::Conflict)
+    }
+
+    fn acquire_recovery_page_guard(
+        &self,
+        pin: &RecoveryRootPin,
+    ) -> EngineResult<RecoveryPageGuard> {
+        if system_time_ms()? >= pin.expires_at_ms {
+            return Err(EngineError::Unavailable);
+        }
+        let body = to_json(&RecoveryPageGuardRecord {
+            owner: pin.owner.clone(),
+            cursor_id: pin.cursor_id.clone(),
+            version: pin.version,
+        })?;
+        if !self.store.put_if_absent(&pin.page_guard_key, &body)? {
+            return Err(EngineError::Conflict);
+        }
+        let guard = RecoveryPageGuard {
+            store: pin.store.clone(),
+            key: pin.page_guard_key.clone(),
+        };
+        // Publication ordering is the safety handshake:
+        //  * intent first => this page observes it and never touches a node;
+        //  * guard first => the reaper observes the guard and preserves the pin/root.
+        if self.store_get(&pin.reclaim_key)?.is_some() {
+            return Err(EngineError::Unavailable);
+        }
+        let current = self.store_get(&pin.key)?;
+        let matches = current
+            .as_deref()
+            .and_then(|bytes| serde_json::from_slice::<RecoveryRootPinRecord>(bytes).ok())
+            .is_some_and(|record| {
+                record.owner == pin.owner
+                    && record.cursor_id == pin.cursor_id
+                    && record.version == pin.version
+                    && record.generation == pin.generation
+                    && record.expires_at_ms == Some(pin.expires_at_ms)
+                    && record.root == pin.root
+            });
+        if !matches {
+            return Err(EngineError::Unavailable);
+        }
+        Ok(guard)
     }
 
     fn refresh_recovery_root_pin(&self, pin: &mut RecoveryRootPin) -> EngineResult<()> {
@@ -5054,6 +5177,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         );
         let next_body = to_json(&RecoveryRootPinRecord {
             owner: pin.owner.clone(),
+            cursor_id: pin.cursor_id.clone(),
             version: pin.version,
             authority_epoch: None,
             expires_at_ms: Some(expires_at_ms),
@@ -5072,6 +5196,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .and_then(|bytes| serde_json::from_slice::<RecoveryRootPinRecord>(bytes).ok())
             .is_some_and(|record| {
                 record.owner == pin.owner
+                    && record.cursor_id == pin.cursor_id
                     && record.version == pin.version
                     && record.generation == pin.generation
                     && record.expires_at_ms == Some(pin.expires_at_ms)
@@ -5164,6 +5289,18 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Vec<(CommandPosition, CommandEnvelope)>,
         RecoveryReadPageStats,
     )> {
+        // Hold a durable, non-expiring page guard across every node/segment GET and all use of the
+        // returned bytes. Lease expiry can stop a page before it begins, but can never revoke protection
+        // halfway through a provider call. The guard's Drop closes the interval on every return path.
+        let _page_guard = if !cursor.finished {
+            cursor
+                ._root_pin
+                .as_ref()
+                .map(|pin| self.acquire_recovery_page_guard(pin))
+                .transpose()?
+        } else {
+            None
+        };
         if !cursor.finished
             && let Some(pin) = cursor._root_pin.as_mut()
         {
@@ -9545,7 +9682,72 @@ mod manifest_deletion_watermark_tests {
     use std::sync::atomic::{
         AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering, Ordering,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Condvar, Mutex};
+
+    #[derive(Default)]
+    struct StalledRecoveryNodeStore {
+        inner: InMemoryBlobStore,
+        block_next_node_get: AtomicBool,
+        stall: (Mutex<(bool, bool)>, Condvar),
+    }
+
+    impl StalledRecoveryNodeStore {
+        fn block_next_recovery_node_get(&self) {
+            self.block_next_node_get.store(true, Ordering::SeqCst);
+        }
+
+        fn wait_until_stalled(&self) {
+            let (state, changed) = &self.stall;
+            let mut state = state.lock().unwrap();
+            while !state.0 {
+                state = changed.wait(state).unwrap();
+            }
+        }
+
+        fn release_stalled_get(&self) {
+            let (state, changed) = &self.stall;
+            let mut state = state.lock().unwrap();
+            state.1 = true;
+            changed.notify_all();
+        }
+    }
+
+    impl BlobStore for StalledRecoveryNodeStore {
+        fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
+            self.inner.put(key, body)
+        }
+
+        fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
+            self.inner.put_if_absent(key, body)
+        }
+
+        fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
+            if key.contains("/recovery_index/v1/")
+                && self.block_next_node_get.swap(false, Ordering::SeqCst)
+            {
+                let (state, changed) = &self.stall;
+                let mut state = state.lock().unwrap();
+                state.0 = true;
+                changed.notify_all();
+                while !state.1 {
+                    state = changed.wait(state).unwrap();
+                }
+            }
+            self.inner.get(key)
+        }
+
+        fn delete(&self, key: &str) -> EngineResult<bool> {
+            self.inner.delete(key)
+        }
+
+        fn list(&self, prefix: &str) -> EngineResult<Vec<String>> {
+            self.inner.list(prefix)
+        }
+
+        fn stats(&self, prefix: &str) -> EngineResult<ObjectStoreStats> {
+            self.inner.stats(prefix)
+        }
+    }
 
     #[test]
     fn manifest_json_v3_golden_and_legacy_v2_inference_are_pinned() {
@@ -9950,6 +10152,70 @@ mod manifest_deletion_watermark_tests {
     }
 
     #[test]
+    fn stalled_page_guard_defers_expired_pin_reap_until_node_use_finishes() {
+        let store = Arc::new(StalledRecoveryNodeStore::default());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = Arc::new(SegmentedObjectLog::open(store.clone(), cfg));
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        for sequence in 0..8 {
+            log.enqueue(&shard, &pushes(1), 0, sequence + 1).unwrap();
+            log.seal(&shard, 0, sequence + 1).unwrap();
+        }
+        let cursor = log.open_recovery_cursor(&shard, 0).unwrap();
+        let protected_root = cursor.root.as_ref().unwrap().root.key.clone();
+        for sequence in 8..16 {
+            log.enqueue(&shard, &pushes(1), 0, sequence + 1).unwrap();
+            log.seal(&shard, 0, sequence + 1).unwrap();
+        }
+
+        store.block_next_recovery_node_get();
+        let reader_log = Arc::clone(&log);
+        let reader = std::thread::spawn(move || {
+            let mut cursor = cursor;
+            let page = reader_log.read_recovery_cursor_page(&mut cursor);
+            (cursor, page)
+        });
+        store.wait_until_stalled();
+
+        assert_eq!(
+            log.reap_recovery_pins_expired_bounded(&shard, i64::MAX, 64)
+                .unwrap(),
+            0,
+            "an active page guard wins even when its renewable lease is far past expiry"
+        );
+        let _ = log.reap_recovery_index_garbage_bounded(&shard, 64).unwrap();
+        assert!(
+            store.inner.get(&protected_root).unwrap().is_some(),
+            "the root remains protected for the complete stalled node-read interval"
+        );
+
+        store.release_stalled_get();
+        let (cursor, page) = reader.join().unwrap();
+        assert_eq!(page.unwrap().0.len(), 8);
+        let pin = cursor._root_pin.as_ref().unwrap();
+        assert!(store.inner.get(&pin.page_guard_key).unwrap().is_none());
+        assert_eq!(
+            log.reap_recovery_pins_expired_bounded(&shard, i64::MAX, 64)
+                .unwrap(),
+            1,
+            "after the guarded page finishes, the deliberately expired cursor is reclaimable"
+        );
+        for _ in 0..64 {
+            let _ = log.reap_recovery_index_garbage_bounded(&shard, 64).unwrap();
+            if store.inner.get(&protected_root).unwrap().is_none() {
+                break;
+            }
+        }
+        assert!(
+            store.inner.get(&protected_root).unwrap().is_none(),
+            "bounded COW GC converges once the expired abandoned pin has no active page"
+        );
+        drop(cursor);
+    }
+
+    #[test]
     fn expired_recovery_cursor_fails_before_node_read_and_never_resurrects() {
         let store = Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
@@ -9996,6 +10262,46 @@ mod manifest_deletion_watermark_tests {
     }
 
     #[test]
+    fn reclaim_intent_wins_before_page_entry_without_node_use_or_resurrection() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        log.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+        log.seal(&shard, 0, 1).unwrap();
+        let mut cursor = log.open_recovery_cursor(&shard, 0).unwrap();
+        let pin = cursor._root_pin.as_ref().unwrap();
+        let pin_key = pin.key.clone();
+        let guard_key = pin.page_guard_key.clone();
+        let reclaim_key = pin.reclaim_key.clone();
+        store.put(&reclaim_key, pin_key.as_bytes()).unwrap();
+
+        assert!(matches!(
+            log.read_recovery_cursor_page(&mut cursor),
+            Err(EngineError::Unavailable)
+        ));
+        assert!(
+            !cursor.initialized,
+            "intent is checked before root-node use"
+        );
+        assert!(store.get(&guard_key).unwrap().is_none());
+        assert!(store.get(&pin_key).unwrap().is_some());
+        assert_eq!(
+            log.reap_recovery_pins_expired_bounded(&shard, i64::MAX, 64)
+                .unwrap(),
+            1
+        );
+        assert!(store.get(&pin_key).unwrap().is_none());
+        assert!(store.get(&reclaim_key).unwrap().is_none());
+        assert!(matches!(
+            log.read_recovery_cursor_page(&mut cursor),
+            Err(EngineError::Unavailable)
+        ));
+    }
+
+    #[test]
     fn proven_dead_owner_reap_cleans_crash_pin_without_touching_live_owner() {
         let store = Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
@@ -10007,7 +10313,23 @@ mod manifest_deletion_watermark_tests {
         crashed.seal(&shard, 0, 2).unwrap();
         let dead_owner = crashed.recovery_pin_owner().unwrap().to_owned();
         let leaked = crashed.open_recovery_cursor(&shard, 0).unwrap();
-        std::mem::forget(leaked); // model process death: Drop cleanup cannot run
+        let leaked_pin = leaked._root_pin.as_ref().unwrap();
+        let guard_key = leaked_pin.page_guard_key.clone();
+        let reclaim_key = leaked_pin.reclaim_key.clone();
+        let leaked_guard = crashed.acquire_recovery_page_guard(leaked_pin).unwrap();
+        assert_eq!(
+            crashed
+                .reap_recovery_pins_expired_bounded(&shard, i64::MAX, 16)
+                .unwrap(),
+            0
+        );
+        assert!(store.get(&guard_key).unwrap().is_some());
+        // Model maintenance crashing after durable intent publication. Exact owner-death cleanup owns all
+        // three artifacts and must converge even when neither reader nor reaper can run its normal cleanup.
+        store.put(&reclaim_key, b"interrupted-reclaim").unwrap();
+        assert!(store.get(&reclaim_key).unwrap().is_some());
+        std::mem::forget(leaked_guard);
+        std::mem::forget(leaked); // model process death: neither RAII cleanup can run
 
         let replacement = SegmentedObjectLog::open(store.clone(), cfg);
         replacement.create_queue(&conformance_qdef()).unwrap();
@@ -10021,6 +10343,14 @@ mod manifest_deletion_watermark_tests {
                 .reap_recovery_pins_for_dead_owner(&shard, &dead_owner, 16)
                 .unwrap(),
             1
+        );
+        assert!(
+            store.get(&guard_key).unwrap().is_none(),
+            "exact owner-death cleanup removes a crashed in-page guard"
+        );
+        assert!(
+            store.get(&reclaim_key).unwrap().is_none(),
+            "exact owner-death cleanup also removes its reclaim intent"
         );
         let pins = store
             .list(&SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_pin_prefix(&shard))

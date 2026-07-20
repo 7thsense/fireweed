@@ -843,20 +843,16 @@ pub(crate) fn apply_command_sql(
                 .ok_or(EngineError::NotFound)?;
             insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
             observe_push_for_claim_scan(claim_scan_hints, claim_scan_default_fifo, shard, &c.items);
-            let mut groups: Vec<GroupKey> = Vec::new();
-            for it in &c.items {
-                if let Some(g) = &it.group_key
-                    && !groups.contains(g)
-                {
-                    groups.push(g.clone());
-                }
-            }
+            let groups: HashSet<GroupKey> = c
+                .items
+                .iter()
+                .filter_map(|item| item.group_key.clone())
+                .collect();
             if !groups.is_empty() {
                 grouped_shards.insert(shard.clone());
             }
-            for g in &groups {
-                refresh_group_summary(tx, shard, g, now)?;
-            }
+            let groups: Vec<GroupKey> = groups.into_iter().collect();
+            refresh_group_summaries(tx, shard, &groups, now)?;
             Ok(())
         }
         QueueCommand::Claim(c) => {

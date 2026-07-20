@@ -3425,9 +3425,9 @@ mod hot_query_sql_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use pqueue_core::{
-        EligibilityPolicy, FilterOp, IndexDeclaration, IndexDef, OrderingMode, PriorityDirection,
-        PriorityModel, PriorityModelKind, PriorityTieBreaker, QueryFilter, QueueDefinition,
-        QueueIndex, RecurrencePolicy, RetryPolicy, TypedValue,
+        EligibilityPolicy, FilterOp, GroupKey, IndexDeclaration, IndexDef, OrderingMode,
+        PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueryFilter,
+        QueueDefinition, QueueIndex, RecurrencePolicy, RetryPolicy, TypedValue,
     };
     use pqueue_engine::{
         ClaimPort, ClaimRequest, ControlPlaneStore, HotProjectionQueryPort, ProjectionRead,
@@ -3438,6 +3438,7 @@ mod hot_query_sql_tests {
 
     static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static GROUP_PUSH_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     fn count_statement(_: &str) {
         TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -3445,6 +3446,10 @@ mod hot_query_sql_tests {
 
     fn count_group_statement(_: &str) {
         GROUP_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_group_push_statement(_: &str) {
+        GROUP_PUSH_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
     fn mutation_queue() -> QueueDefinition {
@@ -3596,6 +3601,42 @@ mod hot_query_sql_tests {
         assert_eq!(response.results.len(), rows);
         backend.inner.lock().unwrap().conn.trace(None);
         TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
+    async fn grouped_push_statement_count(groups: usize) -> usize {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        GROUP_PUSH_TRACE_COUNT.store(0, Ordering::Relaxed);
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            inner.conn.trace(Some(count_group_push_statement));
+        }
+        backend
+            .push(
+                &shard,
+                (0..groups)
+                    .map(|ordinal| PushSpec {
+                        group_key: Some(GroupKey::new(format!("group-{ordinal:04}")).unwrap()),
+                        ..PushSpec::default()
+                    })
+                    .collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend.inner.lock().unwrap().conn.trace(None);
+        GROUP_PUSH_TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
+    #[tokio::test]
+    async fn grouped_push_statement_count_is_independent_of_distinct_groups() {
+        let one = grouped_push_statement_count(1).await;
+        let hundred = grouped_push_statement_count(100).await;
+        let thousand = grouped_push_statement_count(1_000).await;
+        assert_eq!((one, hundred, thousand), (one, one, one));
     }
 
     #[tokio::test]
