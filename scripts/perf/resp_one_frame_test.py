@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
 from unittest import mock
 
 import resp_one_frame
@@ -38,6 +39,21 @@ class ResetConnection:
 class SendFailureConnection(ResetConnection):
     def sendall(self, _request: bytes) -> None:
         raise BrokenPipeError("peer closed before request")
+
+
+class InstrumentedStream(io.BytesIO):
+    def __init__(self, body: bytes) -> None:
+        super().__init__(body)
+        self.requests: list[int] = []
+
+    def read(self, length: int = -1) -> bytes:
+        self.requests.append(length)
+        return super().read(length)
+
+
+class ChunkedStream(io.BytesIO):
+    def read(self, length: int = -1) -> bytes:
+        return super().read(min(length, 2))
 
 
 class RespOneFrameTests(unittest.TestCase):
@@ -82,7 +98,7 @@ class RespOneFrameTests(unittest.TestCase):
         for frame in invalid:
             with self.subTest(frame=frame):
                 with self.assertRaisesRegex(
-                    resp_one_frame.TransportError, "transport_invalid"
+                    resp_one_frame.ProtocolError, "protocol_invalid"
                 ):
                     resp_one_frame.read_one_frame(io.BytesIO(frame))
 
@@ -97,9 +113,57 @@ class RespOneFrameTests(unittest.TestCase):
         for frame, limits in cases:
             with self.subTest(frame=frame, limits=limits):
                 with self.assertRaisesRegex(
-                    resp_one_frame.TransportError, "transport_limit"
+                    resp_one_frame.ProtocolError, "protocol_limit"
                 ):
                     resp_one_frame.read_one_frame(io.BytesIO(frame), limits)
+
+    def test_total_budget_is_reserved_before_read_or_allocation(self) -> None:
+        untouched = InstrumentedStream(b"+OK\r\n")
+        with self.assertRaisesRegex(resp_one_frame.ProtocolError, "protocol_limit"):
+            resp_one_frame.read_one_frame(untouched, resp_one_frame.Limits(frame_bytes=0))
+        self.assertEqual(untouched.tell(), 0)
+        self.assertEqual(untouched.requests, [])
+
+        body_untouched = InstrumentedStream(b"$4\r\ndata\r\n")
+        with self.assertRaisesRegex(resp_one_frame.ProtocolError, "protocol_limit"):
+            resp_one_frame.read_one_frame(
+                body_untouched, resp_one_frame.Limits(frame_bytes=9)
+            )
+        self.assertEqual(body_untouched.tell(), 4)
+        self.assertEqual(max(body_untouched.requests), 1)
+
+        chunked = ChunkedStream(b"$4\r\ndata\r\n")
+        self.assertEqual(
+            resp_one_frame.read_one_frame(
+                chunked, resp_one_frame.Limits(frame_bytes=10)
+            ),
+            b"$4\r\ndata\r\n",
+        )
+
+    def test_cli_status_separates_protocol_and_transport_errors(self) -> None:
+        environment = {
+            "RESP_PORT": "1",
+            "RESP_OUT": "/unused-on-error",
+            "RESP_ARGS": "PING\n",
+        }
+        cases = [
+            (resp_one_frame.ProtocolError("protocol_invalid"), 65),
+            (resp_one_frame.ProtocolError("protocol_limit"), 65),
+            (resp_one_frame.TransportError("transport_truncated"), 75),
+        ]
+        for error, status in cases:
+            with self.subTest(error=error), mock.patch.dict(
+                resp_one_frame.os.environ, environment, clear=True
+            ), mock.patch.object(
+                resp_one_frame,
+                "request_one_frame",
+                side_effect=error,
+            ):
+                with redirect_stderr(io.StringIO()), self.assertRaises(
+                    SystemExit
+                ) as raised:
+                    resp_one_frame.main()
+                self.assertEqual(raised.exception.code, status)
 
     def test_connect_refusal_and_read_reset_are_transport_errors(self) -> None:
         with mock.patch.object(

@@ -8,7 +8,8 @@ wait_for_resp_integer() {
   local attempt status
   for ((attempt = 0; attempt < attempts; attempt += 1)); do
     if resp "${output}" "$@"; then
-      if grep -Eq '^:[0-9]+' "${output}"; then return 0; fi
+      if grep -Eq $'^:-?[0-9]+\r?$' "${output}"; then return 0; fi
+      return 65
     else
       status=$?
       if ((status != 75)); then return "${status}"; fi

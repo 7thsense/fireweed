@@ -13,7 +13,11 @@ from typing import BinaryIO, Iterable
 
 
 class TransportError(RuntimeError):
-    """The transport did not deliver one valid, safely bounded RESP frame."""
+    """The peer or socket failed before one complete RESP frame arrived."""
+
+
+class ProtocolError(RuntimeError):
+    """The peer sent an invalid frame or one outside the parser's safe limits."""
 
 
 @dataclass(frozen=True)
@@ -35,15 +39,18 @@ class _Budget:
         self.maximum = maximum
         self.used = 0
 
-    def consume(self, length: int, context: str) -> None:
+    def reserve(self, length: int, context: str) -> None:
         if length > self.maximum - self.used:
-            raise TransportError(
-                f"transport_limit context={context} limit=frame_bytes maximum={self.maximum}"
+            raise ProtocolError(
+                f"protocol_limit context={context} limit=frame_bytes maximum={self.maximum}"
             )
         self.used += length
 
 
 def _read_exact(stream: BinaryIO, length: int, context: str, budget: _Budget) -> bytes:
+    # Reserve the entire read before allocating or asking the stream for bytes.
+    # Short reads consume the reservation, so chunk accumulation never double-counts.
+    budget.reserve(length, context)
     chunks: list[bytes] = []
     remaining = length
     while remaining:
@@ -53,7 +60,6 @@ def _read_exact(stream: BinaryIO, length: int, context: str, budget: _Budget) ->
             raise TransportError(
                 f"transport_truncated context={context} expected={length} received={received}"
             )
-        budget.consume(len(chunk), context)
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
@@ -65,8 +71,8 @@ def _read_header(
     header = bytearray()
     while not header.endswith(b"\r\n"):
         if len(header) >= limits.header_bytes:
-            raise TransportError(
-                f"transport_limit context={kind.decode()}_header "
+            raise ProtocolError(
+                f"protocol_limit context={kind.decode()}_header "
                 f"limit=header_bytes maximum={limits.header_bytes}"
             )
         header.extend(_read_exact(stream, 1, f"{kind.decode()}_header", budget))
@@ -75,8 +81,8 @@ def _read_header(
 
 def _validate_text_payload(payload: bytes, kind: bytes) -> None:
     if any(byte < 0x20 or byte == 0x7F for byte in payload):
-        raise TransportError(
-            f"transport_invalid context={kind.decode()}_payload control_byte=true"
+        raise ProtocolError(
+            f"protocol_invalid context={kind.decode()}_payload control_byte=true"
         )
 
 
@@ -84,14 +90,14 @@ def _read_frame(
     stream: BinaryIO, limits: Limits, budget: _Budget, depth: int
 ) -> bytes:
     if depth > limits.recursion_depth:
-        raise TransportError(
-            f"transport_limit context=array limit=recursion_depth "
+        raise ProtocolError(
+            f"protocol_limit context=array limit=recursion_depth "
             f"maximum={limits.recursion_depth}"
         )
 
     kind = _read_exact(stream, 1, "frame_prefix", budget)
     if kind not in {b"+", b"-", b":", b"$", b"*"}:
-        raise TransportError(f"transport_invalid context=frame_prefix value={kind!r}")
+        raise ProtocolError(f"protocol_invalid context=frame_prefix value={kind!r}")
     header = _read_header(stream, kind, limits, budget)
     payload = header[:-2]
     frame = bytearray(kind + header)
@@ -100,32 +106,32 @@ def _read_frame(
         return bytes(frame)
     if kind == b":":
         if not _INTEGER.fullmatch(payload):
-            raise TransportError(
-                f"transport_invalid context=integer_payload value={payload!r}"
+            raise ProtocolError(
+                f"protocol_invalid context=integer_payload value={payload!r}"
             )
         return bytes(frame)
 
     if not _LENGTH.fullmatch(payload):
-        raise TransportError(
-            f"transport_invalid context={kind.decode()}_length value={payload!r}"
+        raise ProtocolError(
+            f"protocol_invalid context={kind.decode()}_length value={payload!r}"
         )
     count = int(payload)
     if count == -1:
         return bytes(frame)
     if kind == b"$":
         if count > limits.bulk_bytes:
-            raise TransportError(
-                f"transport_limit context=bulk limit=bulk_bytes maximum={limits.bulk_bytes}"
+            raise ProtocolError(
+                f"protocol_limit context=bulk limit=bulk_bytes maximum={limits.bulk_bytes}"
             )
         body = _read_exact(stream, count + 2, "bulk_body", budget)
         if not body.endswith(b"\r\n"):
-            raise TransportError("transport_invalid context=bulk_body missing_crlf=true")
+            raise ProtocolError("protocol_invalid context=bulk_body missing_crlf=true")
         frame.extend(body)
         return bytes(frame)
 
     if count > limits.array_elements:
-        raise TransportError(
-            f"transport_limit context=array limit=array_elements "
+        raise ProtocolError(
+            f"protocol_limit context=array limit=array_elements "
             f"maximum={limits.array_elements}"
         )
     for _ in range(count):
@@ -184,6 +190,12 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(75) from error
+    except ProtocolError as error:
+        print(
+            f"resp_one_frame: classification=protocol_error {error}",
+            file=sys.stderr,
+        )
+        raise SystemExit(65) from error
     output.write_bytes(frame)
 
 
