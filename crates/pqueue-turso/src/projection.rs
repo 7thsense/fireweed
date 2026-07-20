@@ -216,6 +216,7 @@ const PUSH_ITEM_CHUNK: usize = 47; // 47 * 19 binds = 893
 const PUSH_GATE_CHUNK: usize = 225; // 225 * 4 binds = 900
 const PUSH_INDEX_CHUNK: usize = 180; // 180 * 5 binds = 900
 const UNIQUE_CHECK_CHUNK: usize = 448; // 2 common + 448 * 2 binds = 898
+const GROUP_SUMMARY_CHUNK: usize = 897; // tenant + queue + now + 897 group binds = 900
 
 fn values_rows(rows: usize, columns: usize) -> String {
     let row = format!("({})", vec!["?"; columns].join(","));
@@ -737,74 +738,53 @@ async fn groups_for_items(
     Ok(groups)
 }
 
-async fn refresh_group_summary(
+async fn refresh_group_summaries(
     transaction: &Connection,
     tenant: &str,
     queue: &str,
-    group: &GroupKey,
+    groups: &[GroupKey],
     now: i64,
 ) -> EngineResult<()> {
-    let params = vec![
-        tenant.to_string().into(),
-        queue.to_string().into(),
-        group.as_str().to_string().into(),
-        Value::Integer(now),
-    ];
-    let aggregate = one_row(
-        transaction,
-        "SELECT COUNT(*),MIN(eligible_since) FROM pqueue_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 AND lifecycle_state='Pending' \
-         AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
-         ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-         WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-         AND ig.item_id=pqueue_items.item_id)",
-        params.clone(),
-    )
-    .await?
-    .ok_or_else(|| storage("group aggregate returned no row"))?;
-    let representative = one_row(
-        transaction,
-        "SELECT priority_sort,created_at,item_id FROM pqueue_items \
-         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 AND lifecycle_state='Pending' \
-         AND superseded=0 AND (not_before IS NULL OR not_before<=?4) \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
-         ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-         WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-         AND ig.item_id=pqueue_items.item_id) ORDER BY priority_sort,created_seq LIMIT 1",
-        params,
-    )
-    .await?;
-    let (priority, created, item) = representative
-        .map_or((Value::Null, Value::Null, Value::Null), |row| {
-            (row[0].clone(), row[1].clone(), row[2].clone())
-        });
-    transaction
-        .execute(
-            "INSERT INTO pqueue_group_summary \
-             (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,\
-              rep_priority_sort,rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
-             VALUES(?1,?2,?3,?4,NULL,?5,?6,?7,?8,0,?9) \
+    for chunk in groups.chunks(GROUP_SUMMARY_CHUNK) {
+        let target_rows = (0..chunk.len())
+            .map(|offset| format!("(?{})", offset + 4))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "WITH target_input(group_key) AS (VALUES {target_rows}), \
+             target AS (SELECT DISTINCT group_key FROM target_input), \
+             eligible AS (SELECT i.group_key,i.eligible_since,i.priority_sort,i.created_at,i.item_id,i.created_seq \
+               FROM pqueue_items i JOIN target t ON t.group_key=i.group_key \
+               WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' AND i.superseded=0 \
+               AND (i.not_before IS NULL OR i.not_before<=?3) AND NOT EXISTS (SELECT 1 \
+                 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+                 AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id \
+                 AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id)), \
+             ranked AS (SELECT *,ROW_NUMBER() OVER (PARTITION BY group_key ORDER BY priority_sort,created_seq) AS rn FROM eligible), \
+             aggregate AS (SELECT group_key,COUNT(*) AS item_count,MIN(eligible_since) AS oldest FROM eligible GROUP BY group_key) \
+             INSERT INTO pqueue_group_summary \
+             (tenant_id,queue_id,group_key,oldest_eligible_at,rep_progress_guard_sort,rep_priority_sort,\
+              rep_created_at,rep_item_id,eligible_item_count,at_risk_count,updated_at) \
+             SELECT ?1,?2,t.group_key,a.oldest,NULL,r.priority_sort,r.created_at,r.item_id,COALESCE(a.item_count,0),0,?3 \
+             FROM target t LEFT JOIN aggregate a ON a.group_key=t.group_key \
+             LEFT JOIN ranked r ON r.group_key=t.group_key AND r.rn=1 WHERE true \
              ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
-              oldest_eligible_at=excluded.oldest_eligible_at,\
-              rep_progress_guard_sort=excluded.rep_progress_guard_sort,\
+              oldest_eligible_at=excluded.oldest_eligible_at,rep_progress_guard_sort=excluded.rep_progress_guard_sort,\
               rep_priority_sort=excluded.rep_priority_sort,rep_created_at=excluded.rep_created_at,\
               rep_item_id=excluded.rep_item_id,eligible_item_count=excluded.eligible_item_count,\
-              at_risk_count=excluded.at_risk_count,updated_at=excluded.updated_at",
-            vec![
-                tenant.to_string().into(),
-                queue.to_string().into(),
-                group.as_str().to_string().into(),
-                aggregate[1].clone(),
-                priority,
-                created,
-                item,
-                aggregate[0].clone(),
-                Value::Integer(now),
-            ],
-        )
-        .await
-        .map_err(storage)?;
+              at_risk_count=excluded.at_risk_count,updated_at=excluded.updated_at"
+        );
+        let mut params = Vec::with_capacity(3 + chunk.len());
+        params.push(Value::Text(tenant.to_string()));
+        params.push(Value::Text(queue.to_string()));
+        params.push(Value::Integer(now));
+        params.extend(
+            chunk
+                .iter()
+                .map(|group| Value::Text(group.as_str().to_string())),
+        );
+        transaction.execute(sql, params).await.map_err(storage)?;
+    }
     Ok(())
 }
 
@@ -852,9 +832,7 @@ async fn refresh_due_group_summaries(
         groups.push(GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
     }
     drop(rows);
-    for group in groups {
-        refresh_group_summary(transaction, tenant, queue, &group, now).await?;
-    }
+    refresh_group_summaries(transaction, tenant, queue, &groups, now).await?;
     Ok(())
 }
 
@@ -1482,9 +1460,8 @@ async fn apply_owned(
                     .iter()
                     .filter_map(|item| item.group_key.clone())
                     .collect();
-                for group in groups {
-                    refresh_group_summary(&transaction, &tenant, &queue, &group, now).await?;
-                }
+                let groups = groups.into_iter().collect::<Vec<_>>();
+                refresh_group_summaries(&transaction, &tenant, &queue, &groups, now).await?;
                 if let (
                     Some(request_id),
                     Some(_fingerprint),
@@ -1556,16 +1533,14 @@ async fn apply_owned(
                     token_ops.extend(claim.item_ids.iter().map(|item| {
                         TokenOp::Set(position.queue.clone(), *item, claim.lease_token.clone())
                     }));
-                    for group in groups {
-                        refresh_group_summary(
-                            &transaction,
-                            &tenant,
-                            &queue,
-                            &group,
-                            ts_nanos(envelope.created_at),
-                        )
-                        .await?;
-                    }
+                    refresh_group_summaries(
+                        &transaction,
+                        &tenant,
+                        &queue,
+                        &groups,
+                        ts_nanos(envelope.created_at),
+                    )
+                    .await?;
                 }
             }
             QueueCommand::CohortClaim(claim) => {
@@ -1621,11 +1596,11 @@ async fn apply_owned(
                 token_ops.extend(claim.item_ids.iter().map(|item| {
                     TokenOp::Set(position.queue.clone(), *item, claim.lease_token.clone())
                 }));
-                refresh_group_summary(
+                refresh_group_summaries(
                     &transaction,
                     &tenant,
                     &queue,
-                    &group,
+                    std::slice::from_ref(&group),
                     ts_nanos(envelope.created_at),
                 )
                 .await?;
@@ -1835,9 +1810,7 @@ async fn apply_owned(
                     )
                     .await?;
                 }
-                for group in groups {
-                    refresh_group_summary(&transaction, &tenant, &queue, &group, now).await?;
-                }
+                refresh_group_summaries(&transaction, &tenant, &queue, &groups, now).await?;
             }
             QueueCommand::CohortFinalize(finalize) => {
                 if matches!(finalize.kind, FinalizeKind::Rearm) {
@@ -1981,7 +1954,14 @@ async fn apply_owned(
                     ids.iter()
                         .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
                 );
-                refresh_group_summary(&transaction, &tenant, &queue, &group, now).await?;
+                refresh_group_summaries(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    std::slice::from_ref(&group),
+                    now,
+                )
+                .await?;
             }
             QueueCommand::UpdateFields(update) => {
                 let current = one_row(
@@ -2215,16 +2195,14 @@ async fn apply_owned(
                         .iter()
                         .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
                 );
-                for group in groups {
-                    refresh_group_summary(
-                        &transaction,
-                        &tenant,
-                        &queue,
-                        &group,
-                        ts_nanos(envelope.created_at),
-                    )
-                    .await?;
-                }
+                refresh_group_summaries(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    &groups,
+                    ts_nanos(envelope.created_at),
+                )
+                .await?;
             }
             QueueCommand::CohortExpired(expired) => {
                 let cohort = one_row(
@@ -2315,8 +2293,14 @@ async fn apply_owned(
                     ids.iter()
                         .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
                 );
-                refresh_group_summary(&transaction, &tenant, &queue, &expired.group_key, now)
-                    .await?;
+                refresh_group_summaries(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    std::slice::from_ref(&expired.group_key),
+                    now,
+                )
+                .await?;
             }
             QueueCommand::FenceLease(fence) => {
                 execute_for_items(
@@ -2482,16 +2466,14 @@ async fn apply_owned(
                             .iter()
                             .map(|item| TokenOp::Clear(position.queue.clone(), *item)),
                     );
-                    for group in groups {
-                        refresh_group_summary(
-                            &transaction,
-                            &tenant,
-                            &queue,
-                            &group,
-                            ts_nanos(envelope.created_at),
-                        )
-                        .await?;
-                    }
+                    refresh_group_summaries(
+                        &transaction,
+                        &tenant,
+                        &queue,
+                        &groups,
+                        ts_nanos(envelope.created_at),
+                    )
+                    .await?;
                 }
             }
         }
@@ -3673,8 +3655,8 @@ mod push_batch_lowering_tests {
     use pqueue_core::{IndexDeclaration, IndexDef, IndexType, ItemId, QueueIndex};
 
     use super::{
-        PUSH_GATE_CHUNK, PUSH_INDEX_CHUNK, PUSH_ITEM_CHUNK, UNIQUE_CHECK_CHUNK, index_is_unique,
-        typed_index_keys,
+        GROUP_SUMMARY_CHUNK, PUSH_GATE_CHUNK, PUSH_INDEX_CHUNK, PUSH_ITEM_CHUNK,
+        UNIQUE_CHECK_CHUNK, index_is_unique, typed_index_keys,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3761,6 +3743,16 @@ mod push_batch_lowering_tests {
             },
             "only crossing the declared bind-safe chunk adds an item statement"
         );
+    }
+
+    #[test]
+    fn group_summary_await_count_grows_only_at_bind_safe_chunk_boundaries() {
+        let awaited_statements = |groups: usize| groups.div_ceil(GROUP_SUMMARY_CHUNK);
+        assert_eq!(awaited_statements(0), 0);
+        assert_eq!(awaited_statements(1), 1);
+        assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK), 1);
+        assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK + 1), 2);
+        assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK * 10), 10);
     }
 }
 
