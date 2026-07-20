@@ -2757,6 +2757,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fjord-broker",
+ "futures",
  "heimq",
  "heimq-broker",
  "heimq-protocol",

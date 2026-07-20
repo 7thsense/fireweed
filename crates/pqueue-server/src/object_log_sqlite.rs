@@ -940,6 +940,10 @@ impl SegmentedObjectLogSqliteBackend {
         self
     }
 
+    pub fn with_worker_partition(self, _index: usize, _partitions: usize) -> Self {
+        self
+    }
+
     /// Override the recovery-window budget (max tail commands) — the explicit form of the
     /// `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` env knob, used by tests and embedders.
     pub fn with_recovery_max_tail(mut self, max_tail: u64) -> Self {
@@ -1830,6 +1834,11 @@ pub struct SegmentedObjectLogInMemoryBackend {
 }
 
 impl SegmentedObjectLogInMemoryBackend {
+    /// Install the deterministic object-log fault seam used by blocking/fencing conformance tests.
+    pub fn set_object_log_fault_hook(&self, hook: Option<Arc<dyn FaultHook>>) {
+        self.log.set_fault_hook(hook);
+    }
+
     /// Open (or recover) a segmented object log rooted at `object_root` with `config`, paired with in-memory
     /// projections. Recovery replays committed segments into each queue's `ProjectionData` in `create_queue`.
     pub fn open(object_root: impl Into<PathBuf>, config: SegmentConfig) -> EngineResult<Self> {
@@ -1887,6 +1896,10 @@ impl SegmentedObjectLogInMemoryBackend {
 
     pub fn with_node_id(mut self, node_id: u8) -> Self {
         self.node_id = node_id;
+        self
+    }
+
+    pub fn with_worker_partition(self, _index: usize, _partitions: usize) -> Self {
         self
     }
 

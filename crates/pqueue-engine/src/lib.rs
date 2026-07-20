@@ -80,7 +80,8 @@ pub use claim_validation::{
 pub use compose::{
     ComposeFaultHook, ComposeFaultPoint, ComposedBackend, ControlPlane, InProcessControlPlane,
     LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart, RichClaimSelection, max_position,
-    push_items_fingerprint_sha256, push_specs_fingerprint_sha256, resolve_recovery_start,
+    push_items_fingerprint_sha256, push_specs_fingerprint_sha256, queue_worker_partition,
+    resolve_recovery_start,
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseState,

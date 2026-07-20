@@ -37,10 +37,10 @@ const DEFAULT_BLOCKING_OPERATIONS: usize = 8;
 const DEFAULT_QUEUED_OPERATIONS: usize = 1024;
 const DEFAULT_QUEUED_OPERATIONS_PER_QUEUE: usize = 32;
 
-fn global_operation_key() -> QueueKey {
+fn global_operation_key(index: usize) -> QueueKey {
     QueueKey::new(
         TenantId::new("pqueue-internal").expect("valid internal tenant"),
-        QueueId::new("blocking-global").expect("valid internal queue"),
+        QueueId::new(format!("blocking-global-{index}")).expect("valid internal queue"),
     )
 }
 
@@ -50,6 +50,8 @@ struct BlockingCapacity {
     queue_gates: std::sync::Mutex<HashMap<QueueKey, Weak<tokio::sync::Mutex<()>>>>,
     queue_admission: std::sync::Mutex<HashMap<QueueKey, Weak<tokio::sync::Semaphore>>>,
     closed: AtomicBool,
+    closed_token: tokio_util::sync::CancellationToken,
+    start_gate: std::sync::Mutex<()>,
     started: AtomicUsize,
     drained: tokio::sync::Notify,
 }
@@ -64,6 +66,8 @@ impl BlockingCapacity {
             queue_gates: std::sync::Mutex::new(HashMap::new()),
             queue_admission: std::sync::Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            closed_token: tokio_util::sync::CancellationToken::new(),
+            start_gate: std::sync::Mutex::new(()),
             started: AtomicUsize::new(0),
             drained: tokio::sync::Notify::new(),
         }
@@ -113,7 +117,8 @@ impl Drop for StartedOperation {
 }
 
 /// Cloneable lifecycle handle retained by [`crate::Server`]. Closing rejects new work and causes queued
-/// operations to leave before submission; draining waits only for jobs that crossed the started boundary.
+/// operations still waiting for execution to leave; draining waits only for jobs that crossed the started
+/// boundary.
 #[derive(Clone)]
 pub struct PostgresBlockingLifecycle {
     capacity: Arc<BlockingCapacity>,
@@ -121,7 +126,13 @@ pub struct PostgresBlockingLifecycle {
 
 impl PostgresBlockingLifecycle {
     pub fn close(&self) {
+        let _start_gate = self
+            .capacity
+            .start_gate
+            .lock()
+            .expect("blocking operation start gate poisoned");
         self.capacity.closed.store(true, Ordering::Release);
+        self.capacity.closed_token.cancel();
     }
 
     pub async fn drain_started(&self) {
@@ -135,8 +146,8 @@ impl PostgresBlockingLifecycle {
     }
 }
 
-/// Blocking-safe `pqueue-server` wrapper around [`PostgresBackend`]: implements the full [`RespBackend`]
-/// port surface by delegating every call through [`spawn_blocking`](tokio::task::spawn_blocking).
+/// Execution-safe `pqueue-server` wrapper around [`PostgresBackend`]: blocking stores construct and first
+/// poll each whole operation on the blocking pool, while native-async stores stay on Tokio workers.
 ///
 /// [`RespBackend`]: pqueue_resp::RespBackend
 pub struct PostgresWholeOperationAdapter<B: Send + Sync + 'static> {
@@ -144,8 +155,15 @@ pub struct PostgresWholeOperationAdapter<B: Send + Sync + 'static> {
     // for the wrapper's whole lifetime and only taken once, during drop. The `Send + Sync + 'static` bound
     // (always satisfied — `B` is a `RespBackend`) lets [`Drop`] move the inner `Arc<B>` onto a plain OS
     // thread to close the sync postgres connection off any reactor worker.
-    inner: Option<Arc<B>>,
+    inner: Option<Vec<Arc<B>>>,
     capacity: Arc<BlockingCapacity>,
+    mode: ExecutionMode,
+}
+
+#[derive(Clone, Copy)]
+enum ExecutionMode {
+    BlockingWholeOperation,
+    NativeAsync,
 }
 
 /// Back-compat alias: the blocking wrapper around the monolithic [`PostgresBackend`]. The composition root
@@ -162,6 +180,14 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
 
     /// Wrap an existing `Arc` so the caller can keep another handle to the same backend instance.
     pub fn from_arc(inner: Arc<B>) -> Self {
+        Self::from_arcs(vec![inner])
+    }
+
+    /// Build one fixed-size backend pool. Queue-key hashing provides stable affinity, so a queue's
+    /// in-memory projection and mutation order stay on one backend while unrelated queues can use other
+    /// owned connections. Pool size is fixed at construction and independent of queue count.
+    pub fn from_arcs(inner: Vec<Arc<B>>) -> Self {
+        assert!(!inner.is_empty(), "blocking backend pool must be non-empty");
         Self::with_capacity(
             inner,
             NonZeroUsize::new(DEFAULT_BLOCKING_OPERATIONS).expect("nonzero"),
@@ -169,11 +195,21 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
         )
     }
 
+    /// Wrap a native-async backend. Its futures are constructed and polled only on Tokio workers; they
+    /// never enter the blocking pool. The same bounded admission, ordering, cancellation, and drain
+    /// lifecycle still applies.
+    pub fn from_native_arc(inner: Arc<B>) -> Self {
+        let mut adapter = Self::from_arcs(vec![inner]);
+        adapter.mode = ExecutionMode::NativeAsync;
+        adapter
+    }
+
     /// Construct the bounded whole-operation boundary used by production blocking stores.
-    pub fn with_capacity(inner: Arc<B>, max_running: NonZeroUsize, max_queued: usize) -> Self {
+    pub fn with_capacity(inner: Vec<Arc<B>>, max_running: NonZeroUsize, max_queued: usize) -> Self {
         Self {
             inner: Some(inner),
             capacity: Arc::new(BlockingCapacity::new(max_running, max_queued)),
+            mode: ExecutionMode::BlockingWholeOperation,
         }
     }
 
@@ -184,7 +220,20 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
     }
 
     /// A fresh `Arc` handle to move into a `spawn_blocking` closure.
-    fn arc(&self) -> Arc<B> {
+    fn arc_for(&self, queue: &QueueKey) -> Arc<B> {
+        let inner = self.inner.as_ref().expect("backend present until drop");
+        Arc::clone(&inner[Self::pool_index(queue, inner.len())])
+    }
+
+    pub(crate) fn backend_for_queue(&self, queue: &QueueKey) -> Arc<B> {
+        self.arc_for(queue)
+    }
+
+    fn pool_index(queue: &QueueKey, pool_len: usize) -> usize {
+        pqueue_engine::queue_worker_partition(queue, pool_len)
+    }
+
+    fn arcs(&self) -> Vec<Arc<B>> {
         self.inner
             .as_ref()
             .expect("backend present until drop")
@@ -202,6 +251,7 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
         Fut: Future<Output = EngineResult<T>> + Send + 'static,
     {
         let capacity = Arc::clone(&self.capacity);
+        let mode = self.mode;
         async move {
             if capacity.closed.load(Ordering::Acquire) {
                 return Err(EngineError::Unavailable);
@@ -223,37 +273,84 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
                 .map_err(|_| EngineError::Backpressure {
                     resource: "blocking storage operations",
                 })?;
-            let queue_guard = capacity.gate(&queue).lock_owned().await;
-            if capacity.closed.load(Ordering::Acquire) {
-                return Err(EngineError::Unavailable);
-            }
-            let running = capacity
-                .running
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| EngineError::Unavailable)?;
-            if capacity.closed.load(Ordering::Acquire) {
-                return Err(EngineError::Unavailable);
-            }
-            let runtime = tokio::runtime::Handle::current();
-            capacity.started.fetch_add(1, Ordering::AcqRel);
-            let started = StartedOperation {
-                capacity: Arc::clone(&capacity),
-            };
-            tokio::task::spawn_blocking(move || {
-                // Ownership of the queue gate, both permits, request data and future crosses the submit
-                // boundary. Dropping the caller's JoinHandle cannot cancel this started operation.
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            // Admission is the ownership boundary. From this point onward an owned task holds the request
+            // and both queued permits, so dropping the caller cannot silently discard an accepted mutation.
+            // Shutdown cancels tasks still waiting for their queue/running slot and drains tasks that started.
+            tokio::spawn(async move {
+                let gate = capacity.gate(&queue);
+                let queue_guard = tokio::select! {
+                    biased;
+                    _ = capacity.closed_token.cancelled() => {
+                        let _ = result_tx.send(Err(EngineError::Unavailable));
+                        return;
+                    },
+                    guard = gate.lock_owned() => guard,
+                };
+                if capacity.closed.load(Ordering::Acquire) {
+                    let _ = result_tx.send(Err(EngineError::Unavailable));
+                    return;
+                }
+                let running = tokio::select! {
+                    biased;
+                    _ = capacity.closed_token.cancelled() => {
+                        let _ = result_tx.send(Err(EngineError::Unavailable));
+                        return;
+                    },
+                    permit = capacity.running.clone().acquire_owned() => {
+                        match permit {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                let _ = result_tx.send(Err(EngineError::Unavailable));
+                                return;
+                            }
+                        }
+                    }
+                };
+                {
+                    // Serialize the closed check with `close`: once close returns, every operation is
+                    // either represented in `started` (and therefore drained) or has been rejected.
+                    let _start_gate = capacity
+                        .start_gate
+                        .lock()
+                        .expect("blocking operation start gate poisoned");
+                    if capacity.closed.load(Ordering::Acquire) {
+                        let _ = result_tx.send(Err(EngineError::Unavailable));
+                        return;
+                    }
+                    capacity.started.fetch_add(1, Ordering::AcqRel);
+                }
+                let started = StartedOperation {
+                    capacity: Arc::clone(&capacity),
+                };
                 let _queue_guard = queue_guard;
                 let _running = running;
                 let _outstanding = outstanding;
                 let _queue_outstanding = queue_outstanding;
                 let _started = started;
-                runtime.block_on(operation())
-            })
-            .await
-            .map_err(|error| {
-                EngineError::Storage(format!("blocking storage operation task failed: {error}"))
+                let result = match mode {
+                    ExecutionMode::NativeAsync => operation().await,
+                    ExecutionMode::BlockingWholeOperation => {
+                        match tokio::task::spawn_blocking(move || {
+                            // Blocking backends expose async-shaped ports for interface uniformity. Drive
+                            // the complete future on this blocking worker: a transient Pending (for example,
+                            // on a flusher-owned coordination lock) must not move its synchronous tail back
+                            // onto a Tokio reactor thread.
+                            futures::executor::block_on(operation())
+                        })
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => Err(EngineError::Storage(format!(
+                                "blocking storage operation task failed: {error}"
+                            ))),
+                        }
+                    }
+                };
+                let _ = result_tx.send(result);
+            });
+            result_rx.await.map_err(|_| {
+                EngineError::Storage("blocking storage operation responder dropped".into())
             })?
         }
     }
@@ -281,9 +378,9 @@ impl<B: RespBackend> PushPort for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner.push(&shard, items, now, expected_epoch).await
         })
@@ -297,9 +394,9 @@ impl<B: RespBackend> PushPort for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner
                 .push_with_request_id(&shard, request_id, items, now, expected_epoch)
@@ -313,8 +410,8 @@ impl<B: RespBackend> ClaimPort for PostgresWholeOperationAdapter<B> {
         &self,
         req: ClaimRequest,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
-        let inner = self.arc();
         let queue = req.shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move { inner.claim(req).await })
     }
 }
@@ -335,9 +432,9 @@ impl<B: RespBackend> UpsertPort for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         let client_item_key = client_item_key.clone();
         self.dispatch(queue, move || async move {
             inner
@@ -367,9 +464,9 @@ impl<B: RespBackend> FinalizePort for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner.finalize(&shard, outcomes, now, expected_epoch).await
         })
@@ -385,9 +482,9 @@ impl<B: RespBackend> RenewLeasePort for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner
                 .renew(&shard, item_ids, new_lease_expires_at, now, expected_epoch)
@@ -406,9 +503,9 @@ impl<B: RespBackend> ReassignLeasePort for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner
                 .reassign(
@@ -433,9 +530,9 @@ impl<B: RespBackend> PurgePort for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner
                 .purge(&shard, item_ids, force, now, expected_epoch)
@@ -449,10 +546,23 @@ impl<B: RespBackend> ReclaimDriver for PostgresWholeOperationAdapter<B> {
         &self,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        let inner = self.arc();
-        self.dispatch(global_operation_key(), move || async move {
-            inner.tick(now).await
-        })
+        let inners = self.arcs();
+        async move {
+            let mut aggregate = TickReport::default();
+            for (index, inner) in inners.into_iter().enumerate() {
+                let report = self
+                    .dispatch(global_operation_key(index), move || async move {
+                        inner.tick(now).await
+                    })
+                    .await?;
+                aggregate.leases_reclaimed += report.leases_reclaimed;
+                aggregate.cohorts_expired += report.cohorts_expired;
+                aggregate.items_promoted += report.items_promoted;
+                aggregate.progress_bound_breaches += report.progress_bound_breaches;
+                aggregate.maintenance.merge(report.maintenance);
+            }
+            Ok(aggregate)
+        }
     }
 }
 
@@ -461,8 +571,8 @@ impl<B: RespBackend> ControlPlaneStore for PostgresWholeOperationAdapter<B> {
         &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        let inner = self.arc();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner.create_queue(definition).await
         })
@@ -472,9 +582,9 @@ impl<B: RespBackend> ControlPlaneStore for PostgresWholeOperationAdapter<B> {
         &self,
         key: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
-        let inner = self.arc();
         let key = key.clone();
         let queue = key.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(
             queue,
             move || async move { inner.queue_definition(&key).await },
@@ -485,20 +595,32 @@ impl<B: RespBackend> ControlPlaneStore for PostgresWholeOperationAdapter<B> {
         &self,
         tenant: &TenantId,
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
-        let inner = self.arc();
         let tenant = tenant.clone();
-        self.dispatch(global_operation_key(), move || async move {
-            inner.list_queues(&tenant).await
-        })
+        let inners = self.arcs();
+        async move {
+            let mut queues = Vec::new();
+            for (index, inner) in inners.into_iter().enumerate() {
+                let tenant = tenant.clone();
+                let mut found = self
+                    .dispatch(global_operation_key(index), move || async move {
+                        inner.list_queues(&tenant).await
+                    })
+                    .await?;
+                queues.append(&mut found);
+            }
+            queues.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+            queues.dedup();
+            Ok(queues)
+        }
     }
 
     fn current_epoch(
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(
             queue,
             move || async move { inner.current_epoch(&shard).await },
@@ -509,9 +631,9 @@ impl<B: RespBackend> ControlPlaneStore for PostgresWholeOperationAdapter<B> {
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(
             queue,
             move || async move { inner.acquire_epoch(&shard).await },
@@ -526,9 +648,9 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         now: UtcTimestamp,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move {
             inner.select_eligible(&shard, now, limit).await
         })
@@ -539,9 +661,9 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         shard: &QueueKey,
         limit: usize,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(
             queue,
             move || async move { inner.peek(&shard, limit).await },
@@ -552,9 +674,9 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         &self,
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move { inner.pending(&shard).await })
     }
 
@@ -563,9 +685,9 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         shard: &QueueKey,
         ids: &[ItemId],
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         let ids = ids.to_vec();
         self.dispatch(queue, move || async move {
             inner.claimed_view(&shard, &ids).await
@@ -577,9 +699,9 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         shard: &QueueKey,
         keys: &[ClientItemKey],
     ) -> impl std::future::Future<Output = EngineResult<Vec<Option<LiveItemView>>>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         let keys = keys.to_vec();
         self.dispatch(queue, move || async move {
             inner.live_items(&shard, &keys).await
@@ -590,9 +712,9 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         &self,
         queue: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
-        let inner = self.arc();
         let queue = queue.clone();
         let operation_queue = queue.clone();
+        let inner = self.arc_for(&operation_queue);
         self.dispatch(operation_queue, move || async move {
             inner.metrics(&queue).await
         })
@@ -605,9 +727,9 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         emit_change_records: bool,
         emission_cursor: Option<&CommandPosition>,
     ) -> impl std::future::Future<Output = EngineResult<TerminalEmissionMetrics>> + Send {
-        let inner = self.arc();
         let shard = shard.clone();
         let queue = shard.clone();
+        let inner = self.arc_for(&queue);
         // `emission_cursor` is a borrow that cannot outlive this method, but the `spawn_blocking`
         // closure is `'static`. Clone it into an owned value moved into the closure, then re-borrow
         // inside so the delegated call still receives `Option<&CommandPosition>`.
@@ -628,7 +750,17 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pqueue_core::{
+        EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
+        PriorityTieBreaker, RecurrencePolicy, RetryPolicy,
+    };
+    use pqueue_engine::{Backend, ComposeFaultHook, ComposeFaultPoint, RawCommitRequest};
+    use pqueue_objectlog::segmented::{FaultCutPoint, FaultHook, InMemoryBlobStore, SegmentConfig};
     use tokio::sync::oneshot;
+
+    fn drive_blocking<F: Future>(future: F) -> F::Output {
+        futures::executor::block_on(future)
+    }
 
     fn queue(name: &str) -> QueueKey {
         QueueKey::new(
@@ -642,10 +774,89 @@ mod tests {
         queued: usize,
     ) -> Arc<PostgresWholeOperationAdapter<impl RespBackend>> {
         Arc::new(PostgresWholeOperationAdapter::with_capacity(
-            Arc::new(crate::composed_memory_backend()),
+            vec![Arc::new(crate::composed_memory_backend())],
             NonZeroUsize::new(running).unwrap(),
             queued,
         ))
+    }
+
+    fn definition(name: &str) -> QueueDefinition {
+        QueueDefinition {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            queue_id: QueueId::new(name).unwrap(),
+            priority_model: PriorityModel {
+                kind: PriorityModelKind::Int64,
+                direction: PriorityDirection::Ascending,
+                tie_breaker: PriorityTieBreaker::CreatedSequence,
+            },
+            ordering_mode: OrderingMode::Strict,
+            max_rank_error: 0,
+            progress_bound_ms: 60_000,
+            eligibility_policy: EligibilityPolicy::default(),
+            cohort_policy: None,
+            recurrence: RecurrencePolicy::default(),
+            request_id_retention_ms: 60_000,
+            client_item_key_retention_ms: 60_000,
+            terminal_retention_ms: 60_000,
+            max_lease_duration_ms: 60_000,
+            retry_policy: RetryPolicy { max_attempts: 3 },
+            max_push_batch_size: 100,
+            max_claim_batch_size: 100,
+            max_eligible_group_size: None,
+            secondary_indexes: Vec::new(),
+            entity_schema: None,
+            typed_indexes: Vec::new(),
+            emit_change_records: false,
+        }
+    }
+
+    fn push_spec() -> PushSpec {
+        PushSpec {
+            client_item_key: None,
+            priority: None,
+            group_key: None,
+            not_before: None,
+            payload: None,
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            cohort_size: None,
+            gate_keys: Vec::new(),
+            entity: None,
+        }
+    }
+
+    struct BlockingApplyHook {
+        entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ComposeFaultHook for BlockingApplyHook {
+        fn fault_point(&self, cut: ComposeFaultPoint) -> EngineResult<()> {
+            if cut == ComposeFaultPoint::DuringProjectionApply {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                }
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    struct BlockingSegmentHook {
+        entered: std::sync::Mutex<Option<oneshot::Sender<()>>>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl FaultHook for BlockingSegmentHook {
+        fn fault_point(&self, cut: FaultCutPoint) -> EngineResult<()> {
+            if cut == FaultCutPoint::BeforeSegmentWrite {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                }
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -681,6 +892,379 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn native_async_future_never_moves_to_blocking_thread() {
+        let adapter = PostgresWholeOperationAdapter::from_native_arc(Arc::new(
+            crate::composed_memory_backend(),
+        ));
+        let runtime_thread = std::thread::current().id();
+        let observed = adapter
+            .dispatch(queue("native"), || async move {
+                tokio::task::yield_now().await;
+                Ok::<_, EngineError>(std::thread::current().id())
+            })
+            .await
+            .unwrap();
+        assert_eq!(observed, runtime_thread);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_future_tail_stays_off_reactor_after_pending() {
+        let adapter = adapter(1, 1);
+        let runtime_thread = std::thread::current().id();
+        let (pending_tx, pending_rx) = oneshot::channel();
+        let (resume_tx, resume_rx) = oneshot::channel();
+        let worker = Arc::clone(&adapter);
+        let operation = tokio::spawn(async move {
+            worker
+                .dispatch(queue("pending"), move || async move {
+                    let _ = pending_tx.send(());
+                    resume_rx.await.unwrap();
+                    Ok::<_, EngineError>(std::thread::current().id())
+                })
+                .await
+        });
+        pending_rx.await.unwrap();
+        resume_tx.send(()).unwrap();
+        let tail_thread = operation.await.unwrap().unwrap();
+        assert_ne!(tail_thread, runtime_thread);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_sqlite_pool_allows_queue_b_while_queue_a_apply_is_blocked() {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-sqlite-pool-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = path.to_str().unwrap().to_string();
+        let mut raw = Vec::new();
+        for _ in 0..4 {
+            raw.push(pqueue_sqlite::composed_sqlite_backend(&path).unwrap());
+        }
+        let mut a_name = "a0".to_string();
+        let a_index =
+            loop {
+                let key = QueueKey::new(
+                    TenantId::new("tenant").unwrap(),
+                    QueueId::new(&a_name).unwrap(),
+                );
+                let index = PostgresWholeOperationAdapter::<
+                pqueue_sqlite::ComposedSqliteBackend,
+            >::pool_index(&key, raw.len());
+                if index == 0 {
+                    break index;
+                }
+                a_name.push('a');
+            };
+        let mut b_name = "b0".to_string();
+        loop {
+            let key = QueueKey::new(
+                TenantId::new("tenant").unwrap(),
+                QueueId::new(&b_name).unwrap(),
+            );
+            if PostgresWholeOperationAdapter::<pqueue_sqlite::ComposedSqliteBackend>::pool_index(
+                &key,
+                raw.len(),
+            ) != a_index
+            {
+                break;
+            }
+            b_name.push('b');
+        }
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        raw[a_index].set_fault_hook(Some(Arc::new(BlockingApplyHook {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: std::sync::Mutex::new(release_rx),
+        })));
+        let raw: Vec<_> = raw.into_iter().map(Arc::new).collect();
+        let a_backend = Arc::clone(&raw[a_index]);
+        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
+        let a_def = definition(&a_name);
+        let b_def = definition(&b_name);
+        let a_queue = QueueKey::new(a_def.tenant_id.clone(), a_def.queue_id.clone());
+        let b_queue = QueueKey::new(b_def.tenant_id.clone(), b_def.queue_id.clone());
+        adapter.create_queue(a_def).await.unwrap();
+        adapter.create_queue(b_def).await.unwrap();
+        let a_task = tokio::task::spawn_blocking(move || {
+            drive_blocking(a_backend.commit_raw(RawCommitRequest::new(a_queue, Vec::new(), 0)))
+        });
+        entered_rx.await.unwrap();
+        adapter
+            .push(
+                &b_queue,
+                vec![push_spec()],
+                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        release_tx.send(()).unwrap();
+        a_task.await.unwrap().unwrap();
+        drop(adapter);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_objectlog_pool_allows_queue_b_while_queue_a_store_is_blocked() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let config = SegmentConfig::new(1, 1_000).unwrap();
+        let mut raw = Vec::new();
+        for _ in 0..4 {
+            raw.push(
+                crate::SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+                    store.clone(),
+                    config,
+                )
+                .unwrap(),
+            );
+        }
+        let a_name = "object-a";
+        let a_queue = queue(a_name);
+        let a_index =
+            PostgresWholeOperationAdapter::<crate::SegmentedObjectLogInMemoryBackend>::pool_index(
+                &a_queue,
+                raw.len(),
+            );
+        let mut b_name = "object-b".to_string();
+        let b_queue = loop {
+            let candidate = queue(&b_name);
+            if PostgresWholeOperationAdapter::<crate::SegmentedObjectLogInMemoryBackend>::pool_index(
+                &candidate,
+                raw.len(),
+            ) != a_index
+            {
+                break candidate;
+            }
+            b_name.push('b');
+        };
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        raw[a_index].set_object_log_fault_hook(Some(Arc::new(BlockingSegmentHook {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: std::sync::Mutex::new(release_rx),
+        })));
+        let raw: Vec<_> = raw.into_iter().map(Arc::new).collect();
+        let flushers: Vec<_> = raw.iter().map(|backend| backend.spawn_flusher()).collect();
+        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
+        adapter.create_queue(definition(a_name)).await.unwrap();
+        adapter
+            .create_queue(definition(b_queue.queue_id.as_str()))
+            .await
+            .unwrap();
+        let a = Arc::clone(&adapter);
+        let a_task = tokio::spawn(async move {
+            a.push(
+                &a_queue,
+                vec![push_spec()],
+                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+                None,
+            )
+            .await
+        });
+        entered_rx.await.unwrap();
+        adapter
+            .push(
+                &b_queue,
+                vec![push_spec()],
+                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        release_tx.send(()).unwrap();
+        a_task.await.unwrap().unwrap();
+        for flusher in flushers {
+            flusher.abort();
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn production_objectlog_sqlite_pool_allows_queue_b_while_queue_a_store_is_blocked() {
+        let projection_path = std::env::temp_dir().join(format!(
+            "pqueue-segmented-sqlite-pool-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Arc::new(InMemoryBlobStore::new());
+        let config = SegmentConfig::new(1, 1_000).unwrap();
+        let mut raw = Vec::new();
+        for _ in 0..4 {
+            raw.push(
+                crate::SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                    store.clone(),
+                    projection_path.to_str().unwrap(),
+                    config,
+                )
+                .unwrap(),
+            );
+        }
+        let a_name = "object-sqlite-a";
+        let a_queue = queue(a_name);
+        let a_index =
+            PostgresWholeOperationAdapter::<crate::SegmentedObjectLogSqliteBackend>::pool_index(
+                &a_queue,
+                raw.len(),
+            );
+        let mut b_name = "object-sqlite-b".to_string();
+        let b_queue = loop {
+            let candidate = queue(&b_name);
+            if PostgresWholeOperationAdapter::<crate::SegmentedObjectLogSqliteBackend>::pool_index(
+                &candidate,
+                raw.len(),
+            ) != a_index
+            {
+                break candidate;
+            }
+            b_name.push('b');
+        };
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        raw[a_index].set_object_log_fault_hook(Some(Arc::new(BlockingSegmentHook {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: std::sync::Mutex::new(release_rx),
+        })));
+        let raw: Vec<_> = raw.into_iter().map(Arc::new).collect();
+        let flushers: Vec<_> = raw.iter().map(|backend| backend.spawn_flusher()).collect();
+        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
+        adapter.create_queue(definition(a_name)).await.unwrap();
+        adapter
+            .create_queue(definition(b_queue.queue_id.as_str()))
+            .await
+            .unwrap();
+        let a = Arc::clone(&adapter);
+        let a_task = tokio::spawn(async move {
+            a.push(
+                &a_queue,
+                vec![push_spec()],
+                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+                None,
+            )
+            .await
+        });
+        entered_rx.await.unwrap();
+        adapter
+            .push(
+                &b_queue,
+                vec![push_spec()],
+                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        release_tx.send(()).unwrap();
+        a_task.await.unwrap().unwrap();
+        for flusher in flushers {
+            flusher.abort();
+        }
+        drop(adapter);
+        let _ = std::fs::remove_file(projection_path);
+    }
+
+    async fn assert_hybrid_pool_progress(
+        label: &str,
+        strict: bool,
+        monitor: Option<crate::HybridAsyncThresholds>,
+    ) {
+        let path = std::env::temp_dir().join(format!(
+            "pqueue-{label}-pool-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = Arc::new(InMemoryBlobStore::new());
+        let mut raw = Vec::new();
+        for index in 0..4 {
+            raw.push(
+                crate::open_objectlog_hybrid_backend(
+                    store.clone(),
+                    &path,
+                    SegmentConfig::new(1, 1_000).unwrap(),
+                    crate::DEFAULT_RECOVERY_MAX_TAIL,
+                    0,
+                    pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
+                    strict,
+                    monitor,
+                    pqueue_engine::BufferedByteBudget::new(
+                        pqueue_engine::BufferedByteBudgetConfig::new(1_048_576).unwrap(),
+                    ),
+                    1_048_576,
+                    Some((index, 4)),
+                )
+                .unwrap(),
+            );
+        }
+        let a_name = format!("{label}-a");
+        let a_queue = queue(&a_name);
+        let a_index = PostgresWholeOperationAdapter::<crate::ObjectLogHybridBackend>::pool_index(
+            &a_queue,
+            raw.len(),
+        );
+        let mut b_name = format!("{label}-b");
+        let b_queue = loop {
+            let candidate = queue(&b_name);
+            if PostgresWholeOperationAdapter::<crate::ObjectLogHybridBackend>::pool_index(
+                &candidate,
+                raw.len(),
+            ) != a_index
+            {
+                break candidate;
+            }
+            b_name.push('b');
+        };
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        raw[a_index].set_fault_hook(Some(Arc::new(BlockingApplyHook {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            release: std::sync::Mutex::new(release_rx),
+        })));
+        let a_backend = Arc::clone(&raw[a_index]);
+        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arcs(raw));
+        adapter.create_queue(definition(&a_name)).await.unwrap();
+        adapter
+            .create_queue(definition(b_queue.queue_id.as_str()))
+            .await
+            .unwrap();
+        let a_task = tokio::task::spawn_blocking(move || {
+            drive_blocking(a_backend.commit_raw(RawCommitRequest::new(a_queue, Vec::new(), 0)))
+        });
+        entered_rx.await.unwrap();
+        adapter
+            .push(
+                &b_queue,
+                vec![push_spec()],
+                UtcTimestamp::new(1_700_000_000, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        release_tx.send(()).unwrap();
+        a_task.await.unwrap().unwrap();
+        drop(adapter);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_production_hybrid_mode_progresses_queue_b_while_queue_a_is_blocked() {
+        assert_hybrid_pool_progress("hybrid", false, None).await;
+        assert_hybrid_pool_progress("hybrid-strict", true, None).await;
+        assert_hybrid_pool_progress(
+            "hybrid-async",
+            false,
+            Some(crate::HybridAsyncThresholds::default()),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn aborting_caller_after_submit_does_not_cancel_storage_operation() {
         let adapter = adapter(1, 1);
         let (started_tx, started_rx) = oneshot::channel();
@@ -700,6 +1284,44 @@ mod tests {
         started_rx.await.unwrap();
         caller.abort();
         release_tx.send(()).unwrap();
+        committed_rx.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn aborting_caller_does_not_discard_an_admitted_queued_operation() {
+        let adapter = adapter(1, 2);
+        let (first_started_tx, first_started_rx) = oneshot::channel();
+        let (release_first_tx, release_first_rx) = std::sync::mpsc::channel();
+        let first_worker = Arc::clone(&adapter);
+        let first = tokio::spawn(async move {
+            first_worker
+                .dispatch(queue("a"), move || async move {
+                    let _ = first_started_tx.send(());
+                    release_first_rx.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        first_started_rx.await.unwrap();
+
+        let (submitted_tx, submitted_rx) = oneshot::channel();
+        let (committed_tx, committed_rx) = oneshot::channel();
+        let queued_worker = Arc::clone(&adapter);
+        let queued_caller = tokio::spawn(async move {
+            let _ = submitted_tx.send(());
+            queued_worker
+                .dispatch(queue("a"), move || async move {
+                    let _ = committed_tx.send(());
+                    Ok(())
+                })
+                .await
+        });
+        // The spawned caller continues in the same poll through non-blocking admission and into the owned
+        // queue waiter. Receiving this signal therefore establishes that the request has been submitted.
+        submitted_rx.await.unwrap();
+        queued_caller.abort();
+        release_first_tx.send(()).unwrap();
+        first.await.unwrap().unwrap();
         committed_rx.await.unwrap();
     }
 
