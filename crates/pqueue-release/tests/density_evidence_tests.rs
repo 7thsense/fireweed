@@ -6,6 +6,7 @@ use pqueue_release::density::{
 fn measurement() -> DensityMeasurement {
     DensityMeasurement {
         hot_items: 300_000,
+        control_items: 10_000,
         hot_sustain_windows: 1,
         hot_sustain_items: 300_000,
         hot_connections: 8,
@@ -108,6 +109,7 @@ fn density_validator_rejects_every_noncanonical_run_parameter() {
     type MeasurementMutation = Box<dyn Fn(&mut DensityMeasurement)>;
     let mutations: Vec<(&str, MeasurementMutation)> = vec![
         ("hot_items", Box::new(|m| m.hot_items = 299_999)),
+        ("control_items", Box::new(|m| m.control_items = 9_999)),
         ("hot_connections", Box::new(|m| m.hot_connections = 7)),
         ("cold_worker_count", Box::new(|m| m.cold_worker_count = 7)),
         (

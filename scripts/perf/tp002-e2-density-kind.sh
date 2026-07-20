@@ -7,6 +7,7 @@ CLUSTER=${CLUSTER:-pqueue-density}
 IMAGE=${IMAGE:-pqueue:density-e2}
 QUEUE_COUNT=${QUEUE_COUNT:-1001}
 ITEMS=${ITEMS:-300000}
+CONTROL_ITEMS=${CONTROL_ITEMS:-10000}
 HOT_CONNECTIONS=${HOT_CONNECTIONS:-8}
 NOISY_WORKERS=${NOISY_WORKERS:-8}
 SERVER_WORKERS=${SERVER_WORKERS:-4}
@@ -166,6 +167,8 @@ spec:
             - "$QUEUE_COUNT"
             - --items
             - "$ITEMS"
+            - --control-items
+            - "$CONTROL_ITEMS"
             - --hot-connections
             - "$HOT_CONNECTIONS"
             - --noisy-workers

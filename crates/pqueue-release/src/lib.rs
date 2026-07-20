@@ -861,6 +861,7 @@ pub mod density {
 
     pub const MIN_TOTAL_QUEUES: usize = 1001;
     pub const CANONICAL_HOT_ITEMS: u64 = 300_000;
+    pub const CANONICAL_CONTROL_ITEMS: u64 = 10_000;
     pub const CANONICAL_HOT_CONNECTIONS: usize = 8;
     pub const CANONICAL_COLD_WORKERS: usize = 8;
     pub const CANONICAL_SERVER_WORKERS: usize = 4;
@@ -874,6 +875,7 @@ pub mod density {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub struct DensityMeasurement {
         pub hot_items: u64,
+        pub control_items: u64,
         pub hot_sustain_windows: u64,
         pub hot_sustain_items: u64,
         pub hot_connections: usize,
@@ -955,6 +957,7 @@ pub mod density {
     pub fn bars_met(m: &DensityMeasurement) -> bool {
         let cold = m.total_queues.saturating_sub(1);
         m.hot_items == CANONICAL_HOT_ITEMS
+            && m.control_items == CANONICAL_CONTROL_ITEMS
             && m.hot_sustain_windows > 0
             && m.hot_sustain_items == m.hot_items.checked_mul(m.hot_sustain_windows).unwrap_or(0)
             && m.hot_connections == CANONICAL_HOT_CONNECTIONS
@@ -1023,6 +1026,7 @@ pub mod density {
         let values = BTreeMap::from([
             ("bars_met".into(), serde_json::json!(pass)),
             ("hot_items".into(), serde_json::json!(m.hot_items)),
+            ("control_items".into(), serde_json::json!(m.control_items)),
             (
                 "hot_sustain_windows".into(),
                 serde_json::json!(m.hot_sustain_windows),
@@ -1289,6 +1293,7 @@ pub mod density {
         }
         for (key, expected) in [
             ("hot_items", CANONICAL_HOT_ITEMS),
+            ("control_items", CANONICAL_CONTROL_ITEMS),
             ("hot_connections", CANONICAL_HOT_CONNECTIONS as u64),
             ("cold_worker_count", CANONICAL_COLD_WORKERS as u64),
             ("configured_server_workers", CANONICAL_SERVER_WORKERS as u64),

@@ -31,7 +31,10 @@ image's SHA-256 ID, and confirms that both the service pod and load Job run that
 exact image. There is no release-evidence build-skip path.
 
 The in-cluster load generator brackets the loaded hot measurement with control
-measurements before and after it in the same process and deployment. A bounded
+measurements before and after it in the same process and deployment. Each
+control arm uses the fixed 10,000-item diagnostic size; the governed loaded arm
+remains exactly 300,000 items. The ledger records both counts, and the validator
+rejects substitutions. A bounded
 worker pool makes every cold queue complete a live
 claim/finalize cycle, reseeds it with an immediately eligible item, and keeps
 cycling cold queues while the hot workload runs. A cold queue counts as active
@@ -87,7 +90,7 @@ governed bounds, and at least one hot-phase resource sample. Absolute rates,
 latency, and retention percentages are capacity evidence only. The validator
 also rejects quiet-host requirements and host-speed gates, and rejects
 any substitution for the canonical 1,001 queues, 300,000 hot items, eight hot
-connections, eight cold workers, four server workers, seed 42, or 60,000 ms
+connections, 10,000 control items, eight cold workers, four server workers, seed 42, or 60,000 ms
 progress bound. A failed run remains smoke evidence and cannot be promoted by
 editing the ledger.
 

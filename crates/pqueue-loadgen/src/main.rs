@@ -68,6 +68,7 @@ type TuningMeta = pqueue_release::e2::E2Tuning;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DensityRunResult {
     hot_items: u64,
+    control_items: u64,
     hot_sustain_windows: u64,
     hot_sustain_items: u64,
     hot_connections: usize,
@@ -894,6 +895,7 @@ fn cmd_density_run(args: &[String]) -> ! {
     let queue_prefix = arg_value(args, "--queue-prefix").unwrap_or_else(|| "density:q".into());
     let total_queues = parse_usize_arg(args, "--queue-count", 1001);
     let items = parse_u64_arg(args, "--items", 300_000);
+    let control_items = parse_u64_arg(args, "--control-items", 10_000);
     let conns = parse_usize_arg(args, "--hot-connections", 8);
     let pipe = parse_usize_arg(args, "--pipe", 1_000);
     let batch = parse_usize_arg(args, "--batch", 1_000);
@@ -954,8 +956,14 @@ fn cmd_density_run(args: &[String]) -> ! {
     let started = Instant::now();
     println!("DENSITY_STAGE stage=BASELINE status=START");
     io::stdout().flush().expect("flush density baseline stage");
-    let (_, baseline_before_ingest, _, baseline_before_claim) =
-        measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("BASELINE"));
+    let (_, baseline_before_ingest, _, baseline_before_claim) = measure_with_progress(
+        &hot_spec,
+        control_items,
+        conns,
+        pipe,
+        batch,
+        Some("BASELINE"),
+    );
     println!("DENSITY_STAGE stage=BASELINE status=DONE");
     println!(
         "DENSITY_STAGE stage=COLD_PRIME status=START completed=0 total={}",
@@ -1053,8 +1061,14 @@ fn cmd_density_run(args: &[String]) -> ! {
     // progress, resource bounds, and a well-formed same-run comparison are release gates.
     println!("DENSITY_STAGE stage=BASELINE_AFTER status=START");
     io::stdout().flush().expect("flush trailing baseline stage");
-    let (_, baseline_after_ingest, _, baseline_after_claim) =
-        measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("BASELINE_AFTER"));
+    let (_, baseline_after_ingest, _, baseline_after_claim) = measure_with_progress(
+        &hot_spec,
+        control_items,
+        conns,
+        pipe,
+        batch,
+        Some("BASELINE_AFTER"),
+    );
     println!("DENSITY_STAGE stage=BASELINE_AFTER status=DONE");
 
     let paired_control = |before: f64, after: f64| {
@@ -1081,6 +1095,7 @@ fn cmd_density_run(args: &[String]) -> ! {
     let duration_seconds = started.elapsed().as_secs().max(1);
     let result = DensityRunResult {
         hot_items: items,
+        control_items,
         hot_sustain_windows,
         hot_sustain_items: items
             .checked_mul(hot_sustain_windows)
@@ -1143,6 +1158,7 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
     let out = arg_value(args, "--out").expect("density-emit-row needs --out");
     let measurement = pqueue_release::density::DensityMeasurement {
         hot_items: result.hot_items,
+        control_items: result.control_items,
         hot_sustain_windows: result.hot_sustain_windows,
         hot_sustain_items: result.hot_sustain_items,
         hot_connections: result.hot_connections,
