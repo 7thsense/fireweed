@@ -9,7 +9,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 9f8dd7ccf732934ef58132679dc751d9708929df420b4d62e936aed05ee3794f
+    self_hash: a5bc77bb3caf55efa12ebbd5c3513278de3791f7034189034b8c9afe270e4639
     deps:
       build-implementation-plan: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
       td-postgres-native-reference-mode: 1b657638258f7d3fa15e46b7536d33d766ade1a0948a32598dc5c9ae65b7828b
@@ -17,7 +17,7 @@ ddx:
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
       tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
       tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
-    reviewed_at: "2026-07-20T00:01:30Z"
+    reviewed_at: "2026-07-20T00:59:35Z"
 ---
 
 # Production Deployment Readiness Contract
@@ -29,7 +29,7 @@ BUILD-001 release line. Runtime and Helm configuration are expressed as two
 storage axes:
 
 - log backend: `objectlog` or `postgres` (plus the local `sqlite` and dev-only `memory` log axes)
-- projection backend: `inmemory`, `sqlite`, `hybrid`, `hybrid-strict`, `hybrid-async`, or `postgres`
+- projection backend: `inmemory`, `sqlite`, `turso`, `hybrid`, `hybrid-strict`, `hybrid-async`, or `postgres`
 
 The release contract must not collapse those axes into named deployment modes. A
 release artifact can claim only the combinations that its runtime, chart
@@ -38,11 +38,11 @@ rendering, and CI evidence actually cover.
 ## Current Release Boundary
 
 > **Version source of truth:** the workspace `Cargo.toml` `[workspace.package] version`
-> (currently **0.16.0**) is canonical for the current release line. Release tags follow it
-> (`v0.16.0`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
+> (currently **0.19.4**) is canonical for the current release line. Release tags follow it
+> (`v0.19.4`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The v0.16.x release packaging ships the `pqueue-service` RESP binary, container
+The v0.19.4 release packaging ships the `pqueue-service` RESP binary, container
 image, Helm chart, binary archive, checksums, and release evidence. The service
 runtime (`crates/pqueue-server/src/env_config.rs`) currently wires these
 executable combinations:
@@ -51,6 +51,7 @@ executable combinations:
 |-------------|--------------------|----------------|
 | `objectlog` | `inmemory` | Live container and Helm smoke path (in the CI kind matrix). |
 | `objectlog` | `sqlite` | Wired (durable SQLite projection over the object log; in the CI kind matrix). |
+| `objectlog` | `turso` | Wired behind the `turso-projection` feature; local-file recovery and authoritative object-log rebuild are covered by the focused Turso lane. |
 | `objectlog` | `hybrid` | Wired (TD-004 hot-memory-over-durable-SQLite; shipped v0.6.0). |
 | `objectlog` | `hybrid-strict` | Experimental runtime path (SQLite durable before memory apply). Env/direct-config only; intentionally not chart-selectable or production-supported. |
 | `objectlog` | `hybrid-async` | Wired (deferred async SQLite checkpoint with `PQUEUE_HYBRID_ASYNC_*` debt/backpressure thresholds). |
@@ -67,6 +68,7 @@ combinations:
 |-------------|--------------------|------|
 | `objectlog` | `inmemory` | Helm render/lint and live `kind` smoke (CI matrix). |
 | `objectlog` | `sqlite` | Runtime wired, Helm render/lint, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend sqlite`). |
+| `objectlog` | `turso` | Feature-gated runtime and focused chart render fixture; intentionally outside the broad live-`kind` storage matrix. |
 | `objectlog` | `hybrid` | Runtime wired, Helm render/lint (`helm-gate.sh` `objectlog-hybrid`), and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid`). |
 | `objectlog` | `hybrid-async` | Runtime wired, Helm render/lint with exact debt/backpressure-variable assertions, and live `kind` smoke in the CI matrix (`scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend hybrid-async`). |
 | `objectlog` | `hybrid-strict` | Experimental env/direct-config-only runtime path; **not** chart-selectable or production-supported (projection enum omits it). |
