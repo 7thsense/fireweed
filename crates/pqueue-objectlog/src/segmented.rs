@@ -1739,6 +1739,7 @@ struct RecoveryRootPin {
     reclaim_key: String,
     owner: String,
     version: u64,
+    authority_epoch: u64,
     root: Option<RecoveryIndexRoot>,
     cursor_id: String,
     generation: u64,
@@ -2180,6 +2181,8 @@ pub struct SegmentedObjectLog<S: BlobStore> {
     branch_gc_cursors: Mutex<BTreeMap<QueueKey, String>>,
     segment_gc_cursors: Mutex<BTreeMap<QueueKey, String>>,
     segment_gc_progress: Mutex<BTreeMap<QueueKey, SegmentGcProgress>>,
+    recovery_pin_gc_cursors: Mutex<BTreeMap<QueueKey, String>>,
+    recovery_index_gc_cursors: Mutex<BTreeMap<QueueKey, String>>,
     /// Epochs this instance completed `acquire_epoch` for. Durable current epoch alone is not proof that this
     /// process is the serving owner, so background maintenance requires this explicit local claim.
     maintenance_owned_epochs: Mutex<BTreeMap<QueueKey, MaintenanceOwnerToken>>,
@@ -2287,6 +2290,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             branch_gc_cursors: Mutex::new(BTreeMap::new()),
             segment_gc_cursors: Mutex::new(BTreeMap::new()),
             segment_gc_progress: Mutex::new(BTreeMap::new()),
+            recovery_pin_gc_cursors: Mutex::new(BTreeMap::new()),
+            recovery_index_gc_cursors: Mutex::new(BTreeMap::new()),
             maintenance_owned_epochs: Mutex::new(BTreeMap::new()),
             // Pin publication fails closed later if OS entropy was unavailable; constructor compatibility is
             // preserved while never falling back to PID/clock identities that can collide across hosts.
@@ -4858,6 +4863,37 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         format!("{}recovery_index_gc/v1/", shard_prefix(shard))
     }
 
+    /// Return one bounded namespace page and advance a per-shard round-robin cursor. A short/empty tail
+    /// wraps to the beginning, so an indefinitely live object on the first page cannot hide later work.
+    fn rotating_maintenance_page(
+        &self,
+        shard: &QueueKey,
+        prefix: &str,
+        limit: usize,
+        cursors: &Mutex<BTreeMap<QueueKey, String>>,
+    ) -> EngineResult<Vec<String>> {
+        let cursor = cursors
+            .lock()
+            .expect("recovery maintenance cursors poisoned")
+            .get(shard)
+            .cloned();
+        let mut keys = self.store.list_page(prefix, cursor.as_deref(), limit)?;
+        if keys.is_empty() && cursor.is_some() {
+            keys = self.store.list_page(prefix, None, limit)?;
+        }
+        let mut state = cursors
+            .lock()
+            .expect("recovery maintenance cursors poisoned");
+        if keys.len() == limit {
+            if let Some(last) = keys.last() {
+                state.insert(shard.clone(), last.clone());
+            }
+        } else {
+            state.remove(shard);
+        }
+        Ok(keys)
+    }
+
     /// Stable identifier written into this process's durable recovery-root pins. An external liveness
     /// authority may pass a proven-dead identifier to [`Self::reap_recovery_pins_for_dead_owner`]; callers
     /// must never infer death from elapsed wall time.
@@ -4882,7 +4918,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         let prefix = Self::recovery_pin_prefix(shard);
         let mut reaped = 0;
-        for key in self.store.list_page(&prefix, None, limit)? {
+        for key in
+            self.rotating_maintenance_page(shard, &prefix, limit, &self.recovery_pin_gc_cursors)?
+        {
             let bytes = self.store_get(&key)?.ok_or(EngineError::Conflict)?;
             let pin: RecoveryRootPinRecord = serde_json::from_slice(&bytes).map_err(store_err)?;
             if pin.owner == proven_dead_owner {
@@ -4917,11 +4955,35 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         let prefix = Self::recovery_pin_prefix(shard);
         let mut reaped = 0;
-        for key in self.store.list_page(&prefix, None, limit)? {
+        let fenced_epoch = self.maintenance_owner_epoch(shard);
+        for key in
+            self.rotating_maintenance_page(shard, &prefix, limit, &self.recovery_pin_gc_cursors)?
+        {
             let Some(bytes) = self.store_get(&key)? else {
                 continue;
             };
             let pin: RecoveryRootPinRecord = serde_json::from_slice(&bytes).map_err(store_err)?;
+            // A locally held newer epoch is durable fencing authority. A page from the old epoch validates
+            // the epoch again before returning bytes, so removing its crash-surviving guard can only make
+            // that stale page fail closed; it cannot publish recovered state from a reclaimed root.
+            if pin.expires_at_ms.is_some_and(|expiry| expiry <= now_ms)
+                && fenced_epoch.is_some_and(|epoch| {
+                    pin.authority_epoch
+                        .is_some_and(|pin_epoch| pin_epoch < epoch)
+                })
+            {
+                if !pin.cursor_id.is_empty() {
+                    let _ = self
+                        .store
+                        .delete(&Self::recovery_page_guard_key(shard, &pin.cursor_id))?;
+                    let _ = self
+                        .store
+                        .delete(&Self::recovery_pin_reclaim_key(shard, &pin.cursor_id))?;
+                }
+                let _ = self.store.delete(&key)?;
+                reaped += 1;
+                continue;
+            }
             if pin.expires_at_ms.is_some_and(|expiry| expiry <= now_ms) {
                 // Old records have no cursor identity with which to perform the enter-vs-reclaim
                 // handshake. Preserve them rather than guessing that no page is using their root.
@@ -5022,7 +5084,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         let prefix = Self::recovery_index_garbage_prefix(shard);
         let mut reaped = 0;
-        for key in self.store.list_page(&prefix, None, max_batches)? {
+        for key in self.rotating_maintenance_page(
+            shard,
+            &prefix,
+            max_batches,
+            &self.recovery_index_gc_cursors,
+        )? {
             let Some(bytes) = self.store_get(&key)? else {
                 continue;
             };
@@ -5102,6 +5169,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                         reclaim_key,
                         owner,
                         version: observed_version,
+                        authority_epoch: observed_epoch,
                         root,
                         cursor_id,
                         generation,
@@ -5147,6 +5215,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 record.owner == pin.owner
                     && record.cursor_id == pin.cursor_id
                     && record.version == pin.version
+                    && record.authority_epoch == Some(pin.authority_epoch)
                     && record.generation == pin.generation
                     && record.expires_at_ms == Some(pin.expires_at_ms)
                     && record.root == pin.root
@@ -5179,7 +5248,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             owner: pin.owner.clone(),
             cursor_id: pin.cursor_id.clone(),
             version: pin.version,
-            authority_epoch: None,
+            authority_epoch: Some(pin.authority_epoch),
             expires_at_ms: Some(expires_at_ms),
             generation,
             root: pin.root.clone(),
@@ -5198,6 +5267,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 record.owner == pin.owner
                     && record.cursor_id == pin.cursor_id
                     && record.version == pin.version
+                    && record.authority_epoch == Some(pin.authority_epoch)
                     && record.generation == pin.generation
                     && record.expires_at_ms == Some(pin.expires_at_ms)
                     && record.root == pin.root
@@ -5213,6 +5283,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         pin.key = next_key;
         pin.generation = generation;
         pin.expires_at_ms = expires_at_ms;
+        Ok(())
+    }
+
+    fn validate_recovery_page_authority(&self, cursor: &RecoveryCursor) -> EngineResult<()> {
+        if let Some(pin) = cursor._root_pin.as_ref()
+            && system_time_ms()? >= pin.expires_at_ms
+            && self.current_epoch(&cursor.shard)? != pin.authority_epoch
+        {
+            return Err(EngineError::Unavailable);
+        }
         Ok(())
     }
 
@@ -5306,6 +5386,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         {
             self.refresh_recovery_root_pin(pin)?;
         }
+        // Epoch fencing is checked on both sides of all provider reads. A replacement owner may therefore
+        // reclaim a crash-surviving permanent page guard: an overlapping stale page either loses an object
+        // read or observes the new epoch here/below and fails closed before returning recovered commands.
+        self.validate_recovery_page_authority(cursor)?;
         if cursor.legacy_fallback {
             let (entries, mut stats) = self.read_recovery_page(&cursor.shard, cursor.from_seq)?;
             stats.bounded_authority_index = false;
@@ -5314,6 +5398,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             } else {
                 cursor.finished = true;
             }
+            self.validate_recovery_page_authority(cursor)?;
             return Ok((entries, stats));
         }
         let mut stats = RecoveryReadPageStats {
@@ -5391,6 +5476,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             .peak_cursor_bytes_buffered
             .max(Self::recovery_cursor_resident_bytes(cursor)?);
         let _snapshot_version = cursor.captured_head_version;
+        self.validate_recovery_page_authority(cursor)?;
         Ok((out, stats))
     }
 
@@ -10302,7 +10388,7 @@ mod manifest_deletion_watermark_tests {
     }
 
     #[test]
-    fn proven_dead_owner_reap_cleans_crash_pin_without_touching_live_owner() {
+    fn newer_owned_epoch_reaps_crash_guard_without_touching_live_owner() {
         let store = Arc::new(InMemoryBlobStore::new());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
         let shard = conformance_shard();
@@ -10328,19 +10414,27 @@ mod manifest_deletion_watermark_tests {
         // three artifacts and must converge even when neither reader nor reaper can run its normal cleanup.
         store.put(&reclaim_key, b"interrupted-reclaim").unwrap();
         assert!(store.get(&reclaim_key).unwrap().is_some());
+        let mut crashed_record: RecoveryRootPinRecord =
+            serde_json::from_slice(&store.get(&leaked_pin.key).unwrap().expect("crashed pin"))
+                .unwrap();
+        crashed_record.expires_at_ms = Some(0);
+        store
+            .put(&leaked_pin.key, &to_json(&crashed_record).unwrap())
+            .unwrap();
         std::mem::forget(leaked_guard);
         std::mem::forget(leaked); // model process death: neither RAII cleanup can run
 
         let replacement = SegmentedObjectLog::open(store.clone(), cfg);
         replacement.create_queue(&conformance_qdef()).unwrap();
+        assert_eq!(replacement.acquire_epoch(&shard, 3).unwrap(), 1);
         let live_owner = replacement.recovery_pin_owner().unwrap().to_owned();
         let _live = replacement.open_recovery_cursor(&shard, 0).unwrap();
         assert_ne!(live_owner, dead_owner);
-        // Prove only the old process dead. Its stale pin is removed while the new process's exact owner
-        // identity remains present.
+        // The durable newer epoch is the production fencing proof. Ordinary bounded maintenance removes
+        // only the old epoch's crash artifacts and preserves the replacement's live pin.
         assert_eq!(
             replacement
-                .reap_recovery_pins_for_dead_owner(&shard, &dead_owner, 16)
+                .reap_recovery_pins_expired_bounded(&shard, 3, 16)
                 .unwrap(),
             1
         );
@@ -10356,6 +10450,105 @@ mod manifest_deletion_watermark_tests {
             .list(&SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_pin_prefix(&shard))
             .unwrap();
         assert_eq!(pins.len(), 1, "replacement owner pin remains live");
+    }
+
+    #[test]
+    fn pin_reaper_rotates_past_a_permanently_live_first_page() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        let prefix = SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_pin_prefix(&shard);
+        for ordinal in 0..3 {
+            let record = RecoveryRootPinRecord {
+                owner: format!("owner-{ordinal}"),
+                cursor_id: format!("cursor-{ordinal}"),
+                version: ordinal,
+                authority_epoch: Some(0),
+                expires_at_ms: Some(if ordinal < 2 { i64::MAX } else { 0 }),
+                generation: 0,
+                root: None,
+            };
+            store
+                .put(
+                    &format!("{prefix}v{ordinal:020}/pin.json"),
+                    &to_json(&record).unwrap(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            log.reap_recovery_pins_expired_bounded(&shard, 1, 2)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            log.reap_recovery_pins_expired_bounded(&shard, 1, 2)
+                .unwrap(),
+            1,
+            "the expired pin after the live first page must make progress"
+        );
+    }
+
+    #[test]
+    fn recovery_index_gc_rotates_past_a_blocked_first_batch() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        let pin_prefix = SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_pin_prefix(&shard);
+        let pin = RecoveryRootPinRecord {
+            owner: "live".into(),
+            cursor_id: "live-cursor".into(),
+            version: 5,
+            authority_epoch: Some(0),
+            expires_at_ms: Some(i64::MAX),
+            generation: 0,
+            root: None,
+        };
+        store
+            .put(
+                &format!("{pin_prefix}v{:020}/pin.json", 5),
+                &to_json(&pin).unwrap(),
+            )
+            .unwrap();
+        let gc_prefix =
+            SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_index_garbage_prefix(&shard);
+        let blocked_node = format!("{}nodes/blocked", shard_prefix(&shard));
+        let eligible_node = format!("{}nodes/eligible", shard_prefix(&shard));
+        store.put(&blocked_node, b"blocked").unwrap();
+        store.put(&eligible_node, b"eligible").unwrap();
+        store
+            .put(
+                &format!("{gc_prefix}a-blocked.json"),
+                &to_json(&RecoveryIndexGarbageBatch {
+                    safe_after_version: 10,
+                    keys: vec![blocked_node.clone()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        store
+            .put(
+                &format!("{gc_prefix}z-eligible.json"),
+                &to_json(&RecoveryIndexGarbageBatch {
+                    safe_after_version: 4,
+                    keys: vec![eligible_node.clone()],
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            log.reap_recovery_index_garbage_bounded(&shard, 1).unwrap(),
+            0
+        );
+        assert_eq!(
+            log.reap_recovery_index_garbage_bounded(&shard, 1).unwrap(),
+            1,
+            "an eligible batch after the blocked first page must be reclaimed"
+        );
+        assert!(store.get(&blocked_node).unwrap().is_some());
+        assert!(store.get(&eligible_node).unwrap().is_none());
     }
 
     fn expire_as_owner<S: BlobStore>(
