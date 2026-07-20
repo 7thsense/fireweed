@@ -268,6 +268,77 @@ async fn push_preappend_and_durable_idempotency_are_native_async() {
 }
 
 #[tokio::test]
+async fn accepted_push_full_chunk_materializes_items_gates_and_indexes() {
+    let mut definition = definition();
+    definition.max_push_batch_size = 100;
+    definition.typed_indexes = vec![QueueIndex {
+        name: "by_email".to_string(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: "email".to_string(),
+            index_type: IndexType::String,
+            unique: true,
+        }),
+    }];
+    let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    let turso = TursoRelational::in_memory().await.unwrap();
+    AsyncProjectionStore::ensure_shard(&turso, definition)
+        .await
+        .unwrap();
+    let items: Vec<_> = (0..47)
+        .map(|offset| {
+            let id = ItemId::mint(1, 0, offset);
+            let mut item = indexed_item(
+                id,
+                &format!("batch-key-{offset}"),
+                &format!("batch-{offset}@example.com"),
+            );
+            item.gate_keys = vec![format!("gate-{offset}")];
+            item
+        })
+        .collect();
+    let ids = items.iter().map(|item| item.item_id).collect::<Vec<_>>();
+    apply_turso(
+        &turso,
+        &shard,
+        0,
+        envelope(
+            "full-chunk-push",
+            QueueCommand::Push(PushCommand { items }),
+            ids,
+            1,
+        ),
+    )
+    .await
+    .unwrap();
+
+    for (table, expected) in [
+        ("pqueue_items", 47),
+        ("pqueue_item_gates", 47),
+        ("pqueue_item_index", 47),
+    ] {
+        assert_eq!(
+            turso
+                .query(format!("SELECT COUNT(*) FROM {table}"), vec![])
+                .await
+                .unwrap()[0]
+                .values,
+            vec![Value::Integer(expected)]
+        );
+    }
+    assert_eq!(
+        turso
+            .query(
+                "SELECT MIN(created_seq),MAX(created_seq) FROM pqueue_items",
+                vec![],
+            )
+            .await
+            .unwrap()[0]
+            .values,
+        vec![Value::Integer(0), Value::Integer(46)]
+    );
+}
+
+#[tokio::test]
 async fn group_cap_counts_existing_and_incoming_cohort_members() {
     let mut def = definition();
     def.max_eligible_group_size = Some(2);
