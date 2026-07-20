@@ -109,7 +109,7 @@ impl Inner {
         // ADR-009 / TD-003: read the durable assignment_epoch with the cursor and fence against the owner's
         // cached acquire-time epoch (`Some`) — a superseded owner is rejected `EpochFenced`, nothing applied.
         // `None` is the degenerate sole-owner path (no fence). Brings this data-plane path to parity with the
-        // `RelLogWriter::append` seam.
+        // typed relational commit seam.
         let (seq, epoch): (i64, i64) = st(tx
             .query_row(
                 "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",

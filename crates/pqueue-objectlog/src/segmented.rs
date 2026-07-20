@@ -1626,7 +1626,7 @@ enum BranchAttempt {
 // Internal fault-injection seam (TP-003 §3.10 AC-TXN-4)
 // ---------------------------------------------------------------------------
 //
-// The only commit-pipeline seam the engine exposes to a driver is `Backend::write` (append/apply as one
+// The only commit-pipeline seam the engine exposes to a driver is the typed raw commit (append/apply as one
 // unit), which cannot strike the instants INSIDE this substrate's own group-commit pipeline: durable
 // segment write, durable manifest CAS commit, durable epoch-fence commit (owner reassignment), and durable
 // snapshot write are all internal to `SegmentedObjectLog::seal` / `acquire_epoch` / `write_snapshot`. This
@@ -1636,7 +1636,7 @@ enum BranchAttempt {
 // documented as an unreachable gap.
 
 /// The object-log-internal commit-pipeline instants a test can strike (TP-003 §3.10 AC-TXN-4). Each
-/// variant names a point strictly INSIDE the durable pipeline that the public `Backend::write` seam cannot
+/// variant names a point strictly INSIDE the durable pipeline that the public typed commit seam cannot
 /// reach because it treats a whole `append` (or `acquire_epoch`/`write_snapshot`) as one opaque call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultCutPoint {

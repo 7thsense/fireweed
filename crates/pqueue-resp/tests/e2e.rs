@@ -15,8 +15,8 @@ use pqueue_core::{
 use pqueue_engine::Clock;
 use pqueue_engine::{
     Backend, ClaimedItem, CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore,
-    EngineError, FenceLeaseCommand, LogWriter, PayloadUpdate, ProjectionRead, ProjectionWriter,
-    QueueCommand, QueueKey, UpdateFieldsPort,
+    EngineError, FenceLeaseCommand, PayloadUpdate, ProjectionRead, QueueCommand, QueueKey,
+    RawCommitRequest, UpdateFieldsPort,
 };
 use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend};
 use pqueue_resp::{RespBackend, SystemClock, serve};
@@ -71,13 +71,7 @@ async fn fence(backend: &ComposedMemoryBackend, id: &str) {
     let sk = shard();
     let epoch = backend.current_epoch(&sk).await.unwrap();
     backend
-        .write(
-            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-                let pos = lw.append(&sk, std::slice::from_ref(&env), epoch)?;
-                pw.apply(&pos, std::slice::from_ref(&env))?;
-                Ok(())
-            },
-        )
+        .commit_raw(RawCommitRequest::new(sk, vec![env], epoch))
         .await
         .unwrap();
 }
@@ -523,35 +517,6 @@ impl LyingClaimedViewBackend {
         Self {
             inner: Arc::new(inner),
         }
-    }
-}
-
-impl pqueue_engine::Backend for LyingClaimedViewBackend {
-    fn durability_class(&self) -> pqueue_engine::DurabilityClass {
-        self.inner.durability_class()
-    }
-
-    fn supports_gates(&self) -> bool {
-        self.inner.supports_gates()
-    }
-
-    fn commit_capabilities(&self) -> pqueue_engine::CommitCapabilities {
-        self.inner.commit_capabilities()
-    }
-
-    fn write<R, F>(
-        &self,
-        f: F,
-    ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<R>> + Send
-    where
-        F: FnOnce(
-                &mut dyn pqueue_engine::LogWriter,
-                &mut dyn pqueue_engine::ProjectionWriter,
-            ) -> pqueue_engine::EngineResult<R>
-            + Send,
-        R: Send,
-    {
-        self.inner.write(f)
     }
 }
 

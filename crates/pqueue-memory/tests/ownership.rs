@@ -9,9 +9,8 @@
 use pqueue_conformance::{envelope, qdef, shard};
 use pqueue_core::{OwnerId, UtcTimestamp};
 use pqueue_engine::{
-    Backend, ControlPlaneStore, EngineError, EngineResult, InMemoryControlPlane, LogWriter,
-    OwnershipOutcome, PauseQueueCommand, ProjectionWriter, QueueCommand, QueueControlPlane,
-    acquire_and_fence,
+    Backend, ControlPlaneStore, EngineError, EngineResult, InMemoryControlPlane, OwnershipOutcome,
+    PauseQueueCommand, QueueCommand, QueueControlPlane, RawCommitRequest, acquire_and_fence,
 };
 use pqueue_memory::{ComposedMemoryBackend, composed_memory_backend};
 
@@ -22,20 +21,15 @@ fn owner(s: &str) -> OwnerId {
     OwnerId::new(s).unwrap()
 }
 
-/// Append `PauseQueue` under `expected_epoch` through the atomic write UoW; returns the fence outcome.
+/// Append `PauseQueue` under `expected_epoch` through the typed raw commit; returns the fence outcome.
 async fn append_at(b: &ComposedMemoryBackend, epoch: u64) -> EngineResult<()> {
     let env = envelope(
         QueueCommand::PauseQueue(PauseQueueCommand::default()),
         vec![],
     );
-    b.write(
-        move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-            let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        },
-    )
-    .await
+    b.commit_raw(RawCommitRequest::new(shard(), vec![env], epoch))
+        .await
+        .map(|_| ())
 }
 
 /// `acquire_and_fence` advances the durable storage fence on acquire, so once a NEW owner takes over (after

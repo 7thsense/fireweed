@@ -16,7 +16,7 @@
 //!    the library facade (`Pqueue::push`/`claim`/`ack`/etc.) and the RESP server wiring
 //!    (`OwnershipRuntime::expected_epoch_for_write`) supply the owner's cached `fence_epoch` from the
 //!    [`OwnedSession`] — so a SUPERSEDED owner's claim/push/finalize is `EpochFenced` at commit time, not
-//!    just the raw `LogWriter::append` seam. Backend implementations (compose.rs, sqlite/relational/apply.rs,
+//!    just the typed raw-commit seam. Backend implementations (compose.rs, sqlite/relational/apply.rs,
 //!    segmented writer, etc.) check `expected_epoch.is_some_and(|e| e != current_epoch)` inside the atomic
 //!    unit of work before applying anything. `None` is the degenerate sole-owner path (never self-fence).
 //!    Tests `claim_fences_superseded_owner_epoch`, `push_fences_superseded_owner_epoch`, and

@@ -680,11 +680,11 @@ async fn commit_cohort_expired(b: &SqliteRelationalBackend, group: &str, now: Ut
         created_at: now,
     };
     let epoch = b.current_epoch(&shard()).await.unwrap();
-    b.write(move |lw, pw| {
-        let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
-        pw.apply(&pos, std::slice::from_ref(&env))?;
-        Ok(())
-    })
+    b.commit_raw(pqueue_engine::RawCommitRequest::new(
+        shard(),
+        vec![env],
+        epoch,
+    ))
     .await
     .unwrap();
 }

@@ -65,14 +65,13 @@ use pqueue_engine::{
     ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision,
     IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
-    LogWriter, PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionStore,
-    ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
-    QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
-    RequestOutcome, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
-    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
-    validate_purge_force,
+    PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionStore, PurgeItemsCommand,
+    PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
+    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, RequestOutcome, SnapshotRef, SnapshotStore,
+    TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
+    validate_gate_command, validate_gate_push, validate_purge_force,
 };
 use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 
@@ -224,8 +223,8 @@ struct SegmentRecord {
 /// projection).
 ///
 /// Enforces the eventual-apply class ban on the atomic XDEL+XADD upsert (Invariant 2) at the SINGLE
-/// durable chokepoint both write paths funnel through (`commit_locked` and `Backend::write` →
-/// `ObjLogWriter`): a `ReplacePending` command is refused with `Unavailable` BEFORE any object is
+/// durable chokepoint both write paths funnel through (`commit_locked` and the typed raw commit): a
+/// `ReplacePending` command is refused with `Unavailable` BEFORE any object is
 /// written, so the ban holds at the write path, not just the `replace_if_pending` port.
 fn append_segment(
     root: &Path,
@@ -777,15 +776,15 @@ impl ObjectLogBackend {
 }
 
 // ---------------------------------------------------------------------------
-// UoW writer views (Backend::write)
+// Typed raw commit helpers
 // ---------------------------------------------------------------------------
 
-struct ObjLogWriter {
+struct ObjLogTxn {
     root: PathBuf,
     segment_config: ObjectLogSegmentConfig,
 }
 
-impl LogWriter for ObjLogWriter {
+impl ObjLogTxn {
     fn append(
         &mut self,
         shard: &QueueKey,
@@ -803,11 +802,11 @@ impl LogWriter for ObjLogWriter {
     }
 }
 
-struct ObjProjectionWriter<'a> {
+struct ObjProjectionTxn<'a> {
     projections: &'a mut HashMap<QueueKey, ProjectionData>,
 }
 
-impl ProjectionWriter for ObjProjectionWriter<'_> {
+impl ObjProjectionTxn<'_> {
     fn apply(
         &mut self,
         positions: &[CommandPosition],
@@ -832,15 +831,19 @@ impl Backend for ObjectLogBackend {
         DurabilityClass::EventualApply
     }
 
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        request: pqueue_engine::RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
         // The log-writer needs only `root` (writes objects to the filesystem); the projection-writer
         // needs only the `projections` map. Disjoint, so the borrow checker is satisfied by destructuring
         // — the log side gets a cheap `PathBuf` clone, the projection side a `&mut` to its map.
-        let result = {
+        let result = (|| {
+            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            if fault == pqueue_engine::RawCommitFault::BeforeAppend {
+                return Err(EngineError::Invalid("fault-injection: kill before append"));
+            }
             let mut guard = self.inner.lock().expect("objectlog poisoned");
             let Inner {
                 root,
@@ -848,13 +851,17 @@ impl Backend for ObjectLogBackend {
                 segment_config,
                 ..
             } = &mut *guard;
-            let mut lw = ObjLogWriter {
+            let positions = ObjLogTxn {
                 root: root.clone(),
                 segment_config: *segment_config,
-            };
-            let mut pw = ObjProjectionWriter { projections };
-            f(&mut lw, &mut pw)
-        };
+            }
+            .append(&shard, &commands, expected_epoch)?;
+            if fault == pqueue_engine::RawCommitFault::AfterAppendBeforeApply {
+                return Ok(pqueue_engine::RawCommitOutcome::appended(positions));
+            }
+            ObjProjectionTxn { projections }.apply(&positions, &commands)?;
+            Ok(pqueue_engine::RawCommitOutcome::applied(positions))
+        })();
         std::future::ready(result)
     }
 }
@@ -1261,7 +1268,7 @@ impl ReclaimPort for ObjectLogBackend {
             // Per-queue and FENCED (unlike the global `ReclaimDriver::tick`, which passes the degenerate
             // None path). Objectlog's `commit_locked`/`append_segment` stamp the queue's current durable
             // epoch but do NOT validate an `expected_epoch` (the TD-003 reject lives at the
-            // `ObjLogWriter::append` seam, not in the data-plane fast path). So replicate that seam's fence
+            // typed raw-commit seam, not in the data-plane fast path). So replicate that seam's fence
             // rule inline BEFORE the durable object write: `Some(e)` that is not the current durable epoch
             // is a superseded owner → reject `EpochFenced`, nothing appended; `None` is the degenerate
             // sole-owner path (stamp current, never fence).
@@ -1766,73 +1773,61 @@ impl SnapshotStore for ObjectLogBackend {
 impl HistoricalProjectionRead for ObjectLogBackend {
     type AsOfProjection = InMemoryProjection;
 
-    fn current_position(
-        &self,
-        shard: &QueueKey,
-    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
-        let result =
-            (|| futures::executor::block_on(self.high_water(shard))?.ok_or(EngineError::NotFound))(
-            );
-        std::future::ready(result)
+    async fn current_position(&self, shard: &QueueKey) -> EngineResult<CommandPosition> {
+        self.high_water(shard).await?.ok_or(EngineError::NotFound)
     }
 
-    fn read_as_of<T, F>(
+    async fn read_as_of<T, F>(
         &self,
         shard: &QueueKey,
         position: CommandPosition,
         query: F,
-    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    ) -> EngineResult<T>
     where
         T: Send,
         F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
     {
-        let result = (|| {
-            let definition = {
-                let g = self.inner.lock().expect("poisoned");
-                g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
-            };
-            let snapshot_ref =
-                futures::executor::block_on(self.snapshot_at_or_before(shard, &position))?;
-            let snapshot = match snapshot_ref.as_ref() {
-                Some(snapshot_ref) => Some(futures::executor::block_on(
-                    self.read_snapshot(snapshot_ref),
-                )?),
-                None => None,
-            };
-            let mut as_of = InMemoryProjection::new();
-            as_of.ensure_shard(&definition)?;
-            if let Some(snapshot) = snapshot {
-                let image = ProjectionImage::from_bytes(&snapshot.payload)?;
-                as_of.hydrate_shard(&definition, image)?;
+        let definition = {
+            let g = self.inner.lock().expect("poisoned");
+            g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
+        };
+        let snapshot_ref = self.snapshot_at_or_before(shard, &position).await?;
+        let snapshot = match snapshot_ref.as_ref() {
+            Some(snapshot_ref) => Some(self.read_snapshot(snapshot_ref).await?),
+            None => None,
+        };
+        let mut as_of = InMemoryProjection::new();
+        as_of.ensure_shard(&definition)?;
+        if let Some(snapshot) = snapshot {
+            let image = ProjectionImage::from_bytes(&snapshot.payload)?;
+            as_of.hydrate_shard(&definition, image)?;
+        }
+        let mut from = snapshot_ref.map(|s| s.position);
+        loop {
+            let page = self.read_from(shard, from.clone(), 8192).await?;
+            if page.entries.is_empty() {
+                break;
             }
-            let mut from = snapshot_ref.map(|s| s.position);
-            loop {
-                let page = futures::executor::block_on(self.read_from(shard, from.clone(), 8192))?;
-                if page.entries.is_empty() {
+            let mut positions = Vec::new();
+            let mut envelopes = Vec::new();
+            let mut reached_target = false;
+            for (entry_position, env) in page.entries {
+                if entry_position == position || entry_position.precedes(&position) {
+                    positions.push(entry_position.clone());
+                    envelopes.push(env);
+                } else {
+                    reached_target = true;
                     break;
                 }
-                let mut positions = Vec::new();
-                let mut envelopes = Vec::new();
-                let mut reached_target = false;
-                for (entry_position, env) in page.entries {
-                    if entry_position == position || entry_position.precedes(&position) {
-                        positions.push(entry_position.clone());
-                        envelopes.push(env);
-                    } else {
-                        reached_target = true;
-                        break;
-                    }
-                }
-                if !positions.is_empty() {
-                    as_of.apply_borrowed(&positions, &envelopes)?;
-                }
-                if reached_target || page.next.is_none() {
-                    break;
-                }
-                from = page.next;
             }
-            query(&as_of)
-        })();
-        std::future::ready(result)
+            if !positions.is_empty() {
+                as_of.apply_borrowed(&positions, &envelopes)?;
+            }
+            if reached_target || page.next.is_none() {
+                break;
+            }
+            from = page.next;
+        }
+        query(&as_of)
     }
 }

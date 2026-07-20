@@ -178,13 +178,14 @@ fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
         | QueueCommand::PauseQueue(_)
         | QueueCommand::ResumeQueue
         | QueueCommand::PurgeItems(_)
-        | QueueCommand::SetGates(_) => {}
+        | QueueCommand::SetGates(_)
+        | QueueCommand::WriteSideRecords(_)
+        | QueueCommand::AdvanceInstanceFence(_) => {}
         QueueCommand::Push(_)
         | QueueCommand::CohortClaim(_)
         | QueueCommand::CohortRenewLease(_)
         | QueueCommand::CohortFinalize(_)
         | QueueCommand::CohortExpired(_) => {}
-        _ => return Err(EngineError::Unavailable),
     }
     Ok(())
 }
@@ -2241,6 +2242,40 @@ async fn apply_owned(
                         .map_err(storage)?;
                 }
             }
+            QueueCommand::WriteSideRecords(command) => {
+                for record in &command.records {
+                    transaction
+                        .execute(
+                            "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                             VALUES (?1,?2,?3,?4) ON CONFLICT(tenant_id,queue_id,key) \
+                             DO UPDATE SET payload=excluded.payload",
+                            vec![
+                                Value::Text(tenant.clone()),
+                                Value::Text(queue.clone()),
+                                Value::Blob(record.key.clone()),
+                                Value::Blob(record.payload.to_vec()),
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
+                }
+            }
+            QueueCommand::AdvanceInstanceFence(command) => {
+                transaction
+                    .execute(
+                        "INSERT INTO pqueue_instance_fences (tenant_id,queue_id,instance_key,fence) \
+                         VALUES (?1,?2,?3,?4) ON CONFLICT(tenant_id,queue_id,instance_key) \
+                         DO UPDATE SET fence=excluded.fence",
+                        vec![
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                            Value::Blob(command.instance_key.clone()),
+                            Value::Integer(i64::try_from(command.next).map_err(storage)?),
+                        ],
+                    )
+                    .await
+                    .map_err(storage)?;
+            }
             QueueCommand::PurgeItems(purge) => {
                 if !purge.item_ids.is_empty() {
                     let groups =
@@ -2324,7 +2359,6 @@ async fn apply_owned(
                     }
                 }
             }
-            _ => unreachable!("validated minimal command set"),
         }
 
         let next = incoming
@@ -3332,5 +3366,186 @@ impl AsyncProjectionStore for TursoRelational {
                 .map(|row| serde_json::from_str(&text(&row.values[0])?).map_err(storage))
                 .collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod deterministic_cancellation_tests {
+    use std::future;
+    use std::sync::Arc;
+
+    use pqueue_conformance::{envelope, item, qdef, ts};
+    use pqueue_core::{BodyHash, ItemId, ItemState, RequestId};
+    use pqueue_engine::{
+        AsyncProjectionStore, CommandPosition, IdempotencyDecision, PushCommand, PushFingerprint,
+        QueueCommand, QueueKey, RequestOutcome, push_items_fingerprint_sha256,
+    };
+    use tokio::sync::oneshot;
+
+    use super::TursoRelational;
+
+    fn replayable_push(
+        shard: &QueueKey,
+        id: ItemId,
+        sequence: u64,
+        request_id: &str,
+        item_count: usize,
+    ) -> (
+        CommandPosition,
+        pqueue_engine::CommandEnvelope,
+        RequestId,
+        PushFingerprint,
+    ) {
+        let items = (0..item_count)
+            .map(|offset| {
+                item(
+                    &id.as_u64().saturating_add(offset as u64).to_string(),
+                    &format!("cancel-key-{id}-{offset}"),
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let ids = items.iter().map(|item| item.item_id).collect::<Vec<_>>();
+        let fingerprint = PushFingerprint {
+            canonical_sha256: push_items_fingerprint_sha256(&items).unwrap(),
+            legacy_body_hash: BodyHash(7),
+        };
+        let request_id = RequestId::new(request_id).unwrap();
+        let mut command = envelope(QueueCommand::Push(PushCommand { items }), ids.clone());
+        command.request_id = Some(request_id.clone());
+        command.request_fingerprint = Some(fingerprint.legacy_body_hash.0);
+        command.request_outcome = Some(RequestOutcome::Push { item_ids: ids });
+        (
+            CommandPosition::new(shard.clone(), 0, sequence),
+            command,
+            request_id,
+            fingerprint,
+        )
+    }
+
+    async fn replay(
+        store: &TursoRelational,
+        shard: &QueueKey,
+        request_id: RequestId,
+        fingerprint: PushFingerprint,
+    ) -> IdempotencyDecision<Vec<ItemId>> {
+        AsyncProjectionStore::push_idempotency(store, shard.clone(), request_id, fingerprint, ts(1))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_started_and_resolved_cancellation_cuts_do_not_strand_writer_or_outcome() {
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let store = Arc::new(TursoRelational::in_memory().await.unwrap());
+        AsyncProjectionStore::ensure_shard(store.as_ref(), definition)
+            .await
+            .unwrap();
+
+        // Queued cut: the writer is held before the apply future can start a transaction.
+        let guard = store.writer.lock().await;
+        let queued_id = ItemId::new("401").unwrap();
+        let (position, command, request_id, fingerprint) =
+            replayable_push(&shard, queued_id, 0, "queued-cut", 1);
+        let queued_store = Arc::clone(&store);
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let queued = tokio::spawn(async move {
+            entered_tx.send(()).unwrap();
+            AsyncProjectionStore::apply_live(queued_store.as_ref(), vec![position], vec![command])
+                .await
+        });
+        entered_rx.await.unwrap();
+        tokio::task::yield_now().await;
+        queued.abort();
+        assert!(queued.await.unwrap_err().is_cancelled());
+        drop(guard);
+        assert_eq!(
+            AsyncProjectionStore::item_state(store.as_ref(), shard.clone(), queued_id)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            replay(store.as_ref(), &shard, request_id, fingerprint).await,
+            IdempotencyDecision::Proceed
+        ));
+
+        // Started cut: wait until apply owns the writer, then abort while a deliberately large transaction
+        // is being staged. The driver rolls back or finishes atomically; either outcome is replayable.
+        let started_id = ItemId::new("500").unwrap();
+        let (position, command, request_id, fingerprint) =
+            replayable_push(&shard, started_id, 0, "started-cut", 512);
+        let started_store = Arc::clone(&store);
+        let started = tokio::spawn(async move {
+            AsyncProjectionStore::apply_live(started_store.as_ref(), vec![position], vec![command])
+                .await
+        });
+        while store.writer.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+        started.abort();
+        let _ = started.await;
+        let state = AsyncProjectionStore::item_state(store.as_ref(), shard.clone(), started_id)
+            .await
+            .unwrap();
+        match state {
+            None => assert!(matches!(
+                replay(store.as_ref(), &shard, request_id, fingerprint).await,
+                IdempotencyDecision::Proceed
+            )),
+            Some(ItemState::Pending) => assert!(matches!(
+                replay(store.as_ref(), &shard, request_id, fingerprint).await,
+                IdempotencyDecision::Replay(_)
+            )),
+            other => panic!("unexpected started-cut state: {other:?}"),
+        }
+
+        let next = AsyncProjectionStore::recovery_high_water(store.as_ref(), shard.clone())
+            .await
+            .unwrap()
+            .map_or(0, |position| position.sequence + 1);
+        let resolved_id = ItemId::new("2000").unwrap();
+        let (position, command, request_id, fingerprint) =
+            replayable_push(&shard, resolved_id, next, "resolved-cut", 1);
+        let resolved_store = Arc::clone(&store);
+        let (resolved_tx, resolved_rx) = oneshot::channel();
+        let resolved = tokio::spawn(async move {
+            let result = AsyncProjectionStore::apply_live(
+                resolved_store.as_ref(),
+                vec![position],
+                vec![command],
+            )
+            .await;
+            resolved_tx.send(()).unwrap();
+            future::pending::<()>().await;
+            result
+        });
+        resolved_rx.await.unwrap();
+        resolved.abort();
+        assert!(resolved.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            AsyncProjectionStore::item_state(store.as_ref(), shard.clone(), resolved_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Pending)
+        );
+        assert!(matches!(
+            replay(store.as_ref(), &shard, request_id.clone(), fingerprint).await,
+            IdempotencyDecision::Replay(_)
+        ));
+        assert!(matches!(
+            replay(
+                store.as_ref(),
+                &shard,
+                request_id,
+                PushFingerprint {
+                    canonical_sha256: [0xff; 32],
+                    legacy_body_hash: BodyHash(u64::MAX),
+                },
+            )
+            .await,
+            IdempotencyDecision::Conflict
+        ));
     }
 }

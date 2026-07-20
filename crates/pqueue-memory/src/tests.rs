@@ -366,8 +366,8 @@ async fn distinct_node_ids_never_collide_on_concurrent_push() {
 async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
     use pqueue_conformance::{envelope, qdef, qkey, shard, ts};
     use pqueue_engine::{
-        Backend, ControlPlaneStore, EngineError, LogWriter, ProjectionRead, ProjectionWriter,
-        PushPort, PushSpec, QueueCommand, SetGatesCommand,
+        Backend, ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueCommand,
+        RawCommitRequest, SetGatesCommand,
     };
 
     let b = composed_memory_backend();
@@ -397,13 +397,7 @@ async fn gate_bearing_push_and_raw_setgates_are_rejected_before_commit() {
     );
     let epoch = b.current_epoch(&shard()).await.unwrap();
     let err = b
-        .write(
-            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-                let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
-                pw.apply(&pos, std::slice::from_ref(&env))?;
-                Ok(())
-            },
-        )
+        .commit_raw(RawCommitRequest::new(shard(), vec![env], epoch))
         .await
         .unwrap_err();
     assert_eq!(err, EngineError::Unavailable);

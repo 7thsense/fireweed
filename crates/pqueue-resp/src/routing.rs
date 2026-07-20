@@ -24,7 +24,7 @@
 //! Bounded-stale reads (a deposed-but-not-yet-renewed owner serving a read from its frozen projection) are a
 //! server-runtime CACHING behavior — this decision, given a FRESH `resolve_queue_owner`, is authoritative
 //! (a non-owner redirects). "Misrouted write fenced" is the BQ-20 epoch fence: even if stale routing slips a
-//! write to a deposed owner, `LogWriter::append` rejects the non-current epoch. Routing + fence together are
+//! write to a deposed owner, the typed commit rejects the non-current epoch. Routing + fence together are
 //! AC-ROUTE-1.
 
 use pqueue_core::OwnerId;

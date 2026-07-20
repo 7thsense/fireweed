@@ -930,7 +930,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
 
 #[cfg(feature = "turso-projection")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn objectlog_turso_profile_runs_lifecycle_reads_and_reopens() {
+async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log() {
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-profile");
     let config = SegmentConfig::new(1, 5).unwrap();
     let item_id = {
@@ -989,6 +989,7 @@ async fn objectlog_turso_profile_runs_lifecycle_reads_and_reopens() {
         ids[0]
     };
 
+    std::fs::remove_file(&projection_path).unwrap();
     let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
     let reopened = ObjectLogTursoBackend::open_with_blob_store(store, &projection_path, config)
         .await

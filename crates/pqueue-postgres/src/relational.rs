@@ -67,15 +67,15 @@ use pqueue_engine::{
     CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity,
     DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand,
     FinalizeKind, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision,
-    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter,
-    PayloadUpdate, ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand,
-    PushFingerprint, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand,
-    SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema,
-    project_scopes, validate_api001_reserved_write_fields, validate_claim_compatibility,
-    validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
+    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView,
+    PayloadUpdate, ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushFingerprint,
+    PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort,
+    TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema, project_scopes,
+    validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogLineageIdentity,
@@ -1089,7 +1089,7 @@ impl Inner {
     /// `command`, and commit. Token-map mutations apply post-commit (a commit failure cannot desync them).
     ///
     /// BQ-20 NOTE: the data-plane fast path (every port routes here) is the in-process owner and is NOT
-    /// epoch-fenced — the TD-003 `assignment_epoch` fence lives at the [`PgRelLogWriter::append`] seam.
+    /// epoch-fenced — the TD-003 `assignment_epoch` fence lives at the typed commit seam.
     /// Caching + stamping the owner's `expected_epoch` on the hot path (so a stale owner's claim is fenced
     /// end-to-end) arrives with the ownership/lease identity layer (BQ-21).
     fn commit_command(
@@ -3334,19 +3334,16 @@ impl PostgresRelationalBackend {
     }
 }
 
-// --- Backend::write unit of work --------------------------------------------------------------------
+// --- Typed raw commit -------------------------------------------------------------------------------
 //
-// Unlike rusqlite (whose `Transaction` methods take `&self`, letting two writers share `&tx`), the sync
-// postgres `Transaction` methods take `&mut self`. The append-then-apply closure the conformance `commit`
-// helper drives needs both `&mut dyn LogWriter` and `&mut dyn ProjectionWriter` live at once, so the two
-// writers share the ONE transaction through a `RefCell` and `borrow_mut()` it at call time. The closure
-// calls them sequentially (append returns before apply runs), so the runtime borrows never overlap.
+// The sync postgres `Transaction` methods take `&mut self`, so append and apply share one transaction
+// through a `RefCell` and borrow it sequentially inside this backend-owned typed operation.
 
-struct PgRelLogWriter<'a, 'b> {
+struct PgRelLogTxn<'a, 'b> {
     tx: &'a RefCell<postgres::Transaction<'b>>,
 }
 
-impl LogWriter for PgRelLogWriter<'_, '_> {
+impl PgRelLogTxn<'_, '_> {
     fn append(
         &mut self,
         shard: &QueueKey,
@@ -3378,13 +3375,13 @@ impl LogWriter for PgRelLogWriter<'_, '_> {
     }
 }
 
-struct PgRelProjectionWriter<'a, 'b> {
+struct PgRelProjectionTxn<'a, 'b> {
     tx: &'a RefCell<postgres::Transaction<'b>>,
     queues: &'a HashMap<QueueKey, QueueDefinition>,
     token_ops: &'a mut Vec<TokenOp>,
 }
 
-impl ProjectionWriter for PgRelProjectionWriter<'_, '_> {
+impl PgRelProjectionTxn<'_, '_> {
     fn apply(
         &mut self,
         positions: &[CommandPosition],
@@ -3461,12 +3458,16 @@ impl Backend for PostgresRelationalBackend {
         }
     }
 
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        request: pqueue_engine::RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
         let result = (|| {
+            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            if fault == pqueue_engine::RawCommitFault::BeforeAppend {
+                return Err(EngineError::Invalid("fault-injection: kill before append"));
+            }
             let mut guard = self
                 .inner
                 .lock()
@@ -3479,18 +3480,24 @@ impl Backend for PostgresRelationalBackend {
             } = &mut *guard;
             let tx_cell = RefCell::new(st(client.transaction())?);
             let mut token_ops = Vec::new();
-            let r = {
-                let mut lw = PgRelLogWriter { tx: &tx_cell };
-                let mut pw = PgRelProjectionWriter {
+            let positions = {
+                let mut log_txn = PgRelLogTxn { tx: &tx_cell };
+                log_txn.append(&shard, &commands, expected_epoch)?
+            };
+            if fault == pqueue_engine::RawCommitFault::AfterAppendBeforeApply {
+                return Ok(pqueue_engine::RawCommitOutcome::appended(positions));
+            }
+            {
+                let mut projection_txn = PgRelProjectionTxn {
                     tx: &tx_cell,
                     queues,
                     token_ops: &mut token_ops,
                 };
-                f(&mut lw, &mut pw)?
-            };
+                projection_txn.apply(&positions, &commands)?;
+            }
             st(tx_cell.into_inner().commit())?;
             apply_token_ops(live_tokens, token_ops); // only after a durable commit
-            Ok(r)
+            Ok(pqueue_engine::RawCommitOutcome::applied(positions))
         })();
         std::future::ready(result)
     }

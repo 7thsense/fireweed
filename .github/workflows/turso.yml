@@ -1,0 +1,40 @@
+name: turso projection
+
+on:
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/pqueue-engine/**
+      - crates/pqueue-objectlog/**
+      - crates/pqueue-relational/**
+      - crates/pqueue-server/**
+      - crates/pqueue-turso/**
+      - .github/workflows/turso.yml
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/pqueue-engine/**
+      - crates/pqueue-objectlog/**
+      - crates/pqueue-relational/**
+      - crates/pqueue-server/**
+      - crates/pqueue-turso/**
+      - .github/workflows/turso.yml
+
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+      - run: cargo +1.92.0 fmt --all --check
+      - run: cargo +1.92.0 clippy -p pqueue-turso -p pqueue-server --all-targets --features pqueue-server/turso-projection -- -D warnings
+      - run: cargo +1.92.0 test -p pqueue-turso --features local
+      - run: cargo +1.92.0 test -p pqueue-server --features turso-projection --test server objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log -- --exact

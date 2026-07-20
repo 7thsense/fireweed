@@ -2,7 +2,7 @@
 //!
 //! Both combos assemble their composed backend the SAME off-reactor way as the already-wired
 //! postgres/inmemory combo (`crates/pqueue-server/tests/postgres_native.rs`): connect + recover inside
-//! `spawn_blocking`, then drive every port through the blocking-safe `BlockingBackend` wrapper so no sync
+//! `spawn_blocking`, then drive every port through the bounded whole-operation adapter so no sync
 //! postgres client call ever runs on a Tokio reactor worker (it would panic — "cannot start a runtime from
 //! within a runtime"). These tests boot the full server over each combo and drive push → claim → finalize
 //! over RESP, proving the composition survives a real `#[tokio::test]` runtime end to end.
@@ -124,7 +124,7 @@ async fn push_claim_finalize_over_resp(addr: std::net::SocketAddr) {
 }
 
 /// Composed postgres-log + sqlite-projection backend, driven end to end under a real Tokio runtime: proves
-/// the `spawn_blocking` + `BlockingBackend` boundary covers this combo the same way it covers postgres/inmemory
+/// the `spawn_blocking` + whole-operation boundary covers this combo the same way it covers postgres/inmemory
 /// (no reactor-thread panic on the sync postgres `connect`/`recover`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_sqlite_combo_runs_under_tokio() {

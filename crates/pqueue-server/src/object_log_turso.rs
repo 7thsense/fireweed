@@ -18,12 +18,11 @@ use pqueue_engine::{
     AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed,
     CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget,
-    IdGen, InProcessControlPlane, ItemView, LeaseView, LiveItemView, LogWriter,
-    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
-    ProjectionWriter, PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    QueueMetrics, RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
-    RenewLeasePort, RenewTarget, SeparateReplayCommit, TerminalEmissionMetrics, TickReport,
-    UpsertOutcome, UpsertPort,
+    IdGen, InProcessControlPlane, ItemView, LeaseView, LiveItemView, ProjectionClaimPlanner,
+    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, PurgePort, PushPort,
+    PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, RawCommitRequest,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, RenewTarget,
+    SeparateReplayCommit, TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_memory::SeqIdGen;
 use pqueue_objectlog::segmented::{BlobStore, SegmentConfig};
@@ -182,12 +181,16 @@ impl Backend for ObjectLogTursoBackend {
     fn durability_class(&self) -> DurabilityClass {
         DurabilityClass::EventualApply
     }
-    fn write<R, F>(&self, _f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        request: RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        async move {
+            self.engine.submit_commit(request).await.map_err(|error| {
+                EngineError::Storage(format!("async raw commit submission failed: {error:?}"))
+            })?
+        }
     }
 }
 

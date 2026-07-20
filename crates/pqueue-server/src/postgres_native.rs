@@ -9,19 +9,14 @@
 //! `Send + 'static` bound; the postgres backend already serializes its single connection behind an internal
 //! `Mutex`, so concurrent blocking tasks queue safely.
 //!
-//! The inner port bodies compute eagerly and return `std::future::ready` (the blocking happens when the
-//! method is *called*, not when its future is awaited), so inside `spawn_blocking` we drive that ready
-//! future to completion with [`futures::executor::block_on`] — off the Tokio reactor entirely.
+//! The inner sync port bodies compute before returning their immediately-resolved future. Inside
+//! `spawn_blocking` we poll that future once and reject a pending result as an adapter contract violation;
+//! no nested executor or runtime is entered.
 //!
-//! [`Backend::write`] is the one exception: its closure bound is `Send` but not `'static`, so it cannot be
-//! moved into `spawn_blocking`. It is also NOT on the RESP-driven hot path (the front uses the individual
-//! ports — push/claim/finalize/renew/reassign/purge/upsert/tick/control-plane/projection-read — never
-//! `Backend::write`). We run it on a fresh scoped OS thread ([`std::thread::scope`]) so the postgres
-//! client's internal runtime still starts cleanly (no `EnterGuard` on that thread); it is documented as the
-//! non-reactor-isolated path because it is never invoked by the server runtime.
-
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -29,11 +24,11 @@ use pqueue_core::{
     RequestId, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
-    CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort,
-    ItemView, LeaseView, LiveItemView, LogWriter, ProjectionRead, ProjectionWriter, PurgePort,
-    PushPort, PushSpec, QueueKey, QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
-    TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
+    ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
+    CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome, FinalizePort, ItemView,
+    LeaseView, LiveItemView, ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, QueueMetrics,
+    ReassignLeasePort, ReclaimDriver, RenewLeasePort, TerminalEmissionMetrics, TickReport,
+    UpsertOutcome, UpsertPort,
 };
 use pqueue_postgres::PostgresBackend;
 use pqueue_resp::RespBackend;
@@ -50,11 +45,20 @@ where
         .map_err(|e| EngineError::Storage(format!("postgres blocking task join failed: {e}")))?
 }
 
+fn resolve_eager<F: Future>(future: F) -> F::Output {
+    let mut future = Box::pin(future);
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("sync Postgres adapter returned a pending future"),
+    }
+}
+
 /// Blocking-safe `pqueue-server` wrapper around [`PostgresBackend`]: implements the full [`RespBackend`]
 /// port surface by delegating every call through [`spawn_blocking`](tokio::task::spawn_blocking).
 ///
 /// [`RespBackend`]: pqueue_resp::RespBackend
-pub struct BlockingBackend<B: Send + Sync + 'static> {
+pub struct PostgresWholeOperationAdapter<B: Send + Sync + 'static> {
     // `Option` so [`Drop`] can move the inner backend off the reactor (see the `Drop` impl). It is `Some`
     // for the wrapper's whole lifetime and only taken once, during drop. The `Send + Sync + 'static` bound
     // (always satisfied — `B` is a `RespBackend`) lets [`Drop`] move the inner `Arc<B>` onto a plain OS
@@ -64,10 +68,10 @@ pub struct BlockingBackend<B: Send + Sync + 'static> {
 
 /// Back-compat alias: the blocking wrapper around the monolithic [`PostgresBackend`]. The composition root
 /// now wraps the composed postgres backend ([`pqueue_postgres::ComposedPostgresBackend`]) in the same
-/// generic [`BlockingBackend`].
-pub type PostgresNativeBackend = BlockingBackend<PostgresBackend>;
+/// generic [`PostgresWholeOperationAdapter`].
+pub type PostgresNativeBackend = PostgresWholeOperationAdapter<PostgresBackend>;
 
-impl<B: RespBackend> BlockingBackend<B> {
+impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
     /// Wrap an already-constructed backend. The backend's `connect`/`with_node_id` must run on a non-reactor
     /// thread (the composition root connects inside `spawn_blocking`).
     pub fn new(inner: B) -> Self {
@@ -95,7 +99,7 @@ impl<B: RespBackend> BlockingBackend<B> {
     }
 }
 
-impl<B: Send + Sync + 'static> Drop for BlockingBackend<B> {
+impl<B: Send + Sync + 'static> Drop for PostgresWholeOperationAdapter<B> {
     fn drop(&mut self) {
         // The sync postgres `Client::drop` does a blocking `block_on` to close the connection. If the final
         // `Arc` drops on a Tokio worker thread that PANICS ("cannot start a runtime from within a runtime").
@@ -109,40 +113,7 @@ impl<B: Send + Sync + 'static> Drop for BlockingBackend<B> {
     }
 }
 
-impl<B: RespBackend> Backend for BlockingBackend<B> {
-    fn durability_class(&self) -> DurabilityClass {
-        self.backend().durability_class()
-    }
-
-    fn supports_gates(&self) -> bool {
-        self.backend().supports_gates()
-    }
-
-    fn commit_capabilities(&self) -> pqueue_engine::CommitCapabilities {
-        self.backend().commit_capabilities()
-    }
-
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
-    {
-        // `f` is `Send` but not `'static`, so it cannot move into `spawn_blocking`. `write` is never on the
-        // RESP-driven path; run it on a fresh scoped OS thread so the postgres client's internal runtime
-        // starts cleanly (no `EnterGuard`), accepting that the caller's thread is parked for the duration.
-        let inner = self.arc();
-        let result = std::thread::scope(|scope| {
-            scope
-                .spawn(move || futures::executor::block_on(inner.write(f)))
-                .join()
-                .map_err(|_| EngineError::Storage("postgres write worker panicked".into()))
-        })
-        .and_then(|r| r);
-        std::future::ready(result)
-    }
-}
-
-impl<B: RespBackend> PushPort for BlockingBackend<B> {
+impl<B: RespBackend> PushPort for PostgresWholeOperationAdapter<B> {
     fn push(
         &self,
         shard: &QueueKey,
@@ -152,9 +123,7 @@ impl<B: RespBackend> PushPort for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || {
-            futures::executor::block_on(inner.push(&shard, items, now, expected_epoch))
-        })
+        blocking(move || resolve_eager(inner.push(&shard, items, now, expected_epoch)))
     }
 
     fn push_with_request_id(
@@ -168,7 +137,7 @@ impl<B: RespBackend> PushPort for BlockingBackend<B> {
         let inner = self.arc();
         let shard = shard.clone();
         blocking(move || {
-            futures::executor::block_on(inner.push_with_request_id(
+            resolve_eager(inner.push_with_request_id(
                 &shard,
                 request_id,
                 items,
@@ -179,17 +148,17 @@ impl<B: RespBackend> PushPort for BlockingBackend<B> {
     }
 }
 
-impl<B: RespBackend> ClaimPort for BlockingBackend<B> {
+impl<B: RespBackend> ClaimPort for PostgresWholeOperationAdapter<B> {
     fn claim(
         &self,
         req: ClaimRequest,
     ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
         let inner = self.arc();
-        blocking(move || futures::executor::block_on(inner.claim(req)))
+        blocking(move || resolve_eager(inner.claim(req)))
     }
 }
 
-impl<B: RespBackend> UpsertPort for BlockingBackend<B> {
+impl<B: RespBackend> UpsertPort for PostgresWholeOperationAdapter<B> {
     #[allow(clippy::too_many_arguments)]
     fn replace_if_pending(
         &self,
@@ -209,7 +178,7 @@ impl<B: RespBackend> UpsertPort for BlockingBackend<B> {
         let shard = shard.clone();
         let client_item_key = client_item_key.clone();
         blocking(move || {
-            futures::executor::block_on(inner.replace_if_pending(
+            resolve_eager(inner.replace_if_pending(
                 &shard,
                 &client_item_key,
                 priority,
@@ -226,7 +195,7 @@ impl<B: RespBackend> UpsertPort for BlockingBackend<B> {
     }
 }
 
-impl<B: RespBackend> FinalizePort for BlockingBackend<B> {
+impl<B: RespBackend> FinalizePort for PostgresWholeOperationAdapter<B> {
     fn finalize(
         &self,
         shard: &QueueKey,
@@ -236,13 +205,11 @@ impl<B: RespBackend> FinalizePort for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || {
-            futures::executor::block_on(inner.finalize(&shard, outcomes, now, expected_epoch))
-        })
+        blocking(move || resolve_eager(inner.finalize(&shard, outcomes, now, expected_epoch)))
     }
 }
 
-impl<B: RespBackend> RenewLeasePort for BlockingBackend<B> {
+impl<B: RespBackend> RenewLeasePort for PostgresWholeOperationAdapter<B> {
     fn renew(
         &self,
         shard: &QueueKey,
@@ -254,18 +221,12 @@ impl<B: RespBackend> RenewLeasePort for BlockingBackend<B> {
         let inner = self.arc();
         let shard = shard.clone();
         blocking(move || {
-            futures::executor::block_on(inner.renew(
-                &shard,
-                item_ids,
-                new_lease_expires_at,
-                now,
-                expected_epoch,
-            ))
+            resolve_eager(inner.renew(&shard, item_ids, new_lease_expires_at, now, expected_epoch))
         })
     }
 }
 
-impl<B: RespBackend> ReassignLeasePort for BlockingBackend<B> {
+impl<B: RespBackend> ReassignLeasePort for PostgresWholeOperationAdapter<B> {
     fn reassign(
         &self,
         shard: &QueueKey,
@@ -278,7 +239,7 @@ impl<B: RespBackend> ReassignLeasePort for BlockingBackend<B> {
         let inner = self.arc();
         let shard = shard.clone();
         blocking(move || {
-            futures::executor::block_on(inner.reassign(
+            resolve_eager(inner.reassign(
                 &shard,
                 item_ids,
                 new_lease_token,
@@ -290,7 +251,7 @@ impl<B: RespBackend> ReassignLeasePort for BlockingBackend<B> {
     }
 }
 
-impl<B: RespBackend> PurgePort for BlockingBackend<B> {
+impl<B: RespBackend> PurgePort for PostgresWholeOperationAdapter<B> {
     fn purge(
         &self,
         shard: &QueueKey,
@@ -301,29 +262,27 @@ impl<B: RespBackend> PurgePort for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || {
-            futures::executor::block_on(inner.purge(&shard, item_ids, force, now, expected_epoch))
-        })
+        blocking(move || resolve_eager(inner.purge(&shard, item_ids, force, now, expected_epoch)))
     }
 }
 
-impl<B: RespBackend> ReclaimDriver for BlockingBackend<B> {
+impl<B: RespBackend> ReclaimDriver for PostgresWholeOperationAdapter<B> {
     fn tick(
         &self,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         let inner = self.arc();
-        blocking(move || futures::executor::block_on(inner.tick(now)))
+        blocking(move || resolve_eager(inner.tick(now)))
     }
 }
 
-impl<B: RespBackend> ControlPlaneStore for BlockingBackend<B> {
+impl<B: RespBackend> ControlPlaneStore for PostgresWholeOperationAdapter<B> {
     fn create_queue(
         &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         let inner = self.arc();
-        blocking(move || futures::executor::block_on(inner.create_queue(definition)))
+        blocking(move || resolve_eager(inner.create_queue(definition)))
     }
 
     fn queue_definition(
@@ -332,7 +291,7 @@ impl<B: RespBackend> ControlPlaneStore for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
         let inner = self.arc();
         let key = key.clone();
-        blocking(move || futures::executor::block_on(inner.queue_definition(&key)))
+        blocking(move || resolve_eager(inner.queue_definition(&key)))
     }
 
     fn list_queues(
@@ -341,7 +300,7 @@ impl<B: RespBackend> ControlPlaneStore for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
         let inner = self.arc();
         let tenant = tenant.clone();
-        blocking(move || futures::executor::block_on(inner.list_queues(&tenant)))
+        blocking(move || resolve_eager(inner.list_queues(&tenant)))
     }
 
     fn current_epoch(
@@ -350,7 +309,7 @@ impl<B: RespBackend> ControlPlaneStore for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || futures::executor::block_on(inner.current_epoch(&shard)))
+        blocking(move || resolve_eager(inner.current_epoch(&shard)))
     }
 
     fn acquire_epoch(
@@ -359,11 +318,11 @@ impl<B: RespBackend> ControlPlaneStore for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || futures::executor::block_on(inner.acquire_epoch(&shard)))
+        blocking(move || resolve_eager(inner.acquire_epoch(&shard)))
     }
 }
 
-impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
+impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
     fn select_eligible(
         &self,
         shard: &QueueKey,
@@ -372,7 +331,7 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || futures::executor::block_on(inner.select_eligible(&shard, now, limit)))
+        blocking(move || resolve_eager(inner.select_eligible(&shard, now, limit)))
     }
 
     fn peek(
@@ -382,7 +341,7 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemView>>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || futures::executor::block_on(inner.peek(&shard, limit)))
+        blocking(move || resolve_eager(inner.peek(&shard, limit)))
     }
 
     fn pending(
@@ -391,7 +350,7 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
         let inner = self.arc();
         let shard = shard.clone();
-        blocking(move || futures::executor::block_on(inner.pending(&shard)))
+        blocking(move || resolve_eager(inner.pending(&shard)))
     }
 
     fn claimed_view(
@@ -402,7 +361,7 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
         let inner = self.arc();
         let shard = shard.clone();
         let ids = ids.to_vec();
-        blocking(move || futures::executor::block_on(inner.claimed_view(&shard, &ids)))
+        blocking(move || resolve_eager(inner.claimed_view(&shard, &ids)))
     }
 
     fn live_items(
@@ -413,7 +372,7 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
         let inner = self.arc();
         let shard = shard.clone();
         let keys = keys.to_vec();
-        blocking(move || futures::executor::block_on(inner.live_items(&shard, &keys)))
+        blocking(move || resolve_eager(inner.live_items(&shard, &keys)))
     }
 
     fn metrics(
@@ -422,7 +381,7 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
     ) -> impl std::future::Future<Output = EngineResult<QueueMetrics>> + Send {
         let inner = self.arc();
         let queue = queue.clone();
-        blocking(move || futures::executor::block_on(inner.metrics(&queue)))
+        blocking(move || resolve_eager(inner.metrics(&queue)))
     }
 
     fn terminal_emission_metrics(
@@ -439,7 +398,7 @@ impl<B: RespBackend> ProjectionRead for BlockingBackend<B> {
         // inside so the delegated call still receives `Option<&CommandPosition>`.
         let emission_cursor = emission_cursor.cloned();
         blocking(move || {
-            futures::executor::block_on(inner.terminal_emission_metrics(
+            resolve_eager(inner.terminal_emission_metrics(
                 &shard,
                 now,
                 emit_change_records,

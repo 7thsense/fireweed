@@ -9,7 +9,7 @@
 //! the apply/eligibility/lease logic.
 //!
 //! `LogData` and `ProjectionData` are kept SEPARATE (not bundled) so a backend can hold them in
-//! disjoint maps and hand out `&mut dyn LogWriter` + `&mut dyn ProjectionWriter` simultaneously for the
+//! disjoint maps and apply backend-owned typed commits without exposing transaction borrows to callers.
 //! two-writer unit of work. The free [`commit`] couples them for the orchestration ports. The owning
 //! backend supplies the [`QueueKey`] (to stamp positions) and constructs each [`CommandEnvelope`] (so
 //! each backend keeps its own command-id scheme); everything else is here.
@@ -1208,7 +1208,7 @@ pub struct LogData {
 }
 
 impl LogData {
-    /// `LogWriter::append` — append `commands` to this shard's log under `expected_epoch`, advancing the
+    /// Typed commit append — append `commands` to this shard's log under `expected_epoch`, advancing the
     /// persisted high-water, returning the committed positions in order. TD-003 fencing rule: an
     /// `expected_epoch` that is not the log's current epoch is rejected with [`EngineError::EpochFenced`]
     /// (a stale owner), appending nothing.

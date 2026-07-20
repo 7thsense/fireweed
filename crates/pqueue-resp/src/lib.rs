@@ -17,10 +17,10 @@ use pqueue_core::{
     TenantId, UtcTimestamp, WorkerId,
 };
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError,
-    EngineResult, FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, LiveItemView,
-    ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver,
-    RenewLeasePort, UpsertOutcome, UpsertPort,
+    ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError, EngineResult,
+    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, LiveItemView, ProjectionRead,
+    PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
+    UpsertOutcome, UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -37,8 +37,7 @@ pub use routing::{RouteDecision, route};
 /// The backend capabilities the RESP front needs. A concrete backend (e.g. `MemoryBackend`) is
 /// injected by the composition root / tests; the adapter never names one (hexagonal).
 pub trait RespBackend:
-    Backend
-    + PushPort
+    PushPort
     + ClaimPort
     + UpsertPort
     + FinalizePort
@@ -54,8 +53,7 @@ pub trait RespBackend:
 {
 }
 impl<T> RespBackend for T where
-    T: Backend
-        + PushPort
+    T: PushPort
         + ClaimPort
         + UpsertPort
         + FinalizePort

@@ -11,6 +11,7 @@ use pqueue_engine::{
     CommandPosition, EngineError, EngineResult, FinalizeTarget, IdempotencyDecision,
     ProjectionStore, PushFingerprint, PushItem, QueueKey, RenewTarget,
 };
+use pqueue_projection::ProjectionImage;
 
 use crate::SqliteProjectionStore;
 
@@ -326,6 +327,12 @@ impl AsyncSqliteProjectionStore {
     pub async fn close_and_drain(&self) -> EngineResult<()> {
         self.close();
         self.actor.completion.wait().await
+    }
+
+    /// Export the complete durable serving image through the same whole-operation actor boundary.
+    pub async fn export_projection_image(&self, shard: QueueKey) -> EngineResult<ProjectionImage> {
+        self.execute(move |store| store.export_projection_image(&shard))
+            .await
     }
 }
 

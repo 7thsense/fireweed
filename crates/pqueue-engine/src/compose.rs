@@ -60,12 +60,12 @@ use crate::port::{
     CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery,
     CommitTransition, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery,
     FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView, LeaseView,
-    LiveItemView, LogRead, LogWriter, MaintenanceStopReason, MaintenanceSummary, ProjectionRead,
-    ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort, PushSpec, QueueMetrics,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
-    validate_api001_reserved_write_fields, validate_instance_fence,
+    LiveItemView, LogRead, MaintenanceStopReason, MaintenanceSummary, ProjectionRead,
+    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef,
+    SnapshotStore, TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, generate_query_lease_token, validate_api001_reserved_write_fields,
+    validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::sequenced_metadata::{AdvanceThenDelete, RetainedAddress, RetentionFloorClass};
@@ -651,7 +651,7 @@ pub trait ProjectionStore: Send {
     /// Materialize a shard's projection from its [`QueueDefinition`] (called from `create_queue`).
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()>;
 
-    /// Apply committed `commands` (at `positions`) to the projection — the [`ProjectionWriter::apply`]
+    /// Apply committed `commands` (at `positions`) to the projection.
     /// seam. The caller pre-validated, so this is infallible in practice.
     fn apply(
         &mut self,
@@ -1198,7 +1198,7 @@ const RETENTION_TRIM_SKEW_MARGIN_MS: i64 = 5_000;
 /// the [`ComposedBackend`] apply step — ABOVE the [`LogStore`] substrate, whose own internal cut points
 /// ([`crate`]-external `pqueue_objectlog::FaultCutPoint`) cannot reach them — so they need this seam.
 ///
-/// A commit's durable append (via [`LogWriter::append`]) has already returned `Ok` by the time the
+/// A commit's durable append has already returned `Ok` by the time the
 /// projection apply runs; these instants strike that apply:
 ///
 /// * [`ComposeFaultPoint::DuringProjectionApply`] — while applying the committed command to the projection,
@@ -2987,72 +2987,6 @@ fn recovery_from_outcome_entry(e: CommitOutcomeEntry) -> EntryRecovery {
 }
 
 // ---------------------------------------------------------------------------
-// UoW writer views (Backend::write) — disjoint borrows of log / projection
-// ---------------------------------------------------------------------------
-
-struct LogWriterView<'a, L> {
-    log: &'a mut L,
-    /// The composition's gate capability (the projection axis' `supports_gates`), so the raw-write append
-    /// path refuses gate-bearing commands on a non-gate backend exactly like the port write paths.
-    supports_gates: bool,
-    /// Admission is sampled under the composed UoW lock before log/projection are split. Each queue's
-    /// reservation is single-use, binding raw `Backend::write` to one admitted append batch per queue.
-    admissions: HashMap<QueueKey, EngineResult<()>>,
-    used_admissions: HashSet<QueueKey>,
-}
-
-impl<L: LogStore> LogWriter for LogWriterView<'_, L> {
-    fn append(
-        &mut self,
-        shard: &QueueKey,
-        commands: &[CommandEnvelope],
-        expected_epoch: u64,
-    ) -> EngineResult<Vec<CommandPosition>> {
-        if !self.used_admissions.insert(shard.clone()) {
-            return Err(EngineError::Unavailable);
-        }
-        self.admissions
-            .get(shard)
-            .cloned()
-            .unwrap_or(Err(EngineError::NotFound))?;
-        for env in commands {
-            validate_gate_command(self.supports_gates, &env.command)?;
-        }
-        self.log.append(shard, commands, expected_epoch)
-    }
-}
-
-struct ProjectionWriterView<'a, P> {
-    projection: &'a mut P,
-    /// Test-only composed-layer fault hook (TP-003 §3.10 AC-TXN-4), cloned once from the backend under the
-    /// unit-of-work lock. `None` in every production path.
-    fault_hook: Option<Arc<dyn ComposeFaultHook>>,
-}
-
-impl<P: ProjectionStore> ProjectionWriter for ProjectionWriterView<'_, P> {
-    fn apply(
-        &mut self,
-        positions: &[CommandPosition],
-        commands: &[CommandEnvelope],
-    ) -> EngineResult<()> {
-        // AC-TXN-4 composed cut point: strike WHILE applying the committed command to the projection, before
-        // it durably advances. The durable log append has already returned Ok, so a fault here leaves a
-        // durable-but-unapplied tail that recovery must replay exactly once.
-        if let Some(hook) = &self.fault_hook {
-            hook.fault_point(ComposeFaultPoint::DuringProjectionApply)?;
-        }
-        self.projection.apply_live(positions, commands)?;
-        // AC-TXN-4 composed cut point: the projection has applied + durably advanced; strike before the caller
-        // receives its success response. The in-process apply is discarded on drop; recovery replays the
-        // durable log to the same exactly-once projected state.
-        if let Some(hook) = &self.fault_hook {
-            hook.fault_point(ComposeFaultPoint::AfterApplyBeforeResponse)?;
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Backend
 // ---------------------------------------------------------------------------
 
@@ -3092,41 +3026,44 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
         }
     }
 
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
-    {
+    fn commit_raw(
+        &self,
+        request: crate::RawCommitRequest,
+    ) -> impl Future<Output = EngineResult<crate::RawCommitOutcome>> + Send {
         deferred(move || {
+            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            if fault == crate::RawCommitFault::BeforeAppend {
+                return Err(EngineError::Invalid("fault-injection: kill before append"));
+            }
             let fault_hook = self
                 .fault_hook
                 .lock()
                 .expect("compose fault hook poisoned")
                 .clone();
             let mut g = self.inner.lock().expect("composed backend poisoned");
-            let admission_keys: Vec<QueueKey> = g.known_shards.iter().cloned().collect();
-            let admissions = admission_keys
-                .into_iter()
-                .map(|shard| {
-                    let result = g.projection.admit_mutation(&shard);
-                    (shard, result)
-                })
-                .collect();
+            if !g.known_shards.contains(&shard) {
+                return Err(EngineError::NotFound);
+            }
+            g.projection.admit_mutation(&shard)?;
             let Inner {
                 log, projection, ..
             } = &mut *g;
             let supports_gates = projection.supports_gates();
-            let mut lw = LogWriterView {
-                log,
-                supports_gates,
-                admissions,
-                used_admissions: HashSet::new(),
-            };
-            let mut pw = ProjectionWriterView {
-                projection,
-                fault_hook,
-            };
-            f(&mut lw, &mut pw)
+            for env in &commands {
+                validate_gate_command(supports_gates, &env.command)?;
+            }
+            let positions = log.append(&shard, &commands, expected_epoch)?;
+            if fault == crate::RawCommitFault::AfterAppendBeforeApply {
+                return Ok(crate::RawCommitOutcome::appended(positions));
+            }
+            if let Some(hook) = &fault_hook {
+                hook.fault_point(ComposeFaultPoint::DuringProjectionApply)?;
+            }
+            projection.apply_live(&positions, &commands)?;
+            if let Some(hook) = &fault_hook {
+                hook.fault_point(ComposeFaultPoint::AfterApplyBeforeResponse)?;
+            }
+            Ok(crate::RawCommitOutcome::applied(positions))
         })
     }
 }
@@ -3363,7 +3300,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
     /// the counter/command-id identically) — WITHOUT committing it or recording the in-memory idempotency
     /// entry. Mirrors the non-group-commit body of `push_with_request_id` (validate gate/entity, reserve,
     /// `build_push_items`, `index_validate_push`) up to (but not including) the commit + record. The caller
-    /// drives the returned envelope through [`crate::Backend::write`] with a mid-pipeline fault so the
+    /// drives the returned envelope through [`crate::Backend::commit_raw`] with a mid-pipeline fault so the
     /// `AfterAppendBeforeApply` cut point carries a real `request_id` (recovery rebuilds the push-idempotency
     /// map from this durable envelope on reopen — see `rebuild_push_idempotency_from_log`).
     fn build_request_id_push_envelope(
@@ -3414,7 +3351,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
     /// real commit path now stamps) + the `Finalize` command over the consumed input — WITHOUT committing it
     /// or recording the in-memory `commit_idempotency` entry. Validates the `claim_ref` exactly like the real
     /// path (a `commit_validate` rejection here matches it). The caller drives the returned envelope through
-    /// [`crate::Backend::write`] with a mid-pipeline fault so the `AfterAppendBeforeApply` cut point is
+    /// [`crate::Backend::commit_raw`] with a mid-pipeline fault so the `AfterAppendBeforeApply` cut point is
     /// `request_id`-bearing for `commit_transition`; recovery rebuilds the commit-idempotency cache from this
     /// durable envelope on reopen (see `rebuild_commit_idempotency_from_log`).
     fn build_request_id_commit_envelope(
@@ -6181,11 +6118,7 @@ mod ordered_tests {
                 .reject_admission = true;
         });
         let envelope = pause_envelope(false, "raw-admission", ItemId::new("1").unwrap(), ts(0));
-        let write_shard = shard.clone();
-        let mut write = backend.write(move |log, _projection| {
-            log.append(&write_shard, &[envelope], 0)?;
-            Ok(())
-        });
+        let mut write = backend.commit_raw(crate::RawCommitRequest::new(shard, vec![envelope], 0));
         assert!(matches!(
             poll_once(&mut write),
             Poll::Ready(Err(EngineError::Unavailable))
@@ -6358,13 +6291,12 @@ mod ordered_tests {
         drop(push_one);
 
         let pause_env = pause_envelope(true, "pause-intake", ItemId::from_u64(1), ts(1));
-        let pause_shard = shard.clone();
-        let mut pause_write = backend.write(move |lw, pw| {
-            let pos = lw.append(&pause_shard, std::slice::from_ref(&pause_env), 0)?;
-            pw.apply(&pos, std::slice::from_ref(&pause_env))?;
-            Ok(())
-        });
-        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
+        let mut pause_write = backend.commit_raw(crate::RawCommitRequest::new(
+            shard.clone(),
+            vec![pause_env],
+            0,
+        ));
+        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(_))));
 
         let mut paused_claim = backend.claim(ClaimRequest {
             eligibility_time: None,
@@ -6391,9 +6323,9 @@ mod ordered_tests {
             "intake-blocking pause rejects pushes"
         );
 
-        let resume_shard = shard.clone();
-        let mut resume_write = backend.write(move |lw, pw| {
-            let env = CommandEnvelope {
+        let mut resume_write = backend.commit_raw(crate::RawCommitRequest::new(
+            shard.clone(),
+            vec![CommandEnvelope {
                 command_id: CommandId::new("resume-1"),
                 request_id: None,
                 request_fingerprint: None,
@@ -6402,12 +6334,10 @@ mod ordered_tests {
                 command: QueueCommand::ResumeQueue,
                 checksum: CommandChecksum(0),
                 created_at: ts(3),
-            };
-            let pos = lw.append(&resume_shard, std::slice::from_ref(&env), 0)?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        });
-        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
+            }],
+            0,
+        ));
+        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(_))));
 
         let mut resumed_claim = backend.claim(ClaimRequest {
             eligibility_time: None,
@@ -6435,13 +6365,12 @@ mod ordered_tests {
             Poll::Ready(Ok(_))
         ));
         let pause_env = pause_envelope(false, "pause-plain", ItemId::from_u64(1), ts(0));
-        let plain_pause_shard = plain_shard.clone();
-        let mut pause_write = plain_backend.write(move |lw, pw| {
-            let pos = lw.append(&plain_pause_shard, std::slice::from_ref(&pause_env), 0)?;
-            pw.apply(&pos, std::slice::from_ref(&pause_env))?;
-            Ok(())
-        });
-        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
+        let mut pause_write = plain_backend.commit_raw(crate::RawCommitRequest::new(
+            plain_shard.clone(),
+            vec![pause_env],
+            0,
+        ));
+        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(_))));
 
         let mut landed_push =
             plain_backend.push(&plain_shard, vec![PushSpec::default()], ts(1), None);
@@ -6474,13 +6403,12 @@ mod ordered_tests {
             checksum: CommandChecksum(0),
             created_at: ts(2),
         };
-        let plain_resume_shard = plain_shard.clone();
-        let mut resume_write = plain_backend.write(move |lw, pw| {
-            let pos = lw.append(&plain_resume_shard, std::slice::from_ref(&resume_env), 0)?;
-            pw.apply(&pos, std::slice::from_ref(&resume_env))?;
-            Ok(())
-        });
-        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
+        let mut resume_write = plain_backend.commit_raw(crate::RawCommitRequest::new(
+            plain_shard.clone(),
+            vec![resume_env],
+            0,
+        ));
+        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(_))));
 
         let mut resumed_plain_claim = plain_backend.claim(ClaimRequest {
             eligibility_time: None,
@@ -6534,13 +6462,12 @@ mod ordered_tests {
         );
 
         let pause_env = pause_envelope(true, "pause-lease", ItemId::from_u64(1), ts(1));
-        let lease_pause_shard = shard.clone();
-        let mut pause_write = backend.write(move |lw, pw| {
-            let pos = lw.append(&lease_pause_shard, std::slice::from_ref(&pause_env), 0)?;
-            pw.apply(&pos, std::slice::from_ref(&pause_env))?;
-            Ok(())
-        });
-        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(()))));
+        let mut pause_write = backend.commit_raw(crate::RawCommitRequest::new(
+            shard.clone(),
+            vec![pause_env],
+            0,
+        ));
+        assert!(matches!(poll_once(&mut pause_write), Poll::Ready(Ok(_))));
 
         let mut reclaim = backend.reclaim_expired(&shard, None, ts(20), None);
         assert!(matches!(poll_once(&mut reclaim), Poll::Ready(Ok(ids)) if ids == vec![first_id]));
@@ -6572,13 +6499,12 @@ mod ordered_tests {
             checksum: CommandChecksum(0),
             created_at: ts(21),
         };
-        let resume_lease_shard = shard.clone();
-        let mut resume_write = backend.write(move |lw, pw| {
-            let pos = lw.append(&resume_lease_shard, std::slice::from_ref(&resume_env), 0)?;
-            pw.apply(&pos, std::slice::from_ref(&resume_env))?;
-            Ok(())
-        });
-        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(()))));
+        let mut resume_write = backend.commit_raw(crate::RawCommitRequest::new(
+            shard.clone(),
+            vec![resume_env],
+            0,
+        ));
+        assert!(matches!(poll_once(&mut resume_write), Poll::Ready(Ok(_))));
 
         let mut resumed_claim = backend.claim(ClaimRequest {
             eligibility_time: None,
