@@ -26,9 +26,9 @@ use pqueue_core::{
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome, FinalizePort, ItemView,
-    LeaseView, LiveItemView, ProjectionRead, PurgePort, PushPort, PushSpec, QueueKey, QueueMetrics,
-    ReassignLeasePort, ReclaimDriver, RenewLeasePort, TerminalEmissionMetrics, TickReport,
-    UpsertOutcome, UpsertPort,
+    LeaseView, LiveItemView, PendingPage, PendingSummary, ProjectionRead, PurgePort, PushPort,
+    PushSpec, QueueKey, QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
+    TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
 };
 use pqueue_postgres::PostgresBackend;
 use pqueue_resp::RespBackend;
@@ -685,6 +685,66 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
         let queue = shard.clone();
         let inner = self.arc_for(&queue);
         self.dispatch(queue, move || async move { inner.pending(&shard).await })
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        let shard = shard.clone();
+        let queue = shard.clone();
+        let inner = self.arc_for(&queue);
+        self.dispatch(
+            queue,
+            move || async move { inner.pending_summary(&shard).await },
+        )
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        let shard = shard.clone();
+        let queue = shard.clone();
+        let inner = self.arc_for(&queue);
+        self.dispatch(queue, move || async move {
+            inner.pending_page(&shard, start, limit).await
+        })
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let shard = shard.clone();
+        let queue = shard.clone();
+        let inner = self.arc_for(&queue);
+        let consumer = consumer.cloned();
+        self.dispatch(queue, move || async move {
+            inner
+                .pending_range(&shard, start, end, consumer.as_ref(), limit)
+                .await
+        })
+    }
+
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let shard = shard.clone();
+        let queue = shard.clone();
+        let inner = self.arc_for(&queue);
+        let ids = ids.to_vec();
+        self.dispatch(queue, move || async move {
+            inner.pending_by_ids(&shard, &ids).await
+        })
     }
 
     fn claimed_view(

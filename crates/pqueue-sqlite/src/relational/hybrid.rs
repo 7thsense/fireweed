@@ -4,15 +4,16 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse,
-    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, MetricsByQueryRequest,
-    QueryCapabilityFlags, QueueDefinition, RangeScanRequest, RangeScanResponse, UtcTimestamp,
+    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken,
+    MetricsByQueryRequest, QueryCapabilityFlags, QueueDefinition, RangeScanRequest,
+    RangeScanResponse, UtcTimestamp,
 };
 use pqueue_engine::TerminalEmissionMetrics;
 use pqueue_engine::{AsOfProjectionStore, ProjectionSnapshot, ProjectionStore};
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogLineageIdentity, PushItem,
-    QueueCounters, QueueKey, QueueMetrics,
+    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogLineageIdentity, PendingPage,
+    PendingSummary, PushItem, QueueCounters, QueueKey, QueueMetrics,
 };
 use pqueue_projection::InMemoryProjection;
 
@@ -1174,6 +1175,39 @@ impl ProjectionStore for HybridProjectionStore {
     fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
         self.require_hydrated(shard)?;
         self.memory.pending(shard)
+    }
+
+    fn pending_summary(&self, shard: &QueueKey) -> EngineResult<PendingSummary> {
+        self.require_hydrated(shard)?;
+        self.memory.pending_summary(shard)
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        self.require_hydrated(shard)?;
+        self.memory.pending_page(shard, start, limit)
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        self.require_hydrated(shard)?;
+        self.memory
+            .pending_range(shard, start, end, consumer, limit)
+    }
+
+    fn pending_by_ids(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<LeaseView>> {
+        self.require_hydrated(shard)?;
+        self.memory.pending_by_ids(shard, ids)
     }
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {

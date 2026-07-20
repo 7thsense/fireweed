@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use axon_esf::CompiledSchema;
@@ -32,7 +32,8 @@ pub(crate) struct Inner {
     pub(crate) claim_scan_default_fifo: HashMap<QueueKey, bool>,
     /// Ephemeral live lease tokens (cleartext is never persisted; only the hash is). Lost on reopen.
     /// Item ids are queue-local, so the queue key is part of the identity here as it is in SQLite.
-    pub(crate) live_tokens: HashMap<QueueKey, HashMap<ItemId, LeaseToken>>,
+    pub(crate) live_tokens: HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
+    pub(crate) live_tokens_by_consumer: HashMap<QueueKey, HashMap<LeaseToken, BTreeSet<ItemId>>>,
 }
 
 impl Inner {
@@ -103,6 +104,7 @@ impl Inner {
             claim_scan_hints,
             claim_scan_default_fifo,
             live_tokens,
+            live_tokens_by_consumer,
             ..
         } = self;
         let (t, q) = parts(shard);
@@ -141,7 +143,7 @@ impl Inner {
             params![t, q, seq + 1],
         ))?;
         st(tx.commit())?;
-        apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
+        apply_token_ops(live_tokens, live_tokens_by_consumer, token_ops); // only after a durable commit (F4)
         Ok(())
     }
 }
@@ -619,19 +621,50 @@ pub(crate) enum TokenOp {
 }
 
 pub(crate) fn apply_token_ops(
-    live_tokens: &mut HashMap<QueueKey, HashMap<ItemId, LeaseToken>>,
+    live_tokens: &mut HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
+    by_consumer: &mut HashMap<QueueKey, HashMap<LeaseToken, BTreeSet<ItemId>>>,
     ops: Vec<TokenOp>,
 ) {
     for op in ops {
         match op {
             TokenOp::Set(shard, id, token) => {
-                live_tokens.entry(shard).or_default().insert(id, token);
+                if let Some(old) = live_tokens
+                    .entry(shard.clone())
+                    .or_default()
+                    .insert(id, token.clone())
+                    && let Some(consumers) = by_consumer.get_mut(&shard)
+                    && let Some(ids) = consumers.get_mut(&old)
+                {
+                    ids.remove(&id);
+                    if ids.is_empty() {
+                        consumers.remove(&old);
+                    }
+                }
+                by_consumer
+                    .entry(shard)
+                    .or_default()
+                    .entry(token)
+                    .or_default()
+                    .insert(id);
             }
             TokenOp::Clear(shard, id) => {
                 if let Some(tokens) = live_tokens.get_mut(&shard) {
-                    tokens.remove(&id);
+                    let old = tokens.remove(&id);
                     if tokens.is_empty() {
                         live_tokens.remove(&shard);
+                    }
+                    if let Some(old) = old
+                        && let Some(consumers) = by_consumer.get_mut(&shard)
+                    {
+                        if let Some(ids) = consumers.get_mut(&old) {
+                            ids.remove(&id);
+                            if ids.is_empty() {
+                                consumers.remove(&old);
+                            }
+                        }
+                        if consumers.is_empty() {
+                            by_consumer.remove(&shard);
+                        }
                     }
                 }
             }

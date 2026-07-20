@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -172,7 +172,8 @@ pub struct SchemaReport {
 pub struct TursoRelational {
     database: Database,
     pub(crate) writer: Arc<Mutex<Connection>>,
-    pub(crate) live_tokens: Arc<Mutex<HashMap<(QueueKey, ItemId), LeaseToken>>>,
+    pub(crate) live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
+    pub(crate) live_tokens_by_consumer: Arc<Mutex<BTreeMap<(QueueKey, String, ItemId), ()>>>,
     config: TursoConfig,
 }
 
@@ -197,7 +198,8 @@ impl TursoRelational {
         Ok(Self {
             database,
             writer: Arc::new(Mutex::new(writer)),
-            live_tokens: Arc::new(Mutex::new(HashMap::new())),
+            live_tokens: Arc::new(Mutex::new(BTreeMap::new())),
+            live_tokens_by_consumer: Arc::new(Mutex::new(BTreeMap::new())),
             config,
         })
     }

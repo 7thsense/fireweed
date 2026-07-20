@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -7,8 +7,8 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ActiveScope, ClaimCompatibility, ClaimedItem, CohortLeaseTarget, DiscoveryGranularity,
-    EngineError, EngineResult, ItemView, LeaseView, LiveItemView, QueueKey, QueueMetrics,
-    project_scopes,
+    EngineError, EngineResult, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary,
+    QueueKey, QueueMetrics, project_scopes,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -789,7 +789,7 @@ pub(crate) fn discover_active_scopes_sql(
 /// keeps only the hash); a leased item whose token was lost to a reopen is omitted.
 pub(crate) fn pending_sql(
     conn: &Connection,
-    live_tokens: &HashMap<QueueKey, HashMap<ItemId, LeaseToken>>,
+    live_tokens: &HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
     shard: &QueueKey,
 ) -> EngineResult<Vec<LeaseView>> {
     let (t, q) = parts(shard);
@@ -824,6 +824,139 @@ pub(crate) fn pending_sql(
         });
     }
     Ok(out)
+}
+
+pub(crate) fn pending_summary_sql(
+    live_tokens: &HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
+    by_consumer: &HashMap<QueueKey, HashMap<LeaseToken, BTreeSet<ItemId>>>,
+    shard: &QueueKey,
+) -> PendingSummary {
+    let tokens = live_tokens.get(shard);
+    let mut consumers = by_consumer
+        .get(shard)
+        .into_iter()
+        .flat_map(|consumers| consumers.iter())
+        .map(|(token, ids)| (token.clone(), ids.len() as u64))
+        .collect::<Vec<_>>();
+    consumers.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
+    PendingSummary {
+        count: tokens.map_or(0, |tokens| tokens.len() as u64),
+        min_id: tokens.and_then(|tokens| tokens.first_key_value().map(|(id, _)| *id)),
+        max_id: tokens.and_then(|tokens| tokens.last_key_value().map(|(id, _)| *id)),
+        consumers,
+    }
+}
+
+/// One indexed, batched lookup for the request's ids (chunked only at SQLite's
+/// bind-variable ceiling). The result preserves request order and never scans
+/// or materializes unrelated PEL rows.
+pub(crate) fn pending_by_ids_sql(
+    conn: &Connection,
+    live_tokens: &HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
+    shard: &QueueKey,
+    ids: &[ItemId],
+) -> EngineResult<Vec<LeaseView>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (t, q) = parts(shard);
+    let id_strings: Vec<_> = ids.iter().map(ToString::to_string).collect();
+    let mut rows = HashMap::<String, (i64, i64)>::with_capacity(ids.len());
+    for chunk in id_strings.chunks(SQLITE_BATCH) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+             WHERE tenant_id=? AND queue_id=? AND lifecycle_state='Leased' \
+             AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
+        );
+        let mut values = vec![Value::Text(t.clone()), Value::Text(q.clone())];
+        values.extend(chunk.iter().cloned().map(Value::Text));
+        let mut statement = st(conn.prepare(&sql))?;
+        let mapped = st(statement.query_map(params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?),
+            ))
+        }))?;
+        for row in mapped {
+            let (id, data) = st(row)?;
+            rows.insert(id, data);
+        }
+    }
+    let tokens = live_tokens.get(shard);
+    let mut out = Vec::with_capacity(ids.len());
+    for (id, id_string) in ids.iter().zip(id_strings) {
+        let (Some(token), Some((expires, attempts))) = (
+            tokens.and_then(|tokens| tokens.get(id)),
+            rows.get(&id_string),
+        ) else {
+            continue;
+        };
+        out.push(LeaseView {
+            item_id: *id,
+            lease_token: token.clone(),
+            lease_expires_at: nanos_ts(*expires),
+            attempt_count: *attempts as u32,
+        });
+    }
+    Ok(out)
+}
+
+pub(crate) fn pending_page_sql(
+    conn: &Connection,
+    live_tokens: &HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
+    shard: &QueueKey,
+    start: Option<ItemId>,
+    limit: usize,
+) -> EngineResult<PendingPage> {
+    use std::ops::Bound::{Included, Unbounded};
+    let Some(tokens) = live_tokens.get(shard) else {
+        return Ok(PendingPage::default());
+    };
+    let ids: Vec<_> = tokens
+        .range((start.map_or(Unbounded, Included), Unbounded))
+        .map(|(id, _)| *id)
+        .take(limit.saturating_add(1))
+        .collect();
+    let next = ids.get(limit).copied();
+    let entries = pending_by_ids_sql(conn, live_tokens, shard, &ids[..ids.len().min(limit)])?;
+    Ok(PendingPage { entries, next })
+}
+
+pub(crate) fn pending_range_sql(
+    conn: &Connection,
+    live_tokens: &HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
+    by_consumer: &HashMap<QueueKey, HashMap<LeaseToken, BTreeSet<ItemId>>>,
+    shard: &QueueKey,
+    start: Option<ItemId>,
+    end: Option<ItemId>,
+    consumer: Option<&LeaseToken>,
+    limit: usize,
+) -> EngineResult<Vec<LeaseView>> {
+    use std::ops::Bound::{Included, Unbounded};
+    let bounds = (
+        start.map_or(Unbounded, Included),
+        end.map_or(Unbounded, Included),
+    );
+    let ids: Vec<_> = if let Some(consumer) = consumer {
+        by_consumer
+            .get(shard)
+            .and_then(|consumers| consumers.get(consumer))
+            .into_iter()
+            .flat_map(|ids| ids.range(bounds))
+            .copied()
+            .take(limit)
+            .collect()
+    } else {
+        live_tokens
+            .get(shard)
+            .into_iter()
+            .flat_map(|tokens| tokens.range(bounds))
+            .map(|(id, _)| *id)
+            .take(limit)
+            .collect()
+    };
+    pending_by_ids_sql(conn, live_tokens, shard, &ids)
 }
 
 /// Render the rich claimed-item shape for specific leased `ids` (the claim/XCLAIM reply). The lease token

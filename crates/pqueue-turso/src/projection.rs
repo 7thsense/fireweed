@@ -13,9 +13,9 @@ use pqueue_core::{
 use pqueue_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CohortLeaseTarget,
     CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind, FinalizeTarget,
-    IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate, PushFingerprint,
-    PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget, RequestOutcome,
-    RichClaimSelection, TerminalEmissionMetrics,
+    IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage,
+    PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget,
+    RequestOutcome, RichClaimSelection, TerminalEmissionMetrics,
 };
 use pqueue_relational::{
     async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
@@ -1147,7 +1147,8 @@ async fn definition_in_transaction(
 
 async fn apply_owned(
     writer: Arc<Mutex<Connection>>,
-    live_tokens: Arc<Mutex<HashMap<(QueueKey, ItemId), LeaseToken>>>,
+    live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
+    live_tokens_by_consumer: Arc<Mutex<BTreeMap<(QueueKey, String, ItemId), ()>>>,
     positions: Vec<CommandPosition>,
     commands: Vec<CommandEnvelope>,
     enforce_live_epoch: bool,
@@ -2389,13 +2390,19 @@ async fn apply_owned(
     }
     transaction.commit().await.map_err(storage)?;
     let mut tokens = live_tokens.lock().await;
+    let mut by_consumer = live_tokens_by_consumer.lock().await;
     for op in token_ops {
         match op {
             TokenOp::Set(shard, item, token) => {
-                tokens.insert((shard, item), token);
+                if let Some(old) = tokens.insert((shard.clone(), item), token.clone()) {
+                    by_consumer.remove(&(shard.clone(), old.as_str().to_string(), item));
+                }
+                by_consumer.insert((shard, token.as_str().to_string(), item), ());
             }
             TokenOp::Clear(shard, item) => {
-                tokens.remove(&(shard, item));
+                if let Some(old) = tokens.remove(&(shard.clone(), item)) {
+                    by_consumer.remove(&(shard, old.as_str().to_string(), item));
+                }
             }
         }
     }
@@ -2484,6 +2491,146 @@ impl TursoRelational {
             });
         }
         Ok(pending)
+    }
+
+    pub async fn server_pending_summary(&self, shard: &QueueKey) -> EngineResult<PendingSummary> {
+        use std::ops::Bound::Included;
+        let tokens = self.live_tokens.lock().await;
+        let bounds = (
+            Included((shard.clone(), ItemId::from_u64(0))),
+            Included((shard.clone(), ItemId::from_u64(u64::MAX))),
+        );
+        let mut count = 0u64;
+        let mut min_id = None;
+        let mut max_id = None;
+        let mut consumers = BTreeMap::<String, (LeaseToken, u64)>::new();
+        for ((_, id), token) in tokens.range(bounds) {
+            count += 1;
+            min_id.get_or_insert(*id);
+            max_id = Some(*id);
+            let entry = consumers
+                .entry(token.as_str().to_string())
+                .or_insert_with(|| (token.clone(), 0));
+            entry.1 += 1;
+        }
+        Ok(PendingSummary {
+            count,
+            min_id,
+            max_id,
+            consumers: consumers.into_values().collect(),
+        })
+    }
+
+    pub async fn server_pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> EngineResult<Vec<LeaseView>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = HashMap::<ItemId, (i64, u32)>::with_capacity(ids.len());
+        for chunk in ids.chunks(500) {
+            let placeholders = (0..chunk.len())
+                .map(|index| format!("?{}", index + 3))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT item_id,lease_expires_at,retry_count FROM pqueue_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
+                 AND lease_expires_at IS NOT NULL AND item_id IN ({placeholders})"
+            );
+            let mut params = vec![
+                shard.tenant_id.as_str().to_string().into(),
+                shard.queue_id.as_str().to_string().into(),
+            ];
+            params.extend(chunk.iter().map(|id| id.to_string().into()));
+            for row in self.query(sql, params).await.map_err(storage)? {
+                let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+                by_id.insert(
+                    id,
+                    (
+                        integer(&row.values[1])?,
+                        nonnegative_u32(integer(&row.values[2])?, "retry_count")?,
+                    ),
+                );
+            }
+        }
+        let tokens = self.live_tokens.lock().await;
+        Ok(ids
+            .iter()
+            .filter_map(|id| {
+                let token = tokens.get(&(shard.clone(), *id))?;
+                let (expires, attempts) = by_id.get(id)?;
+                Some(LeaseView {
+                    item_id: *id,
+                    lease_token: token.clone(),
+                    lease_expires_at: nanos_ts(*expires),
+                    attempt_count: *attempts,
+                })
+            })
+            .collect())
+    }
+
+    pub async fn server_pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        use std::ops::Bound::Included;
+        let tokens = self.live_tokens.lock().await;
+        let ids: Vec<_> = tokens
+            .range((
+                Included((shard.clone(), start.unwrap_or_else(|| ItemId::from_u64(0)))),
+                Included((shard.clone(), ItemId::from_u64(u64::MAX))),
+            ))
+            .map(|((_, id), _)| *id)
+            .take(limit.saturating_add(1))
+            .collect();
+        drop(tokens);
+        let next = ids.get(limit).copied();
+        let entries = self
+            .server_pending_by_ids(shard, &ids[..ids.len().min(limit)])
+            .await?;
+        Ok(PendingPage { entries, next })
+    }
+
+    pub async fn server_pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        use std::ops::Bound::Included;
+        let start = start.unwrap_or_else(|| ItemId::from_u64(0));
+        let end = end.unwrap_or_else(|| ItemId::from_u64(u64::MAX));
+        let ids: Vec<_> = if let Some(consumer) = consumer {
+            self.live_tokens_by_consumer
+                .lock()
+                .await
+                .range((
+                    Included((shard.clone(), consumer.as_str().to_string(), start)),
+                    Included((shard.clone(), consumer.as_str().to_string(), end)),
+                ))
+                .map(|((_, _, id), _)| *id)
+                .take(limit)
+                .collect()
+        } else {
+            self.live_tokens
+                .lock()
+                .await
+                .range((
+                    Included((shard.clone(), start)),
+                    Included((shard.clone(), end)),
+                ))
+                .map(|((_, id), _)| *id)
+                .take(limit)
+                .collect()
+        };
+        self.server_pending_by_ids(shard, &ids).await
     }
 
     pub async fn server_live_items(
@@ -2973,7 +3120,8 @@ impl AsyncProjectionStore for TursoRelational {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let writer = self.writer.clone();
         let tokens = self.live_tokens.clone();
-        async move { apply_owned(writer, tokens, positions, commands, true).await }
+        let by_consumer = self.live_tokens_by_consumer.clone();
+        async move { apply_owned(writer, tokens, by_consumer, positions, commands, true).await }
     }
 
     fn apply_recovery(
@@ -2983,7 +3131,8 @@ impl AsyncProjectionStore for TursoRelational {
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let writer = self.writer.clone();
         let tokens = self.live_tokens.clone();
-        async move { apply_owned(writer, tokens, positions, commands, false).await }
+        let by_consumer = self.live_tokens_by_consumer.clone();
+        async move { apply_owned(writer, tokens, by_consumer, positions, commands, false).await }
     }
 
     fn eligible_candidates(
@@ -3217,42 +3366,57 @@ impl AsyncProjectionStore for TursoRelational {
     ) -> impl std::future::Future<Output = EngineResult<Vec<ClaimedItem>>> + Send {
         async move {
             let tokens = self.live_tokens.lock().await.clone();
+            let visible: Vec<_> = ids
+                .iter()
+                .copied()
+                .filter(|id| tokens.contains_key(&(shard.clone(), *id)))
+                .collect();
+            let mut item_rows = HashMap::<ItemId, Vec<Value>>::with_capacity(visible.len());
+            let mut gate_keys = HashMap::<ItemId, Vec<String>>::new();
+            for chunk in visible.chunks(500) {
+                let placeholders = (0..chunk.len())
+                    .map(|index| format!("?{}", index + 3))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let mut params = vec![
+                    shard.tenant_id.as_str().to_string().into(),
+                    shard.queue_id.as_str().to_string().into(),
+                ];
+                params.extend(chunk.iter().map(|id| id.to_string().into()));
+                let item_sql = format!(
+                    "SELECT item_id,client_item_key,item_version,priority,group_key,not_before,\
+                     lease_expires_at,retry_count,payload,fields,metadata FROM pqueue_items \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Leased' \
+                     AND item_id IN ({placeholders})"
+                );
+                for row in self
+                    .query(item_sql, params.clone())
+                    .await
+                    .map_err(storage)?
+                {
+                    let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+                    item_rows.insert(id, row.values[1..].to_vec());
+                }
+                let gate_sql = format!(
+                    "SELECT item_id,gate_key FROM pqueue_item_gates WHERE tenant_id=?1 \
+                     AND queue_id=?2 AND item_id IN ({placeholders}) ORDER BY item_id,gate_key"
+                );
+                for row in self.query(gate_sql, params).await.map_err(storage)? {
+                    let id = ItemId::new(text(&row.values[0])?).map_err(storage)?;
+                    gate_keys.entry(id).or_default().push(text(&row.values[1])?);
+                }
+            }
             let mut claimed = Vec::new();
             for id in ids {
                 let Some(token) = tokens.get(&(shard.clone(), id)).cloned() else {
                     continue;
                 };
-                let rows = self
-                    .query(
-                        sql::SELECT_CLAIMED_ITEM,
-                        vec![
-                            shard.tenant_id.as_str().to_string().into(),
-                            shard.queue_id.as_str().to_string().into(),
-                            id.to_string().into(),
-                        ],
-                    )
-                    .await
-                    .map_err(storage)?;
-                let Some(row) = rows.first() else { continue };
-                let values = &row.values;
+                let Some(values) = item_rows.get(&id) else {
+                    continue;
+                };
                 let Some(expires) = optional_integer(&values[5])? else {
                     continue;
                 };
-                let gate_rows = self
-                    .query(
-                        sql::SELECT_ITEM_GATES,
-                        vec![
-                            shard.tenant_id.as_str().to_string().into(),
-                            shard.queue_id.as_str().to_string().into(),
-                            id.to_string().into(),
-                        ],
-                    )
-                    .await
-                    .map_err(storage)?;
-                let gate_keys = gate_rows
-                    .iter()
-                    .map(|row| text(&row.values[0]))
-                    .collect::<EngineResult<Vec<_>>>()?;
                 claimed.push(ClaimedItem {
                     item_id: id,
                     client_item_key: ClientItemKey::new(text(&values[0])?).map_err(storage)?,
@@ -3269,7 +3433,7 @@ impl AsyncProjectionStore for TursoRelational {
                     payload: optional_blob(&values[7])?.map(Bytes::from),
                     fields: fields_from_json(text(&values[8])?)?,
                     metadata: metadata_from_json(text(&values[9])?)?,
-                    gate_keys,
+                    gate_keys: gate_keys.remove(&id).unwrap_or_default(),
                 });
             }
             Ok(claimed)

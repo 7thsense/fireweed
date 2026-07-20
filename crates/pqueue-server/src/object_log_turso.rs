@@ -18,11 +18,12 @@ use pqueue_engine::{
     AsyncPushRequest, AsyncRenewRequest, Backend, ClaimPort, ClaimRequest, Claimed,
     CommandChecksum, CommandEnvelope, CommandPosition, ControlPlaneStore, CreateQueueOutcome,
     DurabilityClass, EngineError, EngineResult, FinalizeOutcome, FinalizePort, FinalizeTarget,
-    IdGen, InProcessControlPlane, ItemView, LeaseView, LiveItemView, ProjectionClaimPlanner,
-    ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead, PurgePort, PushPort,
-    PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, RawCommitRequest,
-    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, RenewTarget,
-    SeparateReplayCommit, TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
+    IdGen, InProcessControlPlane, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary,
+    ProjectionClaimPlanner, ProjectionLifecyclePlanner, ProjectionPushPlanner, ProjectionRead,
+    PurgePort, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    RawCommitRequest, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
+    RenewTarget, SeparateReplayCommit, TerminalEmissionMetrics, TickReport, UpsertOutcome,
+    UpsertPort,
 };
 use pqueue_memory::SeqIdGen;
 use pqueue_objectlog::segmented::{BlobStore, SegmentConfig};
@@ -507,6 +508,38 @@ impl ProjectionRead for ObjectLogTursoBackend {
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
         self.projection.server_pending(shard)
+    }
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        self.projection.server_pending_summary(shard)
+    }
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        self.projection.server_pending_page(shard, start, limit)
+    }
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        self.projection
+            .server_pending_range(shard, start, end, consumer, limit)
+    }
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        self.projection.server_pending_by_ids(shard, ids)
     }
     fn claimed_view(
         &self,

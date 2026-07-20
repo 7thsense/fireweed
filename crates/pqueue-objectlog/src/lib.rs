@@ -65,13 +65,14 @@ use pqueue_engine::{
     ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision,
     IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogRead,
-    PayloadUpdate, ProjectionRead, ProjectionSnapshot, ProjectionStore, PurgeItemsCommand,
-    PurgePort, PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache,
-    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, RequestOutcome, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
-    validate_gate_command, validate_gate_push, validate_purge_force,
+    PayloadUpdate, PendingPage, PendingSummary, ProjectionRead, ProjectionSnapshot,
+    ProjectionStore, PurgeItemsCommand, PurgePort, PushCommand, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
+    RequestOutcome, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items, compile_entity_schema,
+    require_item_level_claim, validate_entity, validate_gate_command, validate_gate_push,
+    validate_purge_force,
 };
 use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
 
@@ -1531,6 +1532,69 @@ impl ProjectionRead for ObjectLogBackend {
             let g = self.inner.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            Ok(g.projections
+                .get(shard)
+                .ok_or(EngineError::NotFound)?
+                .pending_summary())
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            Ok(g.projections
+                .get(shard)
+                .ok_or(EngineError::NotFound)?
+                .pending_page(start, limit))
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            Ok(g.projections
+                .get(shard)
+                .ok_or(EngineError::NotFound)?
+                .pending_range(start, end, consumer, limit))
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let g = self.inner.lock().expect("poisoned");
+            Ok(g.projections
+                .get(shard)
+                .ok_or(EngineError::NotFound)?
+                .pending_by_ids(ids))
         })();
         std::future::ready(result)
     }

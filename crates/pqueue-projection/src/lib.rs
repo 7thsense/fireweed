@@ -3382,8 +3382,8 @@ mod tests {
         ClaimRequest, CommandChecksum, CommandId, ComposedBackend, ControlPlaneStore,
         FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, InProcessControlPlane,
         LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand, PushCommand, PushPort,
-        PushSpec, QueueKey, QueueMetrics, RenewLeaseCommand, SideRecord, UpdateFieldsCommand,
-        WriteSideRecordsCommand,
+        PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand, RenewLeaseCommand, SideRecord,
+        UpdateFieldsCommand, WriteSideRecordsCommand,
     };
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -3984,6 +3984,73 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(projection.metrics(), QueueMetrics::default());
+    }
+
+    #[test]
+    fn pel_indexes_bound_pages_and_requested_id_reads() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        let items: Vec<_> = (1..=1_000)
+            .map(|id| push_item(&id.to_string(), &format!("k{id}"), id))
+            .collect();
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand { items }))
+            .unwrap();
+        let first = LeaseToken::new("consumer-a").unwrap();
+        let second = LeaseToken::new("consumer-b").unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: (1..=1_000).map(ItemId::from_u64).collect(),
+                lease_token: first.clone(),
+                lease_expires_at: ts(60),
+                worker_id: None,
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: vec![iid("500"), iid("900")],
+                lease_token: second.clone(),
+                lease_expires_at: ts(120),
+            }))
+            .unwrap();
+
+        let page = projection.pending_page(Some(iid("498")), 3);
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>(),
+            vec![iid("498"), iid("499"), iid("500")]
+        );
+        assert_eq!(page.next, Some(iid("501")));
+        assert_eq!(page.entries.len(), 3, "page output is request-bounded");
+
+        let consumer_page = projection.pending_range(None, None, Some(&second), 1);
+        assert_eq!(consumer_page.len(), 1);
+        assert_eq!(consumer_page[0].item_id, iid("500"));
+        let requested = projection.pending_by_ids(&[iid("900"), iid("1"), iid("4040")]);
+        assert_eq!(
+            requested
+                .iter()
+                .map(|entry| entry.item_id)
+                .collect::<Vec<_>>(),
+            vec![iid("900"), iid("1")]
+        );
+        let summary = projection.pending_summary();
+        assert_eq!(summary.count, 1_000);
+        assert_eq!(summary.min_id, Some(iid("1")));
+        assert_eq!(summary.max_id, Some(iid("1000")));
+        assert_eq!(
+            summary.consumers,
+            vec![(first, 998), (second, 2)],
+            "consumer counts come from the maintained set index"
+        );
     }
 
     #[test]

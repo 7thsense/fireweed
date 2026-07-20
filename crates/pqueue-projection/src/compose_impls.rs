@@ -20,12 +20,13 @@ use pqueue_core::{
     DeclaredBucketSegmentResponse, GroupedAggregateRequest, GroupedAggregateResponse,
     MetricsByQueryRequest, QueryCapabilityFlags, RangeScanRequest, RangeScanResponse,
 };
-use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
+use pqueue_core::{ClientItemKey, ItemId, ItemState, LeaseToken, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
     AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
     EngineError, EngineResult, FinalizeOutcome, InProcessLogStore, InProcessProjectionStore,
-    IndexHit, ItemView, LeaseView, LiveItemView, LogStore, ProjectionSnapshot, ProjectionStore,
-    PushItem, QueueCounters, QueueKey, QueueMetrics, SnapshotRef, TerminalEmissionMetrics,
+    IndexHit, ItemView, LeaseView, LiveItemView, LogStore, PendingPage, PendingSummary,
+    ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey, QueueMetrics,
+    SnapshotRef, TerminalEmissionMetrics,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -400,6 +401,34 @@ impl ProjectionStore for InMemoryProjection {
 
     fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>> {
         Ok(self.get(shard)?.pending_leases())
+    }
+
+    fn pending_summary(&self, shard: &QueueKey) -> EngineResult<PendingSummary> {
+        Ok(self.get(shard)?.pending_summary())
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        Ok(self.get(shard)?.pending_page(start, limit))
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        Ok(self.get(shard)?.pending_range(start, end, consumer, limit))
+    }
+
+    fn pending_by_ids(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<LeaseView>> {
+        Ok(self.get(shard)?.pending_by_ids(ids))
     }
 
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics> {
