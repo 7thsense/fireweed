@@ -38,6 +38,9 @@ echo "=== pr-gate [mode=${MODE}] ==="
 echo "--- release artifact verifier fixtures ---"
 bash "${SCRIPT_DIR}/../release/verify-release-artifacts-test.sh"
 
+echo "--- governed evidence archive fixtures ---"
+bash "${SCRIPT_DIR}/../release/build-governed-evidence-bundle-test.sh"
+
 if [[ "$MODE" == "enforcing" ]]; then
     echo "--- fmt ---"
     rustup run 1.92.0 cargo fmt --all --check
