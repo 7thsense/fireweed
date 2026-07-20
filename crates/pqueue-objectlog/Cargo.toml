@@ -24,6 +24,7 @@ futures = "0.3"
 # relational projection crates; HMAC-SHA256 / canonical-request / HTTP/1.1 framing are hand-rolled on top so
 # no async HTTP/S3 SDK (reqwest/hyper/object_store) is pulled — keeping the adapter's dependency surface lean.
 sha2 = "0.11"
+getrandom = "0.3"
 # Castagnoli CRC32C protects v3 records and complete segment frames. The
 # cryptographic object identity remains the existing SHA-256 digest.
 crc32c = "0.6"

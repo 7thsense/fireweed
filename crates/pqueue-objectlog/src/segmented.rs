@@ -427,10 +427,29 @@ pub(crate) fn update_manifest_head_via<S: BlobStore + ?Sized>(
     };
     let key = versioned_manifest_head_key(prefix, next_version);
     let body = serde_json::to_vec(value).map_err(store_err)?;
-    // Unlike immutable data publication, an identical pre-existing successor is still a LOST CAS: another
-    // writer advanced from the same observed version and this caller must not acknowledge a second append.
-    // Therefore do not collapse an equal body into idempotent success here.
-    store.put_if_absent(&key, &body)
+    // SP-03 resolves a lost response by rereading this exact immutable successor. Authoritative manifest
+    // entries name attempt-unique candidate keys, so equal successor bytes identify the same physical
+    // publication; a concurrent writer, including one committing identical commands, has a different body
+    // and loses. Successful creates do not reread, and false/error paths perform one exact GET rather than
+    // scanning head history.
+    match CreateOnlyPublication::<ManifestHeadClass, RetainedAddress>::publish(
+        &body,
+        || store.put_if_absent(&key, &body),
+        || store.get(&key),
+    )? {
+        resolution if resolution.applied() => Ok(true),
+        CreateOnlyResolution::PreconditionLost => Ok(false),
+        CreateOnlyResolution::Ambiguous(source) => Err(source),
+        _ => unreachable!("all applied resolutions handled by the guard"),
+    }
+}
+
+fn publication_attempt_id() -> EngineResult<String> {
+    let mut entropy = [0_u8; 32];
+    getrandom::fill(&mut entropy).map_err(|error| {
+        EngineError::Storage(format!("manifest candidate entropy unavailable: {error}"))
+    })?;
+    Ok(hex_lower(&entropy))
 }
 
 /// Share one store between several owners (e.g. two competing epoch holders) — delegates through the `Arc`.
@@ -2166,8 +2185,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         };
         let candidate_body = to_json(&candidate)?;
         let candidate_digest = hex_lower(&Sha256::digest(&candidate_body));
+        let attempt = publication_attempt_id()?;
         let candidate_key = format!(
-            "{}e{:020}/i{:020}/{candidate_digest}.json",
+            "{}e{:020}/i{:020}/{candidate_digest}-{attempt}.json",
             Self::manifest_candidate_prefix(shard),
             entry.epoch,
             entry.index,
