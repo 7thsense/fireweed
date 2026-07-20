@@ -54,14 +54,14 @@ use pqueue_engine::{
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView,
-    LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, PayloadUpdate, ProjectionRead,
-    ProjectionSnapshot, ProjectionStore, PurgeItemsCommand, PurgePort, PushCommand, PushItem,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
-    ReplacePendingCommand, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
-    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
-    validate_gate_push, validate_purge_force,
+    LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, PayloadUpdate, PendingPage,
+    PendingSummary, ProjectionRead, ProjectionSnapshot, ProjectionStore, PurgeItemsCommand,
+    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
+    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore,
+    TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
+    validate_gate_command, validate_gate_push, validate_purge_force,
 };
 use pqueue_engine::{ComposedBackend, InProcessControlPlane};
 use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
@@ -1400,6 +1400,61 @@ impl ProjectionRead for PostgresBackend {
             let g = self.inner.lock().expect("poisoned");
             let proj = g.projections.get(shard).ok_or(EngineError::NotFound)?;
             Ok(proj.pending_leases())
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        let result = (|| {
+            let guard = self.inner.lock().expect("poisoned");
+            let projection = guard.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(projection.pending_summary())
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        let result = (|| {
+            let guard = self.inner.lock().expect("poisoned");
+            let projection = guard.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(projection.pending_page(start, limit))
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let guard = self.inner.lock().expect("poisoned");
+            let projection = guard.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(projection.pending_range(start, end, consumer, limit))
+        })();
+        std::future::ready(result)
+    }
+
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        let result = (|| {
+            let guard = self.inner.lock().expect("poisoned");
+            let projection = guard.projections.get(shard).ok_or(EngineError::NotFound)?;
+            Ok(projection.pending_by_ids(ids))
         })();
         std::future::ready(result)
     }
