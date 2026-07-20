@@ -24,6 +24,7 @@
 //! `std::sync::MutexGuard` or borrowed blocking transaction across an `.await`, and must not offload
 //! individual statements belonging to the same transaction.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -96,7 +97,7 @@ struct BlockingPermits {
 
 struct BlockingPermitsInner {
     available: usize,
-    waiters: Vec<Waker>,
+    waiters: VecDeque<Waker>,
 }
 
 impl BlockingPermits {
@@ -104,7 +105,7 @@ impl BlockingPermits {
         Self {
             inner: Mutex::new(BlockingPermitsInner {
                 available,
-                waiters: Vec::new(),
+                waiters: VecDeque::new(),
             }),
         }
     }
@@ -113,7 +114,7 @@ impl BlockingPermits {
         let mut inner = self.inner.lock().expect("blocking permit mutex poisoned");
         if inner.available == 0 {
             if !inner.waiters.iter().any(|queued| queued.will_wake(waker)) {
-                inner.waiters.push(waker.clone());
+                inner.waiters.push_back(waker.clone());
             }
             return None;
         }
@@ -127,7 +128,7 @@ impl BlockingPermits {
         let wake = {
             let mut inner = self.inner.lock().expect("blocking permit mutex poisoned");
             inner.available += 1;
-            inner.waiters.pop()
+            inner.waiters.pop_front()
         };
         if let Some(waker) = wake {
             waker.wake();
@@ -1681,6 +1682,20 @@ mod tests {
         }
     }
 
+    struct OrderedWake {
+        id: usize,
+        order: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl Wake for OrderedWake {
+        fn wake(self: Arc<Self>) {
+            self.order
+                .lock()
+                .expect("wake order poisoned")
+                .push(self.id);
+        }
+    }
+
     #[test]
     fn blocking_permit_registration_and_acquire_are_atomic() {
         let permits = Arc::new(BlockingPermits::new(1));
@@ -1695,6 +1710,35 @@ mod tests {
 
         assert_eq!(wake_count.0.load(AtomicOrdering::SeqCst), 1);
         assert!(permits.acquire_or_park(&waker).is_some());
+    }
+
+    #[test]
+    fn blocking_permits_wake_saturated_work_in_fifo_order() {
+        let permits = Arc::new(BlockingPermits::new(1));
+        let held_waker = Waker::from(Arc::new(CountingWake(AtomicUsize::new(0))));
+        let held = permits
+            .acquire_or_park(&held_waker)
+            .expect("first permit is available");
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let first = Waker::from(Arc::new(OrderedWake {
+            id: 1,
+            order: order.clone(),
+        }));
+        let second = Waker::from(Arc::new(OrderedWake {
+            id: 2,
+            order: order.clone(),
+        }));
+
+        assert!(permits.acquire_or_park(&first).is_none());
+        assert!(permits.acquire_or_park(&second).is_none());
+        drop(held);
+        assert_eq!(*order.lock().unwrap(), vec![1]);
+
+        let first_held = permits
+            .acquire_or_park(&first)
+            .expect("oldest waiter receives released permit");
+        drop(first_held);
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
     }
 
     #[test]
