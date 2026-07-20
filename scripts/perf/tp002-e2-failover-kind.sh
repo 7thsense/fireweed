@@ -34,6 +34,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# shellcheck source=scripts/perf/resp_readiness.sh
+source "${ROOT}/scripts/perf/resp_readiness.sh"
+
 if [[ -v PQUEUE_TEST_COORDINATION_TIMEOUT_SECS ]]; then
   [[ "${COORDINATION_TIMEOUT_SECS}" =~ ^[1-9][0-9]{0,4}$ ]] || \
     die "PQUEUE_TEST_COORDINATION_TIMEOUT_SECS must match [1-9][0-9]* and be <= 86400"
@@ -144,12 +147,11 @@ pod_ip() { k -n "${NS}" get pod "$1" -o jsonpath='{.status.podIP}'; }
 wait_owner_usable() {
   local pod="$1" response="${RUN_DIR}/owner-ready.resp"
   start_pf "pod/${pod}" "${PORT}" 8080
-  for _ in {1..60}; do
-    resp "${response}" XLEN t1:q1
-    if grep -Eq '^:[0-9]+' "${response}"; then return 0; fi
-    sleep 1
-  done
-  cat "${response}" >&2
+  local status=0
+  wait_for_resp_integer "${response}" 60 XLEN t1:q1 || status=$?
+  if ((status == 0)); then return 0; fi
+  if ((status != 70)); then return "${status}"; fi
+  [[ ! -f "${response}" ]] || cat "${response}" >&2
   die "assigned owner never became locally usable"
 }
 
