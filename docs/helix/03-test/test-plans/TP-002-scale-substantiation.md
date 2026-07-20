@@ -15,7 +15,7 @@ ddx:
       prd: 2d97b05f9c0c0db576149bdfef21c729d66e07dbb674c95f6b7135ddcffa3b91
       td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-    reviewed_at: "2026-07-20T19:58:48Z"
+    reviewed_at: "2026-07-20T20:00:20Z"
 ---
 
 # Test Plan: TP-002 Scale Substantiation

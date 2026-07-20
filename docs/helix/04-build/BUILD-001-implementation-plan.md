@@ -17,7 +17,7 @@ ddx:
     - tp-scale-substantiation
     - tp-verification-acceptance-criteria
   review:
-    self_hash: 55528ea72af327659536b155d61bda5984387104871c7e38707173f7aad5c542
+    self_hash: 4ddbeab6da535522d8253e3ce6018c89b901556e2e179453df6de86b3c02363e
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
@@ -30,10 +30,10 @@ ddx:
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
       td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-governing-test-traceability: d464a1278868cd3f72797114d4c49dd25778e0e21b738b187534adf6c1b6e910
-      tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
-      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
-    reviewed_at: "2026-07-20T00:01:29Z"
+      tp-governing-test-traceability: a987698e797f33f52168aba5ba54f41bcc18bd3fcabe278af085afdea7b82768
+      tp-scale-substantiation: e0ca180cb81c98e7c451341f1ea912bf152ac2c75d422a3b315516fc9f8ee7d3
+      tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
+    reviewed_at: "2026-07-20T20:00:41Z"
 ---
 
 # Build Plan: BUILD-001 Implementation Sequence
@@ -143,7 +143,7 @@ scope.
 | B-053 | Recurring queues and native purge | API-001, TD-002, TP-003 AC-REC-1..3 | B-041, B-043, B-060 | `cargo test -p pqueue-core core_recurrence_rearm_tests`; `cargo test -p pqueue-storage storage_conformance_durability_tests`; `cargo test -p pqueue-service service_recurrence_purge_tests`; `cargo test -p pqueue-client` | `rearm`, per-cycle retry reset, idle metrics, `PurgeItems`, tombstone/replay safety, API-001 recurrence/purge route/handler/client binding, and summary recompute for rearmed/purged items. |
 | B-054 | Active-scope discovery and metrics | API-001, TD-002, TD-003, TP-003 AC-DISC-1 single-shard, AC-OBS-1 postgres profile, AC-LAT-3 | B-043, B-050..B-053, B-060 | `cargo test -p pqueue-storage storage_conformance_discovery_tests`; `cargo test -p pqueue-service service_discovery_tests service_metrics_ground_truth_tests` | Single-shard Top-N ranking, exact oldest age, bounded count lag, auth-filtered service discovery, and query-plan assertions for no full scan; summary aggregation uses bounded shared workers. Cross-shard portions of AC-DISC-1 and AC-DISC-2 are owned by B-072. |
 | B-061 | Product E2E smoke harness | TP-001, TP-003 §3.11 | B-060, B-054, B-021 | `PQUEUE_BACKEND_PROFILE=postgres_native PQUEUE_E2E_SCALE=smoke cargo test -p pqueue-service --test product_workflows -- --ignored` | Implements shared `product_workflows` binary, env knobs, ledger output, seeds, smoke fixture scale, and service/worker fault hooks for crash-recovery workflows. |
-| B-062 | Benchmark and scale evidence harness | TP-001 performance suites, TP-002 E0..E2, TP-003 AC-LAT-1..4 | B-060, B-054 | `cargo test -p pqueue-service performance_batch_operation_tests performance_hot_queue_10m_tests`; release: `performance_single_deployment_baseline_tests` | Creates perf/scale runners, env knobs, seeds, instance/profile ledger fields, AC-LAT micro-bars, query-plan capture, and the E1/E2 measurement framework. Full E2 execution waits for B-071/B-081. |
+| B-062 | Benchmark and scale evidence harness | TP-001 performance suites, TP-002 E0..E2, TP-003 AC-LAT-1..4 | B-060, B-054 | `cargo test -p pqueue-service performance_batch_operation_tests performance_hot_queue_10m_tests`; release: `performance_single_deployment_baseline_tests` | Creates perf/scale runners, env knobs, seeds, instance/profile ledger fields, AC-LAT micro-bars, query-plan capture, and the E1/E2 measurement framework. E0/E1 runners declare a positive `progress_bound_ms`, verify its persisted queue-definition value, and record zero accepted-to-claim and discovery-age violations against that declaration; rates and percentiles remain topology-bound capacity observations. Full E2 execution waits for B-071/B-081. |
 | B-070 | Shard ownership lifecycle | TD-003, TD-001, TP-003 AC-SHARD-3 | B-030, B-021 | `cargo test -p pqueue-storage sharding_assignment_fencing_tests sharding_rebalance_drain_tests` | Owner registry, worker registration/heartbeat, target-vs-active owner, acquire/renew/begin-drain/release shard lease, stale-epoch reject, graceful/interrupted drain, recovery hooks. |
 | B-072 | Multi-shard claim, progress, discovery, and command convergence | TD-003, TD-001, TP-003 AC-SHARD-1..2, AC-DISC-1 cross-shard, AC-DISC-2 | B-070, B-054, B-021 | `cargo test -p pqueue-storage cross_shard_progress_tests storage_conformance_multi_shard_tests multi_shard_claim_order_replay_tests` | Fan-out claim, deterministic k-way merge, cross-shard queue-global progress aggregation, stalled-shard visibility, non-co-resident group aggregation across shards, cross-shard active-scope discovery, claim-intent partial-failure/replay convergence, envelope-scope request expiry, and queue-scoped multi-shard command convergence for `SetGates` and native `PurgeItems` spans. |
 | B-071 | Queue density resource model | ADR-003, TD-003, TP-002 E2 | B-072, B-062 | `cargo test -p pqueue-storage queue_density_single_node_tests -- --ignored` | Bounded shared pools/sweepers and LRU handles; no one task/loop/connection per queue/shard. |

@@ -13,7 +13,7 @@ ddx:
       build-sp04-object-store-observability: b75fdf641cb7d51d5baedf66abe2569b7ae19d2722fec456710c887204508706
       build-sp05-maintenance-policy-execution: 1d89282c8fae482f99334b909d45dea15768f6b4ab5ddf7dd57180092e19d8e9
       td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
-    reviewed_at: "2026-07-20T00:01:31Z"
+    reviewed_at: "2026-07-20T20:00:41Z"
 ---
 
 # Technical Spike Plan: SP-06 Targeted Ownership-Handoff Warmup

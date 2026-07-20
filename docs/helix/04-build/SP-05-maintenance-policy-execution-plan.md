@@ -12,7 +12,7 @@ ddx:
     deps:
       build-sp03-sequenced-metadata-boundary: 6634c5fd29d1980929354abc206f44a274102462a3fb210f9a4842a8e985e280
       build-sp04-object-store-observability: b75fdf641cb7d51d5baedf66abe2569b7ae19d2722fec456710c887204508706
-    reviewed_at: "2026-07-20T00:01:31Z"
+    reviewed_at: "2026-07-20T20:00:41Z"
 ---
 
 # Implementation Plan: SP-05 Maintenance Policy and Execution Separation

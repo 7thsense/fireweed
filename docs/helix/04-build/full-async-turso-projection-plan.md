@@ -23,8 +23,8 @@ ddx:
       adr-turso-derived-projection: 76ec5fe8523c4fe831441229aa5f09f0bf966ac3849174764a7ba2c2d805f22a
       td-object-log-turso-projection: 1e3623771c800e9d2c6874c19e94103d00c165f1afdd27ece4760fb43f6f7f69
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-verification-acceptance-criteria: fa0121456931158f03003305b8251bc08dfe43f898051472956df479b2889513
-    reviewed_at: "2026-07-20T00:01:30Z"
+      tp-verification-acceptance-criteria: 450177278bfc6a0d50fa4c5395dea18fc6dc7738087d88bef7b062ce5fce81ab
+    reviewed_at: "2026-07-20T20:00:41Z"
 ---
 
 # Build Plan: Full-Async Storage and Turso Projection
