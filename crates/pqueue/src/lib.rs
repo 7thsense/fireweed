@@ -1616,6 +1616,10 @@ impl<B: LibBackend> Pqueue<B> {
         request_id: Option<RequestId>,
         items: Vec<NewItem>,
     ) -> EngineResult<Vec<ItemId>> {
+        let definition = self.backend.queue_definition(queue).await?;
+        if items.len() > definition.max_push_batch_size as usize {
+            return Err(EngineError::BatchTooLarge);
+        }
         let specs: Vec<PushSpec> = items.into_iter().map(new_item_to_spec).collect();
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
@@ -1722,6 +1726,10 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         request: ClaimAt,
     ) -> EngineResult<Claimed> {
+        let definition = self.backend.queue_definition(queue).await?;
+        if request.max > definition.max_claim_batch_size as usize {
+            return Err(EngineError::BatchTooLarge);
+        }
         // Drain split (TD-003 §Graceful Drain): a draining owner refuses a NEW claim with a retryable
         // `Unavailable` so in-flight leases finalize before handoff; pushes/finalizes/renews continue.
         if self.is_draining(queue) {
@@ -2813,6 +2821,32 @@ mod tests {
         assert_eq!(claimed.items[0].lease_expires_at, ts(1_030));
         assert_eq!(claimed.items[0].item_version, 2);
         assert_eq!(claimed.items[0].item_id, pushed[0]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn facade_enforces_persisted_push_and_claim_batch_limits() -> EngineResult<()> {
+        let backend = Arc::new(pqueue_memory::composed_memory_backend());
+        let pq = Pqueue::new(backend, Arc::new(SystemClock));
+        let mut definition = query_definition();
+        definition.max_push_batch_size = 2;
+        definition.max_claim_batch_size = 2;
+        pq.create_queue(definition).await?;
+        let shard =
+            pqueue_engine::QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap());
+
+        let too_many = vec![NewItem::default(), NewItem::default(), NewItem::default()];
+        assert_eq!(
+            pq.push_batch(&shard, too_many).await.unwrap_err(),
+            crate::EngineError::BatchTooLarge
+        );
+        pq.push_batch(&shard, vec![NewItem::default(), NewItem::default()])
+            .await?;
+        assert_eq!(
+            pq.claim(&shard, 3, 1_000).await.unwrap_err(),
+            crate::EngineError::BatchTooLarge
+        );
+        assert_eq!(pq.claim(&shard, 2, 1_000).await?.len(), 2);
         Ok(())
     }
 }

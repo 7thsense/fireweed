@@ -44,6 +44,199 @@ pub mod single_deployment {
             .and_then(serde_json::Value::as_u64)
     }
 
+    fn u64_array(row: &LedgerRow, key: &str) -> Option<Vec<u64>> {
+        row.measurements
+            .values
+            .get(key)?
+            .as_array()?
+            .iter()
+            .map(serde_json::Value::as_u64)
+            .collect()
+    }
+
+    fn measured_progress_errors(row: &LedgerRow) -> Vec<String> {
+        let mut errors = Vec::new();
+        let samples = u64_array(row, "progress_samples_finalized");
+        match samples {
+            Some(samples) => {
+                if samples.len() < 3
+                    || u64_value(row, "progress_sample_count") != Some(samples.len() as u64)
+                    || samples.first() != Some(&0)
+                    || samples.last() != Some(&10_000_000)
+                    || !samples.windows(2).all(|window| window[1] >= window[0])
+                    || !samples.windows(2).any(|window| window[1] > window[0])
+                {
+                    errors.push(
+                        "finalized progress samples must be counted, start at zero, end at 10000000, and advance monotonically"
+                            .into(),
+                    );
+                }
+            }
+            None => errors.push("measured finalized-count progress samples are required".into()),
+        }
+        let cursors = u64_array(row, "cursor_samples").unwrap_or_default();
+        if cursors.len() < 3
+            || !cursors.windows(2).all(|window| window[1] >= window[0])
+            || !cursors.windows(2).any(|window| window[1] > window[0])
+        {
+            errors.push("command-position cursor samples must be monotonic and advance".into());
+        }
+        let bound = u64_value(row, "progress_bound_ms");
+        let oldest = u64_array(row, "oldest_eligible_age_samples_ms").unwrap_or_default();
+        let sentinels = u64_array(row, "sentinel_latency_samples_ms").unwrap_or_default();
+        if bound != Some(60_000)
+            || oldest.is_empty()
+            || sentinels.is_empty()
+            || oldest
+                .iter()
+                .chain(&sentinels)
+                .any(|value| Some(*value) > bound)
+            || u64_value(row, "progress_bound_violations") != Some(0)
+        {
+            errors.push("measured oldest-eligible and sentinel latency samples must meet the configured 60000ms progress bound with zero violations".into());
+        }
+        errors
+    }
+
+    fn measured_resource_errors(row: &LedgerRow) -> Vec<String> {
+        const EXPECTED: [(&str, &str, u64); 2] = [
+            ("max_connections_observed", "connection_limit", 1),
+            (
+                "max_in_flight_operations_observed",
+                "in_flight_operation_limit",
+                2,
+            ),
+        ];
+        let mut errors = Vec::new();
+        if u64_value(row, "resource_sample_count").is_none_or(|count| count < 3) {
+            errors.push("at least three measured resource samples are required".into());
+        }
+        for (observed, limit) in [
+            ("max_threads_observed", "thread_limit"),
+            ("max_rss_bytes_observed", "rss_limit_bytes"),
+        ] {
+            if u64_value(row, observed)
+                .is_none_or(|value| value == 0 || value > u64_value(row, limit).unwrap_or(0))
+            {
+                errors.push(format!(
+                    "{observed} must be within the measured host-enforced {limit}"
+                ));
+            }
+        }
+        for (peak, limit) in [
+            ("shared_workers_peak", "shared_workers_limit"),
+            ("connections_peak", "connections_limit"),
+            ("pending_tasks_peak", "pending_tasks_limit"),
+            ("memory_peak_bytes", "memory_limit_bytes"),
+        ] {
+            if u64_value(row, peak)
+                .is_none_or(|value| value == 0 || value > u64_value(row, limit).unwrap_or(0))
+            {
+                errors.push(format!("{peak} must be measured and within {limit}"));
+            }
+        }
+        for (alias_peak, alias_limit, source_peak, source_limit) in [
+            (
+                "connections_peak",
+                "connections_limit",
+                "max_connections_observed",
+                "connection_limit",
+            ),
+            (
+                "pending_tasks_peak",
+                "pending_tasks_limit",
+                "max_in_flight_operations_observed",
+                "in_flight_operation_limit",
+            ),
+            (
+                "memory_peak_bytes",
+                "memory_limit_bytes",
+                "max_rss_bytes_observed",
+                "rss_limit_bytes",
+            ),
+        ] {
+            if u64_value(row, alias_peak) != u64_value(row, source_peak)
+                || u64_value(row, alias_limit) != u64_value(row, source_limit)
+            {
+                errors.push(format!(
+                    "{alias_peak}/{alias_limit} must be derived from {source_peak}/{source_limit}"
+                ));
+            }
+        }
+        if u64_value(row, "configured_concurrency") != Some(2)
+            || u64_value(row, "max_in_flight_operations_observed") != Some(2)
+        {
+            errors.push("ordinary load must configure and observe concurrency 2".into());
+        }
+        for (observed_key, limit_key, expected_limit) in EXPECTED {
+            let observed = u64_value(row, observed_key).unwrap_or(0);
+            let limit = u64_value(row, limit_key).unwrap_or(0);
+            if observed == 0 || limit != expected_limit || observed > limit {
+                errors.push(format!(
+                    "{observed_key} must be measured, nonzero, and within the declared {limit_key}={expected_limit}"
+                ));
+            }
+        }
+        if row
+            .measurements
+            .values
+            .get("resource_measurement_source")
+            .and_then(serde_json::Value::as_str)
+            != Some(
+                "linux_procfs+cgroup_limits+postgres_pg_stat_activity+in_process_operation_counter",
+            )
+        {
+            errors.push("resource measurement source is missing or unsupported".into());
+        }
+        for key in [
+            "postgres_server_version",
+            "postgres_instance_class",
+            "postgres_iops_profile",
+            "postgres_storage_class",
+            "topology",
+        ] {
+            if row
+                .measurements
+                .values
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                errors.push(format!("{key} topology declaration is required"));
+            }
+        }
+        for key in [
+            "postgres_max_connections",
+            "postgres_shared_buffers_bytes",
+            "postgres_database_size_bytes",
+            "host_cpu_count",
+            "host_memory_bytes",
+            "postgres_cpu_limit",
+            "postgres_memory_limit_bytes",
+            "postgres_pool_limit",
+        ] {
+            if u64_value(row, key).is_none_or(|value| value == 0) {
+                errors.push(format!(
+                    "{key} must be measured or declared as a positive value"
+                ));
+            }
+        }
+        if !true_value(row, "telemetry_enabled")
+            || u64_value(row, "telemetry_sample_count").is_none_or(|count| count < 3)
+        {
+            errors.push(
+                "telemetry must be enabled and observed through at least three lifecycle samples"
+                    .into(),
+            );
+        }
+        if !true_value(row, "topology_declared") {
+            errors.push(
+                "release topology must be explicitly declared by the producer environment".into(),
+            );
+        }
+        errors
+    }
+
     fn nonportable(text: &str) -> bool {
         let text = text.to_ascii_lowercase();
         [
@@ -113,12 +306,41 @@ pub mod single_deployment {
         {
             errors.push("source_revision does not match expected revision".into());
         }
-        if u64_value(row, "resident_backlog") != Some(10_000_000) {
-            errors.push("resident_backlog must equal 10000000".into());
+        if u64_value(row, "resident_set_items") != Some(10_000_000)
+            || u64_value(row, "retained_terminal_items") != Some(10_000_000)
+        {
+            errors.push(
+                "the measured checkpoint must retain exactly 10000000 terminal resident items"
+                    .into(),
+            );
         }
         if u64_value(row, "lost_items") != Some(0) || u64_value(row, "duplicate_claims") != Some(0)
         {
             errors.push("lost_items and duplicate_claims must be zero".into());
+        }
+        errors.extend(measured_progress_errors(row));
+        errors.extend(measured_resource_errors(row));
+        if u64_value(row, "checkpoint_pending") != Some(0)
+            || u64_value(row, "checkpoint_leased") != Some(0)
+            || u64_value(row, "checkpoint_complete") != Some(10_000_000)
+            || u64_value(row, "checkpoint_failed") != Some(0)
+        {
+            errors.push("checkpoint lifecycle reconciliation must be pending=0 leased=0 complete=10000000 failed=0".into());
+        }
+        if u64_value(row, "payload_bytes_min") != Some(1024)
+            || u64_value(row, "payload_bytes_max") != Some(1024)
+            || u64_value(row, "group_cardinality") != Some(64)
+            || row
+                .measurements
+                .values
+                .get("priority_profile")
+                .and_then(serde_json::Value::as_str)
+                != Some("90pct_regular+10pct_high+sentinel_highest")
+        {
+            errors.push(
+                "representative 1KiB/group64/skewed-priority workload declaration is required"
+                    .into(),
+            );
         }
         if id == "E0" {
             if u64_value(row, "accepted_items") != Some(10_000_000)
@@ -128,10 +350,40 @@ pub mod single_deployment {
                 errors
                     .push("E0 exact accepted/claimed/finalized counts must equal 10000000".into());
             }
-        } else if row.measurements.values.get("batch_sizes")
-            != Some(&serde_json::json!([1, 100, 1000]))
-        {
-            errors.push("E1 batch_sizes must equal [1,100,1000]".into());
+        } else {
+            let configured_max = u64_value(row, "configured_max_batch_size");
+            if configured_max != Some(1_000)
+                || u64_value(row, "persisted_max_push_batch_size") != configured_max
+                || u64_value(row, "persisted_max_claim_batch_size") != configured_max
+                || !true_value(row, "oversize_push_rejected")
+                || !true_value(row, "oversize_claim_rejected")
+            {
+                errors.push("E1 must prove the persisted 1000-item facade limit and production-path rejection at 1001".into());
+            }
+            for key in [
+                "push_batch_sizes",
+                "update_window_sizes",
+                "claim_batch_sizes",
+                "finalize_batch_sizes",
+            ] {
+                if u64_array(row, key).as_deref() != Some(&[1, 100, 1_000]) {
+                    errors.push(format!("{key} must record actual [1,100,1000] operations"));
+                }
+            }
+            let accepted = u64_value(row, "probe_accepted_items");
+            if accepted.is_none()
+                || accepted != u64_value(row, "probe_claimed_items")
+                || accepted != u64_value(row, "probe_finalized_items")
+                || u64_value(row, "total_accepted_items")
+                    != accepted.map(|count| 10_000_000 + count)
+                || u64_value(row, "total_claimed_items") != accepted.map(|count| 10_000_000 + count)
+                || u64_value(row, "total_finalized_items")
+                    != accepted.map(|count| 10_000_000 + count)
+            {
+                errors.push(
+                    "E1 probe accepted/claimed/finalized counts must reconcile exactly".into(),
+                );
+            }
         }
         if errors.is_empty() {
             Ok(())
