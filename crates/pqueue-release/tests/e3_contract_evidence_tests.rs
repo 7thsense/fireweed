@@ -113,6 +113,23 @@ fn rejects_marker_only_recovery_and_recorder_controls() {
 }
 
 #[test]
+fn rejects_true_recorder_marker_without_matching_complete_state_fingerprints() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"bound_1ms_recorder_disabled_state_fingerprint\":\"fnv1a128:0123456789abcdef0123456789abcdef\"",
+        "\"bound_1ms_recorder_disabled_state_fingerprint\":\"fnv1a128:fedcba9876543210fedcba9876543210\"",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    let errors = fixture.errors();
+    assert!(
+        errors.contains("matching complete recorder-control state fingerprints"),
+        "{errors}"
+    );
+}
+
+#[test]
 fn rejects_profile_incorrect_canonical_recovery_command_count() {
     let fixture = Fixture::new();
     let path = fixture.root.join("e3.jsonl");

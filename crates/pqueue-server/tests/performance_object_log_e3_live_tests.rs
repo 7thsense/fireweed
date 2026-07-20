@@ -580,6 +580,7 @@ async fn run_ack_arm<B, F>(
     concurrency: u64,
     recorder_enabled: bool,
     paired_start: Arc<tokio::sync::Barrier>,
+    paired_workers: Arc<Vec<Arc<tokio::sync::Barrier>>>,
     open: F,
 ) -> AckArm
 where
@@ -617,9 +618,14 @@ where
         let end_index = (t + 1) * pushes / concurrency;
         let backend = backend.clone();
         let shard = shard.clone();
+        let paired_worker = paired_workers[t as usize].clone();
         handles.push(tokio::spawn(async move {
             let mut lat = Vec::with_capacity((end_index - start_index) as usize);
             for i in start_index..end_index {
+                // Each enabled/disabled worker pair launches the same logical operation together. Other
+                // worker pairs remain independent, preserving concurrent load while making the cross-arm
+                // interleaving explicit and reproducible.
+                paired_worker.wait().await;
                 let start = Instant::now();
                 backend
                     .push(&shard, vec![ack_spec(t, i)], ts(), None)
@@ -677,6 +683,11 @@ where
     F: Copy + Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
     let paired_start = Arc::new(tokio::sync::Barrier::new(2));
+    let paired_workers = Arc::new(
+        (0..concurrency)
+            .map(|_| Arc::new(tokio::sync::Barrier::new(2)))
+            .collect::<Vec<_>>(),
+    );
     let (mut enabled, disabled) = tokio::join!(
         run_ack_arm::<B, _>(
             s3,
@@ -686,6 +697,7 @@ where
             concurrency,
             true,
             paired_start.clone(),
+            paired_workers.clone(),
             open,
         ),
         run_ack_arm::<B, _>(
@@ -696,6 +708,7 @@ where
             concurrency,
             false,
             paired_start,
+            paired_workers,
             open,
         ),
     );
@@ -759,7 +772,7 @@ where
         throughput_per_s: round3(throughput_per_s),
         disabled_control_throughput_per_s: round3(disabled_control_throughput_per_s),
         recorder_overhead_ratio: round3(recorder_overhead_ratio),
-        recorder_control_schedule: "paired-start-barrier-concurrent-worker-partitions-v1",
+        recorder_control_schedule: "paired-operation-barriers-concurrent-worker-partitions-v1",
         recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
         recorder_enabled_state_fingerprint: enabled.state_fingerprint.digest,
         recorder_disabled_state_fingerprint: disabled.state_fingerprint.digest,
@@ -2288,7 +2301,7 @@ fn synthetic_ack(
         throughput_per_s,
         disabled_control_throughput_per_s: throughput_per_s,
         recorder_overhead_ratio: 1.0,
-        recorder_control_schedule: "paired-start-barrier-concurrent-worker-partitions-v1",
+        recorder_control_schedule: "paired-operation-barriers-concurrent-worker-partitions-v1",
         recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
         recorder_enabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
         recorder_disabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),

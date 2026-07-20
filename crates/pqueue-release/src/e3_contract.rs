@@ -659,6 +659,7 @@ fn verify_e3_ledger(
                 serde_json::json!(true),
                 errors,
             );
+            require_complete_recorder_control(&row, bound, errors);
             require_bounded_resources(&row, &format!("bound_{bound}ms"), errors);
             require_u64(
                 &row,
@@ -679,6 +680,58 @@ fn verify_e3_ledger(
         )));
     }
     source_rows
+}
+
+fn require_complete_recorder_control(
+    row: &LedgerRow,
+    bound: u64,
+    errors: &mut Vec<E3ContractError>,
+) {
+    let prefix = format!("bound_{bound}ms");
+    require_value(
+        row,
+        &format!("{prefix}_recorder_control_schedule"),
+        serde_json::json!("paired-operation-barriers-concurrent-worker-partitions-v1"),
+        errors,
+    );
+    require_value(
+        row,
+        &format!("{prefix}_recorder_control_fingerprint_algorithm"),
+        serde_json::json!("fnv1a128+disk-unique-id-index+canonical-live-state-v1"),
+        errors,
+    );
+    let enabled = row
+        .measurements
+        .values
+        .get(&format!("{prefix}_recorder_enabled_state_fingerprint"))
+        .and_then(serde_json::Value::as_str);
+    let disabled = row
+        .measurements
+        .values
+        .get(&format!("{prefix}_recorder_disabled_state_fingerprint"))
+        .and_then(serde_json::Value::as_str);
+    let digest_valid = |digest: &str| {
+        digest
+            .strip_prefix("fnv1a128:")
+            .is_some_and(|hex| hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    };
+    let verified = require_u64(
+        row,
+        &format!("{prefix}_recorder_control_verified_items"),
+        errors,
+    );
+    let commands = require_u64(row, &format!("{prefix}_commands_committed"), errors);
+    if enabled.is_none()
+        || enabled != disabled
+        || enabled.is_some_and(|digest| !digest_valid(digest))
+        || verified != commands
+        || verified == Some(0)
+    {
+        errors.push(E3ContractError(format!(
+            "E3 ledger profile {} {prefix} requires matching complete recorder-control state fingerprints for every committed item",
+            row.backend_profile
+        )));
+    }
 }
 
 fn require_u64(row: &LedgerRow, key: &str, errors: &mut Vec<E3ContractError>) -> Option<u64> {
