@@ -2623,24 +2623,28 @@ impl pqueue_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                         })
                         .collect::<Vec<_>>();
                     if !index_rows.is_empty() {
-                        let values_clause = std::iter::repeat_n("(?,?,?,?,?)", index_rows.len())
-                            .collect::<Vec<_>>()
-                            .join(",");
-                        let insert_sql = format!(
-                            "INSERT INTO pqueue_item_index \
-                             (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values_clause}"
-                        );
-                        let mut index_values = Vec::with_capacity(index_rows.len() * 5);
-                        for (item_id, name, key) in index_rows {
-                            index_values.extend([
-                                SqlValue::Text(tenant.clone()),
-                                SqlValue::Text(queue.clone()),
-                                SqlValue::Text(name),
-                                SqlValue::Blob(key),
-                                SqlValue::Text(item_id),
-                            ]);
+                        // Stay below SQLite's 32,766-variable ceiling even for queues with many
+                        // declared indexes.  The common <=6-index/1,000-row path remains one statement.
+                        for chunk in index_rows.chunks(6_000) {
+                            let values_clause = std::iter::repeat_n("(?,?,?,?,?)", chunk.len())
+                                .collect::<Vec<_>>()
+                                .join(",");
+                            let insert_sql = format!(
+                                "INSERT INTO pqueue_item_index \
+                                 (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values_clause}"
+                            );
+                            let mut index_values = Vec::with_capacity(chunk.len() * 5);
+                            for (item_id, name, key) in chunk {
+                                index_values.extend([
+                                    SqlValue::Text(tenant.clone()),
+                                    SqlValue::Text(queue.clone()),
+                                    SqlValue::Text(name.clone()),
+                                    SqlValue::Blob(key.clone()),
+                                    SqlValue::Text(item_id.clone()),
+                                ]);
+                            }
+                            st(tx.execute(&insert_sql, params_from_iter(index_values)))?;
                         }
-                        st(tx.execute(&insert_sql, params_from_iter(index_values)))?;
                     }
                 }
             }
