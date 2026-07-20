@@ -19,9 +19,9 @@ use pqueue_core::{
 };
 use pqueue_engine::{
     ClaimPort, ClaimRequest, ClaimedItem, Clock, ControlPlaneStore, EngineError, EngineResult,
-    FinalizeKind, FinalizeOutcome, FinalizePort, LeaseView, LiveItemView, ProjectionRead,
-    PurgePort, PushPort, PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
-    UpsertOutcome, UpsertPort,
+    FinalizeKind, FinalizeOutcome, FinalizePort, LiveItemView, ProjectionRead, PurgePort, PushPort,
+    PushSpec, QueueKey, ReassignLeasePort, ReclaimDriver, RenewLeasePort, UpsertOutcome,
+    UpsertPort,
 };
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
@@ -1031,10 +1031,6 @@ async fn xack<B: RespBackend, H: RespHooks>(
 /// counter low — ADR-009). So the order key is just the parsed value. The `"0-0"` cursor sentinel (and any
 /// non-numeric cursor) keys as `0`, sorting at/before the first real id so a `start = "0-0"` scan includes
 /// the whole PEL.
-fn id_order(id: &str) -> u64 {
-    id.parse::<u64>().unwrap_or(0)
-}
-
 /// `XPENDING key group [start end count [consumer]]` — the in-flight (leased, not-yet-acked) items.
 ///
 /// Summary form (`XPENDING key group`): `[count, min-id, max-id, [[consumer, count]]]`, where the
@@ -1057,14 +1053,14 @@ async fn xpending<B: RespBackend>(
         Ok(s) => s,
         Err(e) => return err_reply(&e),
     };
-    let leases = match backend.pending(&shard).await {
-        Ok(l) => l,
-        Err(e) => return err_reply(&e),
-    };
     let extended = args.len() > 3; // start/end/count present → per-entry form
     if !extended {
+        let summary = match backend.pending_summary(&shard).await {
+            Ok(summary) => summary,
+            Err(e) => return err_reply(&e),
+        };
         // Summary form. Empty → `[0, nil, nil, nil]` (Redis convention).
-        if leases.is_empty() {
+        if summary.count == 0 {
             return Resp::Array(vec![
                 Resp::Int(0),
                 Resp::NullArray,
@@ -1072,27 +1068,20 @@ async fn xpending<B: RespBackend>(
                 Resp::NullArray,
             ]);
         }
-        let mut ids: Vec<ItemId> = leases.iter().map(|l| l.item_id).collect();
-        ids.sort_by_key(|id| id.as_u64());
-        // Aggregate the per-consumer (lease-token) counts.
-        let mut by_consumer: std::collections::BTreeMap<&str, usize> =
-            std::collections::BTreeMap::new();
-        for l in &leases {
-            *by_consumer.entry(l.lease_token.as_str()).or_default() += 1;
-        }
-        let consumers: Vec<Resp> = by_consumer
-            .into_iter()
+        let consumers: Vec<Resp> = summary
+            .consumers
+            .iter()
             .map(|(token, n)| {
                 Resp::Array(vec![
-                    Resp::Bulk(token.as_bytes().to_vec()),
+                    Resp::Bulk(token.as_str().as_bytes().to_vec()),
                     Resp::Bulk(n.to_string().into_bytes()),
                 ])
             })
             .collect();
         return Resp::Array(vec![
-            Resp::Int(leases.len() as i64),
-            Resp::Bulk(ids.first().unwrap().to_string().into_bytes()),
-            Resp::Bulk(ids.last().unwrap().to_string().into_bytes()),
+            Resp::Int(summary.count as i64),
+            Resp::Bulk(summary.min_id.unwrap().to_string().into_bytes()),
+            Resp::Bulk(summary.max_id.unwrap().to_string().into_bytes()),
             Resp::Array(consumers),
         ]);
     }
@@ -1102,17 +1091,42 @@ async fn xpending<B: RespBackend>(
         .and_then(|a| std::str::from_utf8(a).ok())
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(usize::MAX);
+    let start = match &args[3][..] {
+        b"-" => None,
+        raw => match ItemId::new(String::from_utf8_lossy(raw)) {
+            Ok(id) => Some(id),
+            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        },
+    };
+    let end = match &args[4][..] {
+        b"+" => None,
+        raw => match ItemId::new(String::from_utf8_lossy(raw)) {
+            Ok(id) => Some(id),
+            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        },
+    };
+    let consumer = args
+        .get(6)
+        .map(|raw| LeaseToken::new(String::from_utf8_lossy(raw)));
+    let consumer = match consumer.transpose() {
+        Ok(token) => token,
+        Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+    };
+    let leases = match backend
+        .pending_range(&shard, start, end, consumer.as_ref(), limit)
+        .await
+    {
+        Ok(leases) => leases,
+        Err(e) => return err_reply(&e),
+    };
     let now_ms = ts_ms(state.now());
     let lease_ms = backend
         .queue_definition(&shard.clone())
         .await
         .map(|d| d.max_lease_duration_ms as i64)
         .unwrap_or(0);
-    let mut entries: Vec<&LeaseView> = leases.iter().collect();
-    entries.sort_by_key(|lv| lv.item_id.as_u64());
-    let out: Vec<Resp> = entries
-        .into_iter()
-        .take(limit)
+    let out: Vec<Resp> = leases
+        .iter()
         .map(|lv| {
             // idle = now - claimed_at, claimed_at = lease_expires_at - lease_ms.
             let idle = ((now_ms - ts_ms(lv.lease_expires_at)) + lease_ms).max(0);
@@ -1198,22 +1212,24 @@ async fn xautoclaim<B: RespBackend, H: RespHooks>(
         Err(e) => return err_reply(&e),
     };
 
-    // PEL snapshot in a stable id order; page from the `start` cursor.
-    let mut pel = match backend.pending(&shard).await {
-        Ok(p) => p,
+    let start_id = if start == "0-0" {
+        None
+    } else {
+        match ItemId::new(start.clone()) {
+            Ok(id) => Some(id),
+            Err(_) => return Resp::Error("ERR pqueue invalid".into()),
+        }
+    };
+    // Read only the COUNT-sized PEL window and one cursor row.
+    let page = match backend.pending_page(&shard, start_id, count).await {
+        Ok(page) => page,
         Err(e) => return err_reply(&e),
     };
-    pel.sort_by_key(|a| a.item_id.as_u64());
-    let start_key = id_order(&start);
-    let from: Vec<&LeaseView> = pel
-        .iter()
-        .filter(|lv| lv.item_id.as_u64() >= start_key)
-        .collect();
 
     // Examine a COUNT-sized window; the idle (lease-expired) entries in it are reclaimed to `consumer`.
-    let expired_ids: Vec<ItemId> = from
+    let expired_ids: Vec<ItemId> = page
+        .entries
         .iter()
-        .take(count)
         .filter(|lv| lv.lease_expires_at < now)
         .map(|lv| lv.item_id)
         .collect();
@@ -1241,11 +1257,9 @@ async fn xautoclaim<B: RespBackend, H: RespHooks>(
     }
 
     // Cursor: the entry after the scanned window, or `0-0` once the window covers the PEL tail.
-    let next_cursor = if from.len() > count {
-        from[count].item_id.to_string().into_bytes()
-    } else {
-        b"0-0".to_vec()
-    };
+    let next_cursor = page
+        .next
+        .map_or_else(|| b"0-0".to_vec(), |id| id.to_string().into_bytes());
 
     let entries: Vec<Resp> = if justid {
         expired_ids
@@ -1330,7 +1344,7 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
 
     // Partition by CURRENT owner: ids already owned by `consumer` → renew; the rest → reassign. An id that
     // is not currently leased has no owner, so it falls to reassign and is rejected by reassign_validate.
-    let leases = match backend.pending(&shard).await {
+    let leases = match backend.pending_by_ids(&shard, &ids).await {
         Ok(l) => l,
         Err(e) => return err_reply(&e),
     };
@@ -1505,10 +1519,7 @@ async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
         ]),
         "GROUPS" => {
             // One implicit group; `pending` = in-flight (leased) count = the group's PEL size.
-            let pending = match backend.pending(&shard).await {
-                Ok(p) => p.len() as i64,
-                Err(e) => return err_reply(&e),
-            };
+            let pending = m.leased as i64;
             Resp::Array(vec![Resp::Array(vec![
                 Resp::Bulk(b"name".to_vec()),
                 Resp::Bulk(b"default".to_vec()),

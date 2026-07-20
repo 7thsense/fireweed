@@ -61,12 +61,12 @@ use crate::port::{
     CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery,
     CommitTransition, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery,
     FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView, LeaseView,
-    LiveItemView, LogRead, MaintenanceStopReason, MaintenanceSummary, ProjectionRead,
-    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
-    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef,
-    SnapshotStore, TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, generate_query_lease_token, validate_api001_reserved_write_fields,
-    validate_instance_fence,
+    LiveItemView, LogRead, MaintenanceStopReason, MaintenanceSummary, PendingPage, PendingSummary,
+    ProjectionRead, ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueMetrics,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    ReschedulePort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    validate_api001_reserved_write_fields, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::sequenced_metadata::{AdvanceThenDelete, RetainedAddress, RetentionFloorClass};
@@ -920,6 +920,50 @@ pub trait ProjectionStore: Send {
     ) -> EngineResult<Vec<ItemId>>;
     fn peek(&self, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>>;
     fn pending(&self, shard: &QueueKey) -> EngineResult<Vec<LeaseView>>;
+    fn pending_summary(&self, shard: &QueueKey) -> EngineResult<PendingSummary> {
+        Ok(crate::port::summarize_pending(self.pending(shard)?))
+    }
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> EngineResult<PendingPage> {
+        Ok(crate::port::page_pending(
+            self.pending(shard)?,
+            start,
+            limit,
+        ))
+    }
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> EngineResult<Vec<LeaseView>> {
+        let start = start.map(|id| id.as_u64()).unwrap_or(0);
+        let end = end.map(|id| id.as_u64()).unwrap_or(u64::MAX);
+        let mut leases = self.pending(shard)?;
+        leases.sort_by_key(|lease| lease.item_id);
+        Ok(leases
+            .into_iter()
+            .filter(|lease| {
+                (start..=end).contains(&lease.item_id.as_u64())
+                    && consumer.is_none_or(|token| token == &lease.lease_token)
+            })
+            .take(limit)
+            .collect())
+    }
+    fn pending_by_ids(&self, shard: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<LeaseView>> {
+        let by_id: std::collections::HashMap<_, _> = self
+            .pending(shard)?
+            .into_iter()
+            .map(|lease| (lease.item_id, lease))
+            .collect();
+        Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
+    }
     fn metrics(&self, shard: &QueueKey) -> EngineResult<QueueMetrics>;
     fn terminal_emission_metrics(
         &self,
@@ -4302,6 +4346,65 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ProjectionRead for Compos
                 .expect("poisoned")
                 .projection
                 .pending(shard)
+        })
+    }
+
+    fn pending_summary(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<PendingSummary>> + Send {
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .pending_summary(shard)
+        })
+    }
+
+    fn pending_page(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<PendingPage>> + Send {
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .pending_page(shard, start, limit)
+        })
+    }
+
+    fn pending_range(
+        &self,
+        shard: &QueueKey,
+        start: Option<ItemId>,
+        end: Option<ItemId>,
+        consumer: Option<&LeaseToken>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .pending_range(shard, start, end, consumer, limit)
+        })
+    }
+
+    fn pending_by_ids(
+        &self,
+        shard: &QueueKey,
+        ids: &[ItemId],
+    ) -> impl std::future::Future<Output = EngineResult<Vec<LeaseView>>> + Send {
+        deferred(move || {
+            self.inner
+                .lock()
+                .expect("poisoned")
+                .projection
+                .pending_by_ids(shard, ids)
         })
     }
 
