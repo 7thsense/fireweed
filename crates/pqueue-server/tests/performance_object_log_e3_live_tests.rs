@@ -772,6 +772,10 @@ fn profile_row(
     values.insert("resident".into(), serde_json::json!(resident));
     values.insert("load_batch".into(), serde_json::json!(load_batch));
     values.insert("bars_met".into(), serde_json::json!(profile_run.bars_met));
+    values.insert("portable_gate".into(), serde_json::json!(true));
+    values.insert("quiet_host_required".into(), serde_json::json!(false));
+    values.insert("host_speed_gate".into(), serde_json::json!(false));
+    values.insert("wall_clock_capacity_only".into(), serde_json::json!(true));
     match &profile_run.recovery {
         Some(recovery) => {
             values.insert("recovery_excluded".into(), serde_json::json!(false));

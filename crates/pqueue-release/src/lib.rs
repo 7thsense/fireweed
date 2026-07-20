@@ -1687,6 +1687,28 @@ pub mod cost {
             == Some(true)
     }
 
+    fn has_nonportable_host_gate(row: &LedgerRow) -> bool {
+        let text = format!("{} {}", row.environment, row.pass_bar).to_ascii_lowercase();
+        let quiet_host_gate = ["quiet host", "quiet-host", "quiet window", "idle host"]
+            .iter()
+            .any(|phrase| text.contains(phrase));
+        let absolute_speed_gate = [
+            "throughput >=",
+            "throughput >=",
+            "throughput floor",
+            "items/s floor",
+            "sub-second p95",
+            "sub-second p99",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase));
+        quiet_host_gate
+            || absolute_speed_gate
+            || !value_true(row, "portable_gate")
+            || value_true(row, "quiet_host_required")
+            || value_true(row, "host_speed_gate")
+    }
+
     /// Validate governed live E3 rows and extract every profile/bound's measured request counters.
     pub fn release_cost_inputs(rows: &[LedgerRow]) -> Result<Vec<ReleaseCostInput>, Vec<String>> {
         let mut errors = Vec::new();
@@ -1724,6 +1746,11 @@ pub mod cost {
             }
             if !value_true(row, "bars_met") {
                 errors.push(format!("profile {profile} bars_met is not true"));
+            }
+            if has_nonportable_host_gate(row) {
+                errors.push(format!(
+                    "profile {profile} uses a quiet-host or absolute host-speed gate"
+                ));
             }
             if row
                 .measurements
@@ -2824,6 +2851,9 @@ pub mod cost {
             let sqlite = profile == "object_log_sqlite_projection";
             let mut values = BTreeMap::from([
                 ("bars_met".into(), serde_json::json!(true)),
+                ("portable_gate".into(), serde_json::json!(true)),
+                ("quiet_host_required".into(), serde_json::json!(false)),
+                ("host_speed_gate".into(), serde_json::json!(false)),
                 (
                     "storage_topology_id".into(),
                     serde_json::json!("minio-tmpfs-8g"),
@@ -2930,6 +2960,45 @@ pub mod cost {
                     .unwrap_err()
                     .iter()
                     .any(|e| e.contains("not release-tier"))
+            );
+        }
+
+        #[test]
+        fn release_cost_inputs_reject_quiet_host_and_absolute_speed_gates() {
+            let mut sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            sources[0].environment = "deferred until a quiet host is available".into();
+            sources[1].pass_bar = "throughput >= 2777.78 items/s floor".into();
+            let errors = release_cost_inputs(&sources).unwrap_err();
+            assert_eq!(
+                errors
+                    .iter()
+                    .filter(|error| error.contains("quiet-host or absolute host-speed gate"))
+                    .count(),
+                2
+            );
+        }
+
+        #[test]
+        fn release_cost_inputs_require_explicit_portable_gate_marker() {
+            let mut sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            sources[0].measurements.values.remove("portable_gate");
+            sources[1]
+                .measurements
+                .values
+                .insert("host_speed_gate".into(), serde_json::json!(true));
+            let errors = release_cost_inputs(&sources).unwrap_err();
+            assert_eq!(
+                errors
+                    .iter()
+                    .filter(|error| error.contains("quiet-host or absolute host-speed gate"))
+                    .count(),
+                2
             );
         }
 
