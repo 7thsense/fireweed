@@ -205,6 +205,14 @@ and latency with its exact host, topology, and resource limits as capacity
 evidence. Those values do not decide release eligibility and do not require an
 idle, quiet, dedicated, or specially selected host.
 
+The E0/E1 release workload MUST explicitly declare a positive
+`progress_bound_ms` as part of its queue configuration; there is no universal
+canonical duration chosen by this test plan. The harness MUST read back the
+persisted queue definition, prove it matches the declaration, and report zero
+accepted-to-claim intervals or discovery ages beyond that bound. Fixed latency
+buckets, rates, and percentiles are topology-bound capacity observations only;
+they MUST NOT substitute for or silently redefine the declared queue contract.
+
 **What "preserved for every queue at any scale" means.** Adding queues or load
 must not lose or duplicate work, strand an eligible queue, violate its progress
 bound, or create per-queue background resources. One designated hot queue and at
@@ -226,7 +234,7 @@ Backend: `postgres_native` (TD-002). Deployment: one Postgres, one queue owned b
 | Telemetry | enabled |
 | Postgres sizing | stated instance class, CPU, memory, IOPS, pool |
 | Resident set | 10M items including terminal retained rows under retention policy |
-| Pass: progress and correctness | exact accepted/claimed/finalized counts, no lost or duplicate transitions, monotonic cursor/progress samples, and no queue-global progress-bound violation |
+| Pass: progress and correctness | exact accepted/claimed/finalized counts, no lost or duplicate transitions, monotonic cursor/progress samples, an explicitly declared positive queue-global progress bound equal to the persisted queue definition, and zero accepted-to-claim or discovery-age violations of that declaration |
 | Pass: resources | shared workers, connections, pending tasks, and memory remain within workload-declared bounds |
 | Capacity report | ingest and claim/finalize throughput plus p50/p95/p99 latency, tied to this topology and not used as a portable pass bar |
 

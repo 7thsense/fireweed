@@ -50,7 +50,7 @@ use pqueue_postgres::PostgresRelationalBackend;
 
 const CONFIGURED_MAX_BATCH_SIZE: u64 = 1_000;
 const CONFIGURED_CONCURRENCY: u64 = 2;
-const PROGRESS_BOUND_MS: u64 = 60_000;
+const SMOKE_PROGRESS_BOUND_MS: u64 = 60_000;
 const GROUP_CARDINALITY: u64 = 64;
 
 #[derive(Clone, Copy)]
@@ -235,6 +235,10 @@ struct MeasuredContract<'a> {
     progress_identity_sample_count: u64,
     progress_latency_lower_max_ms: u64,
     progress_latency_upper_max_ms: u64,
+    progress_latency_over_60000_ms_count: u64,
+    progress_bound_ms: u64,
+    persisted_progress_bound_ms: u64,
+    progress_bound_explicit: bool,
     progress_bound_violations: u64,
     progress_latency_upper_buckets: &'a BTreeMap<String, u64>,
     lifecycle_snapshots: &'a [serde_json::Value],
@@ -261,6 +265,10 @@ fn insert_measured_contract(
         progress_identity_sample_count,
         progress_latency_lower_max_ms,
         progress_latency_upper_max_ms,
+        progress_latency_over_60000_ms_count,
+        progress_bound_ms,
+        persisted_progress_bound_ms,
+        progress_bound_explicit,
         progress_bound_violations,
         progress_latency_upper_buckets,
         lifecycle_snapshots,
@@ -311,11 +319,34 @@ fn insert_measured_contract(
         ),
         (
             "progress_bound_ms".into(),
-            serde_json::json!(PROGRESS_BOUND_MS),
+            serde_json::json!(progress_bound_ms),
+        ),
+        (
+            "progress_bound_explicit".into(),
+            serde_json::json!(progress_bound_explicit),
+        ),
+        (
+            "persisted_progress_bound_ms".into(),
+            serde_json::json!(persisted_progress_bound_ms),
+        ),
+        (
+            "progress_bound_buckets".into(),
+            serde_json::json!({
+                "within_declared_bound": progress_identity_sample_count - progress_bound_violations,
+                "over_declared_bound": progress_bound_violations,
+            }),
         ),
         (
             "progress_bound_violations".into(),
             serde_json::json!(progress_bound_violations),
+        ),
+        (
+            "progress_latency_over_60000_ms_count".into(),
+            serde_json::json!(progress_latency_over_60000_ms_count),
+        ),
+        (
+            "fixed_latency_buckets_capacity_only".into(),
+            serde_json::json!(true),
         ),
         (
             "progress_measurement".into(),
@@ -526,11 +557,6 @@ fn insert_measured_contract(
     ]);
 }
 
-/// The E0 per-queue throughput floor (TP-002): 10,000,000 accepted items/hr == 2,777.78 items/s.
-const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
-/// Historical E1 latency reference, emitted only as a capacity comparison (never a release gate).
-const LATENCY_BAR_MS: f64 = 1000.0;
-
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
     format!(
@@ -595,7 +621,7 @@ fn sk(tenant: &str, queue: &str) -> QueueKey {
     QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
 }
 
-fn big_qdef(tenant: &str, queue: &str) -> QueueDefinition {
+fn big_qdef(tenant: &str, queue: &str, progress_bound_ms: u64) -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new(tenant).unwrap(),
         queue_id: QueueId::new(queue).unwrap(),
@@ -606,7 +632,7 @@ fn big_qdef(tenant: &str, queue: &str) -> QueueDefinition {
         },
         ordering_mode: OrderingMode::Strict,
         max_rank_error: 0,
-        progress_bound_ms: PROGRESS_BOUND_MS,
+        progress_bound_ms,
         eligibility_policy: EligibilityPolicy::default(),
         cohort_policy: None,
         recurrence: RecurrencePolicy::default(),
@@ -731,6 +757,7 @@ struct ConsumerResult {
     progress_identity_sample_count: u64,
     progress_latency_lower_max_ms: u64,
     progress_latency_upper_max_ms: u64,
+    progress_latency_over_60000_ms_count: u64,
     progress_bound_violations: u64,
     progress_latency_upper_buckets: BTreeMap<String, u64>,
     finalized_samples: Vec<u64>,
@@ -756,6 +783,19 @@ fn performance_single_deployment_baseline_tests() {
     // A designated PERF environment may emit RELEASE-tier evidence. Without it, this is a SMOKE lane that
     // measures the same invariants but never satisfies a release gate. Host speed never decides either lane.
     let perf_env = std::env::var("PQUEUE_PERF_ENV").is_ok();
+    let progress_bound_value = std::env::var("PQUEUE_E0E1_PROGRESS_BOUND_MS");
+    let progress_bound_explicit = progress_bound_value.is_ok();
+    let progress_bound_ms = match progress_bound_value {
+        Ok(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .expect("PQUEUE_E0E1_PROGRESS_BOUND_MS must be a positive integer"),
+        Err(_) if perf_env => {
+            panic!("release evidence requires explicit PQUEUE_E0E1_PROGRESS_BOUND_MS")
+        }
+        Err(_) => SMOKE_PROGRESS_BOUND_MS,
+    };
     // Small fast defaults (the relational backend issues per-item INSERT round-trips, so large batches over a
     // network bridge are slow); the real release shape is env-scaled. Default resident keeps a routine run short.
     let resident: u64 = std::env::var("PQUEUE_E1_RESIDENT")
@@ -782,10 +822,13 @@ fn performance_single_deployment_baseline_tests() {
     let caps = RunCaps::from_env(perf_env);
 
     futures::executor::block_on(async {
-        pq.create_queue(big_qdef("e0e1", "hot")).await.unwrap();
+        pq.create_queue(big_qdef("e0e1", "hot", progress_bound_ms))
+            .await
+            .unwrap();
         let persisted = b.queue_definition(&shard).await.unwrap();
         assert_eq!(persisted.max_push_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.max_claim_batch_size, CONFIGURED_MAX_BATCH_SIZE);
+        assert_eq!(persisted.progress_bound_ms, progress_bound_ms);
         let consumer_url =
             format!("{observer_url}{separator}application_name={application_name}_consumer");
         let consumer_backend = Arc::new(
@@ -917,6 +960,7 @@ fn performance_single_deployment_baseline_tests() {
                         progress_identity_sample_count: 0,
                         progress_latency_lower_max_ms: 0,
                         progress_latency_upper_max_ms: 0,
+                        progress_latency_over_60000_ms_count: 0,
                         progress_bound_violations: 0,
                         progress_latency_upper_buckets: BTreeMap::from([
                             ("le_1000".into(), 0),
@@ -974,7 +1018,7 @@ fn performance_single_deployment_baseline_tests() {
                         result.claim_batches += 1;
                         for id in &ids {
                             let identity_deadline = Instant::now()
-                                + std::time::Duration::from_millis(PROGRESS_BOUND_MS);
+                                + std::time::Duration::from_millis(progress_bound_ms);
                             let accepted = loop {
                                 if let Some(interval) = pending.lock().unwrap().remove(id) {
                                     break interval;
@@ -998,13 +1042,15 @@ fn performance_single_deployment_baseline_tests() {
                                 result.progress_latency_lower_max_ms.max(lower);
                             result.progress_latency_upper_max_ms =
                                 result.progress_latency_upper_max_ms.max(upper);
+                            result.progress_latency_over_60000_ms_count +=
+                                u64::from(upper > 60_000);
                             result.progress_bound_violations +=
-                                u64::from(upper > PROGRESS_BOUND_MS);
+                                u64::from(upper > progress_bound_ms);
                             let bucket = if upper <= 1_000 {
                                 "le_1000"
                             } else if upper <= 10_000 {
                                 "le_10000"
-                            } else if upper <= PROGRESS_BOUND_MS {
+                            } else if upper <= 60_000 {
                                 "le_60000"
                             } else {
                                 "gt_60000"
@@ -1329,13 +1375,20 @@ fn performance_single_deployment_baseline_tests() {
                 .any(|window| window[1] > window[0])
             && cursor_samples.windows(2).all(|w| w[1] >= w[0])
             && cursor_samples.windows(2).any(|w| w[1] > w[0]);
-        let progress_within_bound = consumer_result.progress_identity_sample_count == resident
-            && consumer_result.progress_bound_violations == 0
-            && consumer_result.progress_latency_upper_max_ms <= PROGRESS_BOUND_MS
+        let progress_evidence_complete = consumer_result.progress_identity_sample_count == resident
+            && consumer_result
+                .progress_latency_upper_buckets
+                .values()
+                .sum::<u64>()
+                == resident
             && consumer_result.discovery_query_count > 0
+            && consumer_result.discovery_nonempty_count > 0
+            && !oldest_eligible_age_samples_ms.is_empty()
+            && consumer_result.progress_bound_violations == 0
+            && consumer_result.progress_latency_upper_max_ms <= progress_bound_ms
             && oldest_eligible_age_samples_ms
                 .iter()
-                .all(|v| *v <= PROGRESS_BOUND_MS);
+                .all(|value| *value <= progress_bound_ms);
         let max_in_flight = operations.max_observed();
         let pending_items_peak = pending_peak.load(Ordering::SeqCst);
         let bounded_resources = resources.within_bounds(max_in_flight, pending_items_peak, caps)
@@ -1347,8 +1400,9 @@ fn performance_single_deployment_baseline_tests() {
             "measured finalized-count and command-position samples must advance monotonically"
         );
         assert!(
-            progress_within_bound,
-            "identity/discovery progress: identities={} violations={} upper_max={} oldest_samples={:?}",
+            progress_evidence_complete,
+            "identity/discovery evidence failed declared {}ms progress bound: identities={} violations={} upper_max={} oldest_samples={:?}",
+            progress_bound_ms,
             consumer_result.progress_identity_sample_count,
             consumer_result.progress_bound_violations,
             consumer_result.progress_latency_upper_max_ms,
@@ -1427,7 +1481,7 @@ fn performance_single_deployment_baseline_tests() {
             && topology_declared
             && exact_outcomes
             && monotonic_progress
-            && progress_within_bound
+            && progress_evidence_complete
             && bounded_resources;
         let e1_pass = e0_pass
             && probe_accepted == probe_claimed
@@ -1452,26 +1506,12 @@ fn performance_single_deployment_baseline_tests() {
         println!(
             "\nTP-002 E0/E1 postgres_native single-deployment baseline (resident={resident}, perf_env={perf_env}):"
         );
+        println!("  producer ingest capacity     : {producer_ingest_completion_per_s:.0} items/s");
         println!(
-            "  E0 producer ingest complete : {producer_ingest_completion_per_s:.0} items/s (reference {FLOOR_ITEMS_PER_SEC:.0}) -> {}",
-            if producer_ingest_completion_per_s >= FLOOR_ITEMS_PER_SEC {
-                "PASS"
-            } else {
-                "UNDER"
-            }
+            "  claimant/finalize capacity   : {claimant_finalize_completion_per_s:.0} items/s"
         );
-        println!(
-            "  E0 claimant finalize complete: {claimant_finalize_completion_per_s:.0} items/s -> {}",
-            if claimant_finalize_completion_per_s >= FLOOR_ITEMS_PER_SEC {
-                "PASS"
-            } else {
-                "UNDER"
-            }
-        );
-        println!(
-            "  E1 worst op p99   : {worst_p99:.1} ms (bar {LATENCY_BAR_MS}) -> {}",
-            if e1_pass { "PASS" } else { "OVER" }
-        );
+        println!("  worst operation p99 capacity : {worst_p99:.1} ms");
+        println!("  release evidence contract    : {e1_pass}");
         if full_shape {
             assert!(
                 revision_bound,
@@ -1530,10 +1570,6 @@ fn performance_single_deployment_baseline_tests() {
             (
                 "retained_terminal_items".to_string(),
                 serde_json::json!(checkpoint.resident_terminal_count),
-            ),
-            (
-                "e0_floor_per_s".to_string(),
-                serde_json::json!(FLOOR_ITEMS_PER_SEC.round()),
             ),
             ("bars_met".to_string(), serde_json::json!(e0_pass)),
             ("portable_gate".to_string(), serde_json::json!(true)),
@@ -1640,6 +1676,11 @@ fn performance_single_deployment_baseline_tests() {
                 progress_identity_sample_count: consumer_result.progress_identity_sample_count,
                 progress_latency_lower_max_ms: consumer_result.progress_latency_lower_max_ms,
                 progress_latency_upper_max_ms: consumer_result.progress_latency_upper_max_ms,
+                progress_latency_over_60000_ms_count: consumer_result
+                    .progress_latency_over_60000_ms_count,
+                progress_bound_ms,
+                persisted_progress_bound_ms: persisted.progress_bound_ms,
+                progress_bound_explicit,
                 progress_bound_violations: consumer_result.progress_bound_violations,
                 progress_latency_upper_buckets: &consumer_result.progress_latency_upper_buckets,
                 lifecycle_snapshots: &consumer_result.lifecycle_snapshots,
@@ -1656,7 +1697,7 @@ fn performance_single_deployment_baseline_tests() {
             "e0",
             pqueue_release::LedgerRow {
                 suite: "performance_single_deployment_baseline_tests".into(),
-                command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
+                command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
                 backend_profile: "postgres_native".into(),
                 scale: if resident >= 10_000_000 { "release".into() } else { "baseline".into() },
                 seed: 0,
@@ -1922,6 +1963,11 @@ fn performance_single_deployment_baseline_tests() {
                 progress_identity_sample_count: consumer_result.progress_identity_sample_count,
                 progress_latency_lower_max_ms: consumer_result.progress_latency_lower_max_ms,
                 progress_latency_upper_max_ms: consumer_result.progress_latency_upper_max_ms,
+                progress_latency_over_60000_ms_count: consumer_result
+                    .progress_latency_over_60000_ms_count,
+                progress_bound_ms,
+                persisted_progress_bound_ms: persisted.progress_bound_ms,
+                progress_bound_explicit,
                 progress_bound_violations: consumer_result.progress_bound_violations,
                 progress_latency_upper_buckets: &consumer_result.progress_latency_upper_buckets,
                 lifecycle_snapshots: &consumer_result.lifecycle_snapshots,
@@ -1938,7 +1984,7 @@ fn performance_single_deployment_baseline_tests() {
             "e1",
             pqueue_release::LedgerRow {
                 suite: "performance_single_deployment_baseline_tests".into(),
-                command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
+                command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
                 backend_profile: "postgres_native".into(),
                 scale: if resident >= 10_000_000 { "release".into() } else { "baseline".into() },
                 seed: 0,

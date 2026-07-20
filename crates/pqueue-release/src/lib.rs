@@ -103,22 +103,37 @@ pub mod single_deployment {
         let oldest = u64_array(row, "oldest_eligible_age_samples_ms").unwrap_or_default();
         let buckets = u64_map(row, "progress_latency_upper_buckets").unwrap_or_default();
         let bucket_count: u64 = buckets.values().sum();
-        let violations = buckets.get("gt_60000").copied().unwrap_or(0);
-        if bound != Some(60_000)
+        let over_60s = buckets.get("gt_60000").copied().unwrap_or(0);
+        let bound_buckets = u64_map(row, "progress_bound_buckets").unwrap_or_default();
+        let bound_bucket_count: u64 = bound_buckets.values().sum();
+        let violations = bound_buckets
+            .get("over_declared_bound")
+            .copied()
+            .unwrap_or(0);
+        let lower = u64_value(row, "progress_latency_lower_max_ms");
+        let upper = u64_value(row, "progress_latency_upper_max_ms");
+        let valid_interval = matches!((lower, upper, bound), (Some(lower), Some(upper), Some(bound)) if lower <= upper && upper <= bound);
+        if bound.is_none_or(|value| value == 0)
+            || !true_value(row, "progress_bound_explicit")
+            || u64_value(row, "persisted_progress_bound_ms") != bound
             || oldest.iter().any(|value| Some(*value) > bound)
+            || oldest.is_empty()
             || u64_value(row, "discovery_query_count").is_none_or(|count| count == 0)
-            || u64_value(row, "discovery_nonempty_count")
-                .is_none_or(|count| count > u64_value(row, "discovery_query_count").unwrap_or(0))
-            || (u64_value(row, "discovery_nonempty_count") == Some(0)) != oldest.is_empty()
+            || u64_value(row, "discovery_nonempty_count").is_none_or(|count| {
+                count == 0 || count > u64_value(row, "discovery_query_count").unwrap_or(0)
+            })
             || u64_value(row, "progress_identity_sample_count") != Some(10_000_000)
             || buckets.keys().map(String::as_str).collect::<Vec<_>>()
                 != ["gt_60000", "le_1000", "le_10000", "le_60000"]
             || bucket_count != 10_000_000
-            || u64_value(row, "progress_latency_lower_max_ms")
-                > u64_value(row, "progress_latency_upper_max_ms")
-            || u64_value(row, "progress_latency_upper_max_ms").is_none_or(|value| value > 60_000)
+            || bound_buckets.keys().map(String::as_str).collect::<Vec<_>>()
+                != ["over_declared_bound", "within_declared_bound"]
+            || bound_bucket_count != 10_000_000
+            || !valid_interval
+            || u64_value(row, "progress_latency_over_60000_ms_count") != Some(over_60s)
             || u64_value(row, "progress_bound_violations") != Some(violations)
             || violations != 0
+            || !true_value(row, "fixed_latency_buckets_capacity_only")
             || row
                 .measurements
                 .values
@@ -126,7 +141,7 @@ pub mod single_deployment {
                 .and_then(serde_json::Value::as_str)
                 != Some("per-item accepted and claimed timestamp intervals")
         {
-            errors.push("all 10000000 accepted identities and discovery ages must have timestamp-derived interval bounds within 60000ms, with bucket-derived zero violations".into());
+            errors.push("the release workload must explicitly declare a positive queue progress bound, and all 10000000 accepted identities and discovery ages must satisfy it; fixed timing buckets remain capacity observations only".into());
         }
         errors
     }

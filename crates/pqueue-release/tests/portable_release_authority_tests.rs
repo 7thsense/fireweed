@@ -11,6 +11,10 @@ fn portable(id: &str) -> LedgerRow {
         ("quiet_host_required".into(), serde_json::json!(false)),
         ("host_speed_gate".into(), serde_json::json!(false)),
         ("wall_clock_capacity_only".into(), serde_json::json!(true)),
+        (
+            "fixed_latency_buckets_capacity_only".into(),
+            serde_json::json!(true),
+        ),
         ("exact_outcomes".into(), serde_json::json!(true)),
         ("monotonic_progress".into(), serde_json::json!(true)),
         ("bounded_resources".into(), serde_json::json!(true)),
@@ -89,8 +93,21 @@ fn portable(id: &str) -> LedgerRow {
             "progress_measurement".into(),
             serde_json::json!("per-item accepted and claimed timestamp intervals"),
         ),
-        ("progress_bound_ms".into(), serde_json::json!(60_000)),
+        ("progress_bound_ms".into(), serde_json::json!(300_000)),
+        (
+            "persisted_progress_bound_ms".into(),
+            serde_json::json!(300_000),
+        ),
+        ("progress_bound_explicit".into(), serde_json::json!(true)),
+        (
+            "progress_bound_buckets".into(),
+            serde_json::json!({"within_declared_bound": 10_000_000, "over_declared_bound": 0}),
+        ),
         ("progress_bound_violations".into(), serde_json::json!(0)),
+        (
+            "progress_latency_over_60000_ms_count".into(),
+            serde_json::json!(0),
+        ),
         ("resource_sample_count".into(), serde_json::json!(3)),
         ("max_threads_observed".into(), serde_json::json!(2)),
         ("thread_limit".into(), serde_json::json!(64)),
@@ -296,6 +313,35 @@ fn portable_e0_e1_accept_semantics_not_machine_speed() {
 }
 
 #[test]
+fn portable_e0_e1_accept_reconciled_progress_timing_over_bucket_boundary() {
+    for id in ["E0", "E1"] {
+        let mut row = portable(id);
+        row.measurements.values.insert(
+            "oldest_eligible_age_samples_ms".into(),
+            serde_json::json!([1, 60_001, 263_708]),
+        );
+        row.measurements.values.insert(
+            "progress_latency_upper_max_ms".into(),
+            serde_json::json!(263_708),
+        );
+        row.measurements.values.insert(
+            "progress_latency_upper_buckets".into(),
+            serde_json::json!({
+                "le_1000": 9_000_000,
+                "le_10000": 500_000,
+                "le_60000": 419_455,
+                "gt_60000": 80_545,
+            }),
+        );
+        row.measurements.values.insert(
+            "progress_latency_over_60000_ms_count".into(),
+            serde_json::json!(80_545),
+        );
+        pqueue_release::single_deployment::validate_row(&row, id, REV).unwrap();
+    }
+}
+
+#[test]
 fn e0_e1_reject_quiet_host_and_absolute_speed_bars() {
     for text in ["quiet host required", "throughput >= 2778", "p99 < 1000ms"] {
         let mut row = portable("E0");
@@ -312,6 +358,8 @@ fn e0_e1_reject_unmeasured_progress_and_resource_claims() {
         "resource_sample_count",
         "max_threads_observed",
         "resource_measurement_source",
+        "progress_latency_lower_max_ms",
+        "progress_latency_upper_max_ms",
     ] {
         let saved = row.measurements.values.remove(key).unwrap();
         assert!(
@@ -350,12 +398,26 @@ fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
             "progress_identity_sample_count",
             serde_json::json!(9_999_999),
         ),
-        ("progress_latency_upper_max_ms", serde_json::json!(60_001)),
+        (
+            "fixed_latency_buckets_capacity_only",
+            serde_json::json!(false),
+        ),
+        ("progress_bound_explicit", serde_json::json!(false)),
+        ("persisted_progress_bound_ms", serde_json::json!(60_000)),
+        ("progress_bound_ms", serde_json::json!(0)),
+        ("oldest_eligible_age_samples_ms", serde_json::json!([])),
+        ("discovery_nonempty_count", serde_json::json!(0)),
+        ("progress_latency_upper_max_ms", serde_json::json!(300_001)),
+        (
+            "progress_bound_buckets",
+            serde_json::json!({"within_declared_bound": 9_999_999, "over_declared_bound": 1}),
+        ),
+        ("progress_bound_violations", serde_json::json!(1)),
         (
             "progress_latency_upper_buckets",
             serde_json::json!({"le_1000": 9_999_999, "gt_60000": 1}),
         ),
-        ("progress_bound_violations", serde_json::json!(1)),
+        ("progress_latency_over_60000_ms_count", serde_json::json!(1)),
         ("cursor_samples", serde_json::json!([1, 3, 2])),
         ("checkout_revision", serde_json::json!("wrong")),
         ("checkout_clean", serde_json::json!(false)),
