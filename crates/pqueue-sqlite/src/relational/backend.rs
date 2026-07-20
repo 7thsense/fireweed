@@ -582,33 +582,10 @@ impl SqliteRelationalBackend {
         Ok(backend)
     }
 
-    /// Restart recovery: seed the per-queue mint counter past every id already in `pqueue_items`, so a push
-    /// after reopen never re-mints an existing item id (the durable items table is the authority — there is
-    /// no log to replay). `observe` decodes `(epoch, counter)` from each packed id and only advances.
+    /// Restart recovery from one durable high-water row per queue. Work is proportional to queue count, not
+    /// resident or retained item count.
     fn restore_counters(&self) -> EngineResult<()> {
         let g = self.inner.lock().expect("poisoned");
-        let mut stmt = st(g
-            .conn
-            .prepare("SELECT tenant_id, queue_id, item_id FROM pqueue_items"))?;
-        let rows = st(stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        }))?;
-        for r in rows {
-            let (t, q, id) = st(r)?;
-            let key = QueueKey::new(
-                TenantId::new(t).map_err(|e| EngineError::Storage(e.to_string()))?,
-                QueueId::new(q).map_err(|e| EngineError::Storage(e.to_string()))?,
-            );
-            let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
-            self.counters.observe(&key, item_id);
-        }
-        // Terminal-item reaping (`reap_terminal_items_sql`) deletes rows, so the scan above is no longer the
-        // complete minted set; also restore the durable mint-counter floor for every queue, or a reopen after
-        // a full reap could re-mint a reaped id (ADR-009). Inert when no reap has advanced the floor.
         observe_all_id_high_water_sql(&g.conn, &self.counters)
     }
 }
@@ -3443,6 +3420,7 @@ mod hot_query_sql_tests {
     static MUTATION_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_PUSH_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static COUNTER_RESTORE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     fn count_pel_statement(_: &str) {
         PEL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -3458,6 +3436,10 @@ mod hot_query_sql_tests {
 
     fn count_group_push_statement(_: &str) {
         GROUP_PUSH_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_counter_restore_statement(_: &str) {
+        COUNTER_RESTORE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
     fn mutation_queue() -> QueueDefinition {
@@ -3639,12 +3621,50 @@ mod hot_query_sql_tests {
         GROUP_PUSH_TRACE_COUNT.load(Ordering::Relaxed)
     }
 
+    async fn counter_restore_statement_count(items: usize) -> usize {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                (0..items).map(|_| PushSpec::default()).collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        COUNTER_RESTORE_TRACE_COUNT.store(0, Ordering::Relaxed);
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .trace(Some(count_counter_restore_statement));
+        backend.restore_counters().unwrap();
+        backend.inner.lock().unwrap().conn.trace(None);
+        COUNTER_RESTORE_TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
     #[tokio::test]
     async fn grouped_push_statement_count_is_independent_of_distinct_groups() {
         let one = grouped_push_statement_count(1).await;
         let hundred = grouped_push_statement_count(100).await;
         let thousand = grouped_push_statement_count(1_000).await;
         assert_eq!((one, hundred, thousand), (one, one, one));
+    }
+
+    #[tokio::test]
+    async fn counter_restore_statement_count_is_independent_of_resident_items() {
+        let one = counter_restore_statement_count(1).await;
+        let hundred = counter_restore_statement_count(100).await;
+        let thousand = counter_restore_statement_count(1_000).await;
+        assert_eq!((one, hundred, thousand), (one, one, one));
+        assert_eq!(
+            one, 1,
+            "counter recovery reads only durable queue high-waters"
+        );
     }
 
     #[tokio::test]

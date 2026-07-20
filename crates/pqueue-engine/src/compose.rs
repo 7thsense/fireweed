@@ -1242,6 +1242,22 @@ struct Inner<L, P> {
 pub const DEFAULT_RECOVERY_MAX_TAIL: u64 = 1_000_000;
 const RECOVERY_READ_PAGE_LIMIT: usize = 8_192;
 
+struct CommitRecoveryAccum {
+    fingerprint: u64,
+    created_at: UtcTimestamp,
+    pending_side_keys: Vec<Vec<u8>>,
+    pending_instance: Option<(Vec<u8>, u64)>,
+    pending_lifecycle_ids: Vec<ItemId>,
+    entries: Vec<EntryRecovery>,
+    durable_full: Option<Vec<EntryRecovery>>,
+}
+
+struct RecoveryIdempotencyCaches<'a> {
+    push: &'a mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+    claim: &'a mut HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>,
+    commit: &'a mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
+}
+
 /// A conservative cross-owner clock-skew guard band (ms) subtracted from the retention cutoff before a
 /// segment is eligible for object-log trimming (bead pqueue-b5cc2bc7, risk R4): a segment is trimmed only if
 /// its `committed_at_ms <= now - request_id_retention_ms - RETENTION_TRIM_SKEW_MARGIN_MS`, so a small clock
@@ -1363,6 +1379,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         assert!(partitions > 0 && index < partitions);
         self.worker_partition = Some((index, partitions));
         self
+    }
+
+    /// Recover one member of a fixed worker pool. Installing affinity before catalog enumeration prevents
+    /// every connection from redundantly rebuilding every durable queue.
+    pub fn recover_worker_partition(
+        mut self,
+        index: usize,
+        partitions: usize,
+    ) -> EngineResult<Self> {
+        assert!(partitions > 0 && index < partitions);
+        self.worker_partition = Some((index, partitions));
+        self.recover()
     }
 
     fn owns_worker_queue(&self, queue: &QueueKey) -> bool {
@@ -2185,7 +2213,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         let definitions: Vec<QueueDefinition> = {
             let g = self.inner.lock().expect("composed backend poisoned");
             Self::durable_definitions_locked(&g)?
-        };
+        }
+        .into_iter()
+        .filter(|definition| {
+            self.owns_worker_queue(&QueueKey::new(
+                definition.tenant_id.clone(),
+                definition.queue_id.clone(),
+            ))
+        })
+        .collect();
         if definitions.is_empty() {
             return Ok(());
         }
@@ -2243,19 +2279,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             // unknown-outcome contract (INV-14). The rebuild is a pure log fold and is correct for both
             // durability classes (the relational, DB-authoritative family is a separate backend type, not
             // a ComposedBackend, and is unaffected).
-            Self::rebuild_push_idempotency_from_log(
+            let recovered_max_cmd_seq = Self::rebuild_idempotency_from_log(
                 log,
-                idempotency,
+                RecoveryIdempotencyCaches {
+                    push: idempotency,
+                    claim: claim_by_query_idempotency,
+                    commit: commit_idempotency,
+                },
                 &key,
                 def.request_id_retention_ms,
                 floor.clone(),
-            )?;
-            Self::rebuild_claim_by_query_idempotency_from_log(
-                log,
-                claim_by_query_idempotency,
-                &key,
-                def.request_id_retention_ms,
-                floor.clone(),
+                &self.counters,
             )?;
             // Symmetric rebuild for the OTHER request_id-bearing mutating op: `commit_transition` (the
             // authoritative vectorized claimed-work commit). Its in-memory `commit_idempotency` cache is
@@ -2265,14 +2299,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             // violating INV-14 for commit_transition). The rebuild is a pure durable-state reconstruction:
             // the committed per-entry `EntryRecovery` is rebuilt from the durable commit envelopes on the
             // log (Finalize/WriteSideRecords/AdvanceInstanceFence/Push), and the body fingerprint is the one
-            // stamped onto those envelopes at commit time. See `rebuild_commit_idempotency_from_log`.
-            Self::rebuild_commit_idempotency_from_log(
-                log,
-                commit_idempotency,
-                &key,
-                def.request_id_retention_ms,
-                floor.clone(),
-            )?;
+            // stamped onto those envelopes at commit time. See `rebuild_idempotency_from_log`.
+            if let Some(sequence) = recovered_max_cmd_seq {
+                max_cmd_seq = Some(max_cmd_seq.map_or(sequence, |max| max.max(sequence)));
+            }
             // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
             // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
             let recorded_high_water = projection.recovery_high_water(&key)?;
@@ -2327,22 +2357,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                         positions.push(pos);
                         envelopes.push(env);
                     }
-                    for env in &envelopes {
-                        for id in &env.item_ids {
-                            self.counters.observe(&key, *id);
-                        }
-                        // The composition mints `cmp-{node}-{n}` command ids; resume past the highest replayed
-                        // sequence so a post-reopen append never re-mints an existing command id.
-                        if let Some(n) = env
-                            .command_id
-                            .0
-                            .rsplit('-')
-                            .next()
-                            .and_then(|s| s.parse::<u64>().ok())
-                        {
-                            max_cmd_seq = Some(max_cmd_seq.map_or(n, |m| m.max(n)));
-                        }
-                    }
                     tail += positions.len() as u64;
                     projection.apply_recovery(&positions, &envelopes)?;
                 }
@@ -2368,114 +2382,137 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         Ok(())
     }
 
-    fn rebuild_push_idempotency_from_log(
+    fn rebuild_idempotency_from_log(
         log: &L,
-        idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+        caches: RecoveryIdempotencyCaches<'_>,
         shard: &QueueKey,
         retention_ms: u64,
         floor: Option<CommandPosition>,
-    ) -> EngineResult<()> {
-        // Start the fold at the durable retention floor (bead pqueue-b5cc2bc7): the below-floor segments are
-        // trimmed away, and the trim horizon guarantees every below-floor push request_id is already past
-        // `retention_ms`, so none is dropped. `None` (a never-trimmed log) is genesis — unchanged behavior.
+        counters: &QueueCounters,
+    ) -> EngineResult<Option<u64>> {
+        let mut commit_accums = HashMap::new();
+        let mut max_cmd_seq: Option<u64> = None;
         let mut from = floor;
         loop {
             let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
-            for (_, env) in &page.entries {
-                let Some(request_id) = &env.request_id else {
-                    continue;
-                };
-                let QueueCommand::Push(push) = &env.command else {
-                    continue;
-                };
-                let fingerprint = env
-                    .request_fingerprint
-                    .map(BodyHash)
-                    .unwrap_or(push_item_body_hash(&push.items)?);
-                let expires_at = request_expires_at(env.created_at, retention_ms);
-                idempotency.entry(shard.clone()).or_default().record(
-                    request_id.clone(),
-                    fingerprint,
-                    match &env.request_outcome {
-                        Some(RequestOutcome::Push { item_ids }) => item_ids.clone(),
-                        // A `Push` command never carries a `CommitTransition` outcome; fall back to the
-                        // envelope's minted ids (same as the `None` legacy-push path).
-                        Some(RequestOutcome::ClaimByQuery { .. })
-                        | Some(RequestOutcome::CommitTransition { .. })
-                        | None => env.item_ids.clone(),
-                    },
-                    expires_at,
-                );
+            Self::fold_push_idempotency(&mut *caches.push, shard, retention_ms, &page.entries)?;
+            Self::fold_claim_by_query_idempotency(
+                &mut *caches.claim,
+                shard,
+                retention_ms,
+                &page.entries,
+            )?;
+            Self::fold_commit_idempotency(&mut commit_accums, &page.entries)?;
+            for (_, envelope) in &page.entries {
+                for item_id in &envelope.item_ids {
+                    counters.observe(shard, *item_id);
+                }
+                if let Some(sequence) = envelope
+                    .command_id
+                    .0
+                    .rsplit('-')
+                    .next()
+                    .and_then(|value| value.parse::<u64>().ok())
+                {
+                    max_cmd_seq = Some(max_cmd_seq.map_or(sequence, |max| max.max(sequence)));
+                }
             }
             match page.next {
                 Some(next) => from = Some(next),
                 None => break,
             }
         }
+        Self::finish_commit_idempotency(caches.commit, shard, retention_ms, commit_accums);
+        Ok(max_cmd_seq)
+    }
+
+    fn fold_push_idempotency(
+        idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
+        shard: &QueueKey,
+        retention_ms: u64,
+        entries: &[(CommandPosition, CommandEnvelope)],
+    ) -> EngineResult<()> {
+        for (_, env) in entries {
+            let Some(request_id) = &env.request_id else {
+                continue;
+            };
+            let QueueCommand::Push(push) = &env.command else {
+                continue;
+            };
+            let fingerprint = env
+                .request_fingerprint
+                .map(BodyHash)
+                .unwrap_or(push_item_body_hash(&push.items)?);
+            let expires_at = request_expires_at(env.created_at, retention_ms);
+            idempotency.entry(shard.clone()).or_default().record(
+                request_id.clone(),
+                fingerprint,
+                match &env.request_outcome {
+                    Some(RequestOutcome::Push { item_ids }) => item_ids.clone(),
+                    // A `Push` command never carries a `CommitTransition` outcome; fall back to the
+                    // envelope's minted ids (same as the `None` legacy-push path).
+                    Some(RequestOutcome::ClaimByQuery { .. })
+                    | Some(RequestOutcome::CommitTransition { .. })
+                    | None => env.item_ids.clone(),
+                },
+                expires_at,
+            );
+        }
         Ok(())
     }
 
-    fn rebuild_claim_by_query_idempotency_from_log(
-        log: &L,
+    fn fold_claim_by_query_idempotency(
         idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>,
         shard: &QueueKey,
         retention_ms: u64,
-        floor: Option<CommandPosition>,
+        entries: &[(CommandPosition, CommandEnvelope)],
     ) -> EngineResult<()> {
-        let mut from = floor;
-        loop {
-            let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
-            for (_, env) in &page.entries {
-                if let QueueCommand::RenewLease(renew) = &env.command {
-                    let renewed: HashSet<ItemId> = renew.item_ids.iter().copied().collect();
-                    idempotency
-                        .entry(shard.clone())
-                        .or_default()
-                        .extend_expiry_matching(renew.lease_expires_at, |(item_ids, _)| {
-                            !item_ids.is_empty()
-                                && item_ids.iter().all(|item_id| renewed.contains(item_id))
-                        });
-                    continue;
+        for (_, env) in entries {
+            if let QueueCommand::RenewLease(renew) = &env.command {
+                let renewed: HashSet<ItemId> = renew.item_ids.iter().copied().collect();
+                idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .extend_expiry_matching(renew.lease_expires_at, |(item_ids, _)| {
+                        !item_ids.is_empty()
+                            && item_ids.iter().all(|item_id| renewed.contains(item_id))
+                    });
+                continue;
+            }
+            let (
+                Some(request_id),
+                Some(fingerprint),
+                Some(RequestOutcome::ClaimByQuery {
+                    item_ids,
+                    lease_token,
+                    ..
+                }),
+            ) = (
+                &env.request_id,
+                env.request_fingerprint,
+                &env.request_outcome,
+            )
+            else {
+                continue;
+            };
+            let expires_at = match (&env.command, item_ids.is_empty()) {
+                (QueueCommand::Claim(claim), false) => {
+                    request_expires_at(env.created_at, retention_ms).max(claim.lease_expires_at)
                 }
-                let (
-                    Some(request_id),
-                    Some(fingerprint),
-                    Some(RequestOutcome::ClaimByQuery {
-                        item_ids,
-                        lease_token,
-                        ..
-                    }),
-                ) = (
-                    &env.request_id,
-                    env.request_fingerprint,
-                    &env.request_outcome,
-                )
-                else {
-                    continue;
-                };
-                let expires_at = match (&env.command, item_ids.is_empty()) {
-                    (QueueCommand::Claim(claim), false) => {
-                        request_expires_at(env.created_at, retention_ms).max(claim.lease_expires_at)
-                    }
-                    _ => request_expires_at(env.created_at, retention_ms),
-                };
-                idempotency.entry(shard.clone()).or_default().record(
-                    request_id.clone(),
-                    BodyHash(fingerprint),
-                    (item_ids.clone(), lease_token.clone()),
-                    expires_at,
-                );
-            }
-            match page.next {
-                Some(next) => from = Some(next),
-                None => break,
-            }
+                _ => request_expires_at(env.created_at, retention_ms),
+            };
+            idempotency.entry(shard.clone()).or_default().record(
+                request_id.clone(),
+                BodyHash(fingerprint),
+                (item_ids.clone(), lease_token.clone()),
+                expires_at,
+            );
         }
         Ok(())
     }
 
     /// Recovery twin of `commit_transition`'s in-memory `commit_idempotency` record (mirrors
-    /// [`Self::rebuild_push_idempotency_from_log`] for the OTHER request_id-bearing op). Rebuilds the
+    /// [`Self::rebuild_idempotency_from_log`] fold for the OTHER request_id-bearing op). Rebuilds the
     /// `request_id -> (fingerprint, Vec<EntryRecovery>)` cache from the durable log so a post-restart retry of
     /// an already-committed `commit_transition` `request_id` replays the one committed per-entry outcome
     /// (INV-14 unknown-outcome replay) instead of re-executing / being lease-fenced.
@@ -2511,52 +2548,25 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// all-committed commit reconstructs exactly from its `Finalize` runs (no marker is written for it); a
     /// mixed commit in a pre-change log stays short and safely re-executes under the length guard, exactly as
     /// before — old logs are never corrupted or rejected.
-    fn rebuild_commit_idempotency_from_log(
-        log: &L,
-        commit_idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
-        shard: &QueueKey,
-        retention_ms: u64,
-        floor: Option<CommandPosition>,
+    fn fold_commit_idempotency(
+        accums: &mut HashMap<RequestId, CommitRecoveryAccum>,
+        entries: &[(CommandPosition, CommandEnvelope)],
     ) -> EngineResult<()> {
-        /// Per-`request_id` reconstruction state: the completed entries plus the parts of the entry currently
-        /// being assembled (until its `Finalize` closes it).
-        struct CommitAccum {
-            fingerprint: u64,
-            created_at: UtcTimestamp,
-            pending_side_keys: Vec<Vec<u8>>,
-            pending_instance: Option<(Vec<u8>, u64)>,
-            pending_lifecycle_ids: Vec<ItemId>,
-            entries: Vec<EntryRecovery>,
-            /// The AUTHORITATIVE full per-entry vec (committed AND rejected) decoded from a
-            /// [`RequestOutcome::CommitTransition`] marker, when one was durably recorded (a MIXED commit; bead
-            /// pqueue-db60657d). When present it supersedes the piecemeal `entries` reconstruction so the
-            /// rejected entries — which appended nothing themselves — are replayed with their structured error.
-            /// `None` for all-committed commits and for logs written before the marker existed (back-compat:
-            /// those fall back to `entries`).
-            durable_full: Option<Vec<EntryRecovery>>,
-        }
-        let mut accums: HashMap<RequestId, CommitAccum> = HashMap::new();
-        // Start at the durable retention floor (bead pqueue-b5cc2bc7). A commit_transition's whole
-        // Finalize-delimited run is durably contiguous and stamped with the SAME created_at; the trim horizon
-        // only reclaims segments all past `retention_ms`, so an unexpired commit's entire run is above the
-        // floor and reconstructed intact. `None` (a never-trimmed log) is genesis — unchanged behavior.
-        let mut from = floor;
-        loop {
-            let page = log.read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
-            for (_, env) in &page.entries {
-                let Some(request_id) = &env.request_id else {
-                    continue;
-                };
-                let Some(fingerprint) = env.request_fingerprint else {
-                    continue;
-                };
-                // A `commit_transition`'s terminal marker carries the FULL per-entry outcome for a mixed commit.
-                // Capture it as authoritative; it delimits nothing (no `Finalize`) so it stays out of the
-                // piecemeal fold below.
-                if let Some(RequestOutcome::CommitTransition { entries }) = &env.request_outcome {
-                    let accum = accums
+        for (_, env) in entries {
+            let Some(request_id) = &env.request_id else {
+                continue;
+            };
+            let Some(fingerprint) = env.request_fingerprint else {
+                continue;
+            };
+            // A `commit_transition`'s terminal marker carries the FULL per-entry outcome for a mixed commit.
+            // Capture it as authoritative; it delimits nothing (no `Finalize`) so it stays out of the
+            // piecemeal fold below.
+            if let Some(RequestOutcome::CommitTransition { entries }) = &env.request_outcome {
+                let accum =
+                    accums
                         .entry(request_id.clone())
-                        .or_insert_with(|| CommitAccum {
+                        .or_insert_with(|| CommitRecoveryAccum {
                             fingerprint,
                             created_at: env.created_at,
                             pending_side_keys: Vec::new(),
@@ -2565,78 +2575,81 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                             entries: Vec::new(),
                             durable_full: None,
                         });
-                    accum.durable_full = Some(
-                        entries
-                            .iter()
-                            .cloned()
-                            .map(recovery_from_outcome_entry)
-                            .collect(),
-                    );
-                    continue;
-                }
-                // `push_with_request_id` envelopes carry `request_outcome = Some(RequestOutcome::Push)`; the push
-                // rebuild owns them. Only `commit_transition` envelopes (request_outcome == None) belong to the
-                // piecemeal fold.
-                if env.request_outcome.is_some() {
-                    continue;
-                }
-                let accum = accums
-                    .entry(request_id.clone())
-                    .or_insert_with(|| CommitAccum {
-                        fingerprint,
-                        created_at: env.created_at,
-                        pending_side_keys: Vec::new(),
-                        pending_instance: None,
-                        pending_lifecycle_ids: Vec::new(),
-                        entries: Vec::new(),
-                        durable_full: None,
-                    });
-                match &env.command {
-                    QueueCommand::WriteSideRecords(cmd) => {
-                        accum.pending_side_keys =
-                            cmd.records.iter().map(|r| r.key.clone()).collect();
-                    }
-                    QueueCommand::AdvanceInstanceFence(cmd) => {
-                        accum.pending_instance = Some((cmd.instance_key.clone(), cmd.next));
-                    }
-                    QueueCommand::Push(_) => {
-                        accum.pending_lifecycle_ids = env.item_ids.clone();
-                    }
-                    QueueCommand::Finalize(cmd) => {
-                        let Some(consumed_input_id) = cmd
-                            .outcomes
-                            .first()
-                            .map(|o| o.item_id)
-                            .or_else(|| env.item_ids.first().copied())
-                        else {
-                            continue;
-                        };
-                        let additional_consumed_input_ids = cmd
-                            .outcomes
-                            .iter()
-                            .skip(1)
-                            .map(|outcome| outcome.item_id)
-                            .collect();
-                        let side_record_keys = std::mem::take(&mut accum.pending_side_keys);
-                        let instance = accum.pending_instance.take();
-                        let lifecycle_item_ids = std::mem::take(&mut accum.pending_lifecycle_ids);
-                        accum.entries.push(EntryRecovery {
-                            consumed_input_id,
-                            additional_consumed_input_ids,
-                            instance,
-                            side_record_keys,
-                            lifecycle_item_ids,
-                            status: CommitEntryStatus::Committed,
-                        });
-                    }
-                    _ => {}
-                }
+                accum.durable_full = Some(
+                    entries
+                        .iter()
+                        .cloned()
+                        .map(recovery_from_outcome_entry)
+                        .collect(),
+                );
+                continue;
             }
-            match page.next {
-                Some(next) => from = Some(next),
-                None => break,
+            // `push_with_request_id` envelopes carry `request_outcome = Some(RequestOutcome::Push)`; the push
+            // rebuild owns them. Only `commit_transition` envelopes (request_outcome == None) belong to the
+            // piecemeal fold.
+            if env.request_outcome.is_some() {
+                continue;
+            }
+            let accum = accums
+                .entry(request_id.clone())
+                .or_insert_with(|| CommitRecoveryAccum {
+                    fingerprint,
+                    created_at: env.created_at,
+                    pending_side_keys: Vec::new(),
+                    pending_instance: None,
+                    pending_lifecycle_ids: Vec::new(),
+                    entries: Vec::new(),
+                    durable_full: None,
+                });
+            match &env.command {
+                QueueCommand::WriteSideRecords(cmd) => {
+                    accum.pending_side_keys = cmd.records.iter().map(|r| r.key.clone()).collect();
+                }
+                QueueCommand::AdvanceInstanceFence(cmd) => {
+                    accum.pending_instance = Some((cmd.instance_key.clone(), cmd.next));
+                }
+                QueueCommand::Push(_) => {
+                    accum.pending_lifecycle_ids = env.item_ids.clone();
+                }
+                QueueCommand::Finalize(cmd) => {
+                    let Some(consumed_input_id) = cmd
+                        .outcomes
+                        .first()
+                        .map(|o| o.item_id)
+                        .or_else(|| env.item_ids.first().copied())
+                    else {
+                        continue;
+                    };
+                    let additional_consumed_input_ids = cmd
+                        .outcomes
+                        .iter()
+                        .skip(1)
+                        .map(|outcome| outcome.item_id)
+                        .collect();
+                    let side_record_keys = std::mem::take(&mut accum.pending_side_keys);
+                    let instance = accum.pending_instance.take();
+                    let lifecycle_item_ids = std::mem::take(&mut accum.pending_lifecycle_ids);
+                    accum.entries.push(EntryRecovery {
+                        consumed_input_id,
+                        additional_consumed_input_ids,
+                        instance,
+                        side_record_keys,
+                        lifecycle_item_ids,
+                        status: CommitEntryStatus::Committed,
+                    });
+                }
+                _ => {}
             }
         }
+        Ok(())
+    }
+
+    fn finish_commit_idempotency(
+        commit_idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
+        shard: &QueueKey,
+        retention_ms: u64,
+        accums: HashMap<RequestId, CommitRecoveryAccum>,
+    ) {
         for (request_id, accum) in accums {
             // A durable `CommitTransition` marker (mixed commit) is authoritative — it holds the whole vec
             // including the rejected entries; otherwise fall back to the committed-only piecemeal `entries`.
@@ -2652,7 +2665,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 expires_at,
             );
         }
-        Ok(())
     }
 
     /// Whether the composition offers the atomic append+apply boundary the atomic-only ports require
@@ -3383,7 +3395,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
     /// `build_push_items`, `index_validate_push`) up to (but not including) the commit + record. The caller
     /// drives the returned envelope through [`crate::Backend::commit_raw`] with a mid-pipeline fault so the
     /// `AfterAppendBeforeApply` cut point carries a real `request_id` (recovery rebuilds the push-idempotency
-    /// map from this durable envelope on reopen — see `rebuild_push_idempotency_from_log`).
+    /// map from this durable envelope on reopen — see `rebuild_idempotency_from_log`).
     fn build_request_id_push_envelope(
         &self,
         shard: &QueueKey,
@@ -3434,7 +3446,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
     /// path (a `commit_validate` rejection here matches it). The caller drives the returned envelope through
     /// [`crate::Backend::commit_raw`] with a mid-pipeline fault so the `AfterAppendBeforeApply` cut point is
     /// `request_id`-bearing for `commit_transition`; recovery rebuilds the commit-idempotency cache from this
-    /// durable envelope on reopen (see `rebuild_commit_idempotency_from_log`).
+    /// durable envelope on reopen (see `rebuild_idempotency_from_log`).
     fn build_request_id_commit_envelope(
         &self,
         shard: &QueueKey,
@@ -5129,7 +5141,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 // idempotency key and the fingerprint is what `check` compares for replay-vs-conflict, so
                 // stamping both durably (in the SAME pre-existing envelope fields the push path uses — no
                 // wire-format change, no new serialization) is exactly what lets recovery rebuild the
-                // `commit_idempotency` cache from the log (`rebuild_commit_idempotency_from_log`) so a
+                // `commit_idempotency` cache from the log (`rebuild_idempotency_from_log`) so a
                 // post-restart request_id retry replays the one committed result instead of re-executing.
                 let mut envelopes: Vec<CommandEnvelope> = Vec::new();
                 let mk_env = |g: &mut Inner<L, P>, command: QueueCommand, item_ids: Vec<ItemId>| {
@@ -5415,6 +5427,7 @@ mod ordered_tests {
     };
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::task::Poll;
 
     #[derive(Clone, Default)]
@@ -5432,12 +5445,14 @@ mod ordered_tests {
     #[derive(Default)]
     struct FakeGroupCommitLog {
         state: Mutex<FakeLogState>,
+        read_calls: AtomicUsize,
     }
 
     impl Clone for FakeGroupCommitLog {
         fn clone(&self) -> Self {
             Self {
                 state: Mutex::new(self.state.lock().expect("fake log poisoned").clone()),
+                read_calls: AtomicUsize::new(self.read_calls.load(AtomicOrdering::Relaxed)),
             }
         }
     }
@@ -5453,6 +5468,10 @@ mod ordered_tests {
 
         fn entry_count(&self) -> usize {
             self.state.lock().expect("fake log poisoned").entries.len()
+        }
+
+        fn read_calls(&self) -> usize {
+            self.read_calls.load(AtomicOrdering::Relaxed)
         }
 
         fn set_entries(
@@ -5550,6 +5569,7 @@ mod ordered_tests {
             from: Option<CommandPosition>,
             limit: usize,
         ) -> EngineResult<CommandPage> {
+            self.read_calls.fetch_add(1, AtomicOrdering::Relaxed);
             let state = self.state.lock().expect("fake log poisoned");
             let start = match from.as_ref() {
                 None => 0,
@@ -6179,6 +6199,45 @@ mod ordered_tests {
             entity_schema: None,
             typed_indexes: vec![],
             emit_change_records: true,
+        }
+    }
+
+    #[test]
+    fn pooled_recovery_assigns_each_durable_queue_to_exactly_one_worker() {
+        let log = FakeGroupCommitLog::default();
+        let tenant = TenantId::new("tenant").unwrap();
+        for index in 0..65 {
+            let mut definition = qdef();
+            definition.queue_id = QueueId::new(format!("queue-{index}")).unwrap();
+            log.record_definition(&definition);
+        }
+
+        for width in [1, 3, 8] {
+            let mut recovered_by = HashMap::<QueueId, usize>::new();
+            for worker in 0..width {
+                let backend = ComposedBackend::new(
+                    log.clone(),
+                    FakeProjection::default(),
+                    InProcessControlPlane::new(),
+                )
+                .recover_worker_partition(worker, width)
+                .unwrap();
+                let mut list = Box::pin(ControlPlaneStore::list_queues(&backend, &tenant));
+                let Poll::Ready(Ok(queues)) = poll_once(&mut list) else {
+                    panic!("partitioned recovery list must complete")
+                };
+                for queue_id in queues {
+                    assert_eq!(
+                        queue_worker_partition(
+                            &QueueKey::new(tenant.clone(), queue_id.clone()),
+                            width,
+                        ),
+                        worker
+                    );
+                    assert!(recovered_by.insert(queue_id, worker).is_none());
+                }
+            }
+            assert_eq!(recovered_by.len(), 65);
         }
     }
 
@@ -7209,14 +7268,26 @@ mod ordered_tests {
             ],
         );
         let mut recovered = HashMap::new();
-        ComposedBackend::<FakeGroupCommitLog, FakeProjection, InProcessControlPlane>::rebuild_claim_by_query_idempotency_from_log(
+        let mut recovered_push = HashMap::new();
+        let mut recovered_commit = HashMap::new();
+        ComposedBackend::<FakeGroupCommitLog, FakeProjection, InProcessControlPlane>::rebuild_idempotency_from_log(
             &log,
-            &mut recovered,
+            RecoveryIdempotencyCaches {
+                push: &mut recovered_push,
+                claim: &mut recovered,
+                commit: &mut recovered_commit,
+            },
             &shard,
             10_000,
             None,
+            &QueueCounters::default(),
         )
         .unwrap();
+        assert_eq!(
+            log.read_calls(),
+            1,
+            "all retained idempotency folds share one page read"
+        );
         let cache = recovered.get(&shard).unwrap();
         assert!(matches!(
             cache.check_conflict_first(&request_id, BodyHash(fingerprint), ts(145)),
@@ -7227,6 +7298,49 @@ mod ordered_tests {
             cache.check_conflict_first(&request_id, BodyHash(fingerprint), ts(160)),
             IdempotencyDecision::Expired
         ));
+    }
+
+    #[test]
+    fn retained_history_recovery_reads_each_page_once_for_all_idempotency_families() {
+        let log = FakeGroupCommitLog::default();
+        let shard = queue();
+        let entries = (0..(RECOVERY_READ_PAGE_LIMIT + 1))
+            .map(|sequence| CommandEnvelope {
+                command_id: CommandId::new(format!("cmp-0-{sequence}")),
+                request_id: None,
+                request_fingerprint: None,
+                request_outcome: None,
+                item_ids: Vec::new(),
+                command: QueueCommand::CreateQueue(crate::command::CreateQueueCommand {
+                    definition: qdef(),
+                }),
+                checksum: CommandChecksum(0),
+                created_at: ts(0),
+            })
+            .collect();
+        log.set_entries(&shard, 0, entries);
+
+        let mut recovered_push = HashMap::new();
+        let mut recovered_claim = HashMap::new();
+        let mut recovered_commit = HashMap::new();
+        ComposedBackend::<FakeGroupCommitLog, FakeProjection, InProcessControlPlane>::rebuild_idempotency_from_log(
+            &log,
+            RecoveryIdempotencyCaches {
+                push: &mut recovered_push,
+                claim: &mut recovered_claim,
+                commit: &mut recovered_commit,
+            },
+            &shard,
+            60_000,
+            None,
+            &QueueCounters::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            log.read_calls(),
+            2,
+            "8,193 retained commands require two pages, not six family-specific reads"
+        );
     }
 }
 

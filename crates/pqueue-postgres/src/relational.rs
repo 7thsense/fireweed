@@ -182,6 +182,14 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
 );
+CREATE TABLE IF NOT EXISTS pqueue_id_high_water (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id)
+);
+CREATE TABLE IF NOT EXISTS pqueue_schema_migrations (
+    migration_name TEXT NOT NULL PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS relational_emission_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     epoch BIGINT NOT NULL,
@@ -2301,6 +2309,28 @@ fn finalize_update(
 
 /// Apply one command to `pqueue_items` as SQL. Mirrors `ProjectionData::apply_command` (and the sqlite
 /// reference) arm-for-arm. Token-map mutations accumulate in `token_ops` (applied post-commit).
+fn advance_id_high_water(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    item_ids: &[ItemId],
+) -> EngineResult<()> {
+    let Some(max_new) = item_ids
+        .iter()
+        .max_by_key(|item_id| (item_id.epoch(), item_id.counter()))
+        .copied()
+    else {
+        return Ok(());
+    };
+    let (tenant, queue) = parts(shard);
+    st(tx.execute(
+        "INSERT INTO pqueue_id_high_water(tenant_id,queue_id,item_id) VALUES($1,$2,$3) \
+         ON CONFLICT(tenant_id,queue_id) DO UPDATE SET item_id=EXCLUDED.item_id \
+         WHERE pqueue_id_high_water.item_id::numeric < EXCLUDED.item_id::numeric",
+        &[&tenant, &queue, &max_new.to_string()],
+    ))?;
+    Ok(())
+}
+
 fn apply_command_sql(
     tx: &mut postgres::Transaction<'_>,
     queues: &HashMap<QueueKey, QueueDefinition>,
@@ -2321,6 +2351,8 @@ fn apply_command_sql(
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
             insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
+            let minted_ids: Vec<ItemId> = c.items.iter().map(|item| item.item_id).collect();
+            advance_id_high_water(tx, shard, &minted_ids)?;
             let ids: Vec<String> = c
                 .items
                 .iter()
@@ -4286,6 +4318,7 @@ impl PostgresRelationalBackend {
                WHERE state IN ('forming','complete');",
             ))?;
         }
+        migrate_id_high_water(&mut client)?;
         verify_group_summary_indexes(&mut client, fresh)?;
         let mut inner = Inner {
             client,
@@ -4303,14 +4336,14 @@ impl PostgresRelationalBackend {
         Ok(backend)
     }
 
-    /// Restart recovery: seed the per-queue mint counter past every id already in `pqueue_items`, so a push
-    /// after reconnect never re-mints an existing item id (the durable items table is the authority — there
-    /// is no log to replay). `observe` decodes `(epoch, counter)` from each packed id and only advances.
+    /// Restart recovery from one durable high-water row per queue. Work is proportional to queue count, not
+    /// resident or retained item count.
     fn restore_counters(&self) -> EngineResult<()> {
         let mut g = self.inner.lock().expect("poisoned");
-        let rows = st(g
-            .client
-            .query("SELECT tenant_id, queue_id, item_id FROM pqueue_items", &[]))?;
+        let rows = st(g.client.query(
+            "SELECT tenant_id, queue_id, item_id FROM pqueue_id_high_water",
+            &[],
+        ))?;
         for row in rows {
             let t: String = row.get(0);
             let q: String = row.get(1);
@@ -4339,6 +4372,42 @@ fn apply_concurrent_migrations(client: &mut Client) -> EngineResult<()> {
         st(client.batch_execute(ddl))?;
     }
     verify_group_summary_indexes(client, false)
+}
+
+fn migrate_id_high_water(client: &mut Client) -> EngineResult<()> {
+    st(client.batch_execute(
+        "CREATE TABLE IF NOT EXISTS pqueue_id_high_water ( \
+           tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, item_id TEXT NOT NULL, \
+           PRIMARY KEY (tenant_id,queue_id)); \
+         CREATE TABLE IF NOT EXISTS pqueue_schema_migrations ( \
+           migration_name TEXT NOT NULL PRIMARY KEY);",
+    ))?;
+    let mut tx = st(client.transaction())?;
+    st(tx.batch_execute("LOCK TABLE pqueue_schema_migrations IN EXCLUSIVE MODE"))?;
+    let complete: bool = st(tx.query_one(
+        "SELECT EXISTS(SELECT 1 FROM pqueue_schema_migrations \
+         WHERE migration_name='item_id_high_water_v2')",
+        &[],
+    ))?
+    .get(0);
+    if !complete {
+        // One set-based upgrade pass for v0.19.3 databases. Every later pool member and restart sees the
+        // marker and does O(1) work; no Rust-side materialized-row loop is introduced.
+        st(tx.execute(
+            "INSERT INTO pqueue_id_high_water(tenant_id,queue_id,item_id) \
+             SELECT tenant_id,queue_id,MAX(item_id::numeric)::text FROM pqueue_items \
+             GROUP BY tenant_id,queue_id \
+             ON CONFLICT(tenant_id,queue_id) DO UPDATE SET item_id=EXCLUDED.item_id \
+             WHERE pqueue_id_high_water.item_id::numeric < EXCLUDED.item_id::numeric",
+            &[],
+        ))?;
+        st(tx.execute(
+            "INSERT INTO pqueue_schema_migrations(migration_name) \
+             VALUES('item_id_high_water_v2')",
+            &[],
+        ))?;
+    }
+    st(tx.commit())
 }
 
 fn migrate_metrics_batch(
@@ -6546,6 +6615,7 @@ impl PostgresRelational {
              ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
              ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;",
         ))?;
+        migrate_id_high_water(&mut client)?;
         verify_group_summary_indexes(&mut client, fresh)?;
         let mut inner = Inner {
             client,
@@ -7346,11 +7416,11 @@ impl ProjectionStore for PostgresRelational {
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
         let mut g = self.lock();
         let (t, q) = parts(shard);
-        let rows = st(g.client.query(
-            "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2",
+        let row = st(g.client.query_opt(
+            "SELECT item_id FROM pqueue_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
             &[&t, &q],
         ))?;
-        for row in rows {
+        if let Some(row) = row {
             let id: String = row.get(0);
             let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
             counters.observe(shard, item_id);

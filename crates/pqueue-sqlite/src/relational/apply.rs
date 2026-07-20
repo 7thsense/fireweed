@@ -842,6 +842,8 @@ pub(crate) fn apply_command_sql(
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
             insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
+            let minted_ids: Vec<ItemId> = c.items.iter().map(|item| item.item_id).collect();
+            advance_id_high_water_sql(tx, shard, &minted_ids)?;
             observe_push_for_claim_scan(claim_scan_hints, claim_scan_default_fifo, shard, &c.items);
             let groups: HashSet<GroupKey> = c
                 .items
