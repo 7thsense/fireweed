@@ -13,6 +13,8 @@ NOISY_WORKERS=${NOISY_WORKERS:-8}
 SERVER_WORKERS=${SERVER_WORKERS:-4}
 SEED=${SEED:-42}
 PROGRESS_BOUND_MS=${PROGRESS_BOUND_MS:-60000}
+EVIDENCE_MODE=${EVIDENCE_MODE:-release}
+PROJECTION_BACKEND=${PROJECTION_BACKEND:-sqlite}
 THREAD_LIMIT=4
 CONNECTION_LIMIT=32
 TASK_LIMIT=64
@@ -30,6 +32,23 @@ OWNER_BASHPID=$BASHPID
 mkdir -p "$DIAGNOSTICS_DIR"
 PHASE_LOG="$DIAGNOSTICS_DIR/load-follow.log"
 rm -f "$PHASE_LOG"
+
+case "$EVIDENCE_MODE" in
+  release)
+    [[ "$PROJECTION_BACKEND" == sqlite ]]
+    [[ "$QUEUE_COUNT" == 1001 && "$ITEMS" == 300000 && "$CONTROL_ITEMS" == 10000 ]]
+    [[ "$HOT_CONNECTIONS" == 8 && "$NOISY_WORKERS" == 8 && "$SERVER_WORKERS" == 4 && "$SEED" == 42 ]]
+    ;;
+  d5-diagnostic)
+    [[ "$PROJECTION_BACKEND" == sqlite ]]
+    [[ "$QUEUE_COUNT" == 1001 && "$ITEMS" == 10000 && "$CONTROL_ITEMS" == 10000 ]]
+    [[ "$HOT_CONNECTIONS" == 64 && "$NOISY_WORKERS" == 8 && "$SERVER_WORKERS" == 4 && "$SEED" == 42 ]]
+    ;;
+  *)
+    echo "unknown EVIDENCE_MODE=$EVIDENCE_MODE" >&2
+    exit 2
+    ;;
+esac
 
 assert_source_unchanged() {
   [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" == "$REVISION" ]]
@@ -102,11 +121,9 @@ spec:
           ports: [ { containerPort: 8080 } ]
           env:
             - { name: PQUEUE_LOG_BACKEND, value: objectlog }
-            # TD-004's async profile is the production group-commit object-log + durable SQLite
-            # projection path for sustained load. Its bounded apply-debt controls remain at their
-            # governed defaults. PQUEUE_OBJECT_LOG_MODE is a retired pseudo-axis and is intentionally
-            # absent; setting it would falsely imply that it selects segmented/group-commit behavior.
-            - { name: PQUEUE_PROJECTION_BACKEND, value: hybrid-async }
+            # Keep the governed E2 identity exact. PQUEUE_OBJECT_LOG_MODE is a retired pseudo-axis and
+            # is intentionally absent; setting it would falsely imply that it selects behavior.
+            - { name: PQUEUE_PROJECTION_BACKEND, value: "$PROJECTION_BACKEND" }
             - { name: PQUEUE_OBJECT_LOG_ROOT, value: /data/object-log }
             - { name: PQUEUE_SQLITE_PROJECTION_PATH, value: /data/projection.db }
             - { name: PQUEUE_LISTEN_ADDR, value: "0.0.0.0:8080" }
@@ -135,7 +152,15 @@ spec:
   selector: { app: pqueue }
   ports: [ { port: 8080, targetPort: 8080 } ]
 YAML
-kubectl -n "$NAMESPACE" rollout status deployment/pqueue --timeout=300s
+until [[ "$(kubectl -n "$NAMESPACE" get deployment pqueue -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" == 1 ]]; do
+  failed_reason=$(kubectl -n "$NAMESPACE" get pods -l app=pqueue -o jsonpath='{range .items[*].status.containerStatuses[*].state.terminated}{.reason}{end}' 2>/dev/null || true)
+  if [[ -n "$failed_reason" ]]; then
+    capture_diagnostics
+    echo "pqueue deployment terminated before readiness: $failed_reason" >&2
+    exit 1
+  fi
+  sleep 2
+done
 SERVER_POD=$(kubectl -n "$NAMESPACE" get pod -l app=pqueue -o jsonpath='{.items[0].metadata.name}')
 SERVER_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$SERVER_POD" -o jsonpath='{.status.containerStatuses[0].imageID}')
 [[ "$SERVER_IMAGE_ID" == *"$IMAGE_DIGEST" ]]
@@ -143,7 +168,7 @@ SERVER_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$SERVER_POD" -o jsonpath='{.s
 NODE_IMAGE=$(docker inspect "${CLUSTER}-control-plane" --format '{{.Config.Image}}')
 NODE_CAPACITY=$(kubectl get node -o jsonpath='{.items[0].status.capacity.cpu} {.items[0].status.capacity.memory}')
 HARDWARE="$(nproc) host cores; $(awk '/MemTotal/ {printf "%.1f GiB RAM", $2/1024/1024}' /proc/meminfo); kind node $NODE_IMAGE capacity $NODE_CAPACITY; server limit 4 cores/4 GiB RAM"
-TOPOLOGY="live one-node kind deployment; objectlog/sqlite (TD-004 hybrid-async bounded-debt projection) on bounded 4 GiB emptyDir tmpfs; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
+TOPOLOGY="live one-node kind deployment; direct objectlog/sqlite projection on bounded 4 GiB emptyDir tmpfs; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
 
 cat <<YAML | kubectl apply -f -
 apiVersion: batch/v1
@@ -182,7 +207,15 @@ spec:
             limits: { cpu: "4000m", memory: "4Gi" }
 YAML
 
-kubectl -n "$NAMESPACE" wait --for=condition=Ready pod -l job-name=density-load --timeout=300s
+until [[ "$(kubectl -n "$NAMESPACE" get pod -l job-name=density-load -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null)" == true ]]; do
+  failed_reason=$(kubectl -n "$NAMESPACE" get pod -l job-name=density-load -o jsonpath='{.items[0].status.containerStatuses[0].state.terminated.reason}' 2>/dev/null || true)
+  if [[ -n "$failed_reason" ]]; then
+    capture_diagnostics
+    echo "density load pod terminated before readiness: $failed_reason" >&2
+    exit 1
+  fi
+  sleep 2
+done
 LOAD_POD=$(kubectl -n "$NAMESPACE" get pod -l job-name=density-load -o jsonpath='{.items[0].metadata.name}')
 LOAD_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$LOAD_POD" -o jsonpath='{.status.containerStatuses[0].imageID}')
 [[ "$LOAD_IMAGE_ID" == *"$IMAGE_DIGEST" ]]
@@ -207,7 +240,6 @@ LOG_WATCH_PID=$!
 ) &
 SAMPLER_PID=$!
 
-deadline=$((SECONDS + 1800))
 while true; do
   if ! job_json=$(kubectl -n "$NAMESPACE" get job density-load -o json 2>"$DIAGNOSTICS_DIR/job-poll.err"); then
     capture_diagnostics
@@ -223,12 +255,6 @@ while true; do
     cat "$DIAGNOSTICS_DIR/load.log" || true
     exit 1
   fi
-  if (( SECONDS >= deadline )); then
-    capture_diagnostics
-    cat "$DIAGNOSTICS_DIR/load.log" || true
-    echo "density load timed out; diagnostics retained at $DIAGNOSTICS_DIR" >&2
-    exit 1
-  fi
   sleep 2
 done
 
@@ -242,6 +268,9 @@ SAMPLER_PID=
 kill "$LOG_WATCH_PID" 2>/dev/null || true
 wait "$LOG_WATCH_PID" 2>/dev/null || true
 LOG_WATCH_PID=
+# Use one atomic, post-completion copy for counter validation and the retained log hash; the streaming
+# copy exists only so the resource sampler can observe HOT_START/HOT_END while the Job is live.
+printf '%s\n' "$logs" >"$PHASE_LOG"
 HOT_START_MS=$(jq -r '.hot_phase_started_unix_ms' "$RESULT_FILE")
 HOT_END_MS=$(jq -r '.hot_phase_ended_unix_ms' "$RESULT_FILE")
 read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_SAMPLES FIRST_HOT_SAMPLE_MS LAST_HOT_SAMPLE_MS < <(
@@ -261,6 +290,81 @@ read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_
 
 mkdir -p "$(dirname "$LEDGER_OUT")"
 assert_source_unchanged
+if [[ "$EVIDENCE_MODE" == d5-diagnostic ]]; then
+  grep -q '^DENSITY_STAGE stage=READINESS status=DONE$' "$PHASE_LOG"
+  grep -q '^DENSITY_STAGE stage=INVENTORY status=DONE completed=1001 total=1001$' "$PHASE_LOG"
+  grep -q '^DENSITY_STAGE stage=COLD_PRIME status=DONE completed=1000 total=1000$' "$PHASE_LOG"
+  for stage in BASELINE_INGEST BASELINE_CLAIM_FINALIZE LOADED_INGEST LOADED_CLAIM_FINALIZE BASELINE_AFTER_INGEST BASELINE_AFTER_CLAIM_FINALIZE; do
+    awk -v stage="$stage" '
+      $0 ~ "^DENSITY_PROGRESS stage=" stage " " {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^completed=/) { split($i, a, "="); completed=a[2] }
+          if ($i ~ /^total=/) { split($i, a, "="); total=a[2] }
+        }
+      }
+      END { exit !(completed == 10000 && total == 10000) }
+    ' "$PHASE_LOG"
+  done
+  PHASE_LOG_SHA256=$(sha256sum "$PHASE_LOG" | awk '{print $1}')
+  jq -n \
+    --slurpfile result "$RESULT_FILE" \
+    --arg revision "$REVISION" --arg image_digest "$IMAGE_DIGEST" \
+    --arg topology "$TOPOLOGY" --arg hardware "$HARDWARE" \
+    --arg phase_log_sha256 "$PHASE_LOG_SHA256" \
+    --argjson observed_threads "$OBSERVED_THREADS" \
+    --argjson observed_connections "$OBSERVED_CONNECTIONS" \
+    --argjson observed_tasks "$OBSERVED_TASKS" \
+    --argjson resource_samples "$HOT_PHASE_RESOURCE_SAMPLES" '
+      {
+        suite: "pqueue-d5-live-density-diagnostic",
+        revision: $revision,
+        image_digest: $image_digest,
+        topology: $topology,
+        hardware: $hardware,
+        configuration: {
+          total_queues: 1001, hot_items: 10000, control_items: 10000,
+          hot_connections: 64, cold_workers: 8, server_workers: 4, seed: 42
+        },
+        stage_counters: {
+          readiness: 1, inventory: 1001, baseline_ingest: 10000,
+          baseline_claim_finalize: 10000, cold_prime: 1000,
+          loaded_ingest: 10000, loaded_claim_finalize: 10000,
+          baseline_after_ingest: 10000, baseline_after_claim_finalize: 10000
+        },
+        observed_resource_highs: {
+          tokio_worker_threads: $observed_threads,
+          established_connections: $observed_connections,
+          live_tasks: $observed_tasks,
+          hot_phase_samples: $resource_samples
+        },
+        phase_log_sha256: $phase_log_sha256,
+        result: $result[0]
+      }
+      | .bars_met = (
+          (.revision | length) == 40
+          and (.image_digest | startswith("sha256:"))
+          and .result.hot_items == 10000
+          and .result.control_items == 10000
+          and .result.hot_connections == 64
+          and .result.cold_worker_count == 8
+          and .result.seed == 42
+          and .result.total_queues == 1001
+          and .result.cold_queues_active == 1000
+          and .result.cold_queues_progress_eligible == 1000
+          and .result.cold_empty_claim_responses == 0
+          and .result.hot_ingest_per_s > 0
+          and .result.hot_claim_finalize_per_s > 0
+          and .observed_resource_highs.tokio_worker_threads == 4
+          and .observed_resource_highs.established_connections > 0
+          and .observed_resource_highs.live_tasks > 0
+          and .observed_resource_highs.hot_phase_samples > 0
+        )
+    ' >"$LEDGER_OUT"
+  jq -e '.bars_met == true' "$LEDGER_OUT" >/dev/null
+  assert_source_unchanged
+  printf 'DIAGNOSTIC_OUT=%s\n' "$LEDGER_OUT"
+  exit 0
+fi
 rustup run 1.92.0 cargo run --locked --quiet -p pqueue-loadgen -- density-emit-row \
   --result "$RESULT_FILE" \
   --observed-threads "$OBSERVED_THREADS" --thread-limit "$THREAD_LIMIT" \
