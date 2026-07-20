@@ -59,7 +59,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, ItemState, Metadata, OrderingMode, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId,
+    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
 use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey};
@@ -210,10 +210,6 @@ fn qdef(tenant: &str, queue: &str) -> QueueDefinition {
     }
 }
 
-fn spec(payload: &str) -> PushSpec {
-    keyed_spec(payload, None)
-}
-
 fn keyed_spec(payload: &str, client_item_key: Option<ClientItemKey>) -> PushSpec {
     PushSpec {
         client_item_key,
@@ -226,6 +222,22 @@ fn keyed_spec(payload: &str, client_item_key: Option<ClientItemKey>) -> PushSpec
         cohort_size: None,
         gate_keys: Vec::new(),
         entity: None,
+    }
+}
+
+/// Deterministic, non-trivial state used by both recorder-control arms.
+fn ack_spec(worker: u64, id: u64) -> PushSpec {
+    let key = format!("ack-{worker}-{id}");
+    let mut fields = BTreeMap::new();
+    fields.insert("ordinal".into(), Bytes::from(id.to_string()));
+    fields.insert("worker".into(), Bytes::from(worker.to_string()));
+    PushSpec {
+        client_item_key: Some(ClientItemKey::new(key.clone()).unwrap()),
+        priority: Some(PriorityValue::Int64((id % 97) as i64)),
+        not_before: Some(UtcTimestamp::new(1_700_000_000 + (id % 17) as i64, 0).unwrap()),
+        payload: Some(Bytes::from(format!("payload:{key}"))),
+        fields,
+        ..PushSpec::default()
     }
 }
 
@@ -401,6 +413,11 @@ struct AckResult {
     throughput_per_s: f64,
     disabled_control_throughput_per_s: f64,
     recorder_overhead_ratio: f64,
+    recorder_control_schedule: &'static str,
+    recorder_control_fingerprint_algorithm: &'static str,
+    recorder_enabled_state_fingerprint: String,
+    recorder_disabled_state_fingerprint: String,
+    recorder_control_verified_items: u64,
     recorder_control_logical_match: bool,
     throughput_progress_met: bool,
     ack_p50_ms: f64,
@@ -419,6 +436,7 @@ struct AckArm {
     wall_s: f64,
     latencies: Vec<f64>,
     pending: u64,
+    state_fingerprint: StateFingerprint,
 }
 
 struct ProfileRun {
@@ -561,6 +579,7 @@ async fn run_ack_arm<B, F>(
     pushes: u64,
     concurrency: u64,
     recorder_enabled: bool,
+    paired_start: Arc<tokio::sync::Barrier>,
     open: F,
 ) -> AckArm
 where
@@ -587,6 +606,9 @@ where
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
     let store_baseline = recorder.snapshot();
+    // Do not let setup time turn the control into two serial samples: both fully initialized arms enter
+    // their identical worker partitions together and remain live concurrently.
+    paired_start.wait().await;
     let started = Instant::now();
 
     let mut handles = Vec::new();
@@ -600,7 +622,7 @@ where
             for i in start_index..end_index {
                 let start = Instant::now();
                 backend
-                    .push(&shard, vec![spec(&format!("t{t}-{i}"))], ts(), None)
+                    .push(&shard, vec![ack_spec(t, i)], ts(), None)
                     .await
                     .expect("push acked after seal");
                 lat.push(start.elapsed().as_secs_f64() * 1000.0);
@@ -617,6 +639,8 @@ where
     let wall_s = started.elapsed().as_secs_f64();
     let c = backend.snapshot_segment_counters();
     let pending = backend.metrics(&shard).await.unwrap().pending;
+    let state_fingerprint =
+        fingerprint_ack_state(backend.as_ref(), &shard, pushes, concurrency).await;
     let snapshot = recorder.snapshot();
     let mut resource_bounds = backend.resource_bounds();
     resource_bounds.recorder_in_flight = snapshot.in_flight;
@@ -634,6 +658,7 @@ where
         wall_s,
         latencies,
         pending,
+        state_fingerprint,
     }
 }
 
@@ -651,19 +676,29 @@ where
     B: E3Backend,
     F: Copy + Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
-    let enabled_first = matches!(bound.max_latency_ms, 1 | 20);
-    let (mut enabled, disabled) = if enabled_first {
-        (
-            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, true, open).await,
-            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, false, open).await,
-        )
-    } else {
-        let disabled =
-            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, false, open).await;
-        let enabled =
-            run_ack_arm::<B, _>(s3, profile, bound, pushes, concurrency, true, open).await;
-        (enabled, disabled)
-    };
+    let paired_start = Arc::new(tokio::sync::Barrier::new(2));
+    let (mut enabled, disabled) = tokio::join!(
+        run_ack_arm::<B, _>(
+            s3,
+            profile,
+            bound,
+            pushes,
+            concurrency,
+            true,
+            paired_start.clone(),
+            open,
+        ),
+        run_ack_arm::<B, _>(
+            s3,
+            profile,
+            bound,
+            pushes,
+            concurrency,
+            false,
+            paired_start,
+            open,
+        ),
+    );
 
     let c = enabled.counters;
     let throughput_per_s = pushes as f64 / enabled.wall_s.max(f64::MIN_POSITIVE);
@@ -682,7 +717,16 @@ where
     let recorder_control_logical_match = c.commands_committed
         == disabled.counters.commands_committed
         && enabled.pending == pushes
-        && disabled.pending == pushes;
+        && disabled.pending == pushes
+        && enabled.state_fingerprint.digest == disabled.state_fingerprint.digest
+        && enabled.state_fingerprint.verified == pushes
+        && disabled.state_fingerprint.verified == pushes
+        && enabled.state_fingerprint.missing == 0
+        && disabled.state_fingerprint.missing == 0
+        && enabled.state_fingerprint.duplicates == 0
+        && disabled.state_fingerprint.duplicates == 0
+        && enabled.state_fingerprint.invalid == 0
+        && disabled.state_fingerprint.invalid == 0;
     let resources_met = enabled.resource_bounds.current_bytes == 0
         && enabled.resource_bounds.waiters == 0
         && enabled.resource_bounds.peak_bytes <= enabled.resource_bounds.configured_global_bytes
@@ -715,6 +759,11 @@ where
         throughput_per_s: round3(throughput_per_s),
         disabled_control_throughput_per_s: round3(disabled_control_throughput_per_s),
         recorder_overhead_ratio: round3(recorder_overhead_ratio),
+        recorder_control_schedule: "paired-start-barrier-concurrent-worker-partitions-v1",
+        recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
+        recorder_enabled_state_fingerprint: enabled.state_fingerprint.digest,
+        recorder_disabled_state_fingerprint: disabled.state_fingerprint.digest,
+        recorder_control_verified_items: enabled.state_fingerprint.verified,
         recorder_control_logical_match,
         throughput_progress_met,
         ack_p50_ms: round3(ack_p50),
@@ -795,6 +844,116 @@ struct StateFingerprint {
     missing: u64,
     duplicates: u64,
     invalid: u64,
+}
+
+/// Canonically fingerprint the complete ack-control state in bounded pages. Caller keys provide the
+/// stable cross-arm identity/order; the disk index proves server-assigned item ids are also unique without
+/// retaining a resident-sized set in memory.
+async fn fingerprint_ack_state<B: ProjectionRead>(
+    backend: &B,
+    shard: &QueueKey,
+    pushes: u64,
+    concurrency: u64,
+) -> StateFingerprint {
+    const PAGE: u64 = 512;
+    let identity_path = projection_path("ack-control-identity-index");
+    let mut identity_db = rusqlite::Connection::open(&identity_path).unwrap();
+    identity_db
+        .execute_batch("PRAGMA journal_mode=OFF; CREATE TABLE seen_ids (id INTEGER PRIMARY KEY)")
+        .unwrap();
+    let mut digest = StreamingDigest::new();
+    let mut verified = 0u64;
+    let mut missing = 0u64;
+    let mut duplicates = 0u64;
+    let mut invalid = 0u64;
+    let mut id_xor = 0u64;
+    let mut id_sum = 0u64;
+
+    for worker in 0..concurrency {
+        let worker_start = worker * pushes / concurrency;
+        let worker_end = (worker + 1) * pushes / concurrency;
+        let mut start = worker_start;
+        while start < worker_end {
+            let end = (start + PAGE).min(worker_end);
+            let keys = (start..end)
+                .map(|id| ClientItemKey::new(format!("ack-{worker}-{id}")).unwrap())
+                .collect::<Vec<_>>();
+            let views = backend.live_items(shard, &keys).await.unwrap();
+            assert_eq!(
+                views.len(),
+                keys.len(),
+                "live_items preserves control shape"
+            );
+            let tx = identity_db.transaction().unwrap();
+            for (offset, (key, view)) in keys.iter().zip(views).enumerate() {
+                let id = start + offset as u64;
+                let Some(view) = view else {
+                    missing += 1;
+                    continue;
+                };
+                verified += 1;
+                let expected_payload = format!("payload:{}", key.as_str());
+                let expected_priority = Some(PriorityValue::Int64((id % 97) as i64));
+                let expected_not_before =
+                    Some(UtcTimestamp::new(1_700_000_000 + (id % 17) as i64, 0).unwrap());
+                let expected_fields = BTreeMap::from([
+                    ("ordinal".to_string(), Bytes::from(id.to_string())),
+                    ("worker".to_string(), Bytes::from(worker.to_string())),
+                ]);
+                if view.client_item_key != *key
+                    || view.item_version != 1
+                    || view.lifecycle_state != ItemState::Pending
+                    || view.priority != expected_priority
+                    || view.group_key.is_some()
+                    || view.not_before != expected_not_before
+                    || view.attempt_count != 0
+                    || view.payload.as_deref() != Some(expected_payload.as_bytes())
+                    || view.fields != expected_fields
+                {
+                    invalid += 1;
+                }
+                if tx
+                    .execute(
+                        "INSERT OR IGNORE INTO seen_ids(id) VALUES (?1)",
+                        [view.item_id.as_u64() as i64],
+                    )
+                    .unwrap()
+                    != 1
+                {
+                    duplicates += 1;
+                }
+                id_xor ^= view.item_id.as_u64();
+                id_sum = id_sum.wrapping_add(view.item_id.as_u64());
+                // Canonical logical order is (worker, id), independent of executor wake order.
+                digest.update(&worker.to_le_bytes());
+                digest.update(&id.to_le_bytes());
+                digest.update(view.client_item_key.as_str().as_bytes());
+                digest.update(&view.item_version.to_le_bytes());
+                digest.update(format!("{:?}", view.lifecycle_state).as_bytes());
+                digest.update(&serde_json::to_vec(&view.priority).unwrap());
+                digest.update(&serde_json::to_vec(&view.group_key).unwrap());
+                digest.update(&serde_json::to_vec(&view.not_before).unwrap());
+                digest.update(&view.attempt_count.to_le_bytes());
+                digest.update(view.payload.as_deref().unwrap_or_default());
+                for (name, value) in &view.fields {
+                    digest.update(name.as_bytes());
+                    digest.update(value);
+                }
+            }
+            tx.commit().unwrap();
+            start = end;
+        }
+    }
+    digest.update(&id_xor.to_le_bytes());
+    digest.update(&id_sum.to_le_bytes());
+    let _ = std::fs::remove_file(identity_path);
+    StateFingerprint {
+        digest: digest.finish(),
+        verified,
+        missing,
+        duplicates,
+        invalid,
+    }
 }
 
 /// Verify the complete resident state without materializing another resident-sized collection. The
@@ -1720,6 +1879,26 @@ fn profile_row(
             serde_json::json!(result.recorder_overhead_ratio),
         );
         values.insert(
+            format!("{prefix}_recorder_control_schedule"),
+            serde_json::json!(result.recorder_control_schedule),
+        );
+        values.insert(
+            format!("{prefix}_recorder_control_fingerprint_algorithm"),
+            serde_json::json!(result.recorder_control_fingerprint_algorithm),
+        );
+        values.insert(
+            format!("{prefix}_recorder_enabled_state_fingerprint"),
+            serde_json::json!(result.recorder_enabled_state_fingerprint),
+        );
+        values.insert(
+            format!("{prefix}_recorder_disabled_state_fingerprint"),
+            serde_json::json!(result.recorder_disabled_state_fingerprint),
+        );
+        values.insert(
+            format!("{prefix}_recorder_control_verified_items"),
+            serde_json::json!(result.recorder_control_verified_items),
+        );
+        values.insert(
             format!("{prefix}_recorder_control_logical_match"),
             serde_json::json!(result.recorder_control_logical_match),
         );
@@ -2109,6 +2288,11 @@ fn synthetic_ack(
         throughput_per_s,
         disabled_control_throughput_per_s: throughput_per_s,
         recorder_overhead_ratio: 1.0,
+        recorder_control_schedule: "paired-start-barrier-concurrent-worker-partitions-v1",
+        recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
+        recorder_enabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
+        recorder_disabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
+        recorder_control_verified_items: 2,
         recorder_control_logical_match: true,
         throughput_progress_met: progress,
         ack_p50_ms: 1.0,
