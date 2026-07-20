@@ -168,15 +168,32 @@ fn registered_queue_page<V: Clone>(
         .page(cursor, limit)
 }
 
-fn registered_queue_key_page<V: Clone>(
+fn registered_maintenance_page<V>(
     registry: &Mutex<QueueRegistry<V>>,
     cursor: &AtomicUsize,
     limit: usize,
+    excluded: &HashSet<QueueKey>,
 ) -> Vec<QueueKey> {
-    registered_queue_page(registry, cursor, limit)
-        .into_iter()
-        .map(|(key, _)| key)
-        .collect()
+    let registry = registry.lock().expect("queue registry poisoned");
+    if registry.order.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let start = cursor.load(Ordering::Relaxed) % registry.order.len();
+    let mut selected = Vec::with_capacity(limit.min(registry.order.len()));
+    let mut inspected = 0;
+    let probe_limit = limit
+        .saturating_add(excluded.len())
+        .min(RECOVERY_MAINTENANCE_TASK_LIMIT)
+        .min(registry.order.len());
+    while inspected < probe_limit && selected.len() < limit {
+        let shard = &registry.order[(start + inspected) % registry.order.len()];
+        inspected += 1;
+        if !excluded.contains(shard) {
+            selected.push(shard.clone());
+        }
+    }
+    cursor.fetch_add(inspected, Ordering::Relaxed);
+    selected
 }
 
 struct RecoveryMaintenanceTask {
@@ -193,6 +210,7 @@ struct RecoveryMaintenanceTask {
 struct RecoveryMaintenanceDispatcher {
     executor: BoundedBlockingExecutor,
     tasks: Mutex<Vec<RecoveryMaintenanceTask>>,
+    dispatch_gate: tokio::sync::Mutex<()>,
 }
 
 impl RecoveryMaintenanceDispatcher {
@@ -200,15 +218,20 @@ impl RecoveryMaintenanceDispatcher {
         Ok(Self {
             executor: BoundedBlockingExecutor::new(RECOVERY_MAINTENANCE_BLOCKING_CONCURRENCY)?,
             tasks: Mutex::new(Vec::with_capacity(RECOVERY_MAINTENANCE_TASK_LIMIT)),
+            dispatch_gate: tokio::sync::Mutex::new(()),
         })
     }
 
-    async fn dispatch(
+    async fn dispatch<F>(
         &self,
         log: Arc<FsSegmentedLog>,
-        shards: Vec<QueueKey>,
+        select_shards: F,
         now_ms: i64,
-    ) -> EngineResult<TickReport> {
+    ) -> EngineResult<TickReport>
+    where
+        F: FnOnce(usize, &HashSet<QueueKey>) -> Vec<QueueKey> + Send,
+    {
+        let _dispatch_guard = self.dispatch_gate.lock().await;
         let completed = {
             let mut tasks = self
                 .tasks
@@ -241,18 +264,26 @@ impl RecoveryMaintenanceDispatcher {
             }
         }
 
+        let (available, in_flight) = {
+            let tasks = self
+                .tasks
+                .lock()
+                .expect("recovery maintenance tasks poisoned");
+            (
+                RECOVERY_MAINTENANCE_TASK_LIMIT - tasks.len(),
+                tasks.iter().map(|task| task.shard.clone()).collect(),
+            )
+        };
+        let shards = select_shards(available, &in_flight);
+
         {
             let mut tasks = self
                 .tasks
                 .lock()
                 .expect("recovery maintenance tasks poisoned");
             for shard in shards {
-                if tasks.len() == RECOVERY_MAINTENANCE_TASK_LIMIT {
-                    break;
-                }
-                if tasks.iter().any(|task| task.shard == shard) {
-                    continue;
-                }
+                debug_assert!(tasks.len() < RECOVERY_MAINTENANCE_TASK_LIMIT);
+                debug_assert!(!tasks.iter().any(|task| task.shard == shard));
                 let task_log = Arc::clone(&log);
                 let executor = self.executor.clone();
                 let task_shard = shard.clone();
@@ -297,6 +328,15 @@ impl RecoveryMaintenanceDispatcher {
             .lock()
             .expect("recovery maintenance tasks poisoned")
             .len()
+    }
+
+    #[cfg(test)]
+    fn all_tasks_finished(&self) -> bool {
+        self.tasks
+            .lock()
+            .expect("recovery maintenance tasks poisoned")
+            .iter()
+            .all(|task| task.handle.is_finished())
     }
 }
 
@@ -2073,14 +2113,19 @@ impl ReclaimDriver for SegmentedObjectLogSqliteBackend {
         &self,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        let shards = registered_queue_key_page(
-            &self.registry,
-            &self.maintenance_cursor,
-            RECOVERY_MAINTENANCE_QUEUE_PAGE,
-        );
         let log = Arc::clone(&self.log);
-        self.maintenance_dispatcher
-            .dispatch(log, shards, ts_to_ms(now))
+        self.maintenance_dispatcher.dispatch(
+            log,
+            |available, in_flight| {
+                registered_maintenance_page(
+                    &self.registry,
+                    &self.maintenance_cursor,
+                    available,
+                    in_flight,
+                )
+            },
+            ts_to_ms(now),
+        )
     }
 }
 
@@ -3126,14 +3171,19 @@ impl ReclaimDriver for SegmentedObjectLogInMemoryBackend {
         &self,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        let shards = registered_queue_key_page(
-            &self.registry,
-            &self.maintenance_cursor,
-            RECOVERY_MAINTENANCE_QUEUE_PAGE,
-        );
         let log = Arc::clone(&self.log);
-        self.maintenance_dispatcher
-            .dispatch(log, shards, ts_to_ms(now))
+        self.maintenance_dispatcher.dispatch(
+            log,
+            |available, in_flight| {
+                registered_maintenance_page(
+                    &self.registry,
+                    &self.maintenance_cursor,
+                    available,
+                    in_flight,
+                )
+            },
+            ts_to_ms(now),
+        )
     }
 }
 
@@ -3424,6 +3474,13 @@ mod recovery_tests {
         UtcTimestamp::new(1_700_000_000, 0).unwrap()
     }
 
+    fn system_ts() -> UtcTimestamp {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        UtcTimestamp::new(now.as_secs() as i64, now.subsec_nanos()).unwrap()
+    }
+
     /// Force every push to seal its own segment synchronously (no flusher needed): a 1-byte target trips the
     /// size seal inside `enqueue`, so the projection is applied before `push` returns.
     fn seal_each_config() -> SegmentConfig {
@@ -3455,6 +3512,7 @@ mod recovery_tests {
         release_pin_list: std::sync::atomic::AtomicBool,
         active_pin_lists: AtomicUsize,
         peak_active_pin_lists: AtomicUsize,
+        observed_pin_lists: Mutex<HashSet<String>>,
     }
 
     impl BlockingMaintenanceStore {
@@ -3469,7 +3527,15 @@ mod recovery_tests {
                 release_pin_list: std::sync::atomic::AtomicBool::new(false),
                 active_pin_lists: AtomicUsize::new(0),
                 peak_active_pin_lists: AtomicUsize::new(0),
+                observed_pin_lists: Mutex::new(HashSet::new()),
             }
+        }
+
+        fn observed_maintenance(&self, shard: &QueueKey) -> bool {
+            self.observed_pin_lists
+                .lock()
+                .expect("observed pin lists poisoned")
+                .contains(&format!("{}recovery_pins/v1/", object_prefix(shard)))
         }
     }
 
@@ -3523,6 +3589,12 @@ mod recovery_tests {
                 }
             }
             let result = self.inner.list_page(prefix, start_after, limit);
+            if is_pin_list && result.is_ok() {
+                self.observed_pin_lists
+                    .lock()
+                    .expect("observed pin lists poisoned")
+                    .insert(prefix.to_string());
+            }
             if prefix == self.progress_pin_prefix {
                 self.progress_pin_list_completed
                     .store(true, Ordering::SeqCst);
@@ -3548,11 +3620,14 @@ mod recovery_tests {
         );
         backend.create_queue(first).await.unwrap();
         backend.create_queue(second).await.unwrap();
+        let mut maintenance_keys = vec![first_key.clone(), second_key.clone()];
         for index in 0..(RECOVERY_MAINTENANCE_TASK_LIMIT * 2 - 2) {
-            backend
-                .create_queue(queue_def("maintenance-extra", &format!("q-{index}")))
-                .await
-                .unwrap();
+            let definition = queue_def("maintenance-extra", &format!("q-{index}"));
+            maintenance_keys.push(QueueKey::new(
+                definition.tenant_id.clone(),
+                definition.queue_id.clone(),
+            ));
+            backend.create_queue(definition).await.unwrap();
         }
 
         store.block_pin_list.store(true, Ordering::SeqCst);
@@ -3587,15 +3662,24 @@ mod recovery_tests {
             "blocking store concurrency stays globally bounded"
         );
 
-        // A later tick reaps completed wrappers and admits the next round-robin page without waiting for A.
-        tokio::time::timeout(Duration::from_millis(250), backend.tick(ts()))
-            .await
-            .expect("later tick must remain live while one prior shard hangs")
-            .unwrap();
-        assert!(
-            backend.maintenance_dispatcher.in_flight_len() <= RECOVERY_MAINTENANCE_TASK_LIMIT,
-            "maintenance wrapper tasks remain bounded across ticks"
-        );
+        // Repeated ticks reap completed wrappers and fairly admit every queue beyond the first page while A
+        // remains hung. The fixed cap must hold throughout; no skipped page tail may starve forever.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !maintenance_keys[1..]
+                .iter()
+                .all(|shard| store.observed_maintenance(shard))
+            {
+                backend.tick(ts()).await.unwrap();
+                assert!(
+                    backend.maintenance_dispatcher.in_flight_len()
+                        <= RECOVERY_MAINTENANCE_TASK_LIMIT,
+                    "maintenance wrapper tasks remain bounded across ticks"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("every queue after hung A eventually receives maintenance");
 
         store.release_pin_list.store(true, Ordering::SeqCst);
     }
@@ -3631,14 +3715,16 @@ mod recovery_tests {
         assert!(batches_before > 0, "seals published retirement work");
         assert!(nodes_before > 1);
 
-        // Simulate a process crash: the cursor's durable pin is intentionally not dropped. A tick in the
-        // same epoch must preserve it and therefore preserve the covered COW nodes.
+        // Simulate a process crash: one cursor's durable pin is intentionally not dropped. A second reader
+        // remains valid across reassignment because renewable reader leases, not assignment epochs, govern
+        // recovery-node liveness.
         let crashed_cursor = backend.log.open_recovery_cursor(&shard, 0).unwrap();
         std::mem::forget(crashed_cursor);
         let mut retained_cursor = backend.log.open_recovery_cursor(&shard, 0).unwrap();
         assert_eq!(store.list(&pin_prefix).unwrap().len(), 2);
-        backend.tick(ts()).await.unwrap();
-        assert_eq!(store.list(&pin_prefix).unwrap().len(), 2);
+        ControlPlaneStore::acquire_epoch(&backend, &shard)
+            .await
+            .unwrap();
         let mut recovered = Vec::new();
         loop {
             let (page, _) = backend
@@ -3652,31 +3738,49 @@ mod recovery_tests {
         }
         assert_eq!(recovered, (0..24).collect::<Vec<_>>());
         drop(retained_cursor);
+        assert_eq!(store.list(&pin_prefix).unwrap().len(), 1);
 
-        // The ownership fence advances the authoritative head epoch. A new current-epoch reader must
-        // survive maintenance while the old, now-fenced crash pin is eligible for bounded cleanup.
-        ControlPlaneStore::acquire_epoch(&backend, &shard)
-            .await
-            .unwrap();
-        let live_cursor = backend.log.open_recovery_cursor(&shard, 0).unwrap();
-        assert_eq!(store.list(&pin_prefix).unwrap().len(), 2);
-        backend.tick(ts()).await.unwrap();
-        assert_eq!(
-            store.list(&pin_prefix).unwrap().len(),
-            1,
-            "old-epoch crash pin reaped; current-epoch live pin preserved"
-        );
-
-        drop(live_cursor);
-        for _ in 0..16 {
-            backend.tick(ts()).await.unwrap();
-        }
-        assert!(store.list(&gc_prefix).unwrap().is_empty());
+        // With no live cursor remaining, a far-future maintenance time expires the forgotten crash lease.
+        // Repeated non-blocking ticks drive the separately dispatched fixed-size pin and GC pages.
+        let far_future = UtcTimestamp::new(4_000_000_000, 0).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                backend.tick(far_future).await.unwrap();
+                tokio::task::yield_now().await;
+                if store.list(&pin_prefix).unwrap().is_empty()
+                    && store.list(&gc_prefix).unwrap().is_empty()
+                    && backend.maintenance_dispatcher.all_tasks_finished()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("expired crash pin and bounded recovery-index GC converge");
         assert_eq!(
             store.list(&node_prefix).unwrap().len(),
             1,
             "only the current content-addressed recovery-index root remains"
         );
+
+        // A currently live reader survives an actual-time maintenance pass. Wait for the dispatched task so
+        // both the pin assertion and the later seal LIST delta observe a quiescent maintenance executor.
+        let live_cursor = backend.log.open_recovery_cursor(&shard, 0).unwrap();
+        assert_eq!(store.list(&pin_prefix).unwrap().len(), 1);
+        backend.tick(system_ts()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !backend.maintenance_dispatcher.all_tasks_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual-time maintenance task completes");
+        assert_eq!(
+            store.list(&pin_prefix).unwrap().len(),
+            1,
+            "unexpired live recovery lease is preserved"
+        );
+        drop(live_cursor);
 
         let lists_before_seal = backend.segment_counters().list_count;
         backend
