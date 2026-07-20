@@ -32,7 +32,7 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
         .split("fn dispatch")
         .nth(1)
         .expect("whole-operation dispatch exists")
-        .split("match result_rx.await")
+        .split("result_rx.await")
         .next()
         .unwrap();
     assert!(dispatch.contains("pqueue_resp::spawn_governed"));
