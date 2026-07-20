@@ -749,6 +749,9 @@ struct RecoveryResult {
     replay_command_page_limit: u64,
     peak_replay_commands_buffered: u64,
     peak_manifest_objects_buffered: u64,
+    recovery_index_node_visits: u64,
+    recovery_index_entries_visited: u64,
+    bounded_authority_index: bool,
     verification_chunk_items: u64,
     queue_count: u64,
     resource_bounds: ResourceBounds,
@@ -1202,6 +1205,13 @@ where
         && recovery_stats.peak_replay_commands_buffered <= recovery_stats.replay_command_page_limit
         && recovery_stats.peak_manifest_objects_buffered
             <= recovery_stats.manifest_object_page_limit
+        && recovery_stats.bounded_authority_index
+        && recovery_stats.recovery_index_entries_visited
+            <= tail_replayed.saturating_mul(2).saturating_add(64)
+        && recovery_stats.recovery_index_node_visits
+            <= recovery_stats
+                .recovery_index_entries_visited
+                .saturating_add(64)
         && resource_bounds.object_page_limit == STORE_OBJECT_PAGE_LIMIT;
     let bar_met = mode_met
         && tail_replayed <= recovery_max_tail
@@ -1235,6 +1245,9 @@ where
         replay_command_page_limit: recovery_stats.replay_command_page_limit,
         peak_replay_commands_buffered: recovery_stats.peak_replay_commands_buffered,
         peak_manifest_objects_buffered: recovery_stats.peak_manifest_objects_buffered,
+        recovery_index_node_visits: recovery_stats.recovery_index_node_visits,
+        recovery_index_entries_visited: recovery_stats.recovery_index_entries_visited,
+        bounded_authority_index: recovery_stats.bounded_authority_index,
         verification_chunk_items,
         queue_count: 1,
         resource_bounds,
@@ -1560,6 +1573,18 @@ fn profile_row(
             values.insert(
                 "recovery_peak_manifest_objects_buffered".into(),
                 serde_json::json!(recovery.peak_manifest_objects_buffered),
+            );
+            values.insert(
+                "recovery_index_node_visits".into(),
+                serde_json::json!(recovery.recovery_index_node_visits),
+            );
+            values.insert(
+                "recovery_index_entries_visited".into(),
+                serde_json::json!(recovery.recovery_index_entries_visited),
+            );
+            values.insert(
+                "recovery_bounded_authority_index".into(),
+                serde_json::json!(recovery.bounded_authority_index),
             );
             values.insert(
                 "recovery_load_task_count".into(),
@@ -2119,6 +2144,9 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
         replay_command_page_limit: 256,
         peak_replay_commands_buffered: 100,
         peak_manifest_objects_buffered: 1,
+        recovery_index_node_visits: 2,
+        recovery_index_entries_visited: 100,
+        bounded_authority_index: true,
         verification_chunk_items: 512,
         queue_count: 1,
         resource_bounds: ResourceBounds {
