@@ -166,6 +166,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use futures::FutureExt;
 
@@ -4268,6 +4269,326 @@ async fn ac_txn_7_latency_sweep_scenario() -> AcOutcome {
     Ok(asserts)
 }
 
+/// Execute the profile-specific AC-TXN-4 composed crash seam at one exact E3 bound. The full substrate
+/// crash matrix remains the AC authority; this probe prevents a generic matrix result from being relabelled
+/// as though it had exercised this profile/bound cell. `AfterApplyBeforeResponse` is request-id-bearing and
+/// force-sealed, so the configured latency bound is an actual configuration input but not an ack-timing
+/// claim. Recovery must reconstruct exactly one visible item through the selected projection.
+async fn e3_ac_txn_4_exact_cell<P, F>(profile: &str, bound_ms: u64, open: F) -> AcOutcome
+where
+    P: ProjectionStore + Send + 'static,
+    F: Fn() -> Result<ComposedBackend<ObjectLog, P, InProcessControlPlane>, String>,
+{
+    let shard = pqueue_conformance::shard();
+    let backend = open()?;
+    backend
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms create_queue: {e:?}"))?;
+    backend.set_fault_hook(Some(Arc::new(ComposeCrashAt(
+        ComposeFaultPoint::AfterApplyBeforeResponse,
+    ))));
+    let epoch = backend
+        .current_epoch(&shard)
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms current epoch: {e:?}"))?;
+    let result = backend
+        .commit_raw(RawCommitRequest::new(
+            shard.clone(),
+            vec![ac_txn_4_push_env("700000004", "e3-ac4")],
+            epoch,
+        ))
+        .await;
+    ensure!(
+        result.is_err(),
+        "{profile} @ {bound_ms}ms: AfterApplyBeforeResponse must withhold success; got {result:?}"
+    );
+    let sealed = backend.with_log(|log| log.counters().segments_sealed);
+    ensure!(
+        sealed > 0,
+        "{profile} @ {bound_ms}ms: the faulted request must have sealed a durable segment"
+    );
+    drop(backend);
+
+    let recovered = open()?;
+    let metrics = recovered
+        .metrics(&shard)
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms recovery metrics: {e:?}"))?;
+    ensure!(
+        (
+            metrics.pending,
+            metrics.leased,
+            metrics.complete,
+            metrics.failed
+        ) == (1, 0, 0, 0),
+        "{profile} @ {bound_ms}ms: recovery must expose exactly one committed item; got {metrics:?}"
+    );
+
+    Ok(vec![format!(
+        "profile={profile} bound={bound_ms}ms ACTUAL composed AfterApplyBeforeResponse execution: success was withheld after a durable segment seal, and reopen through this profile's projection reconstructed exactly one pending item (0 duplicate/lost)"
+    )])
+}
+
+async fn e3_ac_txn_4_cell(profile: &str, bound_ms: u64) -> AcOutcome {
+    let mut assertions = ac_txn_4_crash_point_matrix().await?;
+    let base = base_dir(&format!("e3-ac4-{profile}-{bound_ms}"));
+    let root = base.join("run");
+    let cell = if profile == "object_log_inmemory_projection" {
+        e3_ac_txn_4_exact_cell(profile, bound_ms, || {
+            pqueue_objectlog::composed_objectlog_backend_group_commit(
+                &root,
+                SegmentConfig::new(1, bound_ms).map_err(|e| format!("SegmentConfig: {e:?}"))?,
+            )
+            .map_err(|e| format!("open {profile} @ {bound_ms}ms: {e:?}"))
+        })
+        .await?
+    } else {
+        let sqlite = root.join("projection.sqlite");
+        e3_ac_txn_4_exact_cell(profile, bound_ms, || {
+            std::fs::create_dir_all(&root)
+                .map_err(|e| format!("create {}: {e}", root.display()))?;
+            let log = ObjectLog::open_group_commit(
+                &root,
+                SegmentConfig::new(1, bound_ms).map_err(|e| format!("SegmentConfig: {e:?}"))?,
+            )
+            .map_err(|e| format!("open object log: {e:?}"))?;
+            let projection = HybridProjectionStore::open(sqlite.to_str().unwrap())
+                .map_err(|e| format!("open SQLite projection: {e:?}"))?;
+            ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                .with_group_commit(true)
+                .recover()
+                .map_err(|e| format!("recover {profile} @ {bound_ms}ms: {e:?}"))
+        })
+        .await?
+    };
+    assertions.extend(cell);
+    Ok(assertions)
+}
+
+/// Execute AC-TXN-7 for one exact profile/bound cell. This deliberately returns only observations made by
+/// this execution: a genuine latency-window push, a force-seal control on the same projection class, and
+/// request-id replay on both. Wall time is diagnostic provenance, never a host-performance gate.
+async fn e3_ac_txn_7_exact_cell<P, FL, FF>(
+    profile: &str,
+    bound_ms: u64,
+    open_latency: FL,
+    open_force: FF,
+) -> AcOutcome
+where
+    P: ProjectionStore + Send + 'static,
+    FL: Fn() -> Result<ComposedBackend<ObjectLog, P, InProcessControlPlane>, String>,
+    FF: Fn() -> Result<ComposedBackend<ObjectLog, P, InProcessControlPlane>, String>,
+{
+    let shard = pqueue_conformance::shard();
+    let latency = Arc::new(open_latency()?);
+    ensure!(
+        latency.group_commit_enabled(),
+        "{profile} @ {bound_ms}ms must use group commit"
+    );
+    latency
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms create queue: {e:?}"))?;
+    let seals_before = latency.with_log(|log| log.counters().segments_sealed);
+    let (stop, flusher) = spawn_latency_flusher(Arc::clone(&latency), bound_ms);
+    let started = Instant::now();
+    let latency_ids = latency
+        .push(
+            &shard,
+            vec![pqueue_conformance::fault::spec("e3-ac7-window", 9)],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms latency-window push: {e:?}"))?;
+    let observed_ack_us = started.elapsed().as_micros();
+    ensure!(
+        latency_ids.len() == 1
+            && latency.with_log(|log| log.counters().segments_sealed) > seals_before,
+        "{profile} @ {bound_ms}ms latency-window push did not seal exactly one accepted item"
+    );
+    let latency_rid = RequestId::new(format!("e3-ac7-window-{profile}-{bound_ms}"))
+        .map_err(|e| format!("request id: {e:?}"))?;
+    let latency_body = vec![pqueue_conformance::fault::spec("e3-ac7-rid", 5)];
+    let latency_first = latency
+        .push_with_request_id(
+            &shard,
+            latency_rid.clone(),
+            latency_body.clone(),
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms request push: {e:?}"))?;
+    let latency_replay = latency
+        .push_with_request_id(
+            &shard,
+            latency_rid,
+            latency_body,
+            pqueue_conformance::ts(2),
+            None,
+        )
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms request replay: {e:?}"))?;
+    ensure!(
+        latency_replay == latency_first,
+        "{profile} @ {bound_ms}ms same request-id must replay the original result"
+    );
+    let latency_metrics = latency
+        .metrics(&shard)
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms metrics: {e:?}"))?;
+    let latency_eligible = latency
+        .select_eligible(&shard, pqueue_conformance::ts(100), 10)
+        .await
+        .map_err(|e| format!("{profile} @ {bound_ms}ms eligible: {e:?}"))?
+        .len();
+    stop.store(true, Ordering::Relaxed);
+    flusher.await.ok();
+
+    let force = open_force()?;
+    force
+        .create_queue(pqueue_conformance::qdef())
+        .await
+        .map_err(|e| format!("{profile} force-seal create queue: {e:?}"))?;
+    force
+        .push(
+            &shard,
+            vec![pqueue_conformance::fault::spec("e3-ac7-window", 9)],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+        .map_err(|e| format!("{profile} force-seal push: {e:?}"))?;
+    let force_rid = RequestId::new(format!("e3-ac7-force-{profile}-{bound_ms}"))
+        .map_err(|e| format!("request id: {e:?}"))?;
+    let force_body = vec![pqueue_conformance::fault::spec("e3-ac7-rid", 5)];
+    let force_first = force
+        .push_with_request_id(
+            &shard,
+            force_rid.clone(),
+            force_body.clone(),
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await
+        .map_err(|e| format!("{profile} force-seal request push: {e:?}"))?;
+    let force_replay = force
+        .push_with_request_id(
+            &shard,
+            force_rid,
+            force_body,
+            pqueue_conformance::ts(2),
+            None,
+        )
+        .await
+        .map_err(|e| format!("{profile} force-seal request replay: {e:?}"))?;
+    ensure!(
+        force_replay == force_first,
+        "{profile} force-seal same request-id must replay the original result"
+    );
+    let force_metrics = force
+        .metrics(&shard)
+        .await
+        .map_err(|e| format!("{profile} force-seal metrics: {e:?}"))?;
+    let force_eligible = force
+        .select_eligible(&shard, pqueue_conformance::ts(100), 10)
+        .await
+        .map_err(|e| format!("{profile} force-seal eligible: {e:?}"))?
+        .len();
+    let latency_state = (
+        latency_metrics.pending,
+        latency_metrics.leased,
+        latency_metrics.complete,
+        latency_metrics.failed,
+        latency_eligible,
+    );
+    let force_state = (
+        force_metrics.pending,
+        force_metrics.leased,
+        force_metrics.complete,
+        force_metrics.failed,
+        force_eligible,
+    );
+    ensure!(
+        latency_state == force_state,
+        "{profile} @ {bound_ms}ms correctness diverged from force-seal control: latency={latency_state:?} force={force_state:?}"
+    );
+
+    Ok(vec![
+        format!(
+            "profile={profile} bound={bound_ms}ms ACTUAL latency-window execution: 1MiB target prevented size seal, externalized flusher sealed the accepted push, observed_ack_us={observed_ack_us} (diagnostic only; no host-speed gate)"
+        ),
+        format!(
+            "profile={profile} bound={bound_ms}ms ACTUAL state comparison: latency-window and force-seal controls produced identical (pending, leased, complete, failed, eligible)={latency_state:?}"
+        ),
+        format!(
+            "profile={profile} bound={bound_ms}ms ACTUAL request-id operations: same-body replay returned the original result on both the bound-configured backend and force-seal control"
+        ),
+    ])
+}
+
+async fn e3_ac_txn_7_cell(profile: &str, bound_ms: u64) -> AcOutcome {
+    let base = base_dir(&format!("e3-ac7-{profile}-{bound_ms}"));
+    let latency_root = base.join("latency");
+    let force_root = base.join("force");
+    if profile == "object_log_inmemory_projection" {
+        e3_ac_txn_7_exact_cell(
+            profile,
+            bound_ms,
+            || {
+                pqueue_objectlog::composed_objectlog_backend_group_commit(
+                    &latency_root,
+                    SegmentConfig::new(SWEEP_TARGET_BYTES, bound_ms)
+                        .map_err(|e| format!("SegmentConfig: {e:?}"))?,
+                )
+                .map_err(|e| format!("open latency backend: {e:?}"))
+            },
+            || {
+                pqueue_objectlog::composed_objectlog_backend(&force_root)
+                    .map_err(|e| format!("open force-seal backend: {e:?}"))
+            },
+        )
+        .await
+    } else {
+        let latency_sqlite = latency_root.join("projection.sqlite");
+        let force_sqlite = force_root.join("projection.sqlite");
+        e3_ac_txn_7_exact_cell(
+            profile,
+            bound_ms,
+            || {
+                std::fs::create_dir_all(&latency_root)
+                    .map_err(|e| format!("create {}: {e}", latency_root.display()))?;
+                let log = ObjectLog::open_group_commit(
+                    &latency_root,
+                    SegmentConfig::new(SWEEP_TARGET_BYTES, bound_ms)
+                        .map_err(|e| format!("SegmentConfig: {e:?}"))?,
+                )
+                .map_err(|e| format!("open latency object log: {e:?}"))?;
+                let projection = HybridProjectionStore::open(latency_sqlite.to_str().unwrap())
+                    .map_err(|e| format!("open latency SQLite projection: {e:?}"))?;
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .with_group_commit(true)
+                    .recover()
+                    .map_err(|e| format!("recover latency backend: {e:?}"))
+            },
+            || {
+                std::fs::create_dir_all(&force_root)
+                    .map_err(|e| format!("create {}: {e}", force_root.display()))?;
+                let log = ObjectLog::open(&force_root)
+                    .map_err(|e| format!("open force-seal object log: {e:?}"))?;
+                let projection = HybridProjectionStore::open(force_sqlite.to_str().unwrap())
+                    .map_err(|e| format!("open force-seal SQLite projection: {e:?}"))?;
+                ComposedBackend::new(log, projection, InProcessControlPlane::new())
+                    .recover()
+                    .map_err(|e| format!("recover force-seal backend: {e:?}"))
+            },
+        )
+        .await
+    }
+}
+
 /// AC-TXN-7 acceptance test (bead pqueue-1bcf0104): the E3 commit-latency-bound sweep does not change the
 /// transaction-contract invariants. Sweeps AC-TXN-1/2/3 + the AC-TXN-6 parity across force-seal vs
 /// group-commit and asserts 0 invariant delta.
@@ -4548,18 +4869,31 @@ async fn e3_governed_transaction_evidence_matrix() {
                         .await,
                 ));
             }
-            outcomes.push(("AC-TXN-4", "objectlog", ac_txn_4_crash_point_matrix().await));
             outcomes.push((
-                "AC-TXN-6",
-                "sqlite_log|object_log_sqlite",
-                ac_txn_6_parity(sqlite_log_factory(), objectlog_sqlite_factory_at(bound_ms)).await,
+                "AC-TXN-4",
+                "objectlog",
+                e3_ac_txn_4_cell(profile, bound_ms).await,
             ));
-            // This execution includes the genuine no-flusher liveness check and all four numeric windows;
-            // the row binds the exact cell only after that run proves this bound has zero invariant delta.
+            if profile == "object_log_inmemory_projection" {
+                outcomes.push((
+                    "AC-TXN-6",
+                    "sqlite_log|objectlog",
+                    ac_txn_6_parity(sqlite_log_factory(), objectlog_factory_at(bound_ms)).await,
+                ));
+            } else {
+                outcomes.push((
+                    "AC-TXN-6",
+                    "sqlite_log|object_log_sqlite",
+                    ac_txn_6_parity(sqlite_log_factory(), objectlog_sqlite_factory_at(bound_ms))
+                        .await,
+                ));
+            }
+            // Every AC-TXN-7 row now comes from this exact profile/bound operation and its own force-seal
+            // control. No all-bounds result is copied or relabelled onto individual cells.
             outcomes.push((
                 "AC-TXN-7",
                 "objectlog(force-seal|group-commit)",
-                ac_txn_7_latency_sweep_scenario().await,
+                e3_ac_txn_7_cell(profile, bound_ms).await,
             ));
 
             for (ac, backend, outcome) in outcomes {

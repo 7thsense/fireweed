@@ -1096,7 +1096,8 @@ fn governed_backend<'a>(profile: &str, ac: &str) -> Option<&'a str> {
             Some("object_log_sqlite")
         }
         ("object_log_sqlite_projection", "AC-TXN-4") => Some("objectlog"),
-        (_, "AC-TXN-6") => Some("sqlite_log|object_log_sqlite"),
+        ("object_log_inmemory_projection", "AC-TXN-6") => Some("sqlite_log|objectlog"),
+        ("object_log_sqlite_projection", "AC-TXN-6") => Some("sqlite_log|object_log_sqlite"),
         (_, "AC-TXN-7") => Some("objectlog(force-seal|group-commit)"),
         _ => None,
     }
