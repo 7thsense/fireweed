@@ -199,9 +199,16 @@ where
 }
 
 /// Explicit group-commit variant. It never probes mode or calls ordinary append.
-#[derive(Clone)]
 pub struct GroupCommitObjectLogProjectionCommitter<P> {
     coordinator: Arc<GroupCommitCoordinator<P>>,
+}
+
+impl<P> Clone for GroupCommitObjectLogProjectionCommitter<P> {
+    fn clone(&self) -> Self {
+        Self {
+            coordinator: Arc::clone(&self.coordinator),
+        }
+    }
 }
 
 /// Runtime-neutral exhaustion behavior. `Reject` is the finite production default; `Wait` preserves
@@ -375,10 +382,28 @@ where
         recovery_page_size: usize,
         max_queued_commits: usize,
     ) -> EngineResult<Self> {
+        Self::open_shared(
+            log,
+            Arc::new(projection),
+            definitions,
+            recovery_page_size,
+            max_queued_commits,
+        )
+        .await
+    }
+
+    /// Open over a projection shared with server read/planning adapters.
+    pub async fn open_shared(
+        log: AsyncObjectLog,
+        projection: Arc<P>,
+        definitions: Vec<pqueue_core::QueueDefinition>,
+        recovery_page_size: usize,
+        max_queued_commits: usize,
+    ) -> EngineResult<Self> {
         let budget = BufferedByteBudget::new(
             BufferedByteBudgetConfig::new(64 * 1024 * 1024).expect("constant byte budget is valid"),
         );
-        Self::open_with_byte_admission(
+        Self::open_shared_with_byte_admission(
             log,
             projection,
             definitions,
@@ -402,6 +427,25 @@ where
         max_queued_commits: usize,
         admission: ObjectLogByteAdmissionConfig,
     ) -> EngineResult<Self> {
+        Self::open_shared_with_byte_admission(
+            log,
+            Arc::new(projection),
+            definitions,
+            recovery_page_size,
+            max_queued_commits,
+            admission,
+        )
+        .await
+    }
+
+    pub async fn open_shared_with_byte_admission(
+        log: AsyncObjectLog,
+        projection: Arc<P>,
+        definitions: Vec<pqueue_core::QueueDefinition>,
+        recovery_page_size: usize,
+        max_queued_commits: usize,
+        admission: ObjectLogByteAdmissionConfig,
+    ) -> EngineResult<Self> {
         let writer_format = log.segment_writer_format();
         let ObjectLogByteAdmissionConfig {
             budget: byte_budget,
@@ -420,7 +464,7 @@ where
                 "global buffered-byte limit must be at least segment_target_bytes",
             ));
         }
-        let inner = ObjectLogProjectionCommitter::open(
+        let inner = ObjectLogProjectionCommitter::open_shared(
             log,
             projection,
             definitions,
@@ -447,6 +491,10 @@ where
                 phase_hook: Mutex::new(None),
             }),
         })
+    }
+
+    pub async fn recover_projection(&self, shard: QueueKey) -> EngineResult<()> {
+        self.coordinator.inner.recover_projection(shard).await
     }
 
     /// Stop accepting new commit requests. Already accepted requests remain coordinator-owned.

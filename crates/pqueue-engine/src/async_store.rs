@@ -201,13 +201,13 @@ impl<T: Send + 'static> Future for BlockingTaskFuture<T> {
     }
 }
 
-/// Immediate ready-future adapter for a synchronous log store.
-pub struct ImmediateLogStore<S> {
+/// Shared in-process adapter for CPU-only log stores whose operations complete without suspension.
+pub struct InProcessLogStore<S> {
     store: Arc<Mutex<S>>,
     durability_class: DurabilityClass,
 }
 
-impl<S: LogStore> ImmediateLogStore<S> {
+impl<S: LogStore> InProcessLogStore<S> {
     pub fn new(store: S) -> Self {
         let durability_class = store.durability_class();
         Self {
@@ -217,31 +217,18 @@ impl<S: LogStore> ImmediateLogStore<S> {
     }
 }
 
-/// Immediate ready-future adapter for a synchronous projection store.
-pub struct ImmediateProjectionStore<S> {
+/// Shared in-process adapter for CPU-only projections whose operations complete without suspension.
+pub struct InProcessProjectionStore<S> {
     store: Arc<Mutex<S>>,
     supports_gates: bool,
 }
 
-impl<S: ProjectionStore> ImmediateProjectionStore<S> {
+impl<S: ProjectionStore> InProcessProjectionStore<S> {
     pub fn new(store: S) -> Self {
         let supports_gates = store.supports_gates();
         Self {
             store: Arc::new(Mutex::new(store)),
             supports_gates,
-        }
-    }
-}
-
-/// Immediate ready-future adapter for a synchronous control plane.
-pub struct ImmediateControlPlane<S> {
-    store: Arc<S>,
-}
-
-impl<S> ImmediateControlPlane<S> {
-    pub fn new(store: S) -> Self {
-        Self {
-            store: Arc::new(store),
         }
     }
 }
@@ -741,7 +728,7 @@ pub trait AsyncControlPlane: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send;
 }
 
-impl<S> AsyncLogStore for ImmediateLogStore<S>
+impl<S> AsyncLogStore for InProcessLogStore<S>
 where
     S: LogStore + Send,
 {
@@ -879,7 +866,7 @@ where
     }
 }
 
-impl<S> AsyncProjectionStore for ImmediateProjectionStore<S>
+impl<S> AsyncProjectionStore for InProcessProjectionStore<S>
 where
     S: ProjectionStore + Send,
 {
@@ -1064,35 +1051,6 @@ where
             .lock()
             .expect("immediate projection store mutex poisoned")
             .recover_definitions();
-        std::future::ready(result)
-    }
-}
-
-impl<S> AsyncControlPlane for ImmediateControlPlane<S>
-where
-    S: ControlPlane + Send + Sync,
-{
-    fn create_queue(
-        &self,
-        definition: QueueDefinition,
-    ) -> impl Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        let result = self.store.create_queue(definition);
-        std::future::ready(result)
-    }
-
-    fn queue_definition(
-        &self,
-        key: QueueKey,
-    ) -> impl Future<Output = EngineResult<QueueDefinition>> + Send {
-        let result = self.store.queue_definition(&key);
-        std::future::ready(result)
-    }
-
-    fn list_queues(
-        &self,
-        tenant: TenantId,
-    ) -> impl Future<Output = EngineResult<Vec<QueueId>>> + Send {
-        let result = self.store.list_queues(&tenant);
         std::future::ready(result)
     }
 }

@@ -1,10 +1,9 @@
 //! Driven and driving ports (TD-007 §2, plan §2.1).
 //!
 //! Hexagonal: these traits are defined by the domain and implemented by adapters. The engine
-//! depends on nothing outward. Write-side ports (`LogWriter`/`ProjectionWriter`) are **sync** and
-//! run inside a `Backend::write` unit of work; read/claim/reclaim ports are **async** (a backend
-//! such as postgres is async). Atomicity for async backends is provided via `ClaimPort`/`UpsertPort`
-//! (TD-007 §2.3), so the sync UoW closure suffices for the atomic-sync backends (memory, sqlite).
+//! depends on nothing outward. Storage-facing operations are asynchronous through the complete engine
+//! path. Ordinary mutations use typed operation ports; conformance and fault injection use the owned
+//! [`RawCommitRequest`] seam. Backends never accept caller-supplied transaction closures.
 
 use std::collections::BTreeMap;
 
@@ -24,7 +23,7 @@ use crate::command::{
 };
 use crate::error::{EngineError, EngineResult};
 use crate::types::{CommandPosition, DurabilityClass, QueueKey};
-use crate::{ProjectionStore, RawCommitFault, RawCommitOutcome, RawCommitRequest};
+use crate::{ProjectionStore, RawCommitOutcome, RawCommitRequest};
 
 /// API-001 write-reserved item field names. These names are emitted by the claimed-item / lease wire
 /// shapes, so user-authored field writes must reject them before commit or RESP rendering.
@@ -60,47 +59,11 @@ pub fn validate_api001_reserved_write_fields(
 }
 
 // ---------------------------------------------------------------------------
-// Write side (sync; runs inside a Backend unit of work)
+// Backend descriptors and typed raw-commit seam
 // ---------------------------------------------------------------------------
 
-/// Appends commands to the durable log within the current unit of work.
-pub trait LogWriter {
-    /// Append `commands` to `shard`'s log under the owner's `expected_epoch`, returning the committed
-    /// positions in order. Implements the TD-003 Single Authoritative Fencing Rule, step 2: the append
-    /// MUST reject any `expected_epoch` that is not the queue's current durable `assignment_epoch` (not
-    /// merely `<=`) with [`EngineError::EpochFenced`](crate::EngineError::EpochFenced) — a superseded
-    /// owner is fenced the instant a newer epoch is acquired, before any new-epoch segment exists. The
-    /// committed positions carry the current epoch as their `backend_epoch`. An in-process owner passes the
-    /// epoch it **cached at `acquire_queue_lease`** (ADR-009 / TD-003 In-Process Library Owner-Runtime), so a
-    /// superseded owner self-fences here; a sole-owner / degenerate caller passes the current epoch and never
-    /// fences. (The cached epoch is threaded from the data-plane ports as `expected_epoch: Option<u64>`, where
-    /// `None` selects the always-current degenerate path.)
-    fn append(
-        &mut self,
-        shard: &QueueKey,
-        commands: &[CommandEnvelope],
-        expected_epoch: u64,
-    ) -> EngineResult<Vec<CommandPosition>>;
-}
-
-/// Applies committed commands to the projection within the current unit of work.
-pub trait ProjectionWriter {
-    /// Apply `commands` (already appended at `positions`) to the projection.
-    fn apply(
-        &mut self,
-        positions: &[CommandPosition],
-        commands: &[CommandEnvelope],
-    ) -> EngineResult<()>;
-}
-
-// ---------------------------------------------------------------------------
-// Backend: the atomic seam
-// ---------------------------------------------------------------------------
-
-/// A driven backend providing the atomic append+apply unit of work and read access.
-///
-/// On the `Atomic` class the closure's log append and projection apply commit together. On
-/// `EventualApply` the closure has self-read-after-write only (TD-007 §2.1-2.2).
+/// Common backend descriptors plus the owned raw-commit operation used by conformance and recovery probes.
+/// Ordinary production mutations use their operation-specific ports.
 pub trait Backend: Send + Sync {
     fn durability_class(&self) -> DurabilityClass;
 
@@ -117,43 +80,14 @@ pub trait Backend: Send + Sync {
         CommitCapabilities::default()
     }
 
-    /// Run `f` as one unit of work. The closure is synchronous (no `.await` inside); the async
-    /// boundary is the method itself.
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send;
-
     /// Drive the append/apply boundary with an owned, typed request.
-    ///
-    /// This additive seam supersedes raw closure construction in conformance and fault-injection callers.
-    /// Its owned inputs are suitable for transfer into a backend-owned task once an adapter gains a native
-    /// async transaction. The legacy implementation below is correct only for implementations whose
-    /// [`Self::write`] work completes synchronously without yielding: cancellation cannot then interrupt a
-    /// started commit. Any implementation whose commit can return `Pending` MUST override this method,
-    /// transfer the request and transaction capability into backend-owned execution before its first
-    /// suspension, and await only that task's result channel. Dropping the caller after transfer may discard
-    /// the response, but MUST NOT cancel the started commit; its outcome remains resolvable by replay.
+    /// Every input is owned, so a native-async adapter can transfer the request and its transaction
+    /// capability into backend-owned execution before the first suspension. Dropping the caller after that
+    /// transfer may discard only the response; the outcome remains resolvable by request-id replay.
     fn commit_raw(
         &self,
         request: RawCommitRequest,
-    ) -> impl std::future::Future<Output = EngineResult<RawCommitOutcome>> + Send {
-        async move {
-            let (shard, commands, expected_epoch, fault) = request.into_parts();
-            self.write(move |log, projection| {
-                if fault == RawCommitFault::BeforeAppend {
-                    return Err(EngineError::Invalid("fault-injection: kill before append"));
-                }
-                let positions = log.append(&shard, &commands, expected_epoch)?;
-                if fault == RawCommitFault::AfterAppendBeforeApply {
-                    return Ok(RawCommitOutcome::appended(positions));
-                }
-                projection.apply(&positions, &commands)?;
-                Ok(RawCommitOutcome::applied(positions))
-            })
-            .await
-        }
-    }
+    ) -> impl std::future::Future<Output = EngineResult<RawCommitOutcome>> + Send;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +425,7 @@ pub struct PushSpec {
 /// Appends new items (server-assigned ids). The backend builds the envelope from its own command
 /// sequence and commits through its atomic append+apply UoW after confirming the shard exists, so a
 /// Push can never leave the log ahead of the projection (divergence-safe) and ids are unique across
-/// handles + restart. The library facade's `push` routes here rather than reaching for `Backend::write`.
+/// handles + restart. The library facade's `push` routes here rather than reaching for the raw commit seam.
 #[doc(hidden)]
 pub trait PushPort: Send + Sync {
     /// `expected_epoch`: the owner's cached acquire-time fence epoch (ADR-009 / TD-003). `Some(e)` fences the
@@ -524,7 +458,7 @@ pub trait PushPort: Send + Sync {
 /// counter/command-id identically) — WITHOUT committing it or recording the in-memory idempotency entry.
 ///
 /// A fault-injection harness drives the returned envelope through the `append→apply` unit-of-work seam
-/// ([`Backend::write`]) and injects a kill *before* apply; on reopen, recovery rebuilds the push-idempotency
+/// ([`Backend::commit_raw`]) and injects a kill *before* apply; on reopen, recovery rebuilds the push-idempotency
 /// map from this durable envelope (the same log fold `push_with_request_id` recovery uses), so a retry by
 /// `request_id` replays the one committed result. This is what makes the mid-pipeline
 /// (`AfterAppendBeforeApply`) cut point `request_id`-bearing rather than item-level: the public
@@ -538,7 +472,7 @@ pub trait RequestIdReplayProbe: Send + Sync {
     /// Build (but do not commit) the durable `request_id`-bearing push envelope and return it alongside the
     /// server-minted item ids it will carry. Validates gate/entity/index constraints exactly like
     /// `push_with_request_id` so a rejection here matches the real path; on success the caller drives the
-    /// envelope through [`Backend::write`] with a mid-pipeline fault to exercise the append→apply kill window.
+    /// envelope through [`Backend::commit_raw`] with a mid-pipeline fault to exercise the append→apply kill window.
     fn build_request_id_push_envelope(
         &self,
         shard: &QueueKey,
@@ -554,7 +488,7 @@ pub trait RequestIdReplayProbe: Send + Sync {
     /// items / instance fence — so the commit is exactly one envelope), stamped with the SAME whole-body
     /// fingerprint `commit_transition` computes over that body, and return it alongside that fingerprint.
     /// Validates the `claim_ref` exactly like the real path (so a rejection here matches it). The caller drives
-    /// the envelope through [`Backend::write`] with a mid-pipeline (`AfterAppendBeforeApply`) fault so the
+    /// the envelope through [`Backend::commit_raw`] with a mid-pipeline (`AfterAppendBeforeApply`) fault so the
     /// append→apply kill window is `request_id`-bearing for `commit_transition`; on reopen, recovery rebuilds
     /// the commit-idempotency cache from this durable envelope so a retry by `request_id` replays the one
     /// committed per-entry outcome. Not a commit path — appends nothing and records nothing.
@@ -579,7 +513,7 @@ pub trait RequestIdReplayProbe: Send + Sync {
     /// computes, so a post-reopen retry of the same body Replays (not Conflicts). Each `claim_ref` is validated
     /// exactly like the real commit path (a rejection here matches it), against the CURRENT projection with no
     /// intervening apply — correct for INDEPENDENT entries (the conformance mixed case). Appends/applies/records
-    /// NOTHING: the caller drives the returned envelopes through [`crate::Backend::write`] with an
+    /// NOTHING: the caller drives the returned envelopes through [`crate::Backend::commit_raw`] with an
     /// `AfterAppendBeforeApply` fault to strike the durable-but-unapplied window for a mixed commit, then
     /// reopens so recovery replays the durable tail AND rebuilds `commit_idempotency` from the durable marker.
     /// Returns the envelopes plus the whole-body fingerprint. Default: [`EngineError::Unavailable`].
@@ -1324,7 +1258,7 @@ pub trait ControlPlaneStore: Send + Sync {
     /// Acquire the queue at a NEW, strictly-greater `assignment_epoch` and durably record it (TD-003
     /// Single Authoritative Fencing Rule, step 1: "durable fence before use"). Returns the new epoch. This
     /// is the ownership-handoff primitive: after it commits, the previous epoch's writers are fenced at
-    /// their next [`LogWriter::append`] (step 2), before any new-epoch segment exists. `assignment_epoch`
+    /// their next typed commit (step 2), before any new-epoch segment exists. `assignment_epoch`
     /// MUST increase strictly and MUST NOT decrease or repeat for a queue (TD-003 epoch monotonicity).
     /// NOTE (BQ-21/BQ-23 binding): this is the storage backend's durable epoch. Some control-plane
     /// implementations, notably postgres-native, bind their acquire transaction directly to this value and

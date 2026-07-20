@@ -44,6 +44,8 @@ use tokio_util::sync::CancellationToken;
 
 mod change_record_sink;
 mod object_log_sqlite;
+#[cfg(feature = "turso-projection")]
+mod object_log_turso;
 mod tokio_dispatcher;
 pub use change_record_sink::{
     ChangeRecordSinkConfig, ChangeRecordSinkMode, FjordChangeRecordSink, NiflheimChangeRecordSink,
@@ -53,6 +55,8 @@ pub use object_log_sqlite::{
     DEFAULT_RECOVERY_MAX_TAIL, ObjectLogSqliteBackend, SegmentedObjectLogInMemoryBackend,
     SegmentedObjectLogSqliteBackend,
 };
+#[cfg(feature = "turso-projection")]
+pub use object_log_turso::ObjectLogTursoBackend;
 pub use pqueue_objectlog::segmented::{SegmentConfig, SegmentWriterFormat};
 pub use tokio_dispatcher::TokioTaskDispatcher;
 
@@ -66,7 +70,7 @@ pub use env_config::ConfigError;
 #[cfg(feature = "postgres")]
 mod postgres_native;
 #[cfg(feature = "postgres")]
-pub use postgres_native::{BlockingBackend, PostgresNativeBackend};
+pub use postgres_native::{PostgresNativeBackend, PostgresWholeOperationAdapter};
 
 /// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
 /// epoch/fence authority. One half of a [`BackendSpec`].
@@ -319,6 +323,9 @@ pub enum ProjectionSpec {
     InMemory,
     /// Derived relational sqlite projection (`pqueue_items` is the read model) at `path`.
     Sqlite { path: PathBuf },
+    /// Native-async local Turso derived projection. Selection is accepted only by builds carrying the
+    /// `turso-projection` feature and only with an object-log authority.
+    Turso { path: PathBuf },
     /// SQLite-first durable projection image plus hot in-memory serving at `path`.
     Hybrid { path: PathBuf },
     /// The `objectlog/hybrid-strict` profile (TD-004): the SAME hot-in-memory serving + durable SQLite
@@ -347,6 +354,7 @@ impl ProjectionSpec {
         match self {
             ProjectionSpec::InMemory => "inmemory",
             ProjectionSpec::Sqlite { .. } => "sqlite",
+            ProjectionSpec::Turso { .. } => "turso",
             ProjectionSpec::Hybrid { .. } => "hybrid",
             ProjectionSpec::HybridStrict { .. } => "hybrid-strict",
             ProjectionSpec::HybridAsync { .. } => "hybrid-async",
@@ -786,7 +794,7 @@ async fn maybe_spawn_embedded_broker(
 /// NOTE (ADR-012 P2 status): the spec is the one composition axis the server selects on, and [`start`] now
 /// assembles the wired families from the ONE generic `ComposedBackend` — `Memory → composed_memory_backend`,
 /// `Sqlite → composed_sqlite_backend`, `Postgres → composed_postgres_backend_with_config` (the durable
-/// `PostgresLog` command log + in-memory projection, driven blocking-safe through [`BlockingBackend`]). The
+/// `PostgresLog` command log + in-memory projection, driven through [`PostgresWholeOperationAdapter`]). The
 /// generic `ComposedBackend::recover` rebuilds the projection + counters + cmd-seq from the durable
 /// log/projection on open (honored across every durable composition by the reopen/recovery conformance
 /// dimension), so no composed family regresses restart durability. The object-log families
@@ -1927,6 +1935,29 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             )
             .await
         }
+        #[cfg(feature = "turso-projection")]
+        (LogSpec::ObjectLog(spec), ProjectionSpec::Turso { path }) => {
+            let segment_config = spec.segment_config();
+            let store = spec.open_blob_store()?;
+            let backend = Arc::new(
+                ObjectLogTursoBackend::open_with_blob_store(store, &path, segment_config).await?,
+            );
+            run_owned(
+                backend,
+                control_plane,
+                advertise_addr.as_deref(),
+                owner_id.clone(),
+                clock,
+                &listen,
+                interval,
+                &queues,
+            )
+            .await
+        }
+        #[cfg(not(feature = "turso-projection"))]
+        (LogSpec::ObjectLog(_), ProjectionSpec::Turso { .. }) => Err(EngineError::Invalid(
+            "PQUEUE_PROJECTION_BACKEND=turso requires a pqueue-server build with the `turso-projection` cargo feature",
+        )),
         (LogSpec::ObjectLog(spec), ProjectionSpec::Hybrid { path }) => {
             let segment_config = spec.segment_config();
             let store = spec.open_blob_store()?;
@@ -2088,7 +2119,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // handshake + log replay) MUST run off the reactor: the postgres client drives its own internal
             // runtime per call, so connecting on a Tokio worker would panic ("cannot start a runtime from
             // within a runtime"). Connect + recover inside `spawn_blocking`, then drive the composition only
-            // through the blocking-safe `BlockingBackend` wrapper so no sync postgres call hits a reactor
+            // through the whole-operation adapter so no sync postgres call hits a reactor
             // worker.
             let backend = tokio::task::spawn_blocking(move || {
                 let mut connect_config = pqueue_postgres::PostgresConnectConfig::new(url);
@@ -2102,7 +2133,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
+            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
             run_owned(
                 backend,
                 control_plane,
@@ -2121,7 +2152,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             // SqliteProjectionStore, InProcessControlPlane>`): the durable postgres command log paired with a
             // derived SQLite relational projection, recovery-on-open. Same off-reactor discipline as
             // postgres/inmemory above: connect BOTH axes and recover inside `spawn_blocking`, then drive the
-            // composition only through the blocking-safe `BlockingBackend` wrapper.
+            // composition only through the bounded whole-operation adapter.
             let p = path
                 .to_str()
                 .ok_or_else(|| EngineError::Storage("non-utf8 path".into()))?
@@ -2141,7 +2172,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres/sqlite connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
+            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
             run_owned(
                 backend,
                 control_plane,
@@ -2182,7 +2213,7 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             .map_err(|e| {
                 EngineError::Storage(format!("postgres/postgres connect task join failed: {e}"))
             })??;
-            let backend = Arc::new(BlockingBackend::from_arc(Arc::new(backend)));
+            let backend = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::new(backend)));
             run_owned(
                 backend,
                 control_plane,

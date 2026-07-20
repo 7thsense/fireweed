@@ -107,12 +107,11 @@ fn ts(s: i64) -> UtcTimestamp {
 /// Apply one command through the atomic unit of work (append + apply), stamping the current durable epoch.
 async fn commit_to<B: Backend + ControlPlaneStore>(b: &B, shard: &QueueKey, env: CommandEnvelope) {
     let epoch = b.current_epoch(shard).await.expect("current epoch");
-    let shard = shard.clone();
-    b.write(move |lw, pw| {
-        let pos = lw.append(&shard, std::slice::from_ref(&env), epoch)?;
-        pw.apply(&pos, std::slice::from_ref(&env))?;
-        Ok(())
-    })
+    b.commit_raw(pqueue_engine::RawCommitRequest::new(
+        shard.clone(),
+        vec![env],
+        epoch,
+    ))
     .await
     .expect("commit");
 }

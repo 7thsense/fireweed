@@ -119,6 +119,9 @@ storage:
     backend: inmemory
     sqlite:
       path: /var/lib/pqueue/projection/projection.db
+    # Used only by feature-enabled images selecting the objectlog/turso profile.
+    turso:
+      path: /var/lib/pqueue/projection/projection.turso
     # Async-apply debt/backpressure/poison thresholds for the objectlog/hybrid-async profile. Rendered as
     # PQUEUE_HYBRID_ASYNC_* env only when projection.backend is "hybrid-async". Defaults mirror the server's
     # HybridAsyncThresholds::default(); every bound must be > 0 (a zero bound is instantly backpressured).

@@ -54,14 +54,14 @@ use pqueue_engine::{
     CommandChecksum, CommandEnvelope, CommandId, CommandPage, CommandPosition, ControlPlaneStore,
     CreateQueueOutcome, DurabilityClass, EngineError, EngineResult, FinalizeCommand,
     FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView,
-    LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, LogWriter, PayloadUpdate,
-    ProjectionRead, ProjectionSnapshot, ProjectionStore, ProjectionWriter, PurgeItemsCommand,
-    PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
-    UpsertPort, build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
-    validate_gate_command, validate_gate_push, validate_purge_force,
+    LeaseExpiredCommand, LeaseView, LiveItemView, LogRead, PayloadUpdate, ProjectionRead,
+    ProjectionSnapshot, ProjectionStore, PurgeItemsCommand, PurgePort, PushCommand, PushItem,
+    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RenewLeaseCommand, RenewLeasePort,
+    ReplacePendingCommand, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, build_push_items,
+    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
+    validate_gate_push, validate_purge_force,
 };
 use pqueue_engine::{ComposedBackend, InProcessControlPlane};
 use pqueue_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
@@ -550,14 +550,14 @@ impl PostgresBackend {
 }
 
 // ---------------------------------------------------------------------------
-// UoW writer views (Backend::write) — disjoint borrows of client / projections
+// Typed raw commit helpers — disjoint borrows of client / projections
 // ---------------------------------------------------------------------------
 
-struct PgLogWriter<'a> {
+struct PgLogTxn<'a> {
     client: &'a mut Client,
 }
 
-impl LogWriter for PgLogWriter<'_> {
+impl PgLogTxn<'_> {
     fn append(
         &mut self,
         shard: &QueueKey,
@@ -610,11 +610,11 @@ impl LogWriter for PgLogWriter<'_> {
     }
 }
 
-struct PgProjectionWriter<'a> {
+struct PgProjectionTxn<'a> {
     projections: &'a mut HashMap<QueueKey, ProjectionData>,
 }
 
-impl ProjectionWriter for PgProjectionWriter<'_> {
+impl PgProjectionTxn<'_> {
     fn apply(
         &mut self,
         positions: &[CommandPosition],
@@ -639,22 +639,29 @@ impl Backend for PostgresBackend {
         DurabilityClass::Atomic
     }
 
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        request: pqueue_engine::RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
-        let result = {
+        let result = (|| {
+            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            if fault == pqueue_engine::RawCommitFault::BeforeAppend {
+                return Err(EngineError::Invalid("fault-injection: kill before append"));
+            }
             let mut guard = self.inner.lock().expect("postgres backend poisoned");
             let Inner {
                 client,
                 projections,
                 ..
             } = &mut *guard;
-            let mut lw = PgLogWriter { client };
-            let mut pw = PgProjectionWriter { projections };
-            f(&mut lw, &mut pw)
-        };
+            let positions = PgLogTxn { client }.append(&shard, &commands, expected_epoch)?;
+            if fault == pqueue_engine::RawCommitFault::AfterAppendBeforeApply {
+                return Ok(pqueue_engine::RawCommitOutcome::appended(positions));
+            }
+            PgProjectionTxn { projections }.apply(&positions, &commands)?;
+            Ok(pqueue_engine::RawCommitOutcome::applied(positions))
+        })();
         std::future::ready(result)
     }
 }
@@ -1650,73 +1657,61 @@ impl SnapshotStore for PostgresBackend {
 impl HistoricalProjectionRead for PostgresBackend {
     type AsOfProjection = InMemoryProjection;
 
-    fn current_position(
-        &self,
-        shard: &QueueKey,
-    ) -> impl std::future::Future<Output = EngineResult<CommandPosition>> + Send {
-        let result =
-            (|| futures::executor::block_on(self.high_water(shard))?.ok_or(EngineError::NotFound))(
-            );
-        std::future::ready(result)
+    async fn current_position(&self, shard: &QueueKey) -> EngineResult<CommandPosition> {
+        self.high_water(shard).await?.ok_or(EngineError::NotFound)
     }
 
-    fn read_as_of<T, F>(
+    async fn read_as_of<T, F>(
         &self,
         shard: &QueueKey,
         position: CommandPosition,
         query: F,
-    ) -> impl std::future::Future<Output = EngineResult<T>> + Send
+    ) -> EngineResult<T>
     where
         T: Send,
         F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send,
     {
-        let result = (|| {
-            let definition = {
-                let g = self.inner.lock().expect("poisoned");
-                g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
-            };
-            let snapshot_ref =
-                futures::executor::block_on(self.snapshot_at_or_before(shard, &position))?;
-            let snapshot = match snapshot_ref.as_ref() {
-                Some(snapshot_ref) => Some(futures::executor::block_on(
-                    self.read_snapshot(snapshot_ref),
-                )?),
-                None => None,
-            };
-            let mut as_of = InMemoryProjection::new();
-            as_of.ensure_shard(&definition)?;
-            if let Some(snapshot) = snapshot {
-                let image = ProjectionImage::from_bytes(&snapshot.payload)?;
-                as_of.hydrate_shard(&definition, image)?;
+        let definition = {
+            let g = self.inner.lock().expect("poisoned");
+            g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
+        };
+        let snapshot_ref = self.snapshot_at_or_before(shard, &position).await?;
+        let snapshot = match snapshot_ref.as_ref() {
+            Some(snapshot_ref) => Some(self.read_snapshot(snapshot_ref).await?),
+            None => None,
+        };
+        let mut as_of = InMemoryProjection::new();
+        as_of.ensure_shard(&definition)?;
+        if let Some(snapshot) = snapshot {
+            let image = ProjectionImage::from_bytes(&snapshot.payload)?;
+            as_of.hydrate_shard(&definition, image)?;
+        }
+        let mut from = snapshot_ref.map(|s| s.position);
+        loop {
+            let page = self.read_from(shard, from.clone(), 8192).await?;
+            if page.entries.is_empty() {
+                break;
             }
-            let mut from = snapshot_ref.map(|s| s.position);
-            loop {
-                let page = futures::executor::block_on(self.read_from(shard, from.clone(), 8192))?;
-                if page.entries.is_empty() {
+            let mut positions = Vec::new();
+            let mut envelopes = Vec::new();
+            let mut reached_target = false;
+            for (entry_position, env) in page.entries {
+                if entry_position == position || entry_position.precedes(&position) {
+                    positions.push(entry_position.clone());
+                    envelopes.push(env);
+                } else {
+                    reached_target = true;
                     break;
                 }
-                let mut positions = Vec::new();
-                let mut envelopes = Vec::new();
-                let mut reached_target = false;
-                for (entry_position, env) in page.entries {
-                    if entry_position == position || entry_position.precedes(&position) {
-                        positions.push(entry_position.clone());
-                        envelopes.push(env);
-                    } else {
-                        reached_target = true;
-                        break;
-                    }
-                }
-                if !positions.is_empty() {
-                    as_of.apply_recovery(&positions, &envelopes)?;
-                }
-                if reached_target || page.next.is_none() {
-                    break;
-                }
-                from = page.next;
             }
-            query(&as_of)
-        })();
-        std::future::ready(result)
+            if !positions.is_empty() {
+                as_of.apply_recovery(&positions, &envelopes)?;
+            }
+            if reached_target || page.next.is_none() {
+                break;
+            }
+            from = page.next;
+        }
+        query(&as_of)
     }
 }

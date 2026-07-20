@@ -4105,7 +4105,7 @@ pub async fn claim_compatibility_is_resolved_and_gated<B: ConformanceCore>(make:
 // ---------------------------------------------------------------------------
 // BQ-20 — the Single Authoritative Fencing Rule (TD-003). The durable `assignment_epoch` is the one
 // fencing authority: `acquire_epoch` advances it strictly + durably (step 1, "durable fence before
-// use"), and `LogWriter::append` rejects any non-current `expected_epoch` (step 2). Both projection
+// use"), and the typed raw commit rejects any non-current `expected_epoch` (step 2). Both projection
 // families run these (a CORE guarantee; TD-001 lease/epoch fencing is the core class).
 // ---------------------------------------------------------------------------
 

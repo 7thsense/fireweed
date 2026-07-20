@@ -23,7 +23,7 @@ use pqueue_core::{
 use pqueue_core::{ClientItemKey, ItemId, ItemState, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
     AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    EngineError, EngineResult, FinalizeOutcome, ImmediateLogStore, ImmediateProjectionStore,
+    EngineError, EngineResult, FinalizeOutcome, InProcessLogStore, InProcessProjectionStore,
     IndexHit, ItemView, LeaseView, LiveItemView, LogStore, ProjectionSnapshot, ProjectionStore,
     PushItem, QueueCounters, QueueKey, QueueMetrics, SnapshotRef, TerminalEmissionMetrics,
 };
@@ -143,7 +143,7 @@ impl LogStore for MemoryLog {
 ///
 /// Memory uses the explicit immediate adapter at the storage boundary instead of maintaining a second,
 /// independently locked implementation of the same axis.
-pub type AsyncMemoryLog = ImmediateLogStore<MemoryLog>;
+pub type AsyncMemoryLog = InProcessLogStore<MemoryLog>;
 
 // ---------------------------------------------------------------------------
 // InMemoryProjection — the in-memory materialized-read-model axis
@@ -503,7 +503,7 @@ impl ProjectionStore for InMemoryProjection {
 }
 
 /// Runtime-neutral async view of the synchronous in-memory projection.
-pub type AsyncInMemoryProjection = ImmediateProjectionStore<InMemoryProjection>;
+pub type AsyncInMemoryProjection = InProcessProjectionStore<InMemoryProjection>;
 
 impl AsOfProjectionStore for InMemoryProjection {
     type AsOfProjection = InMemoryProjection;

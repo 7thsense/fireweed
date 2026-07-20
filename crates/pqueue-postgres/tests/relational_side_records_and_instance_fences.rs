@@ -5,8 +5,7 @@
 //! Scope note: `CommitTransitionPort::commit_transition` (the Snorri-facing orchestration) and
 //! `RecoveryReadPort` (`side_record`/`instance_fence` reads) are NOT wired on this backend yet — both are
 //! separate follow-on beads, and `hot_projection_queries.rs` already asserts they stay `Unavailable`. This
-//! test instead drives the two commands directly through the generic `LogWriter::append` +
-//! `ProjectionWriter::apply` seam every write port already uses, and reads the persisted rows back with a
+//! test instead drives the two commands directly through the typed raw-commit seam and reads the persisted rows back with a
 //! raw SQL query against the same schema (no read port exists yet to exercise).
 //!
 //! ENV-GATED on `PQUEUE_PG_TEST_URL` (a live database). Without it this prints a LOUD skip and returns —
@@ -39,12 +38,12 @@ fn fresh_schema() -> String {
 async fn commit(backend: &PostgresRelationalBackend, shard: &QueueKey, command: QueueCommand) {
     let epoch = backend.current_epoch(shard).await.expect("current epoch");
     let env = envelope(command, vec![]);
-    let shard = shard.clone();
     backend
-        .write(move |lw, pw| {
-            let positions = lw.append(&shard, std::slice::from_ref(&env), epoch)?;
-            pw.apply(&positions, std::slice::from_ref(&env))
-        })
+        .commit_raw(pqueue_engine::RawCommitRequest::new(
+            shard.clone(),
+            vec![env],
+            epoch,
+        ))
         .await
         .expect("commit side-record/instance-fence command");
 }

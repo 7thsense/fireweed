@@ -21,12 +21,12 @@ use pqueue_engine::{
     CommandChecksum, CommandEnvelope, CommandId, CommandPosition, CompiledSchema,
     ControlPlaneStore, CreateQueueOutcome, DurabilityClass, EngineError, EngineResult,
     FinalizeCommand, FinalizeOutcome, FinalizePort, IdempotencyDecision, ItemView, LeaseView,
-    LiveItemView, LogRead, LogWriter, OwnedBytePermit, ProjectionRead, ProjectionWriter, PurgePort,
-    PushCommand, PushPort, PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand,
-    RenewLeasePort, TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
-    build_push_items, compile_entity_schema, require_item_level_claim, validate_entity,
-    validate_gate_command, validate_gate_push,
+    LiveItemView, LogRead, OwnedBytePermit, ProjectionRead, PurgePort, PushCommand, PushPort,
+    PushSpec, QueueCommand, QueueCounters, QueueIdempotencyCache, QueueKey, QueueMetrics,
+    ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, RenewLeaseCommand, RenewLeasePort,
+    TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort, build_push_items,
+    compile_entity_schema, require_item_level_claim, validate_entity, validate_gate_command,
+    validate_gate_push,
 };
 use pqueue_objectlog::segmented::{
     BlobStore, FaultHook, LocalFsBlobStore, SegmentConfig, SegmentCounters, SegmentedObjectLog,
@@ -347,10 +347,10 @@ impl Backend for ObjectLogSqliteBackend {
         DurabilityClass::EventualApply
     }
 
-    fn write<R, F>(&self, _f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        _request: pqueue_engine::RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
         std::future::ready(Err(EngineError::Unavailable))
     }
@@ -1295,10 +1295,10 @@ impl Backend for SegmentedObjectLogSqliteBackend {
         DurabilityClass::EventualApply
     }
 
-    fn write<R, F>(&self, _f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        _request: pqueue_engine::RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
         std::future::ready(Err(EngineError::Unavailable))
     }
@@ -2158,10 +2158,10 @@ impl Backend for SegmentedObjectLogInMemoryBackend {
         DurabilityClass::EventualApply
     }
 
-    fn write<R, F>(&self, _f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        _request: pqueue_engine::RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
         std::future::ready(Err(EngineError::Unavailable))
     }

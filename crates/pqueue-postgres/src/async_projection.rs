@@ -31,6 +31,15 @@ pub const DEFAULT_ASYNC_CONTROL_PLANE_MAILBOX_CAPACITY: usize = 64;
 const PROJECTION_WORKER_NAME: &str = "pqueue-postgres-projection";
 const CONTROL_PLANE_WORKER_NAME: &str = "pqueue-postgres-control-plane";
 
+fn resolve_eager<F: Future>(future: F) -> F::Output {
+    let mut future = Box::pin(future);
+    let mut context = Context::from_waker(futures::task::noop_waker_ref());
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("sync Postgres control-plane port returned a pending future"),
+    }
+}
+
 type Job<S> = Box<dyn FnOnce(&mut S) + Send + 'static>;
 
 struct ReplyState<T> {
@@ -759,7 +768,7 @@ impl AsyncControlPlane for AsyncPostgresRelationalControlPlane {
         async move {
             actor
                 .execute(move |store| {
-                    futures::executor::block_on(ControlPlaneStore::create_queue(store, definition))
+                    resolve_eager(ControlPlaneStore::create_queue(store, definition))
                 })
                 .await
         }
@@ -773,7 +782,7 @@ impl AsyncControlPlane for AsyncPostgresRelationalControlPlane {
         async move {
             actor
                 .execute(move |store| {
-                    futures::executor::block_on(ControlPlaneStore::queue_definition(store, &key))
+                    resolve_eager(ControlPlaneStore::queue_definition(store, &key))
                 })
                 .await
         }
@@ -786,9 +795,7 @@ impl AsyncControlPlane for AsyncPostgresRelationalControlPlane {
         let actor = self.actor.clone();
         async move {
             actor
-                .execute(move |store| {
-                    futures::executor::block_on(ControlPlaneStore::list_queues(store, &tenant))
-                })
+                .execute(move |store| resolve_eager(ControlPlaneStore::list_queues(store, &tenant)))
                 .await
         }
     }

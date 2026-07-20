@@ -21,14 +21,14 @@ use pqueue_engine::{
     CommitEntryStatus, CommitRecovery, CommitTransition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort,
-    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, LogWriter, PayloadUpdate,
-    ProjectionRead, ProjectionWriter, PurgeItemsCommand, PurgePort, PushCommand, PushItem,
-    PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand,
-    RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
-    build_push_items, validate_api001_reserved_write_fields, validate_claim_compatibility,
-    validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
+    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate, ProjectionRead,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
+    SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
+    validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value as JsonValue;
@@ -130,13 +130,13 @@ impl SqliteRelationalBackend {
     }
 }
 
-// --- Backend::write unit of work (disjoint borrows: tx over conn, &mut live-token map, &queues) -------
+// --- Typed raw commit (one owned transaction) ---------------------------------------------------------
 
-struct RelLogWriter<'a> {
+struct RelLogTxn<'a> {
     tx: &'a Transaction<'a>,
 }
 
-impl LogWriter for RelLogWriter<'_> {
+impl RelLogTxn<'_> {
     fn append(
         &mut self,
         shard: &QueueKey,
@@ -174,7 +174,7 @@ impl LogWriter for RelLogWriter<'_> {
     }
 }
 
-struct RelProjectionWriter<'a> {
+struct RelProjectionTxn<'a> {
     tx: &'a Transaction<'a>,
     queues: &'a HashMap<QueueKey, QueueDefinition>,
     grouped_shards: &'a mut HashSet<QueueKey>,
@@ -184,7 +184,7 @@ struct RelProjectionWriter<'a> {
     token_ops: &'a mut Vec<TokenOp>,
 }
 
-impl ProjectionWriter for RelProjectionWriter<'_> {
+impl RelProjectionTxn<'_> {
     fn apply(
         &mut self,
         positions: &[CommandPosition],
@@ -239,12 +239,16 @@ impl Backend for SqliteRelationalBackend {
         }
     }
 
-    fn write<R, F>(&self, f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
+    fn commit_raw(
+        &self,
+        request: pqueue_engine::RawCommitRequest,
+    ) -> impl std::future::Future<Output = EngineResult<pqueue_engine::RawCommitOutcome>> + Send
     {
         let result = (|| {
+            let (shard, commands, expected_epoch, fault) = request.into_parts();
+            if fault == pqueue_engine::RawCommitFault::BeforeAppend {
+                return Err(EngineError::Invalid("fault-injection: kill before append"));
+            }
             let mut guard = self.inner.lock().expect("relational backend poisoned");
             let Inner {
                 conn,
@@ -257,9 +261,15 @@ impl Backend for SqliteRelationalBackend {
             } = &mut *guard;
             let tx = st(conn.transaction())?;
             let mut token_ops = Vec::new();
-            let r = {
-                let mut lw = RelLogWriter { tx: &tx };
-                let mut pw = RelProjectionWriter {
+            let positions = {
+                let mut log_txn = RelLogTxn { tx: &tx };
+                log_txn.append(&shard, &commands, expected_epoch)?
+            };
+            if fault == pqueue_engine::RawCommitFault::AfterAppendBeforeApply {
+                return Ok(pqueue_engine::RawCommitOutcome::appended(positions));
+            }
+            {
+                let mut projection_txn = RelProjectionTxn {
                     tx: &tx,
                     queues,
                     grouped_shards,
@@ -267,11 +277,11 @@ impl Backend for SqliteRelationalBackend {
                     claim_scan_default_fifo,
                     token_ops: &mut token_ops,
                 };
-                f(&mut lw, &mut pw)?
-            };
+                projection_txn.apply(&positions, &commands)?;
+            }
             st(tx.commit())?;
             apply_token_ops(live_tokens, token_ops); // only after a durable commit (F4)
-            Ok(r)
+            Ok(pqueue_engine::RawCommitOutcome::applied(positions))
         })();
         std::future::ready(result)
     }

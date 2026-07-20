@@ -4,9 +4,8 @@
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
 use pqueue_core::{ClientItemKey, EntitySchemaDocument, ItemId, RequestId};
 use pqueue_engine::{
-    Backend, ClaimPort, ControlPlaneStore, DurabilityClass, EngineError, LogRead, LogWriter,
-    ProjectionRead, ProjectionWriter, PushCommand, PushPort, QueueCommand, ReplacePendingCommand,
-    SetGatesCommand,
+    Backend, ClaimPort, ControlPlaneStore, DurabilityClass, EngineError, LogRead, ProjectionRead,
+    PushCommand, PushPort, QueueCommand, RawCommitRequest, ReplacePendingCommand, SetGatesCommand,
 };
 use pqueue_objectlog::{LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig};
 use serde_json::json;
@@ -176,7 +175,7 @@ async fn local_object_log_rejects_replace_pending_before_append() {
 #[tokio::test]
 async fn replace_pending_command_is_refused_at_the_write_path() {
     // I-1: the upsert ban holds at the durable write path, not only at `replace_if_pending`. A raw
-    // ReplacePending command driven through `Backend::write` must be refused with Unavailable BEFORE any
+    // ReplacePending command driven through the typed raw commit must be refused with Unavailable BEFORE any
     // object is written.
     let root = tmp_root("rp");
     let _ = std::fs::remove_dir_all(&root);
@@ -202,13 +201,7 @@ async fn replace_pending_command_is_refused_at_the_write_path() {
     );
     let epoch = b.current_epoch(&shard()).await.unwrap();
     let res = b
-        .write(
-            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-                let pos = lw.append(&shard(), std::slice::from_ref(&env), epoch)?;
-                pw.apply(&pos, std::slice::from_ref(&env))?;
-                Ok(())
-            },
-        )
+        .commit_raw(RawCommitRequest::new(shard(), vec![env], epoch))
         .await;
     assert_eq!(
         res,
@@ -240,13 +233,11 @@ async fn raw_setgates_is_rejected_before_any_object_is_written() {
     );
     let epoch = b.current_epoch(&shard()).await.unwrap();
     let res = b
-        .write(
-            move |lw: &mut dyn LogWriter, pw: &mut dyn ProjectionWriter| {
-                let pos = lw.append(&shard(), &[valid.clone(), unsupported.clone()], epoch)?;
-                pw.apply(&pos, &[valid, unsupported])?;
-                Ok(())
-            },
-        )
+        .commit_raw(RawCommitRequest::new(
+            shard(),
+            vec![valid, unsupported],
+            epoch,
+        ))
         .await;
     assert_eq!(res, Err(EngineError::Unavailable));
     let page = b.read_from(&shard(), None, 10).await.unwrap();

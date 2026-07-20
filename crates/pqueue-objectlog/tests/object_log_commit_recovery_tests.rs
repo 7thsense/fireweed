@@ -286,13 +286,12 @@ async fn commit_to<B: Backend + ControlPlaneStore>(
     env: CommandEnvelope,
 ) {
     let epoch = backend.current_epoch(shard).await.expect("current epoch");
-    let shard = shard.clone();
     backend
-        .write(move |lw, pw| {
-            let pos = lw.append(&shard, std::slice::from_ref(&env), epoch)?;
-            pw.apply(&pos, std::slice::from_ref(&env))?;
-            Ok(())
-        })
+        .commit_raw(pqueue_engine::RawCommitRequest::new(
+            shard.clone(),
+            vec![env],
+            epoch,
+        ))
         .await
         .expect("commit");
 }

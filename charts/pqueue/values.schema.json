@@ -467,6 +467,7 @@
           "required": [
             "backend",
             "sqlite",
+            "turso",
             "postgres"
           ],
           "properties": {
@@ -475,6 +476,7 @@
               "enum": [
                 "inmemory",
                 "sqlite",
+                "turso",
                 "hybrid",
                 "hybrid-async",
                 "postgres"
@@ -486,6 +488,17 @@
               "required": [
                 "path"
               ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "turso": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path"],
               "properties": {
                 "path": {
                   "type": "string",

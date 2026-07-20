@@ -65,8 +65,8 @@ pub use async_reclaim_planner::{
 };
 pub use async_store::{
     AsyncControlPlane, AsyncLogStore, AsyncProjectionStore, BlockingControlPlane, BlockingLogStore,
-    BlockingProjectionStore, BlockingStoreOperation, FinalizeLeaseMember, ImmediateControlPlane,
-    ImmediateLogStore, ImmediateProjectionStore,
+    BlockingProjectionStore, BlockingStoreOperation, FinalizeLeaseMember, InProcessLogStore,
+    InProcessProjectionStore,
 };
 pub use auth::{AuthContext, RedactedLeaseToken, hash_lease_token};
 pub use byte_admission::{
@@ -125,10 +125,10 @@ pub use port::{
     CommitRecovery, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
     ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery, FinalizePort,
     HistoricalProjectionRead, HotProjectionQueryPort, IdGen, IndexHit, IndexQueryPort,
-    InstanceFence, ItemView, LeaseView, LiveItemView, LogRead, LogWriter, MaintenanceStopReason,
-    MaintenanceSummary, ProjectionRead, ProjectionSnapshot, ProjectionWriter, PurgePort, PushPort,
-    PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort,
-    RenewLeasePort, RequestIdReplayProbe, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
+    InstanceFence, ItemView, LeaseView, LiveItemView, LogRead, MaintenanceStopReason,
+    MaintenanceSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushPort, PushSpec,
+    QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    RequestIdReplayProbe, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
     TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
     generate_query_lease_token, is_api001_reserved_write_field,
     validate_api001_reserved_write_fields, validate_distinct_commit_claims,

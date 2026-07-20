@@ -1982,14 +1982,14 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
     .await
     .expect("unsupported overlap is idempotently skipped");
 
-    // Unsupported live-frontier arms fail before mutation or cursor advancement.
-    let unsupported = envelope(
+    // Side-record commands are part of the complete relational projection corpus and advance the frontier.
+    let side_records = envelope(
         "side-records",
         QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
         Vec::new(),
         12,
     );
-    let unsupported_position = CommandPosition::new(
+    let side_records_position = CommandPosition::new(
         QueueKey::new(
             TenantId::new("tenant").unwrap(),
             QueueId::new("queue").unwrap(),
@@ -1997,11 +1997,9 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
         1,
         2,
     );
-    assert!(matches!(
-        AsyncProjectionStore::apply_live(&turso, vec![unsupported_position], vec![unsupported])
-            .await,
-        Err(pqueue_engine::EngineError::Unavailable)
-    ));
+    AsyncProjectionStore::apply_live(&turso, vec![side_records_position], vec![side_records])
+        .await
+        .expect("side-record apply");
     assert_eq!(
         AsyncProjectionStore::recovery_high_water(
             &turso,
@@ -2014,7 +2012,7 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
         .unwrap()
         .unwrap()
         .sequence,
-        1
+        2
     );
 
     let gap = envelope(
@@ -2037,7 +2035,7 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
                     QueueId::new("queue").unwrap(),
                 ),
                 1,
-                3,
+                4,
             )],
             vec![gap],
         )
@@ -2056,7 +2054,7 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
         .unwrap()
         .unwrap()
         .sequence,
-        1
+        2
     );
 
     // Even an empty supported command advances both sequence and assignment epoch.
@@ -2077,7 +2075,7 @@ async fn async_projection_matches_sqlite_for_push_claim_reads_and_frontier() {
             QueueId::new("queue").unwrap(),
         ),
         7,
-        2,
+        3,
     );
     AsyncProjectionStore::apply_live(&turso, vec![empty_position.clone()], vec![empty_claim])
         .await

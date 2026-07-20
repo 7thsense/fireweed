@@ -1,0 +1,8 @@
+# Focused static render fixture for feature-enabled objectlog/turso images (AC-TURSO-5/6).
+storage:
+  log:
+    backend: objectlog
+  projection:
+    backend: turso
+    turso:
+      path: /var/lib/pqueue/projection/test.turso

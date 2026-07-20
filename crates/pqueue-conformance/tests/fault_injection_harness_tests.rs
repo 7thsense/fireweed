@@ -16,9 +16,8 @@ use pqueue_conformance::fault::{CutPoint, durable_command_count, inject_commit, 
 use pqueue_conformance::{envelope, item, qdef, qkey, shard, ts};
 use pqueue_engine::{
     Backend, CommandPosition, ComposedBackend, ControlPlaneStore, DurabilityClass, EngineError,
-    EngineResult, InProcessControlPlane, LogStore, LogWriter, ProjectionRead, ProjectionSnapshot,
-    ProjectionWriter, PushCommand, QueueCommand, RawCommitFault, RawCommitOutcome,
-    RawCommitRequest,
+    EngineResult, InProcessControlPlane, LogStore, ProjectionRead, ProjectionSnapshot, PushCommand,
+    QueueCommand, RawCommitFault, RawCommitOutcome, RawCommitRequest,
 };
 use pqueue_objectlog::{FaultCutPoint, FaultHook, ObjectLog, SegmentConfig};
 use pqueue_sqlite::HybridProjectionStore;
@@ -41,14 +40,6 @@ struct ControlledOwnedCommitBackend {
 impl Backend for ControlledOwnedCommitBackend {
     fn durability_class(&self) -> DurabilityClass {
         DurabilityClass::Atomic
-    }
-
-    fn write<R, F>(&self, _f: F) -> impl std::future::Future<Output = EngineResult<R>> + Send
-    where
-        F: FnOnce(&mut dyn LogWriter, &mut dyn ProjectionWriter) -> EngineResult<R> + Send,
-        R: Send,
-    {
-        std::future::ready(Err(EngineError::Unavailable))
     }
 
     fn commit_raw(

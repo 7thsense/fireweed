@@ -169,8 +169,9 @@ fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
 fn blocking_backend_from_arc_compiles_for_composed_postgres_backend() {
     let _ctor: fn(
         Arc<pqueue_postgres::ComposedPostgresBackend>,
-    ) -> pqueue_server::BlockingBackend<pqueue_postgres::ComposedPostgresBackend> =
-        pqueue_server::BlockingBackend::from_arc;
+    ) -> pqueue_server::PostgresWholeOperationAdapter<
+        pqueue_postgres::ComposedPostgresBackend,
+    > = pqueue_server::PostgresWholeOperationAdapter::from_arc;
 }
 
 /// No plaintext fallback: on a build WITHOUT the `tls` feature, an `sslmode=require` DSN must fail at config
