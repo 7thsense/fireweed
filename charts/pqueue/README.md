@@ -14,6 +14,7 @@ Projection backend:
 
 - `inmemory`
 - `sqlite`
+- `turso`
 - `hybrid`
 - `hybrid-async`
 - `postgres`
@@ -25,7 +26,8 @@ must reject attempts to set `storage.projection.backend=hybrid-strict`.
 
 The current `pqueue-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
 `objectlog/inmemory`, `objectlog/sqlite`, `objectlog/hybrid`, and
-`objectlog/hybrid-async` unconditionally. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
+`objectlog/hybrid-async` unconditionally. `objectlog/turso` is available in
+builds with the `turso-projection` feature. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
 via the `PostgresNativeBackend` wrapper, never on a reactor worker — but only when
 the binary is built with the `postgres` cargo feature (`--features postgres`, or
 `--features postgres,tls` for native-tls). The default release image does **not**

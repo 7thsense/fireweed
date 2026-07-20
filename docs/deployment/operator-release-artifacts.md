@@ -135,7 +135,7 @@ kind storage matrix only and is not CI matrix proof.
 The chart exposes separate storage axes:
 
 - log backend: `objectlog` or `postgres`
-- projection backend: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or
+- projection backend: `inmemory`, `sqlite`, `turso`, `hybrid`, `hybrid-async`, or
   `postgres`
 
 `objectlog/hybrid-strict` is deliberately absent from that chart enum. It is an

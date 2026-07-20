@@ -7,7 +7,7 @@ The chart storage contract is expressed as axes:
 
 - `storage.log.backend`: `objectlog` or `postgres`
 - `storage.log.objectLog.store`: `local` or `s3`
-- `storage.projection.backend`: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or `postgres`
+- `storage.projection.backend`: `inmemory`, `sqlite`, `turso`, `hybrid`, `hybrid-async`, or `postgres`
 - `storage.controlPlane.backend`: `inprocess` or `postgres`
 
 `objectlog/hybrid-strict` is not part of the chart contract or public support

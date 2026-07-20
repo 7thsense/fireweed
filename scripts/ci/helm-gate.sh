@@ -333,8 +333,8 @@ assert_hybrid_strict_schema_exclusion() {
     # path and allowed enum from either formatter so a schema expansion, a
     # template-time rejection, or an unrelated render failure cannot satisfy
     # this public-support boundary.
-    local helm4_error="- at '/storage/projection/backend': value must be one of 'inmemory', 'sqlite', 'hybrid', 'hybrid-async', 'postgres'"
-    local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "inmemory", "sqlite", "hybrid", "hybrid-async", "postgres"'
+    local helm4_error="- at '/storage/projection/backend': value must be one of 'inmemory', 'sqlite', 'turso', 'hybrid', 'hybrid-async', 'postgres'"
+    local helm3_error='storage.projection.backend: storage.projection.backend must be one of the following: "inmemory", "sqlite", "turso", "hybrid", "hybrid-async", "postgres"'
     if ! grep -Fq -- "$helm4_error" "$output" && ! grep -Fq -- "$helm3_error" "$output"; then
         err "objectlog/hybrid-strict did not fail with the exact projection enum-exclusion error"
         cat "$output" >&2
