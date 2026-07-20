@@ -31,28 +31,13 @@ pub(crate) fn advance_id_high_water_sql(
         return Ok(());
     };
     let (t, q) = parts(shard);
-    let existing: Option<String> = st(tx
-        .query_row(
-            "SELECT item_id FROM pqueue_id_high_water WHERE tenant=?1 AND queue=?2",
-            params![t, q],
-            |row| row.get(0),
-        )
-        .optional())?;
-    let keep = match existing {
-        Some(s) => {
-            let cur = ItemId::new(s).map_err(|e| EngineError::Storage(e.to_string()))?;
-            if (max_reaped.epoch(), max_reaped.counter()) > (cur.epoch(), cur.counter()) {
-                max_reaped
-            } else {
-                cur
-            }
-        }
-        None => max_reaped,
-    };
     st(tx.execute(
         "INSERT INTO pqueue_id_high_water(tenant,queue,item_id) VALUES(?1,?2,?3) \
-         ON CONFLICT(tenant,queue) DO UPDATE SET item_id=?3",
-        params![t, q, keep.to_string()],
+         ON CONFLICT(tenant,queue) DO UPDATE SET item_id=excluded.item_id \
+         WHERE length(excluded.item_id)>length(pqueue_id_high_water.item_id) \
+            OR (length(excluded.item_id)=length(pqueue_id_high_water.item_id) \
+                AND excluded.item_id>pqueue_id_high_water.item_id)",
+        params![t, q, max_reaped.to_string()],
     ))?;
     Ok(())
 }
@@ -391,6 +376,7 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
          PRAGMA busy_timeout=5000;",
     ))?;
     st(conn.execute_batch(RELATIONAL_SCHEMA))?;
+    backfill_id_high_water_once(&conn)?;
     ensure_queue_pause_drain_intake_column(&conn)?;
     ensure_item_fields_column(&conn)?;
     ensure_item_metadata_column(&conn)?;
@@ -409,6 +395,46 @@ pub(crate) fn open_inner(conn: Connection) -> EngineResult<Inner> {
     };
     inner.reload()?;
     Ok(inner)
+}
+
+fn backfill_id_high_water_once(conn: &Connection) -> EngineResult<()> {
+    st(conn.execute_batch("BEGIN IMMEDIATE"))?;
+    let result = (|| -> EngineResult<()> {
+        let complete: bool = st(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pqueue_schema_migrations \
+             WHERE migration_name='item_id_high_water_v2')",
+            [],
+            |row| row.get(0),
+        ))?;
+        if complete {
+            return Ok(());
+        }
+        // SQLite stores ItemId as canonical unsigned decimal text. Length then lexical order is numeric
+        // order without signed-64-bit casts, so this backfills old databases containing the full u64 range.
+        st(conn.execute_batch(
+            "INSERT INTO pqueue_id_high_water(tenant,queue,item_id) \
+             SELECT tenant_id,queue_id,item_id FROM ( \
+               SELECT tenant_id,queue_id,item_id, \
+                 ROW_NUMBER() OVER (PARTITION BY tenant_id,queue_id \
+                   ORDER BY length(item_id) DESC,item_id DESC) AS rank \
+               FROM pqueue_items \
+             ) WHERE rank=1 \
+             ON CONFLICT(tenant,queue) DO UPDATE SET item_id=excluded.item_id \
+             WHERE length(excluded.item_id)>length(pqueue_id_high_water.item_id) \
+                OR (length(excluded.item_id)=length(pqueue_id_high_water.item_id) \
+                    AND excluded.item_id>pqueue_id_high_water.item_id); \
+             INSERT INTO pqueue_schema_migrations(migration_name) \
+             VALUES('item_id_high_water_v2');",
+        ))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => st(conn.execute_batch("COMMIT")),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn create_queue_sql(
