@@ -53,6 +53,14 @@ have progressed, the load generator runs additional exact 300,000-item hot
 sustain windows before ending the loaded phase. The row records and reconciles
 the window count and total sustain items, so a fast host cannot fail merely
 because its first hot window was shorter than one complete cold-queue cycle.
+The load generator also records exact accepted, claimed, and finalized item-ID
+sets for the measured hot and cold workloads; setup warm-ups are explicitly
+outside these measured lifecycle totals. After the workers stop, it sums live cold-queue
+`XLEN` values and requires exactly one retained eligible item per cold queue.
+The semantic validator reconciles accepted = finalized + pending for the cold
+workload, accepted = claimed = finalized for the hot workload, and requires
+zero lost items, duplicate transitions, empty post-reseed claims, and
+queue-global progress violations.
 
 The run writes
 `target/pqueue-ledger/tp002-e2-density-kind.jsonl`. Its row records the exact
@@ -64,15 +72,14 @@ The wrapper retains the latest Job object plus load/server logs under
 `target/pqueue-ledger/tp002-e2-density-kind-diagnostics/` before deleting its
 namespace. Only the top-level wrapper process owns cleanup; background log and
 sampler subshells cannot fire the namespace-deletion trap.
-The load generator emits explicit `HOT_START` and `HOT_END` phase markers. A
-separate sampler must record at least one sample strictly between those markers.
-The load pod and sampling host share the kind node's system clock; the row
-records the hot-phase start/end and first/last accepted sample timestamps, and
-the validator requires the sample interval to be contained by the hot interval.
-It reads Tokio's live runtime metrics from the service's atomic in-container
-snapshot, including the actual worker-pool size and all live async tasks
+The load generator emits explicit `HOT_START` and `HOT_END` phase markers.
+Resource correctness does not depend on landing a periodic sample inside that
+interval. Density instrumentation enforces the connection cap at handler
+allocation, aborts the service on a worker/task bound violation, and exports
+process-lifetime high-water counters in its atomic in-container snapshot. The
+row records the actual worker-pool size and maximum live async tasks
 (detached object-log flushers, background loops, and connection handlers), and
-counts established port-8080 TCP connections from the server network namespace.
+and the allocation-observed maximum live RESP connections.
 The governed maxima are four Tokio workers, 32 connections, and 64 live tasks;
 these limits are fixed in the semantic validator rather than selected by the
 run. The snapshot reporter is disabled in normal service deployments and is
@@ -86,9 +93,10 @@ cargo run -p pqueue-release --bin pqueue-verify-density-evidence -- \
 
 The validator requires release scale/tier, `bars_met=true`, exactly 1,001
 queues, all 1,000 cold queues active and observed making non-empty progress
-during hot load, complete positive baseline/load measurements whose derived
+during hot load, exact lifecycle reconciliation with zero correctness or
+progress violations, complete positive baseline/load measurements whose derived
 controls and retention values reconcile, all resource counts within their
-governed bounds, and at least one hot-phase resource sample. Absolute rates,
+governed bounds with continuous enforcement enabled. Absolute rates,
 latency, and retention percentages are capacity evidence only. The validator
 also rejects quiet-host requirements and host-speed gates, and rejects
 any substitution for the canonical 1,001 queues, 300,000 hot items, eight hot

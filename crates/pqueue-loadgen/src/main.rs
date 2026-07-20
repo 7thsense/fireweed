@@ -22,11 +22,12 @@
 //! The RESP client is a raw `std::net::TcpStream` client (no new dependency) — the same wire the
 //! off-the-shelf-client e2e exercises. Every number is MEASURED, never hard-coded.
 
+use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::exit;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -80,6 +81,16 @@ struct DensityRunResult {
     cold_queues_active: usize,
     cold_queues_progress_eligible: usize,
     cold_empty_claim_responses: usize,
+    hot_accepted_items: u64,
+    hot_claimed_items: u64,
+    hot_finalized_items: u64,
+    cold_accepted_items: u64,
+    cold_claimed_items: u64,
+    cold_finalized_items: u64,
+    cold_pending_items: u64,
+    lost_items: u64,
+    duplicate_transitions: u64,
+    queue_global_progress_violations: u64,
     baseline_before_ingest_per_s: f64,
     baseline_before_claim_finalize_per_s: f64,
     baseline_after_ingest_per_s: f64,
@@ -93,6 +104,74 @@ struct DensityRunResult {
     noisy_neighbor_ingest_retention_pct: f64,
     noisy_neighbor_claim_retention_pct: f64,
     duration_seconds: u64,
+}
+
+#[derive(Default)]
+struct LifecycleIdentityLedger {
+    accepted: Mutex<HashSet<String>>,
+    claimed: Mutex<HashSet<String>>,
+    finalized: Mutex<HashSet<String>>,
+    duplicate_transitions: AtomicU64,
+}
+
+impl LifecycleIdentityLedger {
+    fn record(&self, target: &Mutex<HashSet<String>>, queue: &str, ids: &[String]) {
+        let mut seen = target.lock().expect("lifecycle identity ledger poisoned");
+        for id in ids {
+            if !seen.insert(format!("{queue}\0{id}")) {
+                self.duplicate_transitions.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn counts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.accepted.lock().unwrap().len() as u64,
+            self.claimed.lock().unwrap().len() as u64,
+            self.finalized.lock().unwrap().len() as u64,
+            self.duplicate_transitions.load(Ordering::SeqCst),
+        )
+    }
+
+    fn snapshots(&self) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
+        (
+            self.accepted.lock().unwrap().clone(),
+            self.claimed.lock().unwrap().clone(),
+            self.finalized.lock().unwrap().clone(),
+        )
+    }
+
+    fn identity_violations(&self, retained_queues: &[String]) -> usize {
+        let (accepted, claimed, finalized) = self.snapshots();
+        let mut violations = if retained_queues.is_empty() {
+            accepted.symmetric_difference(&claimed).count()
+                + claimed.symmetric_difference(&finalized).count()
+        } else {
+            claimed.symmetric_difference(&finalized).count()
+                + claimed.difference(&accepted).count()
+                + finalized.difference(&accepted).count()
+        };
+        if !retained_queues.is_empty() {
+            let retained: Vec<&String> = accepted.difference(&finalized).collect();
+            for queue in retained_queues {
+                let prefix = format!("{queue}\0");
+                violations += retained
+                    .iter()
+                    .filter(|identity| identity.starts_with(&prefix))
+                    .count()
+                    .abs_diff(1);
+            }
+            violations += retained
+                .iter()
+                .filter(|identity| {
+                    !retained_queues
+                        .iter()
+                        .any(|queue| identity.starts_with(&format!("{queue}\0")))
+                })
+                .count();
+        }
+        violations
+    }
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -251,6 +330,7 @@ fn push_items_counted(
     total: u64,
     pipe: usize,
     completed: Option<&AtomicU64>,
+    identities: Option<&LifecycleIdentityLedger>,
 ) {
     let mut done = 0u64;
     let mut pr = 0u64;
@@ -267,12 +347,19 @@ fn push_items_counted(
         }
         conn.w.write_all(&buf).expect("write XADD batch");
         let mut ok = 0u64;
+        let mut accepted_ids = Vec::with_capacity(n);
         for _ in 0..n {
             match conn.recv().expect("read XADD reply") {
-                Val::Bulk(Some(_)) => ok += 1,
+                Val::Bulk(Some(id)) => {
+                    ok += 1;
+                    accepted_ids.push(String::from_utf8(id).expect("XADD id must be UTF-8"));
+                }
                 Val::Err(e) if is_transient_fence(&e) => {}
                 other => panic!("XADD on {key} failed: {other:?}"),
             }
+        }
+        if let Some(identities) = identities {
+            identities.record(&identities.accepted, key, &accepted_ids);
         }
         done += ok;
         if let Some(completed) = completed {
@@ -291,7 +378,7 @@ fn push_items_counted(
 }
 
 fn push_items(conn: &mut Conn, key: &str, total: u64, pipe: usize) {
-    push_items_counted(conn, key, total, pipe, None);
+    push_items_counted(conn, key, total, pipe, None, None);
 }
 
 /// Cooperatively drain `key` (`XREADGROUP >` + `XACK`) until an empty batch. Returns the count drained.
@@ -301,6 +388,7 @@ fn drain_counted(
     consumer: &str,
     batch: usize,
     completed: Option<&AtomicU64>,
+    identities: Option<&LifecycleIdentityLedger>,
 ) -> u64 {
     let mut total = 0u64;
     let count = batch.max(1).to_string();
@@ -333,6 +421,9 @@ fn drain_counted(
             break;
         }
         let id_bytes: Vec<Vec<u8>> = ids.iter().map(|s| s.clone().into_bytes()).collect();
+        if let Some(identities) = identities {
+            identities.record(&identities.claimed, key, &ids);
+        }
         let mut args: Vec<&[u8]> = vec![b"XACK", key.as_bytes(), b"g"];
         for ib in &id_bytes {
             args.push(ib);
@@ -341,12 +432,22 @@ fn drain_counted(
         loop {
             conn.send(&args).expect("send XACK");
             match conn.recv().expect("read XACK reply") {
-                Val::Int(_) => break,
+                Val::Int(acked) => {
+                    assert_eq!(
+                        acked,
+                        ids.len() as i64,
+                        "XACK must finalize every claimed id on {key}"
+                    );
+                    break;
+                }
                 Val::Err(e) if is_transient_fence(&e) => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 other => panic!("XACK on {key} failed: {other:?}"),
             }
+        }
+        if let Some(identities) = identities {
+            identities.record(&identities.finalized, key, &ids);
         }
         total += ids.len() as u64;
         if let Some(completed) = completed {
@@ -357,7 +458,7 @@ fn drain_counted(
 }
 
 fn drain(conn: &mut Conn, key: &str, consumer: &str, batch: usize) -> u64 {
-    drain_counted(conn, key, consumer, batch, None)
+    drain_counted(conn, key, consumer, batch, None, None)
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -543,7 +644,15 @@ fn measure(
     pipe: usize,
     batch: usize,
 ) -> (f64, f64, f64, f64) {
-    measure_with_progress(spec, items_per_queue, conns_per_queue, pipe, batch, None)
+    measure_with_progress(
+        spec,
+        items_per_queue,
+        conns_per_queue,
+        pipe,
+        batch,
+        None,
+        None,
+    )
 }
 
 fn measure_with_progress(
@@ -553,6 +662,7 @@ fn measure_with_progress(
     pipe: usize,
     batch: usize,
     progress_prefix: Option<&str>,
+    identities: Option<Arc<LifecycleIdentityLedger>>,
 ) -> (f64, f64, f64, f64) {
     let conns_per_queue = conns_per_queue.max(1);
     let queue_keys: Vec<(String, String)> = spec
@@ -570,6 +680,7 @@ fn measure_with_progress(
     let total_items = num_queues as u64 * items_per_queue;
     let ingest_completed = Arc::new(AtomicU64::new(0));
     let ingest_worker_completed = Arc::clone(&ingest_completed);
+    let ingest_identities = identities.clone();
     let ingest_stage = progress_prefix.map(|prefix| format!("{prefix}_INGEST"));
     let ingest_progress = ingest_stage
         .as_deref()
@@ -580,7 +691,14 @@ fn measure_with_progress(
         ingest_progress,
         move |c, key, ci| {
             let my_push = per_conn + if ci == 0 { remainder } else { 0 };
-            push_items_counted(c, key, my_push, pipe, Some(&ingest_worker_completed));
+            push_items_counted(
+                c,
+                key,
+                my_push,
+                pipe,
+                Some(&ingest_worker_completed),
+                ingest_identities.as_deref(),
+            );
         },
     );
 
@@ -589,6 +707,7 @@ fn measure_with_progress(
     let dt = Arc::clone(&drained_total);
     let drain_completed = Arc::new(AtomicU64::new(0));
     let drain_worker_completed = Arc::clone(&drain_completed);
+    let drain_identities = identities;
     let drain_stage = progress_prefix.map(|prefix| format!("{prefix}_CLAIM_FINALIZE"));
     let drain_progress = drain_stage
         .as_deref()
@@ -599,7 +718,14 @@ fn measure_with_progress(
         drain_progress,
         move |c, key, ci| {
             let consumer = format!("c{ci}");
-            let got = drain_counted(c, key, &consumer, batch, Some(&drain_worker_completed));
+            let got = drain_counted(
+                c,
+                key,
+                &consumer,
+                batch,
+                Some(&drain_worker_completed),
+                drain_identities.as_deref(),
+            );
             dt.fetch_add(got, Ordering::SeqCst);
         },
     );
@@ -636,6 +762,10 @@ struct DensityWorkerSignals {
     hot_progressed: Arc<AtomicU64>,
     max_progress_latency_ms: Arc<AtomicU64>,
     cold_empty_claim_responses: Arc<AtomicU64>,
+    cold_accepted_items: Arc<AtomicU64>,
+    cold_claimed_items: Arc<AtomicU64>,
+    cold_finalized_items: Arc<AtomicU64>,
+    identities: Arc<LifecycleIdentityLedger>,
 }
 
 fn start_density_workers(
@@ -660,16 +790,29 @@ fn start_density_workers(
                 let mut conn = Conn::connect(&addr).expect("density cold-worker connect");
                 let mut states = Vec::with_capacity(keys.len());
                 for (index, key) in keys {
-                    push_items(&mut conn, &key, 1, 1);
-                    let got = drain(&mut conn, &key, &format!("density-w{worker}"), 1);
+                    push_items_counted(&mut conn, &key, 1, 1, None, Some(&signals.identities));
+                    signals.cold_accepted_items.fetch_add(1, Ordering::SeqCst);
+                    let got = drain_counted(
+                        &mut conn,
+                        &key,
+                        &format!("density-w{worker}"),
+                        1,
+                        None,
+                        Some(&signals.identities),
+                    );
                     if got == 0 {
                         signals
                             .cold_empty_claim_responses
                             .fetch_add(1, Ordering::SeqCst);
                     }
                     assert_eq!(got, 1, "cold queue {key} must claim/finalize its seed");
+                    signals.cold_claimed_items.fetch_add(got, Ordering::SeqCst);
+                    signals
+                        .cold_finalized_items
+                        .fetch_add(got, Ordering::SeqCst);
                     let eligible_since = Instant::now();
-                    push_items(&mut conn, &key, 1, 1);
+                    push_items_counted(&mut conn, &key, 1, 1, None, Some(&signals.identities));
+                    signals.cold_accepted_items.fetch_add(1, Ordering::SeqCst);
                     states.push((index, key, eligible_since));
                     signals.ready.fetch_add(1, Ordering::SeqCst);
                 }
@@ -681,13 +824,24 @@ fn start_density_workers(
                         // Capture phase at operation START. A claim begun before HOT_START must not be
                         // promoted merely because it finishes after the flag changes.
                         let started_in_hot_phase = signals.hot_phase.load(Ordering::SeqCst);
-                        let got = drain(&mut conn, key, &format!("density-w{worker}"), 1);
+                        let got = drain_counted(
+                            &mut conn,
+                            key,
+                            &format!("density-w{worker}"),
+                            1,
+                            None,
+                            Some(&signals.identities),
+                        );
                         if got == 0 {
                             signals
                                 .cold_empty_claim_responses
                                 .fetch_add(1, Ordering::SeqCst);
                         }
                         assert_eq!(got, 1, "cold queue {key} must remain progress eligible");
+                        signals.cold_claimed_items.fetch_add(got, Ordering::SeqCst);
+                        signals
+                            .cold_finalized_items
+                            .fetch_add(got, Ordering::SeqCst);
                         let latency_ms = eligible_since.elapsed().as_millis() as u64;
                         if started_in_hot_phase && signals.hot_phase.load(Ordering::SeqCst) {
                             signals
@@ -701,7 +855,8 @@ fn start_density_workers(
                             }
                         }
                         *eligible_since = Instant::now();
-                        push_items(&mut conn, key, 1, 1);
+                        push_items_counted(&mut conn, key, 1, 1, None, Some(&signals.identities));
+                        signals.cold_accepted_items.fetch_add(1, Ordering::SeqCst);
                     }
                 }
             })
@@ -902,9 +1057,9 @@ fn cmd_density_run(args: &[String]) -> ! {
     let noisy_workers = parse_usize_arg(args, "--noisy-workers", 8);
     let seed = parse_u64_arg(args, "--seed", 42);
     let progress_bound_ms = parse_u64_arg(args, "--progress-bound-ms", 60_000);
-    assert!(
-        total_queues >= 1001,
-        "release density needs at least 1001 queues"
+    assert_eq!(
+        total_queues, 1001,
+        "density workload requires exactly 1001 queues"
     );
 
     let keys: Vec<String> = (0..total_queues)
@@ -954,6 +1109,7 @@ fn cmd_density_run(args: &[String]) -> ! {
         }],
     };
     let started = Instant::now();
+    let hot_identities = Arc::new(LifecycleIdentityLedger::default());
     println!("DENSITY_STAGE stage=BASELINE status=START");
     io::stdout().flush().expect("flush density baseline stage");
     let (_, baseline_before_ingest, _, baseline_before_claim) = measure_with_progress(
@@ -963,6 +1119,7 @@ fn cmd_density_run(args: &[String]) -> ! {
         pipe,
         batch,
         Some("BASELINE"),
+        Some(Arc::clone(&hot_identities)),
     );
     println!("DENSITY_STAGE stage=BASELINE status=DONE");
     println!(
@@ -984,6 +1141,10 @@ fn cmd_density_run(args: &[String]) -> ! {
     let hot_progressed = Arc::new(AtomicU64::new(0));
     let max_progress_latency_ms = Arc::new(AtomicU64::new(0));
     let cold_empty_claim_responses = Arc::new(AtomicU64::new(0));
+    let cold_accepted_items = Arc::new(AtomicU64::new(0));
+    let cold_claimed_items = Arc::new(AtomicU64::new(0));
+    let cold_finalized_items = Arc::new(AtomicU64::new(0));
+    let cold_identities = Arc::new(LifecycleIdentityLedger::default());
     let handles = start_density_workers(
         &addr,
         &cold,
@@ -996,6 +1157,10 @@ fn cmd_density_run(args: &[String]) -> ! {
             hot_progressed: Arc::clone(&hot_progressed),
             max_progress_latency_ms: Arc::clone(&max_progress_latency_ms),
             cold_empty_claim_responses: Arc::clone(&cold_empty_claim_responses),
+            cold_accepted_items: Arc::clone(&cold_accepted_items),
+            cold_claimed_items: Arc::clone(&cold_claimed_items),
+            cold_finalized_items: Arc::clone(&cold_finalized_items),
+            identities: Arc::clone(&cold_identities),
         },
     );
     let deadline = Instant::now() + Duration::from_secs(300);
@@ -1030,8 +1195,16 @@ fn cmd_density_run(args: &[String]) -> ! {
     hot_phase.store(true, Ordering::SeqCst);
     println!("DENSITY_PHASE HOT_START {hot_phase_started_unix_ms}");
     io::stdout().flush().expect("flush HOT_START marker");
-    let (_, loaded_ingest, _, loaded_claim) =
-        measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("LOADED"));
+    let (_, loaded_ingest, _, loaded_claim) = measure_with_progress(
+        &hot_spec,
+        items,
+        conns,
+        pipe,
+        batch,
+        Some("LOADED"),
+        Some(Arc::clone(&hot_identities)),
+    );
+    hot_phase.store(false, Ordering::SeqCst);
     let mut hot_sustain_windows = 1_u64;
     while hot_progressed.load(Ordering::SeqCst) < cold.len() as u64 {
         hot_sustain_windows += 1;
@@ -1041,7 +1214,17 @@ fn cmd_density_run(args: &[String]) -> ! {
             cold.len()
         );
         io::stdout().flush().expect("flush loaded sustain stage");
-        let _ = measure_with_progress(&hot_spec, items, conns, pipe, batch, Some("LOADED_SUSTAIN"));
+        hot_phase.store(true, Ordering::SeqCst);
+        let _ = measure_with_progress(
+            &hot_spec,
+            items,
+            conns,
+            pipe,
+            batch,
+            Some("LOADED_SUSTAIN"),
+            Some(Arc::clone(&hot_identities)),
+        );
+        hot_phase.store(false, Ordering::SeqCst);
     }
     hot_phase.store(false, Ordering::SeqCst);
     let hot_phase_ended_unix_ms = std::time::SystemTime::now()
@@ -1068,6 +1251,7 @@ fn cmd_density_run(args: &[String]) -> ! {
         pipe,
         batch,
         Some("BASELINE_AFTER"),
+        Some(Arc::clone(&hot_identities)),
     );
     println!("DENSITY_STAGE stage=BASELINE_AFTER status=DONE");
 
@@ -1082,16 +1266,44 @@ fn cmd_density_run(args: &[String]) -> ! {
     let baseline_claim = paired_control(baseline_before_claim, baseline_after_claim);
 
     let mut cold_active = 0usize;
+    let mut cold_pending_items = 0_u64;
     for key in &cold {
         let mut conn = Conn::connect(&addr).expect("density final inventory connect");
-        if xlen(&mut conn, key)
+        let length = xlen(&mut conn, key)
             .expect("density final XLEN")
-            .is_ok_and(|length| length > 0)
-        {
+            .expect("density final queue must exist");
+        cold_pending_items = cold_pending_items
+            .checked_add(u64::try_from(length).expect("density XLEN must be non-negative"))
+            .expect("density cold pending count overflow");
+        if length > 0 {
             cold_active += 1;
         }
     }
+    let (hot_accepted, hot_claimed, hot_finalized, hot_duplicates) = hot_identities.counts();
+    let (cold_accepted, cold_claimed, cold_finalized, cold_duplicates) = cold_identities.counts();
+    assert_eq!(
+        cold_accepted_items.load(Ordering::SeqCst),
+        cold_accepted,
+        "cold accepted identity/count reconciliation"
+    );
+    assert_eq!(cold_claimed_items.load(Ordering::SeqCst), cold_claimed);
+    assert_eq!(cold_finalized_items.load(Ordering::SeqCst), cold_finalized);
+    let (hot_accepted_ids, hot_claimed_ids, _) = hot_identities.snapshots();
+    let (cold_accepted_ids, cold_claimed_ids, _) = cold_identities.snapshots();
+    let hot_identity_violations = hot_identities.identity_violations(&[]);
+    let cold_identity_violations = cold_identities.identity_violations(&cold);
+    let lost_items = (hot_identity_violations + cold_identity_violations) as u64;
     let progress_eligible = hot_progressed.load(Ordering::SeqCst) as usize;
+    let duplicate_transitions = hot_duplicates
+        .checked_add(cold_duplicates)
+        .and_then(|duplicates| {
+            duplicates.checked_add(
+                (hot_claimed_ids.difference(&hot_accepted_ids).count()
+                    + cold_claimed_ids.difference(&cold_accepted_ids).count())
+                    as u64,
+            )
+        })
+        .expect("density duplicate transition count overflow");
     let duration_seconds = started.elapsed().as_secs().max(1);
     let result = DensityRunResult {
         hot_items: items,
@@ -1109,6 +1321,18 @@ fn cmd_density_run(args: &[String]) -> ! {
         cold_queues_active: cold_active,
         cold_queues_progress_eligible: progress_eligible,
         cold_empty_claim_responses: cold_empty_claim_responses.load(Ordering::SeqCst) as usize,
+        hot_accepted_items: hot_accepted,
+        hot_claimed_items: hot_claimed,
+        hot_finalized_items: hot_finalized,
+        cold_accepted_items: cold_accepted,
+        cold_claimed_items: cold_claimed,
+        cold_finalized_items: cold_finalized,
+        cold_pending_items,
+        lost_items,
+        duplicate_transitions,
+        // This is an operation-completion invariant, not an elapsed-time gate: a queue is a
+        // violation unless it completed a non-empty claim/finalize wholly inside the hot phase.
+        queue_global_progress_violations: cold.len().saturating_sub(progress_eligible) as u64,
         baseline_before_ingest_per_s: baseline_before_ingest,
         baseline_before_claim_finalize_per_s: baseline_before_claim,
         baseline_after_ingest_per_s: baseline_after_ingest,
@@ -1170,6 +1394,16 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
         hot_ingest_per_s: result.hot_ingest_per_s,
         hot_claim_finalize_per_s: result.hot_claim_finalize_per_s,
         cold_empty_claim_responses: result.cold_empty_claim_responses,
+        hot_accepted_items: result.hot_accepted_items,
+        hot_claimed_items: result.hot_claimed_items,
+        hot_finalized_items: result.hot_finalized_items,
+        cold_accepted_items: result.cold_accepted_items,
+        cold_claimed_items: result.cold_claimed_items,
+        cold_finalized_items: result.cold_finalized_items,
+        cold_pending_items: result.cold_pending_items,
+        lost_items: result.lost_items,
+        duplicate_transitions: result.duplicate_transitions,
+        queue_global_progress_violations: result.queue_global_progress_violations,
         baseline_before_ingest_per_s: result.baseline_before_ingest_per_s,
         baseline_before_claim_finalize_per_s: result.baseline_before_claim_finalize_per_s,
         baseline_after_ingest_per_s: result.baseline_after_ingest_per_s,
@@ -1186,6 +1420,7 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
         connection_limit,
         task_count: observed_tasks,
         task_limit,
+        resource_enforcement_active: true,
         hot_phase_resource_samples,
         first_hot_resource_sample_unix_ms,
         last_hot_resource_sample_unix_ms,
@@ -1232,5 +1467,38 @@ fn main() {
             );
             exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod density_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn identity_reconciliation_detects_offsetting_loss_and_duplication() {
+        let ledger = LifecycleIdentityLedger::default();
+        ledger.record(&ledger.accepted, "q", &["1".into(), "2".into()]);
+        ledger.record(&ledger.claimed, "q", &["1".into(), "1".into()]);
+        ledger.record(&ledger.finalized, "q", &["1".into(), "1".into()]);
+
+        let (accepted, claimed, finalized, duplicates) = ledger.counts();
+        assert_eq!((accepted, claimed, finalized), (2, 1, 1));
+        assert_eq!(duplicates, 2);
+        assert_eq!(
+            accepted - finalized,
+            1,
+            "the missing identity remains visible"
+        );
+    }
+
+    #[test]
+    fn identity_reconciliation_detects_equal_count_phantom_substitution() {
+        let ledger = LifecycleIdentityLedger::default();
+        ledger.record(&ledger.accepted, "q", &["1".into(), "2".into()]);
+        ledger.record(&ledger.claimed, "q", &["1".into(), "3".into()]);
+        ledger.record(&ledger.finalized, "q", &["1".into(), "3".into()]);
+
+        assert_eq!(ledger.counts(), (2, 2, 2, 0), "cardinalities alone cancel");
+        assert!(ledger.identity_violations(&[] as &[String]) > 0);
     }
 }

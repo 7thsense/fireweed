@@ -992,7 +992,9 @@ impl SegmentedObjectLogSqliteBackend {
         let weak = Arc::downgrade(self);
         let interval = self.flush_interval;
         let debug_segments = self.debug_segments;
-        tokio::spawn(async move { Self::flush_loop(weak, interval, debug_segments).await })
+        pqueue_resp::spawn_governed(async move {
+            Self::flush_loop(weak, interval, debug_segments).await
+        })
     }
 
     fn coord_for(&self, shard: &QueueKey) -> Arc<ShardCoord> {
@@ -1931,7 +1933,9 @@ impl SegmentedObjectLogInMemoryBackend {
         let weak = Arc::downgrade(self);
         let interval = self.flush_interval;
         let debug_segments = self.debug_segments;
-        tokio::spawn(async move { Self::flush_loop(weak, interval, debug_segments).await })
+        pqueue_resp::spawn_governed(async move {
+            Self::flush_loop(weak, interval, debug_segments).await
+        })
     }
 
     fn projection_for(&self, shard: &QueueKey) -> EngineResult<Arc<Mutex<ProjectionData>>> {

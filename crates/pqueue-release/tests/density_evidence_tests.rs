@@ -4,12 +4,39 @@ use pqueue_release::density::{
 };
 
 const DENSITY_KIND_HARNESS: &str = include_str!("../../../scripts/perf/tp002-e2-density-kind.sh");
+const DENSITY_LOADGEN: &str = include_str!("../../pqueue-loadgen/src/main.rs");
+const RESP_SERVER: &str = include_str!("../../pqueue-resp/src/lib.rs");
+const SERVICE_MAIN: &str = include_str!("../../pqueue-server/src/bin/pqueue-service.rs");
+const POSTGRES_WHOLE_OPERATION_ADAPTER: &str =
+    include_str!("../../pqueue-server/src/postgres_native.rs");
 
 #[test]
 fn density_harness_does_not_charge_canonical_storage_to_the_memory_cap() {
     assert!(DENSITY_KIND_HARNESS.contains("emptyDir: { sizeLimit: 64Gi }"));
     assert!(!DENSITY_KIND_HARNESS.contains("emptyDir: { medium: Memory"));
     assert!(DENSITY_KIND_HARNESS.contains("limits: { cpu: \"4000m\", memory: \"4Gi\" }"));
+}
+
+#[test]
+fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards() {
+    assert!(DENSITY_LOADGEN.contains("assert_eq!(\n        total_queues, 1001"));
+    assert!(DENSITY_LOADGEN.contains("XACK must finalize every claimed id"));
+    assert!(DENSITY_LOADGEN.contains("hot_phase.store(false, Ordering::SeqCst);"));
+    assert!(DENSITY_LOADGEN.contains("LifecycleIdentityLedger"));
+    assert!(DENSITY_KIND_HARNESS.contains("resource_enforcement_active == true"));
+    assert!(!DENSITY_KIND_HARNESS.contains("(( HOT_PHASE_RESOURCE_SAMPLES > 0 ))"));
+    assert!(RESP_SERVER.contains("MAX_OBSERVED_TASKS.fetch_max(alive + 1"));
+    assert!(RESP_SERVER.contains("alive_tasks >= task_limit"));
+    assert!(SERVICE_MAIN.contains("set_max_runtime_tasks(64)"));
+    let dispatch = POSTGRES_WHOLE_OPERATION_ADAPTER
+        .split("fn dispatch")
+        .nth(1)
+        .expect("whole-operation dispatch exists")
+        .split("result_rx.await")
+        .next()
+        .unwrap();
+    assert!(dispatch.contains("pqueue_resp::spawn_governed"));
+    assert!(!dispatch.contains("tokio::spawn"));
 }
 
 fn measurement() -> DensityMeasurement {
@@ -25,6 +52,16 @@ fn measurement() -> DensityMeasurement {
         cold_queues_active: 1000,
         cold_queues_progress_eligible: 1000,
         cold_empty_claim_responses: 0,
+        hot_accepted_items: 320_000,
+        hot_claimed_items: 320_000,
+        hot_finalized_items: 320_000,
+        cold_accepted_items: 12_000,
+        cold_claimed_items: 11_000,
+        cold_finalized_items: 11_000,
+        cold_pending_items: 1_000,
+        lost_items: 0,
+        duplicate_transitions: 0,
+        queue_global_progress_violations: 0,
         baseline_before_ingest_per_s: 4_900.0,
         baseline_before_claim_finalize_per_s: 4_300.0,
         baseline_after_ingest_per_s: 5_100.0,
@@ -43,6 +80,7 @@ fn measurement() -> DensityMeasurement {
         connection_limit: 32,
         task_count: 17,
         task_limit: 64,
+        resource_enforcement_active: true,
         hot_phase_resource_samples: 5,
         first_hot_resource_sample_unix_ms: 1_700_000_001_000,
         last_hot_resource_sample_unix_ms: 1_700_000_059_000,
@@ -78,6 +116,34 @@ fn density_validator_rejects_inconsistent_or_nonpositive_comparison() {
         let row = build_release_row(&measured, &metadata());
         assert_eq!(row.evidence_tier, "smoke");
         assert!(validate_release_row(&row).is_err());
+    }
+}
+
+#[test]
+fn density_validator_rejects_incomplete_or_inconsistent_lifecycle_evidence() {
+    type MeasurementMutation = Box<dyn Fn(&mut DensityMeasurement)>;
+    let mutations: Vec<(&str, MeasurementMutation)> = vec![
+        ("hot accepted", Box::new(|m| m.hot_accepted_items -= 1)),
+        ("hot claimed", Box::new(|m| m.hot_claimed_items -= 1)),
+        ("hot finalized", Box::new(|m| m.hot_finalized_items -= 1)),
+        ("cold accepted", Box::new(|m| m.cold_accepted_items -= 1)),
+        ("cold claimed", Box::new(|m| m.cold_claimed_items -= 1)),
+        ("cold finalized", Box::new(|m| m.cold_finalized_items -= 1)),
+        ("cold pending", Box::new(|m| m.cold_pending_items -= 1)),
+        ("lost", Box::new(|m| m.lost_items = 1)),
+        ("duplicate", Box::new(|m| m.duplicate_transitions = 1)),
+        (
+            "progress violation",
+            Box::new(|m| m.queue_global_progress_violations = 1),
+        ),
+    ];
+
+    for (name, mutate) in mutations {
+        let mut measured = measurement();
+        mutate(&mut measured);
+        let row = build_release_row(&measured, &metadata());
+        assert_eq!(row.evidence_tier, "smoke", "{name}");
+        assert!(validate_release_row(&row).is_err(), "{name}");
     }
 }
 
@@ -153,18 +219,19 @@ fn density_validator_rejects_every_noncanonical_run_parameter() {
 }
 
 #[test]
-fn density_validator_requires_a_resource_sample_inside_the_hot_phase() {
+fn density_validator_requires_continuous_resource_enforcement_not_a_timed_sample() {
     let mut measured = measurement();
-    measured.hot_phase_resource_samples = 0;
+    measured.resource_enforcement_active = false;
     let row = build_release_row(&measured, &metadata());
     assert_eq!(row.evidence_tier, "smoke");
     assert!(validate_release_row(&row).is_err());
 
-    let mut outside = measurement();
-    outside.first_hot_resource_sample_unix_ms = outside.hot_phase_started_unix_ms - 1;
-    let row = build_release_row(&outside, &metadata());
-    assert_eq!(row.evidence_tier, "smoke");
-    assert!(validate_release_row(&row).is_err());
+    let mut no_sample = measurement();
+    no_sample.hot_phase_resource_samples = 0;
+    no_sample.first_hot_resource_sample_unix_ms = 0;
+    no_sample.last_hot_resource_sample_unix_ms = 0;
+    let row = build_release_row(&no_sample, &metadata());
+    validate_release_row(&row).expect("sampling cadence is not a release gate");
 }
 
 #[test]
@@ -189,6 +256,11 @@ fn density_validator_rejects_quiet_host_and_absolute_speed_gates() {
         let errors = validate_release_row(&row).unwrap_err().join("\n");
         assert!(errors.contains("quiet host or absolute host-speed threshold"));
     }
+
+    let mut row = build_release_row(&measurement(), &metadata());
+    row.pass_bar = "finish within 30 seconds at a rate above the operator target".into();
+    let errors = validate_release_row(&row).unwrap_err().join("\n");
+    assert!(errors.contains("canonical density pass bar"));
 
     for (key, value) in [
         ("portable_gate", serde_json::json!(false)),
@@ -218,11 +290,7 @@ fn density_validator_rejects_direct_tampering_of_an_otherwise_valid_release_row(
         ("shared_worker_count", serde_json::json!(0)),
         ("connection_count", serde_json::json!(0)),
         ("task_count", serde_json::json!(0)),
-        ("hot_phase_resource_samples", serde_json::json!(0)),
-        (
-            "first_hot_resource_sample_unix_ms",
-            serde_json::json!(1_699_999_999_999_u64),
-        ),
+        ("resource_enforcement_active", serde_json::json!(false)),
     ];
     for (key, value) in mutations {
         let mut row = build_release_row(&measurement(), &metadata());
@@ -247,6 +315,16 @@ fn semantic_density_validator_rejects_every_required_bar_when_missing() {
         "hot_ingest_per_s",
         "hot_claim_finalize_per_s",
         "cold_empty_claim_responses",
+        "hot_accepted_items",
+        "hot_claimed_items",
+        "hot_finalized_items",
+        "cold_accepted_items",
+        "cold_claimed_items",
+        "cold_finalized_items",
+        "cold_pending_items",
+        "lost_items",
+        "duplicate_transitions",
+        "queue_global_progress_violations",
         "shared_worker_count",
         "noisy_neighbor_ingest_retention_pct",
     ] {
