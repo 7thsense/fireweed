@@ -1085,12 +1085,17 @@ async fn xpending<B: RespBackend>(
             Resp::Array(consumers),
         ]);
     }
+    if args.len() != 6 && args.len() != 7 {
+        return Resp::Error("ERR wrong number of arguments for 'xpending'".into());
+    }
     // Extended form: `XPENDING key group start end count [consumer]` — `count` is args[5].
-    let limit = args
-        .get(5)
-        .and_then(|a| std::str::from_utf8(a).ok())
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(usize::MAX);
+    let limit = match std::str::from_utf8(&args[5])
+        .ok()
+        .and_then(|count| count.parse::<usize>().ok())
+    {
+        Some(limit) if limit > 0 => limit,
+        _ => return Resp::Error("ERR count must be > 0".into()),
+    };
     let start = match &args[3][..] {
         b"-" => None,
         raw => match ItemId::new(String::from_utf8_lossy(raw)) {
@@ -1348,13 +1353,14 @@ async fn xclaim<B: RespBackend, H: RespHooks>(
         Ok(l) => l,
         Err(e) => return err_reply(&e),
     };
+    let leases_by_id: std::collections::HashMap<_, _> = leases
+        .iter()
+        .map(|lease| (lease.item_id, lease.lease_token.as_str()))
+        .collect();
     let mut renew_ids: Vec<ItemId> = Vec::new();
     let mut reassign_ids: Vec<ItemId> = Vec::new();
     for id in &ids {
-        let current = leases
-            .iter()
-            .find(|lv| lv.item_id == *id)
-            .map(|lv| lv.lease_token.as_str());
+        let current = leases_by_id.get(id).copied();
         if current == Some(consumer.as_str()) {
             renew_ids.push(*id);
         } else {
