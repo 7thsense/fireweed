@@ -57,6 +57,24 @@ fn parse_usize(env: &BTreeMap<String, String>, key: &str, default: usize) -> usi
         .unwrap_or(default)
 }
 
+fn postgres_pool_size(env: &BTreeMap<String, String>) -> Result<usize, ConfigError> {
+    let key = "PQUEUE_POSTGRES_POOL_SIZE";
+    let raw = env.get(key).map(String::as_str).unwrap_or("8");
+    let size = raw.parse::<usize>().map_err(|_| {
+        ConfigError::new(format!(
+            "{key} must be an integer between 1 and {}, got {raw:?}",
+            crate::MAX_POSTGRES_POOL_SIZE
+        ))
+    })?;
+    if !(1..=crate::MAX_POSTGRES_POOL_SIZE).contains(&size) {
+        return Err(ConfigError::new(format!(
+            "{key} must be between 1 and {}, got {size}",
+            crate::MAX_POSTGRES_POOL_SIZE
+        )));
+    }
+    Ok(size)
+}
+
 fn validated_usize(
     env: &BTreeMap<String, String>,
     key: &str,
@@ -767,6 +785,7 @@ impl Config {
                 .get("PQUEUE_WORKER_THREADS")
                 .and_then(|v| v.parse::<usize>().ok())
                 .filter(|n| *n > 0),
+            postgres_pool_size: postgres_pool_size(env)?,
             runtime_resource_metrics_path: match env.get("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH") {
                 None => None,
                 Some(value) => {
@@ -823,6 +842,7 @@ mod tests {
         assert_eq!(config.node_id, 0);
         assert_eq!(config.listen, "0.0.0.0:8080");
         assert_eq!(config.reclaim_interval, Duration::from_millis(1_000));
+        assert_eq!(config.postgres_pool_size, crate::DEFAULT_POSTGRES_POOL_SIZE);
         assert_eq!(config.recovery_max_tail, DEFAULT_RECOVERY_MAX_TAIL);
         assert!(!config.debug_segments);
         assert_eq!(config.worker_threads, None);
@@ -830,6 +850,21 @@ mod tests {
         assert_eq!(config.queues.len(), 1, "default bootstrap is t1:q1");
         assert_eq!(config.queues[0].tenant_id.as_str(), "t1");
         assert_eq!(config.queues[0].queue_id.as_str(), "q1");
+    }
+
+    #[test]
+    fn postgres_pool_size_is_positive_and_bounded() {
+        let configured = Config::from_env(&map(&[("PQUEUE_POSTGRES_POOL_SIZE", "3")]))
+            .expect("valid postgres pool size");
+        assert_eq!(configured.postgres_pool_size, 3);
+
+        for invalid in ["0", "65", "not-a-number"] {
+            let error = match Config::from_env(&map(&[("PQUEUE_POSTGRES_POOL_SIZE", invalid)])) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid postgres pool size must fail closed"),
+            };
+            assert!(error.to_string().contains("PQUEUE_POSTGRES_POOL_SIZE"));
+        }
     }
 
     #[test]

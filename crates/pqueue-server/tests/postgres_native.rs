@@ -18,6 +18,7 @@ use pqueue_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
+use pqueue_engine::QueueKey;
 use pqueue_server::{
     BackendSpec, Config, ControlPlaneSpec, LogSpec, ProjectionSpec, resolve_postgres_log, start,
 };
@@ -33,9 +34,13 @@ fn pg_spec(url: String, credentials: Option<pqueue_postgres::CredentialProvider>
 }
 
 fn qdef() -> QueueDefinition {
+    qdef_named("q1")
+}
+
+fn qdef_named(queue_id: &str) -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new("t1").unwrap(),
-        queue_id: QueueId::new("q1").unwrap(),
+        queue_id: QueueId::new(queue_id).unwrap(),
         priority_model: PriorityModel {
             kind: PriorityModelKind::Int64,
             direction: PriorityDirection::Ascending,
@@ -60,6 +65,11 @@ fn qdef() -> QueueDefinition {
         typed_indexes: vec![],
         emit_change_records: true,
     }
+}
+
+fn append_query_parameter(url: &str, parameter: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}{parameter}")
 }
 
 /// The `Backend::PostgresNative` variant is selectable and a `Config` carrying it is constructible without
@@ -163,15 +173,16 @@ fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
     ));
 }
 
-/// Compile-time regression for the constructor seam that previously tripped `E0308` in the release
-/// matrix: the wrapper must accept the composed postgres backend through `from_arc`.
+/// Compile-time structural regression for the production constructor seam: one wrapper accepts a fixed
+/// vector of composed PostgreSQL workers. The vector length is the connection bound; queue count is absent
+/// from the type and cannot manufacture another connection after construction.
 #[test]
-fn blocking_backend_from_arc_compiles_for_composed_postgres_backend() {
+fn blocking_backend_pool_constructor_compiles_for_composed_postgres_backend() {
     let _ctor: fn(
-        Arc<pqueue_postgres::ComposedPostgresBackend>,
+        Vec<Arc<pqueue_postgres::ComposedPostgresBackend>>,
     ) -> pqueue_server::PostgresWholeOperationAdapter<
         pqueue_postgres::ComposedPostgresBackend,
-    > = pqueue_server::PostgresWholeOperationAdapter::from_arc;
+    > = pqueue_server::PostgresWholeOperationAdapter::from_arcs;
 }
 
 /// No plaintext fallback: on a build WITHOUT the `tls` feature, an `sslmode=require` DSN must fail at config
@@ -223,6 +234,226 @@ async fn postgres_native_start_reports_connection_error_off_reactor() {
         result.is_err(),
         "a refused postgres connection must surface as a structured Err, got Ok"
     );
+}
+
+/// Live ADR-015/E0 structural proof: one production `start()` instance owns a fixed connection pool.
+/// Queue A's real log insert is held inside `pg_sleep`; queue B is deliberately affinity-routed to a
+/// different member, and its trigger releases A. Completion is therefore causal proof that B reached
+/// PostgreSQL while A was still sleeping, not a host-speed or quiet-host threshold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn postgres_native_one_instance_pool_progresses_other_queue_during_pg_sleep() {
+    let Ok(base_url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!("POSTGRES NATIVE POOL E0 SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+        return;
+    };
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let schema = format!("pq_pool_0b249abb_{}_{}", std::process::id(), unique);
+    let application_name = format!("pq_pool_0b249abb_{}", std::process::id());
+    let pool_size = 2usize;
+    let queue_a = "pool_a";
+    let queue_a_key = QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new(queue_a).unwrap());
+    let queue_b = (0..100)
+        .map(|index| format!("pool_b_{index}"))
+        .find(|candidate| {
+            let key = QueueKey::new(
+                TenantId::new("t1").unwrap(),
+                QueueId::new(candidate).unwrap(),
+            );
+            pqueue_engine::queue_worker_partition(&key, pool_size)
+                != pqueue_engine::queue_worker_partition(&queue_a_key, pool_size)
+        })
+        .expect("two queue keys must cover both pool members");
+
+    let observer_url = base_url.clone();
+    let create_schema = schema.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut observer =
+            pqueue_postgres::connect(pqueue_postgres::PostgresConnectConfig::new(observer_url))
+                .expect("connect postgres observer");
+        observer
+            .batch_execute(&format!("CREATE SCHEMA {create_schema}"))
+            .expect("create isolated pool schema");
+    })
+    .await
+    .unwrap();
+
+    let pool_url = append_query_parameter(
+        &append_query_parameter(&base_url, &format!("options=-csearch_path%3D{schema}")),
+        &format!("application_name={application_name}"),
+    );
+    let mut queues = vec![qdef_named(queue_a), qdef_named(&queue_b)];
+    queues.extend((0..62).map(|index| qdef_named(&format!("density_{index}"))));
+    let mut config = Config::new(
+        pg_spec(pool_url, None),
+        0,
+        "127.0.0.1:0".to_string(),
+        Duration::from_secs(60),
+        queues,
+    );
+    config.postgres_pool_size = pool_size;
+    let server = start(config)
+        .await
+        .expect("one pooled postgres production server starts");
+
+    let setup_url = base_url.clone();
+    let setup_schema = schema.clone();
+    let setup_application = application_name.clone();
+    let setup_a = queue_a.to_string();
+    let setup_b = queue_b.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut observer =
+            pqueue_postgres::connect(pqueue_postgres::PostgresConnectConfig::new(setup_url))
+                .expect("connect postgres observer");
+        let connections: i64 = observer
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name=$1",
+                &[&setup_application],
+            )
+            .expect("count production pool connections")
+            .get(0);
+        assert_eq!(connections as usize, pool_size);
+        observer
+            .batch_execute(&format!(
+                "SET search_path TO {setup_schema};
+                 CREATE TABLE pool_hold(queue_id TEXT PRIMARY KEY);
+                 INSERT INTO pool_hold(queue_id) VALUES('{setup_a}');
+                 CREATE FUNCTION pool_sleep_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN
+                   IF NEW.queue = '{setup_a}' THEN
+                     WHILE EXISTS (SELECT 1 FROM pool_hold WHERE queue_id = '{setup_a}') LOOP
+                       PERFORM pg_sleep(0.01);
+                     END LOOP;
+                   ELSIF NEW.queue = '{setup_b}' THEN
+                     DELETE FROM pool_hold WHERE queue_id = '{setup_a}';
+                   END IF;
+                   RETURN NEW;
+                 END $$;
+                 CREATE TRIGGER pool_sleep_gate BEFORE INSERT ON log_entries
+                   FOR EACH ROW EXECUTE FUNCTION pool_sleep_gate();"
+            ))
+            .expect("install causal pg_sleep gate");
+    })
+    .await
+    .unwrap();
+
+    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
+    let mut a_connection = client.get_multiplexed_async_connection().await.unwrap();
+    let a_stream = format!("t1:{queue_a}");
+    let a_push = tokio::spawn(async move {
+        redis::cmd("XADD")
+            .arg(a_stream)
+            .arg("*")
+            .arg("priority")
+            .arg(1)
+            .query_async::<String>(&mut a_connection)
+            .await
+    });
+
+    let wait_url = base_url.clone();
+    let wait_application = application_name.clone();
+    let a_reached_sleep = tokio::task::spawn_blocking(move || {
+        let mut observer =
+            pqueue_postgres::connect(pqueue_postgres::PostgresConnectConfig::new(wait_url))
+                .expect("connect postgres observer");
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let sleeping: bool = observer
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                     WHERE application_name=$1 AND wait_event='PgSleep')",
+                    &[&wait_application],
+                )
+                .expect("observe pg_sleep")
+                .get(0);
+            if sleeping {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    })
+    .await
+    .unwrap();
+    if !a_reached_sleep {
+        let release_url = base_url.clone();
+        let release_schema = schema.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut observer =
+                pqueue_postgres::connect(pqueue_postgres::PostgresConnectConfig::new(release_url))
+                    .expect("connect precondition cleanup observer");
+            observer
+                .batch_execute(&format!(
+                    "DELETE FROM {release_schema}.pool_hold WHERE queue_id='{queue_a}'"
+                ))
+                .expect("release failed precondition gate");
+        })
+        .await
+        .unwrap();
+        server.shutdown_and_drain(Duration::from_secs(10)).await;
+        panic!("queue A never reached the production connection's pg_sleep gate");
+    }
+
+    let mut b_connection = client.get_multiplexed_async_connection().await.unwrap();
+    let b_stream = format!("t1:{queue_b}");
+    let b_push = tokio::spawn(async move {
+        redis::cmd("XADD")
+            .arg(b_stream)
+            .arg("*")
+            .arg("priority")
+            .arg(2)
+            .query_async::<String>(&mut b_connection)
+            .await
+    });
+    // B's trigger deletes the row that keeps A sleeping. Neither request can finish unless the one
+    // production wrapper actually drives both fixed pool connections concurrently.
+    let causal_result = tokio::time::timeout(Duration::from_secs(30), async {
+        b_push.await.unwrap().expect("queue B push");
+        a_push.await.unwrap().expect("queue A push after B release");
+    })
+    .await;
+    if causal_result.is_err() {
+        // Release the database-side gate before failing so an implementation regression cannot strand a
+        // sleeping sync driver or make later tests inherit an orphaned accepted mutation.
+        let release_url = base_url.clone();
+        let release_schema = schema.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut observer =
+                pqueue_postgres::connect(pqueue_postgres::PostgresConnectConfig::new(release_url))
+                    .expect("connect cleanup observer");
+            observer
+                .batch_execute(&format!(
+                    "DELETE FROM {release_schema}.pool_hold WHERE queue_id='{queue_a}'"
+                ))
+                .expect("release failed causal gate");
+        })
+        .await
+        .unwrap();
+        server.shutdown_and_drain(Duration::from_secs(10)).await;
+        panic!("causal pool proof deadlocked");
+    }
+
+    let count_url = base_url.clone();
+    let count_application = application_name.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut observer =
+            pqueue_postgres::connect(pqueue_postgres::PostgresConnectConfig::new(count_url))
+                .expect("connect postgres observer");
+        let connections: i64 = observer
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name=$1",
+                &[&count_application],
+            )
+            .expect("recount production pool connections")
+            .get(0);
+        assert_eq!(connections as usize, pool_size);
+    })
+    .await
+    .unwrap();
+
+    server.shutdown_and_drain(Duration::from_secs(10)).await;
 }
 
 /// Live smoke: env-gated on `PQUEUE_PG_TEST_URL`. Boots the server over `Backend::PostgresNative` and drives

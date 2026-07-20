@@ -154,6 +154,8 @@ pub enum ObjectLogSpec {
 
 pub const DEFAULT_OBJECTLOG_BUFFERED_BYTES_GLOBAL: usize = 64 * 1024 * 1024;
 pub const DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_POSTGRES_POOL_SIZE: usize = 8;
+pub const MAX_POSTGRES_POOL_SIZE: usize = 64;
 
 /// Node-wide buffered-byte limits for object-log commit composition. The optional tenant limit is uniform;
 /// tenant-specific policy belongs outside the storage engine and must not create an unbounded override map.
@@ -946,6 +948,10 @@ pub struct Config {
     /// Tokio worker-thread cap (the typed form of `PQUEUE_WORKER_THREADS`). `None` = one worker per core.
     /// Consumed by the bin when building the runtime, not by [`start`].
     pub worker_threads: Option<usize>,
+    /// Fixed number of sync PostgreSQL connections owned by the `postgres/inmemory` production backend.
+    /// Queue affinity multiplexes any number of queues over this bounded pool; the value never grows from
+    /// queue creation or load. Parsed from `PQUEUE_POSTGRES_POOL_SIZE`.
+    pub postgres_pool_size: usize,
     /// Optional path for the service binary's atomic Tokio worker/live-task gauge snapshot. `None`
     /// disables the reporter. The env-config form requires an absolute, non-empty path.
     pub runtime_resource_metrics_path: Option<std::path::PathBuf>,
@@ -993,6 +999,7 @@ impl Config {
             debug_segments: false,
             objectlog_byte_limits: ObjectLogByteLimits::default(),
             worker_threads: None,
+            postgres_pool_size: DEFAULT_POSTGRES_POOL_SIZE,
             runtime_resource_metrics_path: None,
             hybrid_async: HybridAsyncThresholds::default(),
             deferred_flush_chunk: pqueue_sqlite::DEFAULT_DEFERRED_FLUSH_CHUNK,
@@ -1887,6 +1894,11 @@ pub fn resolve_node_id(configured: &str) -> u8 {
 /// Construct the configured backend + a `SystemClock`, provision the config's queues, then run the
 /// server. After this returns the server is ready to serve requests against the provisioned queues.
 pub async fn start(config: Config) -> EngineResult<Server> {
+    if !(1..=MAX_POSTGRES_POOL_SIZE).contains(&config.postgres_pool_size) {
+        return Err(EngineError::Invalid(
+            "postgres pool size must be between 1 and 64",
+        ));
+    }
     if let LogSpec::ObjectLog(spec) = &config.backend.log {
         config
             .objectlog_byte_limits
@@ -1915,6 +1927,8 @@ pub async fn start(config: Config) -> EngineResult<Server> {
     let config_objectlog_queue_limit = config.objectlog_byte_limits.queue_waiting;
     let objectlog_byte_budget = build_objectlog_byte_budget(config.objectlog_byte_limits)?;
     let change_record_sink = config.change_record_sink.clone();
+    #[cfg(feature = "postgres")]
+    let postgres_pool_size = config.postgres_pool_size;
     let BackendSpec {
         log,
         projection,
@@ -2339,27 +2353,35 @@ pub async fn start(config: Config) -> EngineResult<Server> {
         }
         #[cfg(feature = "postgres")]
         (LogSpec::Postgres { url, credentials }, ProjectionSpec::InMemory) => {
-            // ADR-012 P2: the composed postgres backend (`ComposedBackend<PostgresLog, InMemoryProjection,
-            // InProcessControlPlane>`) — the durable postgres command log + in-memory projection, assembled
-            // by the one generic composition with recovery-on-open. The sync postgres `connect` (client
-            // handshake + log replay) MUST run off the reactor: the postgres client drives its own internal
-            // runtime per call, so connecting on a Tokio worker would panic ("cannot start a runtime from
-            // within a runtime"). Connect + recover inside `spawn_blocking`, then drive the composition only
-            // through the whole-operation adapter so no sync postgres call hits a reactor
-            // worker.
-            let backend = tokio::task::spawn_blocking(move || {
+            // ADR-015: one production wrapper owns a configured fixed pool of recovered composed postgres
+            // workers. Stable queue affinity keeps a queue's projection, ordering gate, and complete SQL
+            // transaction on one connection while unrelated queues use other pool members. Pool size is
+            // independent of queue count. Sync connect/recovery and every complete operation stay off the
+            // reactor because postgres' sync client drives an internal runtime per call.
+            let backends = tokio::task::spawn_blocking(move || {
                 let mut connect_config = pqueue_postgres::PostgresConnectConfig::new(url);
                 if let Some(provider) = credentials {
                     connect_config = connect_config.with_credential_provider(provider);
                 }
-                pqueue_postgres::composed_postgres_backend_with_config(connect_config)
-                    .map(|b| b.with_node_id(node_id))
+                (0..postgres_pool_size)
+                    .map(|index| {
+                        pqueue_postgres::composed_postgres_backend_with_config(
+                            connect_config.clone(),
+                        )
+                        .map(|backend| {
+                            backend
+                                .with_node_id(node_id)
+                                .with_worker_partition(index, postgres_pool_size)
+                        })
+                    })
+                    .collect::<EngineResult<Vec<_>>>()
             })
             .await
             .map_err(|e| {
                 EngineError::Storage(format!("postgres connect task join failed: {e}"))
             })??;
-            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            let (backend, lifecycle) =
+                blocking_backend_pool(backends.into_iter().map(Arc::new).collect());
             run_owned_with_blocking_lifecycle(
                 backend,
                 lifecycle,
