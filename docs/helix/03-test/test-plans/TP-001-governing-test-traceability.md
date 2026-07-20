@@ -18,7 +18,7 @@ ddx:
     - td-s3-object-log-sqlite-projection-mode
     - tp-scale-substantiation
   review:
-    self_hash: d464a1278868cd3f72797114d4c49dd25778e0e21b738b187534adf6c1b6e910
+    self_hash: a987698e797f33f52168aba5ba54f41bcc18bd3fcabe278af085afdea7b82768
     deps:
       adr-auth-tenancy-and-storage-isolation: 822b3589f2ae4a413ffb4bce8cd46991d733951968f368fd58445d0de5dae950
       adr-cqrs-log-projection-storage-model: 849c0bd7e15200ab056c2e5fcedb4b04a116aba520993fb4bab63b1195146107
@@ -34,8 +34,8 @@ ddx:
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
       td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
       td-storage-architecture-backend-contracts: b1d17cc3481f52097ea0b2233a4a0e7bfa1512381c0b1fed7b3830fd3f02cc4e
-      tp-scale-substantiation: ac4fca7c09ab2149c6fd15289771514d62e90284cea70e6169682beb9d496a1f
-    reviewed_at: "2026-07-20T00:01:27Z"
+      tp-scale-substantiation: d53cfdf392d96b96925ca6f409d6e19ab29e16e138679827d5c56d98d49ad364
+    reviewed_at: "2026-07-20T19:53:11Z"
 ---
 
 # Test Plan: TP-001 Governing Test Traceability
@@ -63,6 +63,12 @@ cross-queue scale-out, and object-log commit-latency-bound matrix) are owned by 
 (`tp-scale-substantiation`, TP-002, evidence records E0–E3). This governing plan
 references TP-002 for those records rather than restating them; the two plans are
 complementary and non-overlapping.
+
+Every TP-002 E0/E1 workload declares a positive `progress_bound_ms` in the
+queue definition, reads the persisted definition back, and proves zero
+accepted-to-claim or discovery-age violations of that declared bound. Latency
+percentiles and rates remain capacity observations; they do not replace the
+queue's persisted progress contract.
 
 ## Test Layers
 

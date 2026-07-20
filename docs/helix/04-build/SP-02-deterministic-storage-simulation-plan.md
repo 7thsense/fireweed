@@ -11,7 +11,7 @@ ddx:
       build-sp01-global-buffer-byte-admission: 97d1032e2b1bbd9ecae2df5daed4350d88364b2bb4d9e7b3c643677f665d8280
       td-s3-object-log-sqlite-projection-mode: 56d80c3e6ad5ab54460e300fdf4ddfe535dc75a47b0a2a0e32d0de46c38c7e49
       td-sharding-and-shard-ownership: b98590bc7a51f8e904052d64aaa6ab4d8a9c9729d155d17ee0823ffcf6b64a0d
-    reviewed_at: "2026-07-20T00:01:31Z"
+    reviewed_at: "2026-07-20T19:53:12Z"
 ---
 
 # Technical Spike Plan: SP-02 Deterministic Storage Simulation
