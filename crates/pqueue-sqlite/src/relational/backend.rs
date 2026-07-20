@@ -3436,12 +3436,20 @@ mod hot_query_sql_tests {
 
     use super::*;
 
-    static TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    // rusqlite's trace hook accepts a function pointer, so each concurrently runnable
+    // proof needs its own counter. Sharing one atomic made the PEL and bounded-mutation
+    // tests reset/increment each other's observations under the default parallel test runner.
+    static PEL_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static MUTATION_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_PUSH_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-    fn count_statement(_: &str) {
-        TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    fn count_pel_statement(_: &str) {
+        PEL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_mutation_statement(_: &str) {
+        MUTATION_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
     fn count_group_statement(_: &str) {
@@ -3517,13 +3525,13 @@ mod hot_query_sql_tests {
             })
             .await
             .unwrap();
-        TRACE_COUNT.store(0, Ordering::Relaxed);
+        PEL_TRACE_COUNT.store(0, Ordering::Relaxed);
         backend
             .inner
             .lock()
             .unwrap()
             .conn
-            .trace(Some(count_statement));
+            .trace(Some(count_pel_statement));
         let page = backend.pending_page(&shard, None, 3).await.unwrap();
         assert_eq!(page.entries.len(), 3);
         let requested = [page.entries[2].item_id, page.entries[0].item_id];
@@ -3544,7 +3552,7 @@ mod hot_query_sql_tests {
             2
         );
         backend.inner.lock().unwrap().conn.trace(None);
-        TRACE_COUNT.load(Ordering::Relaxed)
+        PEL_TRACE_COUNT.load(Ordering::Relaxed)
     }
 
     #[tokio::test]
@@ -3574,10 +3582,10 @@ mod hot_query_sql_tests {
             )
             .await
             .unwrap();
-        TRACE_COUNT.store(0, Ordering::Relaxed);
+        MUTATION_TRACE_COUNT.store(0, Ordering::Relaxed);
         {
             let mut inner = backend.inner.lock().unwrap();
-            inner.conn.trace(Some(count_statement));
+            inner.conn.trace(Some(count_mutation_statement));
         }
         let response = backend
             .bounded_mutation(
@@ -3600,7 +3608,7 @@ mod hot_query_sql_tests {
             .unwrap();
         assert_eq!(response.results.len(), rows);
         backend.inner.lock().unwrap().conn.trace(None);
-        TRACE_COUNT.load(Ordering::Relaxed)
+        MUTATION_TRACE_COUNT.load(Ordering::Relaxed)
     }
 
     async fn grouped_push_statement_count(groups: usize) -> usize {
