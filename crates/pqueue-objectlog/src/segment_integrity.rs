@@ -236,105 +236,203 @@ pub(crate) fn decode_range(
     skip: usize,
     limit: usize,
 ) -> EngineResult<(u64, u64, usize, Vec<CommandEnvelope>)> {
-    let fail = |stage, detail| SegmentIntegrityError::new(stage, manifest_index, locator, detail);
-    if bytes.len() > MAX_SEGMENT_BYTES {
-        return Err(fail(DurableIntegrityStage::Bounds, "segment_too_large").into());
-    }
-    if bytes.len() < HEADER_LEN || bytes[..4] != MAGIC {
-        return Err(fail(DurableIntegrityStage::Header, "bad_magic_or_short_header").into());
-    }
-    if bytes[4] != expected.version() {
-        return Err(fail(DurableIntegrityStage::Manifest, "format_version_mismatch").into());
-    }
-    let epoch = u64::from_le_bytes(bytes[5..13].try_into().expect("fixed header"));
-    let first_seq = u64::from_le_bytes(bytes[13..21].try_into().expect("fixed header"));
-    let records_end = match expected {
-        ManifestIntegrity::V2 { checksum_fnv1a } => {
-            let blob = &bytes[HEADER_LEN..];
-            if fnv1a(blob) != *checksum_fnv1a {
-                return Err(fail(DurableIntegrityStage::LegacyFnv1a, "fnv1a_mismatch").into());
-            }
-            bytes.len()
-        }
-        ManifestIntegrity::V3 {
-            frame_crc32c,
-            content_sha256,
-        } => {
-            if bytes.len() < HEADER_LEN + 4 + TRAILER_LEN {
-                return Err(fail(DurableIntegrityStage::Bounds, "truncated_v3_frame").into());
-            }
-            let trailer_at = bytes.len() - TRAILER_LEN;
-            let trailer = u32::from_le_bytes(bytes[trailer_at..].try_into().expect("trailer"));
-            if trailer != *frame_crc32c || crc32c::crc32c(&bytes[..trailer_at]) != trailer {
-                return Err(fail(DurableIntegrityStage::FrameCrc32c, "crc32c_mismatch").into());
-            }
-            if hex_lower(&Sha256::digest(bytes)) != *content_sha256 {
-                return Err(fail(DurableIntegrityStage::Sha256, "sha256_mismatch").into());
-            }
-            trailer_at
-        }
-    };
+    let mut cursor =
+        ValidatedSegmentCursor::new(bytes.to_vec(), manifest_index, locator, expected)?;
+    cursor.skip_to(skip)?;
+    let commands = cursor.take(limit)?;
+    Ok((cursor.epoch(), cursor.first_seq(), cursor.count(), commands))
+}
 
-    let mut cursor = HEADER_LEN;
-    let count = read_u32(bytes, &mut cursor, records_end, &fail)? as usize;
-    let min_record_bytes = if matches!(expected, ManifestIntegrity::V3 { .. }) {
-        8
-    } else {
-        4
-    };
-    if count > MAX_RECORDS || count > (records_end.saturating_sub(cursor) / min_record_bytes) {
-        return Err(fail(DurableIntegrityStage::Bounds, "record_count_out_of_bounds").into());
-    }
-    // Pass one validates every offset, length, record checksum, and exact frame
-    // consumption before the potentially large CommandEnvelope vector exists.
-    let records_start = cursor;
-    for _ in 0..count {
-        let len = read_u32(bytes, &mut cursor, records_end, &fail)? as usize;
-        if len > MAX_RECORD_BYTES {
-            return Err(fail(DurableIntegrityStage::Bounds, "record_too_large").into());
+/// A fully integrity-validated segment with an incremental record cursor. The object frame is fetched and
+/// hashed once; subsequent recovery pages advance through the retained bounded byte frame without rescanning
+/// or re-decoding records already returned. Resident memory is bounded by `MAX_SEGMENT_BYTES` plus one page of
+/// decoded commands.
+#[derive(Clone)]
+pub(crate) struct ValidatedSegmentCursor {
+    bytes: Vec<u8>,
+    manifest_index: u64,
+    locator: String,
+    v3: bool,
+    epoch: u64,
+    first_seq: u64,
+    count: usize,
+    records_end: usize,
+    cursor: usize,
+    next_record: usize,
+}
+
+impl ValidatedSegmentCursor {
+    pub(crate) fn new(
+        bytes: Vec<u8>,
+        manifest_index: u64,
+        locator: &str,
+        expected: &ManifestIntegrity,
+    ) -> EngineResult<Self> {
+        let fail =
+            |stage, detail| SegmentIntegrityError::new(stage, manifest_index, locator, detail);
+        if bytes.len() > MAX_SEGMENT_BYTES {
+            return Err(fail(DurableIntegrityStage::Bounds, "segment_too_large").into());
         }
-        let expected_record_crc = if matches!(expected, ManifestIntegrity::V3 { .. }) {
-            Some(read_u32(bytes, &mut cursor, records_end, &fail)?)
-        } else {
-            None
+        if bytes.len() < HEADER_LEN || bytes[..4] != MAGIC {
+            return Err(fail(DurableIntegrityStage::Header, "bad_magic_or_short_header").into());
+        }
+        if bytes[4] != expected.version() {
+            return Err(fail(DurableIntegrityStage::Manifest, "format_version_mismatch").into());
+        }
+        let epoch = u64::from_le_bytes(bytes[5..13].try_into().expect("fixed header"));
+        let first_seq = u64::from_le_bytes(bytes[13..21].try_into().expect("fixed header"));
+        let records_end = match expected {
+            ManifestIntegrity::V2 { checksum_fnv1a } => {
+                let blob = &bytes[HEADER_LEN..];
+                if fnv1a(blob) != *checksum_fnv1a {
+                    return Err(fail(DurableIntegrityStage::LegacyFnv1a, "fnv1a_mismatch").into());
+                }
+                bytes.len()
+            }
+            ManifestIntegrity::V3 {
+                frame_crc32c,
+                content_sha256,
+            } => {
+                if bytes.len() < HEADER_LEN + 4 + TRAILER_LEN {
+                    return Err(fail(DurableIntegrityStage::Bounds, "truncated_v3_frame").into());
+                }
+                let trailer_at = bytes.len() - TRAILER_LEN;
+                let trailer = u32::from_le_bytes(bytes[trailer_at..].try_into().expect("trailer"));
+                if trailer != *frame_crc32c || crc32c::crc32c(&bytes[..trailer_at]) != trailer {
+                    return Err(fail(DurableIntegrityStage::FrameCrc32c, "crc32c_mismatch").into());
+                }
+                if hex_lower(&Sha256::digest(&bytes)) != *content_sha256 {
+                    return Err(fail(DurableIntegrityStage::Sha256, "sha256_mismatch").into());
+                }
+                trailer_at
+            }
         };
-        let end = cursor
+
+        let mut cursor = HEADER_LEN;
+        let count = read_u32(&bytes, &mut cursor, records_end, &fail)? as usize;
+        let min_record_bytes = if matches!(expected, ManifestIntegrity::V3 { .. }) {
+            8
+        } else {
+            4
+        };
+        if count > MAX_RECORDS || count > (records_end.saturating_sub(cursor) / min_record_bytes) {
+            return Err(fail(DurableIntegrityStage::Bounds, "record_count_out_of_bounds").into());
+        }
+        // Pass one validates every offset, length, record checksum, and exact frame
+        // consumption before the potentially large CommandEnvelope vector exists.
+        let records_start = cursor;
+        for _ in 0..count {
+            let len = read_u32(&bytes, &mut cursor, records_end, &fail)? as usize;
+            if len > MAX_RECORD_BYTES {
+                return Err(fail(DurableIntegrityStage::Bounds, "record_too_large").into());
+            }
+            let expected_record_crc = if matches!(expected, ManifestIntegrity::V3 { .. }) {
+                Some(read_u32(&bytes, &mut cursor, records_end, &fail)?)
+            } else {
+                None
+            };
+            let end = cursor
+                .checked_add(len)
+                .filter(|end| *end <= records_end)
+                .ok_or_else(|| {
+                    EngineError::from(fail(DurableIntegrityStage::Bounds, "truncated_record"))
+                })?;
+            let record = &bytes[cursor..end];
+            if expected_record_crc.is_some_and(|crc| crc32c::crc32c(record) != crc) {
+                return Err(fail(DurableIntegrityStage::RecordCrc32c, "crc32c_mismatch").into());
+            }
+            cursor = end;
+        }
+        if cursor != records_end {
+            return Err(fail(DurableIntegrityStage::Bounds, "trailing_bytes").into());
+        }
+
+        Ok(Self {
+            bytes,
+            manifest_index,
+            locator: locator.to_owned(),
+            v3: matches!(expected, ManifestIntegrity::V3 { .. }),
+            epoch,
+            first_seq,
+            count,
+            records_end,
+            cursor: records_start,
+            next_record: 0,
+        })
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub(crate) fn first_seq(&self) -> u64 {
+        self.first_seq
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.count
+    }
+
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub(crate) fn next_record(&self) -> usize {
+        self.next_record
+    }
+
+    pub(crate) fn skip_to(&mut self, target: usize) -> EngineResult<()> {
+        if target < self.next_record {
+            return Err(EngineError::Conflict);
+        }
+        while self.next_record < target.min(self.count) {
+            let _ = self.next(false)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take(&mut self, limit: usize) -> EngineResult<Vec<CommandEnvelope>> {
+        let mut commands =
+            Vec::with_capacity(limit.min(self.count.saturating_sub(self.next_record)));
+        while commands.len() < limit && self.next_record < self.count {
+            if let Some(command) = self.next(true)? {
+                commands.push(command);
+            }
+        }
+        Ok(commands)
+    }
+
+    fn next(&mut self, decode: bool) -> EngineResult<Option<CommandEnvelope>> {
+        if self.next_record >= self.count {
+            return Ok(None);
+        }
+        let fail = |stage, detail| {
+            SegmentIntegrityError::new(stage, self.manifest_index, &self.locator, detail)
+        };
+        let len = read_u32(&self.bytes, &mut self.cursor, self.records_end, &fail)? as usize;
+        if self.v3 {
+            let _ = read_u32(&self.bytes, &mut self.cursor, self.records_end, &fail)?;
+        }
+        let end = self
+            .cursor
             .checked_add(len)
-            .filter(|end| *end <= records_end)
+            .filter(|end| *end <= self.records_end)
             .ok_or_else(|| {
                 EngineError::from(fail(DurableIntegrityStage::Bounds, "truncated_record"))
             })?;
-        let record = &bytes[cursor..end];
-        if expected_record_crc.is_some_and(|crc| crc32c::crc32c(record) != crc) {
-            return Err(fail(DurableIntegrityStage::RecordCrc32c, "crc32c_mismatch").into());
-        }
-        cursor = end;
+        let command = if decode {
+            Some(
+                serde_json::from_slice(&self.bytes[self.cursor..end]).map_err(|_| {
+                    EngineError::from(fail(DurableIntegrityStage::Payload, "invalid_json"))
+                })?,
+            )
+        } else {
+            None
+        };
+        self.cursor = end;
+        self.next_record += 1;
+        Ok(command)
     }
-    if cursor != records_end {
-        return Err(fail(DurableIntegrityStage::Bounds, "trailing_bytes").into());
-    }
-
-    // Pass two performs structured decode only after the complete frame is
-    // proven bounded. GET has already materialized the object; these bounds
-    // prevent secondary allocations from attacker-controlled length fields.
-    cursor = records_start;
-    let selected = count.saturating_sub(skip).min(limit);
-    let mut commands = Vec::with_capacity(selected);
-    for index in 0..count {
-        let len = read_u32(bytes, &mut cursor, records_end, &fail)? as usize;
-        if matches!(expected, ManifestIntegrity::V3 { .. }) {
-            let _ = read_u32(bytes, &mut cursor, records_end, &fail)?;
-        }
-        let end = cursor + len;
-        if index >= skip && commands.len() < selected {
-            let command = serde_json::from_slice(&bytes[cursor..end]).map_err(|_| {
-                EngineError::from(fail(DurableIntegrityStage::Payload, "invalid_json"))
-            })?;
-            commands.push(command);
-        }
-        cursor = end;
-    }
-    Ok((epoch, first_seq, count, commands))
 }
 
 fn read_u32(

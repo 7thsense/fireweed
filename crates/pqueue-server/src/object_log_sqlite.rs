@@ -65,6 +65,13 @@ pub struct RecoveryStats {
     pub replay_progress_samples: Vec<u64>,
     pub recovery_index_node_visits: u64,
     pub recovery_index_entries_visited: u64,
+    pub recovery_index_height: u64,
+    pub recovery_index_nodes_written_last_append: u64,
+    pub recovery_segment_gets: u64,
+    pub recovery_segment_bytes_fetched: u64,
+    pub recovery_peak_segment_bytes_buffered: u64,
+    pub recovery_peak_index_node_bytes_buffered: u64,
+    pub recovery_peak_cursor_bytes_buffered: u64,
     pub bounded_authority_index: bool,
 }
 
@@ -1357,6 +1364,13 @@ impl SegmentedObjectLogSqliteBackend {
         let mut peak_manifest_objects_buffered = 0u64;
         let mut recovery_index_node_visits = 0u64;
         let mut recovery_index_entries_visited = 0u64;
+        let mut recovery_index_height = 0u64;
+        let mut recovery_index_nodes_written_last_append = 0u64;
+        let mut recovery_segment_gets = 0u64;
+        let mut recovery_segment_bytes_fetched = 0u64;
+        let mut recovery_peak_segment_bytes_buffered = 0u64;
+        let mut recovery_peak_index_node_bytes_buffered = 0u64;
+        let mut recovery_peak_cursor_bytes_buffered = 0u64;
         let mut bounded_authority_index = true;
         let mut replay_progress_samples = vec![start_seq];
         let mut recovery_cursor = self.log.open_recovery_cursor(shard, start_seq)?;
@@ -1372,6 +1386,20 @@ impl SegmentedObjectLogSqliteBackend {
                 .saturating_add(page_stats.recovery_index_node_visits as u64);
             recovery_index_entries_visited = recovery_index_entries_visited
                 .saturating_add(page_stats.recovery_index_entries_visited as u64);
+            recovery_index_height =
+                recovery_index_height.max(page_stats.recovery_index_height as u64);
+            recovery_index_nodes_written_last_append = recovery_index_nodes_written_last_append
+                .max(page_stats.recovery_index_nodes_written_last_append as u64);
+            recovery_segment_gets =
+                recovery_segment_gets.saturating_add(page_stats.segment_gets as u64);
+            recovery_segment_bytes_fetched = recovery_segment_bytes_fetched
+                .saturating_add(page_stats.segment_bytes_fetched as u64);
+            recovery_peak_segment_bytes_buffered = recovery_peak_segment_bytes_buffered
+                .max(page_stats.peak_segment_bytes_buffered as u64);
+            recovery_peak_index_node_bytes_buffered = recovery_peak_index_node_bytes_buffered
+                .max(page_stats.peak_index_node_bytes_buffered as u64);
+            recovery_peak_cursor_bytes_buffered = recovery_peak_cursor_bytes_buffered
+                .max(page_stats.peak_cursor_bytes_buffered as u64);
             bounded_authority_index &= page_stats.bounded_authority_index;
             for (_pos, env) in &entries {
                 for id in &env.item_ids {
@@ -1418,6 +1446,13 @@ impl SegmentedObjectLogSqliteBackend {
                     replay_progress_samples,
                     recovery_index_node_visits,
                     recovery_index_entries_visited,
+                    recovery_index_height,
+                    recovery_index_nodes_written_last_append,
+                    recovery_segment_gets,
+                    recovery_segment_bytes_fetched,
+                    recovery_peak_segment_bytes_buffered,
+                    recovery_peak_index_node_bytes_buffered,
+                    recovery_peak_cursor_bytes_buffered,
                     bounded_authority_index,
                 },
             );
@@ -2359,6 +2394,13 @@ impl SegmentedObjectLogInMemoryBackend {
         let mut peak_manifest_objects_buffered = 0u64;
         let mut recovery_index_node_visits = 0u64;
         let mut recovery_index_entries_visited = 0u64;
+        let mut recovery_index_height = 0u64;
+        let mut recovery_index_nodes_written_last_append = 0u64;
+        let mut recovery_segment_gets = 0u64;
+        let mut recovery_segment_bytes_fetched = 0u64;
+        let mut recovery_peak_segment_bytes_buffered = 0u64;
+        let mut recovery_peak_index_node_bytes_buffered = 0u64;
+        let mut recovery_peak_cursor_bytes_buffered = 0u64;
         let mut bounded_authority_index = true;
         let mut replay_progress_samples = vec![0];
         let mut recovery_cursor = self.log.open_recovery_cursor(shard, 0)?;
@@ -2374,6 +2416,20 @@ impl SegmentedObjectLogInMemoryBackend {
                 .saturating_add(page_stats.recovery_index_node_visits as u64);
             recovery_index_entries_visited = recovery_index_entries_visited
                 .saturating_add(page_stats.recovery_index_entries_visited as u64);
+            recovery_index_height =
+                recovery_index_height.max(page_stats.recovery_index_height as u64);
+            recovery_index_nodes_written_last_append = recovery_index_nodes_written_last_append
+                .max(page_stats.recovery_index_nodes_written_last_append as u64);
+            recovery_segment_gets =
+                recovery_segment_gets.saturating_add(page_stats.segment_gets as u64);
+            recovery_segment_bytes_fetched = recovery_segment_bytes_fetched
+                .saturating_add(page_stats.segment_bytes_fetched as u64);
+            recovery_peak_segment_bytes_buffered = recovery_peak_segment_bytes_buffered
+                .max(page_stats.peak_segment_bytes_buffered as u64);
+            recovery_peak_index_node_bytes_buffered = recovery_peak_index_node_bytes_buffered
+                .max(page_stats.peak_index_node_bytes_buffered as u64);
+            recovery_peak_cursor_bytes_buffered = recovery_peak_cursor_bytes_buffered
+                .max(page_stats.peak_cursor_bytes_buffered as u64);
             bounded_authority_index &= page_stats.bounded_authority_index;
             let mut p = proj.lock().expect("segmented inmemory projection poisoned");
             for (position, envelope) in entries {
@@ -2400,6 +2456,13 @@ impl SegmentedObjectLogInMemoryBackend {
             replay_progress_samples,
             recovery_index_node_visits,
             recovery_index_entries_visited,
+            recovery_index_height,
+            recovery_index_nodes_written_last_append,
+            recovery_segment_gets,
+            recovery_segment_bytes_fetched,
+            recovery_peak_segment_bytes_buffered,
+            recovery_peak_index_node_bytes_buffered,
+            recovery_peak_cursor_bytes_buffered,
             bounded_authority_index,
         })
     }

@@ -53,7 +53,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -82,13 +82,54 @@ const RELEASE_LOAD_BATCH: u64 = 1_000;
 const RELEASE_LOAD_CONCURRENCY: u64 = 8;
 const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
 
+struct FailNextManifestMirrorStore {
+    inner: Arc<dyn BlobStore>,
+    fail_next_manifest_mirror: AtomicBool,
+}
+
+impl BlobStore for FailNextManifestMirrorStore {
+    fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
+        if key.contains("/manifest_head/")
+            && self.fail_next_manifest_mirror.swap(false, Ordering::SeqCst)
+        {
+            return Err(EngineError::Storage(
+                "injected post-CAS mirror failure".into(),
+            ));
+        }
+        self.inner.put(key, body)
+    }
+    fn put_if_absent(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<bool> {
+        self.inner.put_if_absent(key, body)
+    }
+    fn get(&self, key: &str) -> pqueue_engine::EngineResult<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &str) -> pqueue_engine::EngineResult<bool> {
+        self.inner.delete(key)
+    }
+    fn list(&self, prefix: &str) -> pqueue_engine::EngineResult<Vec<String>> {
+        self.inner.list(prefix)
+    }
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        limit: usize,
+    ) -> pqueue_engine::EngineResult<Vec<String>> {
+        self.inner.list_page(prefix, start_after, limit)
+    }
+    fn backend_kind(&self) -> BlobBackendKind {
+        self.inner.backend_kind()
+    }
+}
+
 fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {
     use pqueue_conformance::{envelope, item, qdef as conformance_qdef, shard};
     use pqueue_engine::{PushCommand, QueueCommand};
 
     let postgres_url = std::env::var("PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL")
         .expect("governed no-CAS proof requires PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL");
-    let objects: Arc<dyn BlobStore> = Arc::new(
+    let raw_objects: Arc<dyn BlobStore> = Arc::new(
         S3BlobStore::new(
             &s3.endpoint,
             &s3.bucket,
@@ -98,6 +139,10 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
         )
         .expect("build no-CAS S3 object store"),
     );
+    let objects = Arc::new(FailNextManifestMirrorStore {
+        inner: raw_objects,
+        fail_next_manifest_mirror: AtomicBool::new(false),
+    });
     // Independent clients are essential: a process-local mutex is not the fence under test.
     let pointer_a = Arc::new(
         pqueue_postgres::PostgresManifestPointer::open(&postgres_url)
@@ -117,21 +162,49 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
             vec![],
         )]
     };
-    let owner_a =
-        SegmentedObjectLog::open(PointerFencedBlobStore::new(objects.clone(), pointer_a), cfg);
+    let adapter_a = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_a));
+    let owner_a = SegmentedObjectLog::open(adapter_a, cfg);
     owner_a.create_queue(&conformance_qdef()).unwrap();
     assert_eq!(owner_a.fence_epoch(&shard, 0, 1).unwrap(), 0);
     owner_a.enqueue(&shard, &push("a"), 0, 2).unwrap();
     owner_a.seal(&shard, 0, 3).unwrap();
 
-    let owner_b = SegmentedObjectLog::open(PointerFencedBlobStore::new(objects, pointer_b), cfg);
+    let adapter_b = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_b));
+    let owner_b = SegmentedObjectLog::open(adapter_b.clone(), cfg);
     owner_b.create_queue(&conformance_qdef()).unwrap();
     assert_eq!(owner_b.acquire_epoch(&shard, 4).unwrap(), 1);
     owner_b.enqueue(&shard, &push("b"), 1, 5).unwrap();
+    objects
+        .fail_next_manifest_mirror
+        .store(true, Ordering::SeqCst);
     owner_b.seal(&shard, 1, 6).unwrap();
+    assert!(!objects.fail_next_manifest_mirror.load(Ordering::SeqCst));
+    assert_eq!(adapter_b.pending_manifest_mirrors(), 1);
     owner_a.enqueue(&shard, &push("stale"), 0, 7).unwrap();
     assert_eq!(owner_a.seal(&shard, 0, 8), Err(EngineError::EpochFenced));
     assert_eq!(owner_b.read_all(&shard).unwrap().len(), 2);
+
+    // Model a process restart with a new Postgres client and no volatile mirror-debt map. Authority must be
+    // readable directly from Postgres and the missing optional numeric mirror must be reconstructed from it.
+    let pointer_restart = Arc::new(
+        pqueue_postgres::PostgresManifestPointer::open(&postgres_url)
+            .expect("open fresh restart Postgres pointer"),
+    );
+    let restarted = PointerFencedBlobStore::new(objects, pointer_restart);
+    let pointer_prefix =
+        SegmentedObjectLog::<Arc<PointerFencedBlobStore>>::authoritative_manifest_pointer_prefix(
+            &shard,
+        );
+    let restarted_head = restarted
+        .read_manifest_head(&pointer_prefix)
+        .expect("read restart pointer authority")
+        .expect("restart pointer head exists");
+    assert_eq!(restarted_head.value.current_epoch, 1);
+    assert!(
+        restarted
+            .repair_current_manifest_mirror(&pointer_prefix)
+            .expect("repair mirror from Postgres authority")
+    );
 
     let row = pqueue_release::e3_contract::build_e3_fence_evidence(
         pqueue_release::e3_contract::E3FenceObservation {
@@ -141,6 +214,10 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
             no_cas_stale_epoch_rejected: true,
             no_cas_current_epoch_committed: true,
             no_cas_pointer_and_epoch_atomic: true,
+            no_cas_mirror_failure_after_pointer_cas: true,
+            no_cas_restart_fresh_postgres_client: true,
+            no_cas_restart_read_pointer_authority: true,
+            no_cas_restart_repaired_mirror: true,
         },
     )
     .expect("build executed Postgres-pointer fence evidence");
@@ -813,6 +890,13 @@ struct RecoveryResult {
     peak_manifest_objects_buffered: u64,
     recovery_index_node_visits: u64,
     recovery_index_entries_visited: u64,
+    recovery_index_height: u64,
+    recovery_index_nodes_written_last_append: u64,
+    recovery_segment_gets: u64,
+    recovery_segment_bytes_fetched: u64,
+    recovery_peak_segment_bytes_buffered: u64,
+    recovery_peak_index_node_bytes_buffered: u64,
+    recovery_peak_cursor_bytes_buffered: u64,
     bounded_authority_index: bool,
     verification_chunk_items: u64,
     queue_count: u64,
@@ -1384,6 +1468,14 @@ where
             <= recovery_stats
                 .recovery_index_entries_visited
                 .saturating_add(64)
+        && recovery_stats.recovery_index_height <= 10
+        && recovery_stats.recovery_index_nodes_written_last_append
+            <= recovery_stats.recovery_index_height.saturating_add(2)
+        && recovery_stats.recovery_segment_gets <= tail_replayed.max(1)
+        && recovery_stats.recovery_segment_bytes_fetched
+            >= recovery_stats.recovery_peak_segment_bytes_buffered
+        && recovery_stats.recovery_peak_cursor_bytes_buffered
+            >= recovery_stats.recovery_peak_segment_bytes_buffered
         && resource_bounds.object_page_limit == STORE_OBJECT_PAGE_LIMIT;
     let bar_met = mode_met
         && tail_replayed <= recovery_max_tail
@@ -1419,6 +1511,15 @@ where
         peak_manifest_objects_buffered: recovery_stats.peak_manifest_objects_buffered,
         recovery_index_node_visits: recovery_stats.recovery_index_node_visits,
         recovery_index_entries_visited: recovery_stats.recovery_index_entries_visited,
+        recovery_index_height: recovery_stats.recovery_index_height,
+        recovery_index_nodes_written_last_append: recovery_stats
+            .recovery_index_nodes_written_last_append,
+        recovery_segment_gets: recovery_stats.recovery_segment_gets,
+        recovery_segment_bytes_fetched: recovery_stats.recovery_segment_bytes_fetched,
+        recovery_peak_segment_bytes_buffered: recovery_stats.recovery_peak_segment_bytes_buffered,
+        recovery_peak_index_node_bytes_buffered: recovery_stats
+            .recovery_peak_index_node_bytes_buffered,
+        recovery_peak_cursor_bytes_buffered: recovery_stats.recovery_peak_cursor_bytes_buffered,
         bounded_authority_index: recovery_stats.bounded_authority_index,
         verification_chunk_items,
         queue_count: 1,
@@ -1758,6 +1859,32 @@ fn profile_row(
                 "recovery_bounded_authority_index".into(),
                 serde_json::json!(recovery.bounded_authority_index),
             );
+            for (name, value) in [
+                ("recovery_index_height", recovery.recovery_index_height),
+                (
+                    "recovery_index_nodes_written_last_append",
+                    recovery.recovery_index_nodes_written_last_append,
+                ),
+                ("recovery_segment_gets", recovery.recovery_segment_gets),
+                (
+                    "recovery_segment_bytes_fetched",
+                    recovery.recovery_segment_bytes_fetched,
+                ),
+                (
+                    "recovery_peak_segment_bytes_buffered",
+                    recovery.recovery_peak_segment_bytes_buffered,
+                ),
+                (
+                    "recovery_peak_index_node_bytes_buffered",
+                    recovery.recovery_peak_index_node_bytes_buffered,
+                ),
+                (
+                    "recovery_peak_cursor_bytes_buffered",
+                    recovery.recovery_peak_cursor_bytes_buffered,
+                ),
+            ] {
+                values.insert(name.into(), serde_json::json!(value));
+            }
             values.insert(
                 "recovery_load_task_count".into(),
                 serde_json::json!(recovery.load_task_count),
@@ -2343,6 +2470,13 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
         peak_manifest_objects_buffered: 1,
         recovery_index_node_visits: 2,
         recovery_index_entries_visited: 100,
+        recovery_index_height: 1,
+        recovery_index_nodes_written_last_append: 2,
+        recovery_segment_gets: 1,
+        recovery_segment_bytes_fetched: 1024,
+        recovery_peak_segment_bytes_buffered: 1024,
+        recovery_peak_index_node_bytes_buffered: 512,
+        recovery_peak_cursor_bytes_buffered: 2048,
         bounded_authority_index: true,
         verification_chunk_items: 512,
         queue_count: 1,

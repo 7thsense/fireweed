@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "suite": "segmented_object_log_commits_through_minio",
   "source_revision": "0123456789abcdef0123456789abcdef01234567",
   "store_profile": "minio_create_only_cas",
@@ -15,5 +15,9 @@
   "no_cas_mode": "postgres_transactional_manifest_pointer",
   "no_cas_stale_epoch_rejected": true,
   "no_cas_current_epoch_committed": true,
-  "no_cas_pointer_and_epoch_atomic": true
+  "no_cas_pointer_and_epoch_atomic": true,
+  "no_cas_mirror_failure_after_pointer_cas": true,
+  "no_cas_restart_fresh_postgres_client": true,
+  "no_cas_restart_read_pointer_authority": true,
+  "no_cas_restart_repaired_mirror": true
 }

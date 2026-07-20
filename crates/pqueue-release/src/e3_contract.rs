@@ -139,6 +139,10 @@ pub struct E3FenceEvidenceRow {
     pub no_cas_stale_epoch_rejected: bool,
     pub no_cas_current_epoch_committed: bool,
     pub no_cas_pointer_and_epoch_atomic: bool,
+    pub no_cas_mirror_failure_after_pointer_cas: bool,
+    pub no_cas_restart_fresh_postgres_client: bool,
+    pub no_cas_restart_read_pointer_authority: bool,
+    pub no_cas_restart_repaired_mirror: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +153,10 @@ pub struct E3FenceObservation {
     pub no_cas_stale_epoch_rejected: bool,
     pub no_cas_current_epoch_committed: bool,
     pub no_cas_pointer_and_epoch_atomic: bool,
+    pub no_cas_mirror_failure_after_pointer_cas: bool,
+    pub no_cas_restart_fresh_postgres_client: bool,
+    pub no_cas_restart_read_pointer_authority: bool,
+    pub no_cas_restart_repaired_mirror: bool,
 }
 
 /// One executed TP-003 assertion at a concrete E3 profile and batching bound.
@@ -292,7 +300,7 @@ pub fn build_e3_fence_evidence(
         ));
     }
     Ok(E3FenceEvidenceRow {
-        schema_version: 2,
+        schema_version: 3,
         suite: FENCE_SUITE.into(),
         source_revision: observation.source_revision,
         store_profile: FENCE_PROFILE.into(),
@@ -301,6 +309,10 @@ pub fn build_e3_fence_evidence(
             && observation.no_cas_stale_epoch_rejected
             && observation.no_cas_current_epoch_committed
             && observation.no_cas_pointer_and_epoch_atomic
+            && observation.no_cas_mirror_failure_after_pointer_cas
+            && observation.no_cas_restart_fresh_postgres_client
+            && observation.no_cas_restart_read_pointer_authority
+            && observation.no_cas_restart_repaired_mirror
         {
             "pass"
         } else {
@@ -319,6 +331,11 @@ pub fn build_e3_fence_evidence(
         no_cas_stale_epoch_rejected: observation.no_cas_stale_epoch_rejected,
         no_cas_current_epoch_committed: observation.no_cas_current_epoch_committed,
         no_cas_pointer_and_epoch_atomic: observation.no_cas_pointer_and_epoch_atomic,
+        no_cas_mirror_failure_after_pointer_cas: observation
+            .no_cas_mirror_failure_after_pointer_cas,
+        no_cas_restart_fresh_postgres_client: observation.no_cas_restart_fresh_postgres_client,
+        no_cas_restart_read_pointer_authority: observation.no_cas_restart_read_pointer_authority,
+        no_cas_restart_repaired_mirror: observation.no_cas_restart_repaired_mirror,
     })
 }
 
@@ -866,6 +883,29 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
         || require_u64(row, "recovery_index_node_visits", errors)
             .zip(require_u64(row, "recovery_index_entries_visited", errors))
             .is_none_or(|(nodes, entries)| nodes > entries.saturating_add(64))
+        || require_u64(row, "recovery_index_height", errors).is_none_or(|height| height > 10)
+        || require_u64(row, "recovery_index_nodes_written_last_append", errors)
+            .zip(require_u64(row, "recovery_index_height", errors))
+            .is_none_or(|(writes, height)| writes == 0 || writes > height.saturating_add(2))
+        || require_u64(row, "recovery_segment_gets", errors)
+            .zip(tail)
+            .is_none_or(|(gets, tail)| gets == 0 || gets > tail.max(1))
+        || require_u64(row, "recovery_segment_bytes_fetched", errors)
+            .zip(require_u64(
+                row,
+                "recovery_peak_segment_bytes_buffered",
+                errors,
+            ))
+            .is_none_or(|(fetched, peak)| peak == 0 || fetched < peak)
+        || require_u64(row, "recovery_peak_index_node_bytes_buffered", errors)
+            .is_none_or(|peak| peak == 0)
+        || require_u64(row, "recovery_peak_cursor_bytes_buffered", errors)
+            .zip(require_u64(
+                row,
+                "recovery_peak_segment_bytes_buffered",
+                errors,
+            ))
+            .is_none_or(|(cursor, segment)| cursor < segment)
         || values.get("recovery_progress_source")
             != Some(&serde_json::json!("production_replay_pages"))
         || values.get("recovery_resource_source")
@@ -1181,7 +1221,7 @@ fn verify_fence(
             return None;
         }
     };
-    if row.schema_version != 2
+    if row.schema_version != 3
         || row.suite != FENCE_SUITE
         || row.source_revision != revision
         || row.store_profile != FENCE_PROFILE
@@ -1196,6 +1236,10 @@ fn verify_fence(
         || !row.no_cas_stale_epoch_rejected
         || !row.no_cas_current_epoch_committed
         || !row.no_cas_pointer_and_epoch_atomic
+        || !row.no_cas_mirror_failure_after_pointer_cas
+        || !row.no_cas_restart_fresh_postgres_client
+        || !row.no_cas_restart_read_pointer_authority
+        || !row.no_cas_restart_repaired_mirror
     {
         errors.push(E3ContractError(format!(
             "fencing evidence {} does not prove stale rejection/current commit under both release CAS and Postgres transactional-pointer no-CAS profiles",

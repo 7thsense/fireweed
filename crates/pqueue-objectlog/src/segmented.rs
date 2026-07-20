@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::object_store_observability::ObservedBlobCall;
 pub use crate::segment_integrity::WriterFormat as SegmentWriterFormat;
 use crate::segment_integrity::{
-    CRC32C_ALGORITHM, ManifestIntegrity, SHA256_ALGORITHM, object_locator,
+    CRC32C_ALGORITHM, ManifestIntegrity, SHA256_ALGORITHM, ValidatedSegmentCursor, object_locator,
 };
 use pqueue_core::QueueDefinition;
 use pqueue_engine::{
@@ -76,6 +76,13 @@ pub struct RecoveryReadPageStats {
     pub manifest_object_page_limit: usize,
     pub recovery_index_node_visits: usize,
     pub recovery_index_entries_visited: usize,
+    pub recovery_index_height: usize,
+    pub recovery_index_nodes_written_last_append: usize,
+    pub segment_gets: usize,
+    pub segment_bytes_fetched: usize,
+    pub peak_segment_bytes_buffered: usize,
+    pub peak_index_node_bytes_buffered: usize,
+    pub peak_cursor_bytes_buffered: usize,
     pub bounded_authority_index: bool,
 }
 
@@ -1686,6 +1693,8 @@ pub struct RecoveryIndexRoot {
     root: RecoveryIndexChild,
     height: u8,
     entry_count: u64,
+    #[serde(default)]
+    last_append_nodes_written: u8,
 }
 
 #[derive(Clone)]
@@ -1695,7 +1704,6 @@ struct RecoveryCursorFrame {
     child_height: u8,
 }
 
-#[derive(Clone)]
 pub struct RecoveryCursor {
     shard: QueueKey,
     from_seq: u64,
@@ -1704,9 +1712,35 @@ pub struct RecoveryCursor {
     frames: Vec<RecoveryCursorFrame>,
     leaf: Vec<RecoveryIndexEntry>,
     leaf_offset: usize,
+    segment: Option<(u64, u64, ValidatedSegmentCursor)>,
+    _root_pin: Option<RecoveryRootPin>,
     initialized: bool,
     finished: bool,
     legacy_fallback: bool,
+}
+
+struct RecoveryRootPin {
+    store: Arc<dyn BlobStore>,
+    key: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecoveryRootPinRecord {
+    owner: String,
+    version: u64,
+    root: Option<RecoveryIndexRoot>,
+}
+
+impl Drop for RecoveryRootPin {
+    fn drop(&mut self) {
+        let _ = self.store.delete(&self.key);
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecoveryIndexGarbageBatch {
+    safe_after_version: u64,
+    keys: Vec<String>,
 }
 
 /// Private proof that every address in the contiguous prefix is safe for deletion-watermark publication.
@@ -2067,7 +2101,7 @@ impl SerializedCommandEnvelope {
 
 /// Segmented, group-committing object log over an S3-compatible [`BlobStore`].
 pub struct SegmentedObjectLog<S: BlobStore> {
-    store: crate::object_store_observability::InstrumentedBlobStore<S>,
+    store: Arc<crate::object_store_observability::InstrumentedBlobStore<S>>,
     config: SegmentConfig,
     inner: Mutex<Inner>,
     /// Test-only fault-injection hook (TP-003 §3.10 AC-TXN-4). `None` in every production path.
@@ -2087,6 +2121,7 @@ pub struct SegmentedObjectLog<S: BlobStore> {
     /// Epochs this instance completed `acquire_epoch` for. Durable current epoch alone is not proof that this
     /// process is the serving owner, so background maintenance requires this explicit local claim.
     maintenance_owned_epochs: Mutex<BTreeMap<QueueKey, MaintenanceOwnerToken>>,
+    recovery_pin_owner: Option<String>,
 }
 
 impl<S: BlobStore> SegmentedObjectLog<S> {
@@ -2173,8 +2208,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     pub fn open(store: S, config: SegmentConfig) -> Self {
         let backend = store.backend_kind();
         Self {
-            store: crate::object_store_observability::InstrumentedBlobStore::production(
-                store, backend,
+            store: Arc::new(
+                crate::object_store_observability::InstrumentedBlobStore::production(
+                    store, backend,
+                ),
             ),
             config,
             inner: Mutex::new(Inner {
@@ -2189,6 +2226,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             segment_gc_cursors: Mutex::new(BTreeMap::new()),
             segment_gc_progress: Mutex::new(BTreeMap::new()),
             maintenance_owned_epochs: Mutex::new(BTreeMap::new()),
+            // Pin publication fails closed later if OS entropy was unavailable; constructor compatibility is
+            // preserved while never falling back to PID/clock identities that can collide across hosts.
+            recovery_pin_owner: publication_attempt_id().ok(),
         }
     }
 
@@ -2295,6 +2335,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
 
     fn authoritative_head_prefix(shard: &QueueKey) -> String {
         format!("{}authority_head/", shard_prefix(shard))
+    }
+
+    /// Exact transactional manifest-pointer key used by the no-CAS Postgres authority and its optional
+    /// numeric blob mirrors. Exposed for live recovery/repair tooling, not as a queue data-plane API.
+    pub fn authoritative_manifest_pointer_prefix(shard: &QueueKey) -> String {
+        Self::authoritative_head_prefix(shard)
     }
 
     fn authority_protocol_marker_key(shard: &QueueKey) -> String {
@@ -2407,7 +2453,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         &self,
         child: &RecoveryIndexChild,
     ) -> EngineResult<RecoveryIndexNode> {
+        self.load_recovery_index_node_measured(child)
+            .map(|(node, _)| node)
+    }
+
+    fn load_recovery_index_node_measured(
+        &self,
+        child: &RecoveryIndexChild,
+    ) -> EngineResult<(RecoveryIndexNode, usize)> {
         let bytes = self.store_get(&child.key)?.ok_or(EngineError::Conflict)?;
+        let byte_len = bytes.len();
         let expected = child
             .key
             .rsplit('/')
@@ -2445,7 +2500,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 }
             }
         }
-        Ok(node)
+        Ok((node, byte_len))
     }
 
     fn append_recovery_index_at(
@@ -2454,6 +2509,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         child: &RecoveryIndexChild,
         height: u8,
         entry: RecoveryIndexEntry,
+        superseded: &mut Vec<String>,
+        nodes_written: &mut usize,
     ) -> EngineResult<Vec<RecoveryIndexChild>> {
         let node = self.load_recovery_index_node(child)?;
         match (height, node) {
@@ -2465,12 +2522,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     return Err(EngineError::Conflict);
                 }
                 if entries.len() < RECOVERY_INDEX_FANOUT {
+                    superseded.push(child.key.clone());
                     entries.push(entry);
+                    *nodes_written += 1;
                     Ok(vec![self.put_recovery_index_node(
                         shard,
                         &RecoveryIndexNode::Leaf { entries },
                     )?])
                 } else {
+                    *nodes_written += 1;
                     Ok(vec![
                         child.clone(),
                         self.put_recovery_index_node(
@@ -2484,12 +2544,20 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
             (level, RecoveryIndexNode::Internal { mut children }) if level > 0 => {
                 let last = children.last().cloned().ok_or(EngineError::Conflict)?;
-                let replacements = self.append_recovery_index_at(shard, &last, level - 1, entry)?;
+                let replacements = self.append_recovery_index_at(
+                    shard,
+                    &last,
+                    level - 1,
+                    entry,
+                    superseded,
+                    nodes_written,
+                )?;
                 if replacements.len() == 1 {
                     *children.last_mut().ok_or(EngineError::Conflict)? = replacements[0].clone();
                 } else if children.len() < RECOVERY_INDEX_FANOUT {
                     children.extend(replacements.into_iter().skip(1));
                 } else {
+                    *nodes_written += 1;
                     return Ok(vec![
                         child.clone(),
                         self.put_recovery_index_node(
@@ -2500,6 +2568,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                         )?,
                     ]);
                 }
+                superseded.push(child.key.clone());
+                *nodes_written += 1;
                 Ok(vec![self.put_recovery_index_node(
                     shard,
                     &RecoveryIndexNode::Internal { children },
@@ -2514,7 +2584,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         shard: &QueueKey,
         root: Option<RecoveryIndexRoot>,
         index_entry: RecoveryIndexEntry,
-    ) -> EngineResult<RecoveryIndexRoot> {
+    ) -> EngineResult<(RecoveryIndexRoot, Vec<String>)> {
+        let mut superseded = Vec::with_capacity(usize::from(RECOVERY_INDEX_MAX_HEIGHT) + 1);
+        let mut nodes_written = 0usize;
         let Some(mut root) = root else {
             let child = self.put_recovery_index_node(
                 shard,
@@ -2522,12 +2594,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                     entries: vec![index_entry],
                 },
             )?;
-            return Ok(RecoveryIndexRoot {
-                schema_version: 1,
-                root: child,
-                height: 0,
-                entry_count: 1,
-            });
+            return Ok((
+                RecoveryIndexRoot {
+                    schema_version: 1,
+                    root: child,
+                    height: 0,
+                    entry_count: 1,
+                    last_append_nodes_written: 1,
+                },
+                superseded,
+            ));
         };
         if root.schema_version != 1
             || root.height > RECOVERY_INDEX_MAX_HEIGHT
@@ -2535,8 +2611,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         {
             return Err(EngineError::Conflict);
         }
-        let children =
-            self.append_recovery_index_at(shard, &root.root, root.height, index_entry)?;
+        let children = self.append_recovery_index_at(
+            shard,
+            &root.root,
+            root.height,
+            index_entry,
+            &mut superseded,
+            &mut nodes_written,
+        )?;
         root.root = if children.len() == 1 {
             children[0].clone()
         } else {
@@ -2544,57 +2626,42 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             if root.height > RECOVERY_INDEX_MAX_HEIGHT {
                 return Err(EngineError::Conflict);
             }
+            nodes_written += 1;
             self.put_recovery_index_node(shard, &RecoveryIndexNode::Internal { children })?
         };
         root.entry_count = root
             .entry_count
             .checked_add(1)
             .ok_or(EngineError::Conflict)?;
-        Ok(root)
+        root.last_append_nodes_written =
+            u8::try_from(nodes_written).map_err(|_| EngineError::Conflict)?;
+        Ok((root, superseded))
     }
 
-    fn recovery_index_with_compat_backfill(
+    fn recovery_index_for_append(
         &self,
         shard: &QueueKey,
         head: &VersionedHead<ManifestHeadBlob>,
         candidate_key: &str,
         entry: &ManifestEntry,
-    ) -> EngineResult<RecoveryIndexRoot> {
-        let mut root = head.value.recovery_index.clone();
-        if root.is_none() && head.value.next_manifest_index > head.value.legacy_next_manifest_index
-        {
-            let mut reversed = Vec::new();
-            let mut cursor = head.value.tail_candidate_key.clone();
-            let mut remaining = head
-                .value
-                .next_manifest_index
-                .saturating_sub(head.value.legacy_next_manifest_index);
-            while remaining > 0 {
-                let key = cursor.ok_or(EngineError::Conflict)?;
-                let bytes = self.store_get(&key)?.ok_or(EngineError::Conflict)?;
-                let candidate: ManifestCandidate =
-                    serde_json::from_slice(&bytes).map_err(store_err)?;
-                cursor = candidate.previous_candidate_key.clone();
-                reversed.push((key, candidate.entry));
-                remaining -= 1;
-            }
-            for (key, old_entry) in reversed.into_iter().rev() {
-                root = Some(self.append_recovery_index(
-                    shard,
-                    root,
-                    RecoveryIndexEntry {
-                        manifest_index: old_entry.index,
-                        first_seq: old_entry.first_seq,
-                        visible_last_seq: Self::visible_last_seq(&old_entry),
-                        candidate_key: key,
-                        entry: old_entry,
-                    },
-                )?);
-            }
+    ) -> EngineResult<(RecoveryIndexRoot, Vec<String>)> {
+        let indexed = head
+            .value
+            .recovery_index
+            .as_ref()
+            .map_or(0, |root| root.entry_count);
+        let required = head
+            .value
+            .next_manifest_index
+            .saturating_sub(head.value.legacy_next_manifest_index);
+        if indexed != required {
+            // Never hide an unbounded reverse-chain scan inside the first post-upgrade seal. An operator must
+            // run `migrate_recovery_index_offline` while the queue is exclusively quiesced.
+            return Err(EngineError::Unavailable);
         }
         self.append_recovery_index(
             shard,
-            root,
+            head.value.recovery_index.clone(),
             RecoveryIndexEntry {
                 manifest_index: entry.index,
                 first_seq: entry.first_seq,
@@ -2603,6 +2670,67 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 entry: entry.clone(),
             },
         )
+    }
+
+    /// Explicit offline conversion for authority heads created before the forward recovery index existed.
+    /// The caller must hold an exclusive operator maintenance window: this intentionally performs the full
+    /// historical walk, but it is never reachable from enqueue/seal/recovery hot paths. A racing head update
+    /// fails the final CAS and leaves only unreachable content-addressed nodes for index GC.
+    pub fn migrate_recovery_index_offline(&self, shard: &QueueKey) -> EngineResult<u64> {
+        let head = self
+            .read_authoritative_head(shard)?
+            .ok_or(EngineError::NotFound)?;
+        let required = head
+            .value
+            .next_manifest_index
+            .saturating_sub(head.value.legacy_next_manifest_index);
+        if head
+            .value
+            .recovery_index
+            .as_ref()
+            .is_some_and(|root| root.entry_count == required)
+        {
+            return Ok(0);
+        }
+        let mut reversed = Vec::new();
+        let mut cursor = head.value.tail_candidate_key.clone();
+        let mut remaining = required;
+        while remaining > 0 {
+            let key = cursor.ok_or(EngineError::Conflict)?;
+            let bytes = self.store_get(&key)?.ok_or(EngineError::Conflict)?;
+            let candidate: ManifestCandidate = serde_json::from_slice(&bytes).map_err(store_err)?;
+            cursor = candidate.previous_candidate_key.clone();
+            reversed.push((key, candidate.entry));
+            remaining -= 1;
+        }
+        let mut root = None;
+        for (key, old_entry) in reversed.into_iter().rev() {
+            let (next_root, superseded) = self.append_recovery_index(
+                shard,
+                root,
+                RecoveryIndexEntry {
+                    manifest_index: old_entry.index,
+                    first_seq: old_entry.first_seq,
+                    visible_last_seq: Self::visible_last_seq(&old_entry),
+                    candidate_key: key,
+                    entry: old_entry,
+                },
+            )?;
+            for key in superseded {
+                let _ = self.store.delete(&key)?;
+            }
+            root = Some(next_root);
+        }
+        let mut next_head = head.value.clone();
+        next_head.recovery_index = root;
+        if !self.store.update_manifest_head_if_version(
+            &Self::authoritative_head_prefix(shard),
+            Some(head.version),
+            &next_head,
+        )? {
+            return Err(EngineError::Conflict);
+        }
+        Ok(required)
     }
 
     fn manifest_key(shard: &QueueKey, index: u64) -> String {
@@ -2718,8 +2846,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         // All immutable recovery-index nodes are durable before the same fenced head CAS that makes the
         // candidate authoritative. A crash or CAS loser can therefore leave only unreachable content-addressed
         // nodes; a committed head can never name a missing, post-CAS index update.
-        let recovery_index =
-            self.recovery_index_with_compat_backfill(shard, head, &candidate_key, entry)?;
+        let (recovery_index, superseded_index_nodes) =
+            self.recovery_index_for_append(shard, head, &candidate_key, entry)?;
         let next_head = ManifestHeadBlob {
             current_epoch: entry.epoch,
             next_seq,
@@ -2736,6 +2864,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             Some(head.version),
             &next_head,
         )?;
+        if won {
+            self.retire_recovery_index_nodes(shard, head.version, &superseded_index_nodes)?;
+        } else {
+            // Nodes created for a losing root are unreachable; the bounded operator GC handles them together
+            // with any crash-orphaned content-addressed nodes.
+        }
         Ok((
             won,
             VersionedHead {
@@ -4597,7 +4731,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         &self,
         shard: &QueueKey,
         from_seq: u64,
-    ) -> EngineResult<RecoveryCursor> {
+    ) -> EngineResult<RecoveryCursor>
+    where
+        S: 'static,
+    {
         if self.branch_uncommitted(shard)? {
             return Ok(RecoveryCursor {
                 shard: shard.clone(),
@@ -4607,6 +4744,8 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 frames: Vec::new(),
                 leaf: Vec::new(),
                 leaf_offset: 0,
+                segment: None,
+                _root_pin: None,
                 initialized: true,
                 finished: true,
                 legacy_fallback: false,
@@ -4614,7 +4753,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         let horizon = self.visible_manifest_deletion_watermark(shard)?;
         self.fail_closed_below_floor(shard, from_seq, horizon)?;
-        let head = self.read_authoritative_head(shard)?;
+        let (head, root_pin) = self.pin_recovery_head(shard)?;
         let legacy_fallback = head.as_ref().is_none_or(|head| {
             head.value.legacy_next_manifest_index > 0
                 || (head.value.next_manifest_index > 0 && head.value.recovery_index.is_none())
@@ -4627,10 +4766,170 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             frames: Vec::new(),
             leaf: Vec::new(),
             leaf_offset: 0,
+            segment: None,
+            _root_pin: root_pin,
             initialized: false,
             finished: false,
             legacy_fallback,
         })
+    }
+
+    fn recovery_pin_prefix(shard: &QueueKey) -> String {
+        format!("{}recovery_pins/v1/", shard_prefix(shard))
+    }
+
+    fn recovery_index_garbage_prefix(shard: &QueueKey) -> String {
+        format!("{}recovery_index_gc/v1/", shard_prefix(shard))
+    }
+
+    /// Stable identifier written into this process's durable recovery-root pins. An external liveness
+    /// authority may pass a proven-dead identifier to [`Self::reap_recovery_pins_for_dead_owner`]; callers
+    /// must never infer death from elapsed wall time.
+    pub fn recovery_pin_owner(&self) -> EngineResult<&str> {
+        self.recovery_pin_owner
+            .as_deref()
+            .ok_or_else(|| EngineError::Storage("recovery pin owner entropy unavailable".into()))
+    }
+
+    /// Bounded crash cleanup for durable root pins after an operator/control-plane liveness proof. Live
+    /// owners are preserved by exact owner identity; there is deliberately no timeout or host-speed guess.
+    pub fn reap_recovery_pins_for_dead_owner(
+        &self,
+        shard: &QueueKey,
+        proven_dead_owner: &str,
+        limit: usize,
+    ) -> EngineResult<usize> {
+        if proven_dead_owner.is_empty() || limit == 0 || limit > S3_LIST_PAGE_MAX_KEYS {
+            return Err(EngineError::Invalid(
+                "bounded dead-owner pin reap requires 1..=1000",
+            ));
+        }
+        let prefix = Self::recovery_pin_prefix(shard);
+        let mut reaped = 0;
+        for key in self.store.list_page(&prefix, None, limit)? {
+            let bytes = self.store_get(&key)?.ok_or(EngineError::Conflict)?;
+            let pin: RecoveryRootPinRecord = serde_json::from_slice(&bytes).map_err(store_err)?;
+            if pin.owner == proven_dead_owner {
+                let _ = self.store.delete(&key)?;
+                reaped += 1;
+            }
+        }
+        Ok(reaped)
+    }
+
+    fn has_recovery_pin_at_or_before(&self, shard: &QueueKey, version: u64) -> EngineResult<bool> {
+        let prefix = Self::recovery_pin_prefix(shard);
+        let pins = self.store.list_page(&prefix, None, S3_LIST_PAGE_MAX_KEYS)?;
+        if pins.len() == S3_LIST_PAGE_MAX_KEYS {
+            return Ok(true);
+        }
+        for key in pins {
+            let Some(component) = key
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.split('/').next())
+                .and_then(|value| value.strip_prefix('v'))
+            else {
+                return Ok(true);
+            };
+            let Ok(pinned_version) = component.parse::<u64>() else {
+                return Ok(true);
+            };
+            if pinned_version <= version {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn retire_recovery_index_nodes(
+        &self,
+        shard: &QueueKey,
+        safe_after_version: u64,
+        superseded: &[String],
+    ) -> EngineResult<()> {
+        if !superseded.is_empty() {
+            if self.has_recovery_pin_at_or_before(shard, safe_after_version)? {
+                let batch = RecoveryIndexGarbageBatch {
+                    safe_after_version,
+                    keys: superseded.to_vec(),
+                };
+                let body = to_json(&batch)?;
+                let key = format!(
+                    "{}{}-{}.json",
+                    Self::recovery_index_garbage_prefix(shard),
+                    safe_after_version,
+                    publication_attempt_id()?
+                );
+                let _ = self.store.put_if_absent(&key, &body)?;
+            } else {
+                for key in superseded {
+                    let _ = self.store.delete(key)?;
+                }
+            }
+        }
+        // Each append reaps a fixed number of deferred batches. A long-running cursor can defer reclamation,
+        // but once its durable root pin drops, subsequent appends converge without a resident-sized scan.
+        let prefix = Self::recovery_index_garbage_prefix(shard);
+        for key in self.store.list_page(&prefix, None, 16)? {
+            let Some(bytes) = self.store_get(&key)? else {
+                continue;
+            };
+            let batch: RecoveryIndexGarbageBatch =
+                serde_json::from_slice(&bytes).map_err(store_err)?;
+            if batch.keys.len() > usize::from(RECOVERY_INDEX_MAX_HEIGHT) + 1 {
+                return Err(EngineError::Conflict);
+            }
+            if self.has_recovery_pin_at_or_before(shard, batch.safe_after_version)? {
+                continue;
+            }
+            for node in batch.keys {
+                let _ = self.store.delete(&node)?;
+            }
+            let _ = self.store.delete(&key)?;
+        }
+        Ok(())
+    }
+
+    fn pin_recovery_head(
+        &self,
+        shard: &QueueKey,
+    ) -> EngineResult<(
+        Option<VersionedHead<ManifestHeadBlob>>,
+        Option<RecoveryRootPin>,
+    )>
+    where
+        S: 'static,
+    {
+        for _ in 0..16 {
+            let head = self.read_authoritative_head(shard)?;
+            let Some(observed) = head.as_ref() else {
+                return Ok((None, None));
+            };
+            if observed.value.recovery_index.is_none() {
+                return Ok((head, None));
+            }
+            let key = format!(
+                "{}v{:020}/{}.json",
+                Self::recovery_pin_prefix(shard),
+                observed.version,
+                publication_attempt_id()?
+            );
+            let body = to_json(&RecoveryRootPinRecord {
+                owner: self.recovery_pin_owner()?.to_owned(),
+                version: observed.version,
+                root: observed.value.recovery_index.clone(),
+            })?;
+            if !self.store.put_if_absent(&key, &body)? {
+                continue;
+            }
+            let confirmed = self.read_authoritative_head(shard)?;
+            if confirmed.as_ref().map(|head| head.version) == Some(observed.version) {
+                let store: Arc<dyn BlobStore> = self.store.clone();
+                return Ok((head, Some(RecoveryRootPin { store, key })));
+            }
+            let _ = self.store.delete(&key)?;
+        }
+        Err(EngineError::Conflict)
     }
 
     fn descend_recovery_cursor(
@@ -4642,8 +4941,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         stats: &mut RecoveryReadPageStats,
     ) -> EngineResult<()> {
         loop {
-            let node = self.load_recovery_index_node(&child)?;
+            let (node, node_bytes) = self.load_recovery_index_node_measured(&child)?;
             stats.recovery_index_node_visits += 1;
+            stats.peak_index_node_bytes_buffered =
+                stats.peak_index_node_bytes_buffered.max(node_bytes);
             match (height, node) {
                 (0, RecoveryIndexNode::Leaf { entries }) => {
                     cursor.leaf_offset = seek_seq.map_or(0, |sequence| {
@@ -4717,6 +5018,11 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let mut stats = RecoveryReadPageStats {
             command_limit: RECOVERY_COMMAND_PAGE_LIMIT,
             manifest_object_page_limit: S3_LIST_PAGE_MAX_KEYS,
+            recovery_index_height: cursor.root.as_ref().map_or(0, |root| root.height as usize),
+            recovery_index_nodes_written_last_append: cursor
+                .root
+                .as_ref()
+                .map_or(0, |root| root.last_append_nodes_written as usize),
             bounded_authority_index: true,
             ..RecoveryReadPageStats::default()
         };
@@ -4759,12 +5065,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             {
                 return Err(EngineError::Conflict);
             }
-            self.append_recovery_entry(
-                &cursor.shard,
+            let shard = cursor.shard.clone();
+            self.append_indexed_recovery_entry(
+                cursor,
+                &shard,
                 &indexed.entry,
-                cursor.from_seq,
                 is_committed_branch,
                 &mut out,
+                &mut stats,
             )?;
             if let Some(last) = out.last() {
                 cursor.from_seq = last.0.sequence.saturating_add(1);
@@ -4778,8 +5086,109 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         }
         stats.commands_returned = out.len();
         stats.peak_manifest_objects_buffered = cursor.leaf.len().min(RECOVERY_INDEX_FANOUT);
+        stats.peak_cursor_bytes_buffered = stats
+            .peak_cursor_bytes_buffered
+            .max(Self::recovery_cursor_resident_bytes(cursor)?);
         let _snapshot_version = cursor.captured_head_version;
         Ok((out, stats))
+    }
+
+    fn recovery_cursor_resident_bytes(cursor: &RecoveryCursor) -> EngineResult<usize> {
+        let leaf = to_json(&cursor.leaf)?.len();
+        let frames = cursor.frames.iter().try_fold(0usize, |total, frame| {
+            to_json(&frame.children).map(|bytes| total.saturating_add(bytes.len()))
+        })?;
+        let segment = cursor
+            .segment
+            .as_ref()
+            .map_or(0, |(_, _, segment)| segment.resident_bytes());
+        Ok(leaf.saturating_add(frames).saturating_add(segment))
+    }
+
+    fn append_indexed_recovery_entry(
+        &self,
+        cursor: &mut RecoveryCursor,
+        shard: &QueueKey,
+        entry: &ManifestEntry,
+        is_committed_branch: bool,
+        out: &mut Vec<(CommandPosition, CommandEnvelope)>,
+        stats: &mut RecoveryReadPageStats,
+    ) -> EngineResult<()> {
+        if entry.fence || Self::is_reclaimed_manifest_marker(entry) {
+            cursor.segment = None;
+            return Ok(());
+        }
+        let visible_last_seq = Self::visible_last_seq(entry);
+        if visible_last_seq < cursor.from_seq {
+            cursor.segment = None;
+            return Ok(());
+        }
+        let Some(segment_key) = entry.segment_key.as_ref() else {
+            cursor.segment = None;
+            return Ok(());
+        };
+        self.validate_live_segment_locator(shard, entry, segment_key, is_committed_branch)?;
+        if cursor
+            .segment
+            .as_ref()
+            .is_none_or(|(index, _, _)| *index != entry.index)
+        {
+            let bytes = self
+                .store_get(segment_key)?
+                .ok_or_else(|| EngineError::Storage(format!("missing segment {segment_key}")))?;
+            stats.segment_gets += 1;
+            stats.segment_bytes_fetched = stats.segment_bytes_fetched.saturating_add(bytes.len());
+            stats.peak_segment_bytes_buffered = stats.peak_segment_bytes_buffered.max(bytes.len());
+            let locator = object_locator(segment_key);
+            let integrity = entry.manifest_integrity()?;
+            let segment = ValidatedSegmentCursor::new(bytes, entry.index, &locator, &integrity)?;
+            let expected_epoch = entry.segment_epoch.or_else(|| {
+                (!is_committed_branch || entry.segment_format.is_some()).then_some(entry.epoch)
+            });
+            let count =
+                u64::try_from(segment.count()).map_err(|_| EngineError::DurableDataCorrupt {
+                    stage: pqueue_engine::DurableIntegrityStage::Position,
+                    manifest_index: entry.index,
+                    locator: locator.clone(),
+                })?;
+            if expected_epoch.is_some_and(|expected| segment.epoch() != expected)
+                || segment.first_seq() != entry.first_seq
+                || count == 0
+                || segment.first_seq().checked_add(count.saturating_sub(1)) != Some(entry.last_seq)
+            {
+                return Err(EngineError::DurableDataCorrupt {
+                    stage: pqueue_engine::DurableIntegrityStage::Position,
+                    manifest_index: entry.index,
+                    locator,
+                });
+            }
+            cursor.segment = Some((entry.index, visible_last_seq, segment));
+        }
+        let (_, _, segment) = cursor.segment.as_mut().ok_or(EngineError::Conflict)?;
+        let skip = cursor.from_seq.saturating_sub(entry.first_seq) as usize;
+        segment.skip_to(skip)?;
+        let first_record = segment.next_record();
+        let remaining = RECOVERY_COMMAND_PAGE_LIMIT.saturating_sub(out.len());
+        let commands = segment.take(remaining)?;
+        for (offset, command) in commands.into_iter().enumerate() {
+            let sequence = entry.first_seq + first_record as u64 + offset as u64;
+            if sequence > visible_last_seq {
+                break;
+            }
+            out.push((
+                CommandPosition::new(shard.clone(), segment.epoch(), sequence),
+                command,
+            ));
+        }
+        stats.peak_segment_bytes_buffered = stats
+            .peak_segment_bytes_buffered
+            .max(segment.resident_bytes());
+        if segment.next_record() >= segment.count()
+            || entry.first_seq + segment.next_record() as u64 > visible_last_seq
+        {
+            cursor.segment = None;
+        }
+        Ok(())
     }
 
     /// Production recovery page. Unlike [`Self::read_from`], this never materializes the complete
@@ -4898,6 +5307,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             recovery_index_node_visits: 0,
             recovery_index_entries_visited: 0,
             bounded_authority_index: false,
+            ..RecoveryReadPageStats::default()
         };
         Ok((out, stats))
     }
@@ -9246,6 +9656,129 @@ mod manifest_deletion_watermark_tests {
             "doubling one-command segments must remain near-linear: small={small_nodes}, large={large_nodes}"
         );
         assert!(large_nodes < large_entries / 8);
+    }
+
+    #[test]
+    fn multi_page_recovery_fetches_and_validates_each_large_segment_once() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(64 * 1024 * 1024, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store, cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        log.enqueue(&shard, &pushes(1_024), 0, 1).unwrap();
+        log.seal(&shard, 0, 2).unwrap();
+
+        let mut cursor = log.open_recovery_cursor(&shard, 0).unwrap();
+        let mut recovered = 0usize;
+        let mut segment_gets = 0usize;
+        let mut segment_bytes = 0usize;
+        let mut peak_segment_bytes = 0usize;
+        loop {
+            let (page, stats) = log.read_recovery_cursor_page(&mut cursor).unwrap();
+            segment_gets += stats.segment_gets;
+            segment_bytes += stats.segment_bytes_fetched;
+            peak_segment_bytes = peak_segment_bytes.max(stats.peak_segment_bytes_buffered);
+            if page.is_empty() {
+                break;
+            }
+            recovered += page.len();
+        }
+        assert_eq!(recovered, 1_024);
+        assert_eq!(
+            segment_gets, 1,
+            "one physical segment GET for all four pages"
+        );
+        assert_eq!(segment_bytes, peak_segment_bytes);
+        assert!(peak_segment_bytes > 0);
+        assert!(peak_segment_bytes <= crate::segment_integrity::MAX_SEGMENT_BYTES);
+    }
+
+    #[test]
+    fn captured_root_pin_defers_cow_gc_then_bounded_append_reaps_it() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let log = SegmentedObjectLog::open(store.clone(), cfg);
+        log.create_queue(&conformance_qdef()).unwrap();
+        log.fence_epoch(&shard, 0, 0).unwrap();
+        for sequence in 0..8 {
+            log.enqueue(&shard, &pushes(1), 0, sequence + 1).unwrap();
+            log.seal(&shard, 0, sequence + 1).unwrap();
+        }
+        let mut captured = log.open_recovery_cursor(&shard, 0).unwrap();
+        for sequence in 8..16 {
+            log.enqueue(&shard, &pushes(1), 0, sequence + 1).unwrap();
+            log.seal(&shard, 0, sequence + 1).unwrap();
+        }
+        assert!(
+            !store
+                .list(
+                    &SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_index_garbage_prefix(
+                        &shard
+                    )
+                )
+                .unwrap()
+                .is_empty(),
+            "active durable root pin must defer obsolete COW-node deletion"
+        );
+        let mut captured_count = 0;
+        loop {
+            let (page, _) = log.read_recovery_cursor_page(&mut captured).unwrap();
+            if page.is_empty() {
+                break;
+            }
+            captured_count += page.len();
+        }
+        assert_eq!(captured_count, 8);
+        drop(captured);
+
+        log.enqueue(&shard, &pushes(1), 0, 20).unwrap();
+        log.seal(&shard, 0, 21).unwrap();
+        assert!(
+            store
+                .list(
+                    &SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_index_garbage_prefix(
+                        &shard
+                    )
+                )
+                .unwrap()
+                .is_empty(),
+            "the next append must reap every bounded deferred batch after the pin drops"
+        );
+    }
+
+    #[test]
+    fn proven_dead_owner_reap_cleans_crash_pin_without_touching_live_owner() {
+        let store = Arc::new(InMemoryBlobStore::new());
+        let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+        let shard = conformance_shard();
+        let crashed = SegmentedObjectLog::open(store.clone(), cfg);
+        crashed.create_queue(&conformance_qdef()).unwrap();
+        crashed.fence_epoch(&shard, 0, 0).unwrap();
+        crashed.enqueue(&shard, &pushes(1), 0, 1).unwrap();
+        crashed.seal(&shard, 0, 2).unwrap();
+        let dead_owner = crashed.recovery_pin_owner().unwrap().to_owned();
+        let leaked = crashed.open_recovery_cursor(&shard, 0).unwrap();
+        std::mem::forget(leaked); // model process death: Drop cleanup cannot run
+
+        let replacement = SegmentedObjectLog::open(store.clone(), cfg);
+        replacement.create_queue(&conformance_qdef()).unwrap();
+        let live_owner = replacement.recovery_pin_owner().unwrap().to_owned();
+        let _live = replacement.open_recovery_cursor(&shard, 0).unwrap();
+        assert_ne!(live_owner, dead_owner);
+        // Prove only the old process dead. Its stale pin is removed while the new process's exact owner
+        // identity remains present.
+        assert_eq!(
+            replacement
+                .reap_recovery_pins_for_dead_owner(&shard, &dead_owner, 16)
+                .unwrap(),
+            1
+        );
+        let pins = store
+            .list(&SegmentedObjectLog::<Arc<InMemoryBlobStore>>::recovery_pin_prefix(&shard))
+            .unwrap();
+        assert_eq!(pins.len(), 1, "replacement owner pin remains live");
     }
 
     fn expire_as_owner<S: BlobStore>(

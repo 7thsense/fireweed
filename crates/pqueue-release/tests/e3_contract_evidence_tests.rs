@@ -416,6 +416,10 @@ fn rejects_symlink_authority_and_writer_target() {
         no_cas_stale_epoch_rejected: true,
         no_cas_current_epoch_committed: true,
         no_cas_pointer_and_epoch_atomic: true,
+        no_cas_mirror_failure_after_pointer_cas: true,
+        no_cas_restart_fresh_postgres_client: true,
+        no_cas_restart_read_pointer_authority: true,
+        no_cas_restart_repaired_mirror: true,
     })
     .unwrap();
     assert!(write_e3_fence_evidence(&output, &row).is_err());
@@ -491,6 +495,10 @@ fn fence_builder_fails_closed_and_emits_typed_release_profile() {
         no_cas_stale_epoch_rejected: true,
         no_cas_current_epoch_committed: true,
         no_cas_pointer_and_epoch_atomic: true,
+        no_cas_mirror_failure_after_pointer_cas: true,
+        no_cas_restart_fresh_postgres_client: true,
+        no_cas_restart_read_pointer_authority: true,
+        no_cas_restart_repaired_mirror: true,
     })
     .unwrap();
     assert_eq!(row.result, "pass");
@@ -505,6 +513,10 @@ fn fence_builder_fails_closed_and_emits_typed_release_profile() {
             no_cas_stale_epoch_rejected: true,
             no_cas_current_epoch_committed: true,
             no_cas_pointer_and_epoch_atomic: true,
+            no_cas_mirror_failure_after_pointer_cas: true,
+            no_cas_restart_fresh_postgres_client: true,
+            no_cas_restart_read_pointer_authority: true,
+            no_cas_restart_repaired_mirror: true,
         })
         .is_err()
     );
