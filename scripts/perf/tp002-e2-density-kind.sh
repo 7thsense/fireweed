@@ -143,7 +143,7 @@ spec:
       # Keep storage bounded without charging object-log and SQLite files to the container's 4 GiB
       # memory cgroup. The workload has no elapsed-time or throughput gate, so host-disk contention
       # changes capacity observations only and cannot become an implicit release condition.
-      volumes: [ { name: data, emptyDir: { sizeLimit: 16Gi } } ]
+      volumes: [ { name: data, emptyDir: { sizeLimit: 64Gi } } ]
 ---
 apiVersion: v1
 kind: Service
@@ -168,7 +168,7 @@ SERVER_IMAGE_ID=$(kubectl -n "$NAMESPACE" get pod "$SERVER_POD" -o jsonpath='{.s
 NODE_IMAGE=$(docker inspect "${CLUSTER}-control-plane" --format '{{.Config.Image}}')
 NODE_CAPACITY=$(kubectl get node -o jsonpath='{.items[0].status.capacity.cpu} {.items[0].status.capacity.memory}')
 HARDWARE="$(nproc) host cores; $(awk '/MemTotal/ {printf "%.1f GiB RAM", $2/1024/1024}' /proc/meminfo); kind node $NODE_IMAGE capacity $NODE_CAPACITY; server limit 4 cores/4 GiB RAM"
-TOPOLOGY="live one-node kind deployment; direct objectlog/sqlite projection on bounded 16 GiB disk-backed emptyDir; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
+TOPOLOGY="live one-node kind deployment; direct objectlog/sqlite projection on bounded 64 GiB disk-backed emptyDir; one service pod; $QUEUE_COUNT generated queues; one in-cluster load job"
 
 cat <<YAML | kubectl apply -f -
 apiVersion: batch/v1
