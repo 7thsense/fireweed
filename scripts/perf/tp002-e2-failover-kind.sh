@@ -57,22 +57,8 @@ start_pf() {
 
 resp() {
   local output="$1"; shift
-  RESP_PORT="${PORT}" RESP_OUT="${output}" RESP_ARGS="$(printf '%s\n' "$@")" python3 - <<'PY'
-import os, socket
-from pathlib import Path
-args=os.environ["RESP_ARGS"].splitlines()
-wire=[f"*{len(args)}\r\n".encode()]
-for arg in args:
-    b=arg.encode(); wire += [f"${len(b)}\r\n".encode(), b, b"\r\n"]
-with socket.create_connection(("127.0.0.1", int(os.environ["RESP_PORT"])), timeout=5) as s:
-    s.settimeout(1); s.sendall(b"".join(wire)); chunks=[]
-    while True:
-        try: chunk=s.recv(65536)
-        except TimeoutError: break
-        if not chunk: break
-        chunks.append(chunk)
-Path(os.environ["RESP_OUT"]).write_bytes(b"".join(chunks))
-PY
+  RESP_PORT="${PORT}" RESP_OUT="${output}" RESP_ARGS="$(printf '%s\n' "$@")" \
+    python3 "${ROOT}/scripts/perf/resp_one_frame.py"
 }
 
 resp_claim_counts() {
