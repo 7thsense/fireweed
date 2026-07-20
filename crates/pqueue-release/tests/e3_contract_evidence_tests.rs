@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_release::e3_contract::{
-    E3FenceObservation, build_e3_fence_evidence, verify_e3_contract, write_e3_fence_evidence,
+    E3FenceObservation, build_e3_contract_manifest, build_e3_fence_evidence, verify_e3_contract,
+    write_e3_contract, write_e3_fence_evidence,
 };
 
 static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +64,51 @@ fn accepts_all_profiles_bounds_transaction_authorities_and_fence() {
     let summary = verify_e3_contract(&fixture.manifest(), REVISION).unwrap();
     assert_eq!(summary.entries, 8);
     assert_eq!(summary.transaction_rows, 9);
+    assert_eq!(summary.cost_rows, 8);
+}
+
+#[test]
+fn production_generator_builds_and_semantically_verifies_the_full_matrix() {
+    let fixture = Fixture::new();
+    let generated = fixture.root.join("generated.json");
+    let manifest = build_e3_contract_manifest(
+        REVISION.into(),
+        "e3.jsonl".into(),
+        "tp003.jsonl".into(),
+        "fencing.json".into(),
+    )
+    .unwrap();
+    write_e3_contract(&generated, &manifest).unwrap();
+    let summary = verify_e3_contract(&generated, REVISION).unwrap();
+    assert_eq!(
+        (summary.entries, summary.transaction_rows, summary.cost_rows),
+        (8, 9, 8)
+    );
+}
+
+#[test]
+fn rejects_marker_only_recovery_and_recorder_controls() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path)
+        .unwrap()
+        .replacen(
+            "\"recovery_state_digest_after\":\"fnv1a128:0123456789abcdef0123456789abcdef\"",
+            "\"recovery_state_digest_after\":\"fnv1a128:changed\"",
+            1,
+        )
+        .replacen(
+            "\"bound_1ms_recorder_control_logical_match\":true",
+            "\"bound_1ms_recorder_control_logical_match\":false",
+            1,
+        );
+    fs::write(path, body).unwrap();
+    let errors = fixture.errors();
+    assert!(errors.contains("exact streaming 10M recovery"), "{errors}");
+    assert!(
+        errors.contains("recorder_control_logical_match=true"),
+        "{errors}"
+    );
 }
 
 #[test]

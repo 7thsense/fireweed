@@ -32,6 +32,10 @@ path = "src/bin/pqueue-verify-e2-failover.rs"
 name = "pqueue-verify-e3-contract"
 path = "src/bin/pqueue-verify-e3-contract.rs"
 
+[[bin]]
+name = "pqueue-build-e3-contract"
+path = "src/bin/pqueue-build-e3-contract.rs"
+
 # Cost-model evidence: computes $/billion-commands for object_log_sqlite_projection (from REAL E3 measured
 # segment/object counts + cited S3 prices) vs the postgres_native high-volume baseline, and emits the ADR-001
 # cost-evidence artifact + the E3 cost-model ledger row (bead pqueue-1cd90d1c).
