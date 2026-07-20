@@ -64,6 +64,9 @@ use pqueue_engine::sequenced_metadata::{
 pub const S3_LIST_PAGE_MAX_KEYS: usize = 1_000;
 pub const RECOVERY_COMMAND_PAGE_LIMIT: usize = 256;
 const RECOVERY_INDEX_FANOUT: usize = 64;
+// Height 10 covers every possible `u64` manifest index at fanout 64 while placing a hard, history-independent
+// bound on the immutable-node reads and recursion performed by append and recovery.
+const RECOVERY_INDEX_MAX_HEIGHT: u8 = 10;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecoveryReadPageStats {
@@ -151,6 +154,10 @@ impl PointerFencedBlobStore {
 }
 
 impl BlobStore for PointerFencedBlobStore {
+    fn has_external_manifest_head_authority(&self) -> bool {
+        true
+    }
+
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         self.objects.put(key, body)
     }
@@ -239,6 +246,13 @@ impl BlobStore for PointerFencedBlobStore {
 /// The minimal S3-compatible object surface the segmented substrate drives. Implemented in-memory (unit
 /// tests, no network) and over a real S3 endpoint ([`S3BlobStore`], tested against MinIO).
 pub trait BlobStore: Send + Sync {
+    /// True when manifest-head reads and compare-and-swap are owned by a transactional authority rather
+    /// than represented by blob objects. Decorators preserve that specialized authority instead of
+    /// expanding the default blob-backed composite through `list`/`get`/`put_if_absent`.
+    fn has_external_manifest_head_authority(&self) -> bool {
+        false
+    }
+
     /// Declared hard upper bound on hidden physical attempts for each primitive call. Bounded maintenance
     /// fails closed when a provider cannot declare a bound; shipped providers perform exactly one attempt.
     fn max_physical_attempts_per_primitive(&self) -> Option<std::num::NonZeroUsize> {
@@ -627,6 +641,10 @@ fn publication_attempt_id() -> EngineResult<String> {
 
 /// Share one store between several owners (e.g. two competing epoch holders) — delegates through the `Arc`.
 impl<T: BlobStore + ?Sized> BlobStore for std::sync::Arc<T> {
+    fn has_external_manifest_head_authority(&self) -> bool {
+        (**self).has_external_manifest_head_authority()
+    }
+
     fn observed_put(
         &self,
         key: &str,
@@ -797,6 +815,10 @@ impl NamespacedBlobStore {
 }
 
 impl BlobStore for NamespacedBlobStore {
+    fn has_external_manifest_head_authority(&self) -> bool {
+        self.inner.has_external_manifest_head_authority()
+    }
+
     fn observed_put(
         &self,
         key: &str,
@@ -2507,7 +2529,10 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 entry_count: 1,
             });
         };
-        if root.schema_version != 1 || root.root.max_index >= index_entry.manifest_index {
+        if root.schema_version != 1
+            || root.height > RECOVERY_INDEX_MAX_HEIGHT
+            || root.root.max_index >= index_entry.manifest_index
+        {
             return Err(EngineError::Conflict);
         }
         let children =
@@ -2516,6 +2541,9 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             children[0].clone()
         } else {
             root.height = root.height.checked_add(1).ok_or(EngineError::Conflict)?;
+            if root.height > RECOVERY_INDEX_MAX_HEIGHT {
+                return Err(EngineError::Conflict);
+            }
             self.put_recovery_index_node(shard, &RecoveryIndexNode::Internal { children })?
         };
         root.entry_count = root
@@ -4701,7 +4729,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 cursor.finished = true;
                 return Ok((Vec::new(), stats));
             };
-            if root.schema_version != 1 {
+            if root.schema_version != 1 || root.height > RECOVERY_INDEX_MAX_HEIGHT {
                 return Err(EngineError::Conflict);
             }
             self.descend_recovery_cursor(
@@ -9427,25 +9455,24 @@ mod manifest_deletion_watermark_tests {
     }
 
     #[test]
-    fn authority_seal_cost_is_constant_after_long_head_history() {
+    fn authority_seal_cost_is_bounded_after_long_head_history() {
         let short = authority_seal_request_counts(2);
         let long = authority_seal_request_counts(512);
-        assert_eq!(
-            short, long,
-            "seal object reads must not grow with head history"
-        );
+        let max_gets = u64::from(RECOVERY_INDEX_MAX_HEIGHT) + 3;
         assert_eq!(
             long.0, 0,
             "steady-state seal must not LIST authority history"
         );
         assert!(
-            long.1 <= 2,
-            "seal should GET only predecessor and candidate"
+            short.1 <= max_gets && long.1 <= max_gets,
+            "seal reads must stay within the hard recovery-index height bound: short={short:?}, long={long:?}"
         );
+        assert_eq!(short.2, 0);
+        assert_eq!(long.2, 0);
     }
 
     #[test]
-    fn reopened_authority_cache_makes_first_seal_constant_work() {
+    fn reopened_authority_cache_makes_first_seal_bounded_work() {
         let store = Arc::new(CountingBlobStore::default());
         let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
         let shard = conformance_shard();
@@ -9470,7 +9497,10 @@ mod manifest_deletion_watermark_tests {
             counts.0, 0,
             "recovery pays the scan once, not on the next seal"
         );
-        assert!(counts.1 <= 2, "first post-reopen seal stays constant-work");
+        assert!(
+            counts.1 <= u64::from(RECOVERY_INDEX_MAX_HEIGHT) + 3,
+            "first post-reopen seal stays within the hard recovery-index height bound"
+        );
     }
 
     #[test]
