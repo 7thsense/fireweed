@@ -23,10 +23,11 @@ PQUEUE_S3_TEST_ENDPOINT="http://$IP:9000" scripts/perf/tp002-e3-minio.sh
 ```
 
 The wrapper fixes the release workload at 10,000,000 resident items, 100,000 single-item acknowledgement
-pushes per bound, acknowledgement concurrency 384, load batch 1,000, load concurrency 8, a 1.5 MiB
+pushes per bound, acknowledgement concurrency 384, load batch 1,000, load concurrency 8, an 896 KiB
 recovery-load segment target, and seed 0. Before the load starts, the harness canonically serializes the
-first eight commands and fails closed unless the smallest seven exceed the segment target by at least 10%,
-each command remains below the target, and the full wave's conservative byte-admission charge is at most
+first eight commands and fails closed unless the smallest four exceed the segment target by at least 10%,
+the smallest three remain below it, each command remains below the target, and the full wave's conservative
+byte-admission charge is at most
 half the 16 MiB per-queue cap. These are byte-shape checks, not elapsed-time or host-performance gates.
 
 ## Topology and hardware

@@ -826,6 +826,22 @@ fn require_u64(row: &LedgerRow, key: &str, errors: &mut Vec<E3ContractError>) ->
     value
 }
 
+fn require_f64(row: &LedgerRow, key: &str, errors: &mut Vec<E3ContractError>) -> Option<f64> {
+    let value = row
+        .measurements
+        .values
+        .get(key)
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite());
+    if value.is_none() {
+        errors.push(E3ContractError(format!(
+            "E3 ledger profile {} requires finite numeric {key}",
+            row.backend_profile
+        )));
+    }
+    value
+}
+
 fn require_bounded_resources(row: &LedgerRow, prefix: &str, errors: &mut Vec<E3ContractError>) {
     let configured = require_u64(row, &format!("{prefix}_buffer_configured_bytes"), errors);
     let current = require_u64(row, &format!("{prefix}_buffer_current_bytes"), errors);
@@ -937,9 +953,12 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
         || require_u64(row, "recovery_pending_after", errors) != Some(10_000_000)
         || require_u64(row, "recovery_load_task_count", errors) != Some(8)
         || require_u64(row, "recovery_load_task_limit", errors) != Some(8)
-        || require_u64(row, "recovery_load_segment_target_bytes", errors) != Some(1_572_864)
-        || require_u64(row, "recovery_load_smallest_c_minus_one_raw_bytes", errors)
-            .is_none_or(|raw| raw.saturating_mul(100) < 1_572_864_u64.saturating_mul(110))
+        || require_u64(row, "recovery_load_segment_target_bytes", errors) != Some(917_504)
+        || require_u64(row, "recovery_load_size_seal_commands", errors) != Some(4)
+        || require_u64(row, "recovery_load_smallest_size_seal_raw_bytes", errors)
+            .is_none_or(|raw| raw.saturating_mul(100) < 917_504_u64.saturating_mul(110))
+        || require_u64(row, "recovery_load_smaller_subset_raw_bytes", errors)
+            .is_none_or(|raw| raw >= 917_504)
         || require_u64(row, "recovery_load_full_wave_charged_bytes", errors)
             .zip(require_u64(
                 row,
@@ -967,8 +986,22 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
         || require_u64(row, "recovery_load_group_commit_batch_sum", errors)
             != require_u64(row, "recovery_load_command_count", errors)
         || require_u64(row, "recovery_load_command_count", errors)
-            != command_count.map(|commands| {
-                commands - u64::from(row.backend_profile == "object_log_sqlite_projection")
+            != command_count.and_then(|commands| {
+                commands.checked_sub(u64::from(
+                    row.backend_profile == "object_log_sqlite_projection",
+                ))
+            })
+        || require_u64(row, "recovery_load_segment_bytes", errors).is_none_or(|bytes| bytes == 0)
+        || require_u64(row, "recovery_load_max_commands_per_segment", errors)
+            .zip(require_u64(row, "recovery_load_command_count", errors))
+            .is_none_or(|(max, commands)| max <= 1 || max > commands)
+        || require_f64(row, "recovery_load_mean_commands_per_segment", errors)
+            .zip(require_u64(row, "recovery_load_command_count", errors))
+            .zip(require_u64(row, "recovery_load_segments_sealed", errors))
+            .is_none_or(|((mean, commands), segments)| {
+                segments == 0
+                    || mean <= 1.0
+                    || (mean - commands as f64 / segments as f64).abs() > 0.0015
             })
         || require_u64(row, "recovery_replay_command_page_limit", errors) != Some(256)
         || require_u64(row, "recovery_peak_replay_commands_buffered", errors)

@@ -2508,6 +2508,25 @@ pub mod cost {
         }
     }
 
+    fn value_f64(row: &LedgerRow, key: &str, errors: &mut Vec<String>) -> Option<f64> {
+        match row
+            .measurements
+            .values
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|value| value.is_finite())
+        {
+            Some(value) => Some(value),
+            None => {
+                errors.push(format!(
+                    "profile {} missing finite measured {key}",
+                    row.backend_profile
+                ));
+                None
+            }
+        }
+    }
+
     fn value_true(row: &LedgerRow, key: &str) -> bool {
         row.measurements
             .values
@@ -2679,6 +2698,9 @@ pub mod cost {
             let load_batch_sum =
                 value_u64(row, "recovery_load_group_commit_batch_sum", &mut errors);
             let load_command_count = value_u64(row, "recovery_load_command_count", &mut errors);
+            let load_segment_bytes = value_u64(row, "recovery_load_segment_bytes", &mut errors);
+            let load_mean = value_f64(row, "recovery_load_mean_commands_per_segment", &mut errors);
+            let load_max = value_u64(row, "recovery_load_max_commands_per_segment", &mut errors);
             let load_shape_exact = load_size.zip(load_latency).zip(load_segments).is_some_and(
                 |((size, latency), segments)| {
                     size > latency && latency <= 1 && size.checked_add(latency) == Some(segments)
@@ -2687,8 +2709,20 @@ pub mod cost {
                 && load_rollover == Some(0)
                 && load_batch_sum == load_command_count
                 && load_command_count
-                    == command_count.map(|commands| {
-                        commands - u64::from(profile == "object_log_sqlite_projection")
+                    == command_count.and_then(|commands| {
+                        commands.checked_sub(u64::from(profile == "object_log_sqlite_projection"))
+                    })
+                && load_segment_bytes.is_some_and(|bytes| bytes > 0)
+                && load_max
+                    .zip(load_command_count)
+                    .is_some_and(|(max, commands)| max > 1 && max <= commands)
+                && load_mean
+                    .zip(load_command_count)
+                    .zip(load_segments)
+                    .is_some_and(|((mean, commands), segments)| {
+                        segments > 0
+                            && mean > 1.0
+                            && (mean - commands as f64 / segments as f64).abs() <= 0.0015
                     });
             if !load_shape_exact {
                 errors.push(format!(
@@ -3872,6 +3906,18 @@ pub mod cost {
                     serde_json::json!(if sqlite { 99 } else { 100 }),
                 ),
                 (
+                    "recovery_load_segment_bytes".into(),
+                    serde_json::json!(1_000),
+                ),
+                (
+                    "recovery_load_mean_commands_per_segment".into(),
+                    serde_json::json!(if sqlite { 6.6 } else { 6.667 }),
+                ),
+                (
+                    "recovery_load_max_commands_per_segment".into(),
+                    serde_json::json!(10),
+                ),
+                (
                     "recovery_replay_progress_samples".into(),
                     serde_json::json!(if sqlite { vec![99, 100] } else { vec![0, 100] }),
                 ),
@@ -4176,6 +4222,84 @@ pub mod cost {
                         |error| error.contains("exact command range and replay progress endpoints")
                     )
             );
+        }
+
+        #[test]
+        fn release_cost_inputs_reject_missing_tampered_or_zero_load_batch_measurements() {
+            let sources = || {
+                E3_PROFILES
+                    .iter()
+                    .map(|profile| synthetic_release_source(profile))
+                    .collect::<Vec<_>>()
+            };
+
+            let mut missing = sources();
+            missing[0]
+                .measurements
+                .values
+                .remove("recovery_load_mean_commands_per_segment");
+            assert!(
+                release_cost_inputs(&missing)
+                    .unwrap_err()
+                    .iter()
+                    .any(|error| {
+                        error.contains(
+                            "missing finite measured recovery_load_mean_commands_per_segment",
+                        )
+                    })
+            );
+
+            let mut zero = sources();
+            zero[0]
+                .measurements
+                .values
+                .insert("recovery_load_segment_bytes".into(), serde_json::json!(0));
+            assert!(release_cost_inputs(&zero).unwrap_err().iter().any(|error| {
+                error.contains("lacks exact size-triggered group-commit batching")
+            }));
+
+            let mut tampered = sources();
+            tampered[0].measurements.values.insert(
+                "recovery_load_mean_commands_per_segment".into(),
+                serde_json::json!(99.0),
+            );
+            tampered[1].measurements.values.insert(
+                "recovery_load_max_commands_per_segment".into(),
+                serde_json::json!(1),
+            );
+            let errors = release_cost_inputs(&tampered).unwrap_err();
+            assert_eq!(
+                errors
+                    .iter()
+                    .filter(
+                        |error| error.contains("lacks exact size-triggered group-commit batching")
+                    )
+                    .count(),
+                2
+            );
+        }
+
+        #[test]
+        fn release_cost_inputs_reject_zero_sqlite_command_count_without_panicking() {
+            let mut sources = E3_PROFILES
+                .iter()
+                .map(|profile| synthetic_release_source(profile))
+                .collect::<Vec<_>>();
+            let sqlite = sources
+                .iter_mut()
+                .find(|row| row.backend_profile == "object_log_sqlite_projection")
+                .unwrap();
+            sqlite
+                .measurements
+                .values
+                .insert("recovery_command_count".into(), serde_json::json!(0));
+            sqlite
+                .measurements
+                .values
+                .insert("recovery_load_command_count".into(), serde_json::json!(0));
+            let errors = release_cost_inputs(&sources).unwrap_err();
+            assert!(errors.iter().any(|error| error
+                .contains("lacks exact size-triggered group-commit batching")));
         }
 
         #[test]

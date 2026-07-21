@@ -88,7 +88,8 @@ const RELEASE_ACK_PUSHES: u64 = 100_000;
 const RELEASE_ACK_CONCURRENCY: u64 = 384;
 const RELEASE_LOAD_BATCH: u64 = 1_000;
 const RELEASE_LOAD_CONCURRENCY: u64 = 8;
-const RELEASE_LOAD_SEGMENT_TARGET_BYTES: usize = 1_572_864;
+const RELEASE_LOAD_SEGMENT_TARGET_BYTES: usize = 917_504;
+const RELEASE_LOAD_SIZE_SEAL_COMMANDS: usize = 4;
 const RELEASE_QUEUE_WAITING_BYTES: usize = 16 * 1024 * 1024;
 const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
 
@@ -1497,11 +1498,17 @@ fn assert_release_load_preflight() -> ReleaseLoadPreflight {
         RELEASE_LOAD_BATCH,
         RELEASE_LOAD_CONCURRENCY,
     );
-    let smallest_seven_raw =
-        preflight.smallest_subset_raw_bytes(usize::try_from(RELEASE_LOAD_CONCURRENCY - 1).unwrap());
+    let smallest_size_seal_raw =
+        preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS);
+    let smaller_subset_raw =
+        preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS - 1);
     assert!(
-        smallest_seven_raw * 100 >= RELEASE_LOAD_SEGMENT_TARGET_BYTES * 110,
-        "seven smallest first-wave commands must exceed the target by at least ten percent"
+        smallest_size_seal_raw * 100 >= RELEASE_LOAD_SEGMENT_TARGET_BYTES * 110,
+        "four smallest first-wave commands must exceed the target by at least ten percent"
+    );
+    assert!(
+        smaller_subset_raw < RELEASE_LOAD_SEGMENT_TARGET_BYTES,
+        "three smallest first-wave commands must stay below the target"
     );
     assert!(
         preflight
@@ -1619,12 +1626,13 @@ async fn e3_release_load_shape_calibration() {
     .expect("create bucket");
 
     let preflight = assert_release_load_preflight();
-    let smallest_seven_raw =
-        preflight.smallest_subset_raw_bytes(usize::try_from(RELEASE_LOAD_CONCURRENCY - 1).unwrap());
+    let smallest_size_seal_raw =
+        preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS);
     eprintln!(
-        "E3_LOAD_PREFLIGHT target_bytes={} smallest_seven_raw={} full_wave_raw={} full_wave_charged={} queue_cap={} raw_commands={:?} charged_commands={:?}",
+        "E3_LOAD_PREFLIGHT target_bytes={} size_seal_commands={} smallest_size_seal_raw={} full_wave_raw={} full_wave_charged={} queue_cap={} raw_commands={:?} charged_commands={:?}",
         RELEASE_LOAD_SEGMENT_TARGET_BYTES,
-        smallest_seven_raw,
+        RELEASE_LOAD_SIZE_SEAL_COMMANDS,
+        smallest_size_seal_raw,
         preflight.raw_bytes.iter().sum::<usize>(),
         preflight.full_wave_charged_bytes(),
         RELEASE_QUEUE_WAITING_BYTES,
@@ -1669,7 +1677,7 @@ async fn e3_release_load_shape_calibration() {
         );
     };
     report("old-8mib-1000x8", &old);
-    report("tuned-1.5mib-1000x8", &tuned);
+    report("tuned-896kib-1000x8", &tuned);
     assert!(
         !release_load_batch_shape_met(&old),
         "old underfilled release load shape must be rejected"
@@ -1698,7 +1706,7 @@ where
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let proj = projection_path(&format!("recovery-{profile}"));
     let control_proj = projection_path(&format!("recovery-control-{profile}"));
-    // The target is below seven exact governed load commands with serialized-byte margin. Eight callers
+    // The target is below four exact governed load commands with serialized-byte margin. Eight callers
     // can therefore drive a size seal without depending on host timing or the latency flusher.
     let cfg = SegmentConfig::new(RELEASE_LOAD_SEGMENT_TARGET_BYTES, 10_000).unwrap();
     let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
@@ -2426,10 +2434,20 @@ fn profile_row(
                 serde_json::json!(RELEASE_LOAD_SEGMENT_TARGET_BYTES),
             );
             values.insert(
-                "recovery_load_smallest_c_minus_one_raw_bytes".into(),
-                serde_json::json!(load_preflight.smallest_subset_raw_bytes(
-                    usize::try_from(RELEASE_LOAD_CONCURRENCY - 1).unwrap()
-                )),
+                "recovery_load_size_seal_commands".into(),
+                serde_json::json!(RELEASE_LOAD_SIZE_SEAL_COMMANDS),
+            );
+            values.insert(
+                "recovery_load_smallest_size_seal_raw_bytes".into(),
+                serde_json::json!(
+                    load_preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS)
+                ),
+            );
+            values.insert(
+                "recovery_load_smaller_subset_raw_bytes".into(),
+                serde_json::json!(
+                    load_preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS - 1)
+                ),
             );
             values.insert(
                 "recovery_load_full_wave_charged_bytes".into(),
