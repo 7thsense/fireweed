@@ -6597,7 +6597,6 @@ impl CommitTransitionPort for PostgresRelationalBackend {
                 .map(|d| d.retry_policy.max_attempts)
                 .ok_or(EngineError::NotFound)?;
             let expires_at = request_expires_at(&g.queues, shard, now)?;
-            let epoch = expected_epoch.unwrap_or(0);
             let schema = g.schemas.get(shard).cloned();
             let Inner {
                 client,
@@ -6618,6 +6617,10 @@ impl CommitTransitionPort for PostgresRelationalBackend {
             if expected_epoch.is_some_and(|e| e != cursor_epoch as u64) {
                 return Err(EngineError::EpochFenced);
             }
+            // The cursor row is the durable fencing authority. `expected_epoch=None` means the caller is
+            // not supplying an additional fence; it must never mean epoch zero. Mint continuation IDs from
+            // the same locked epoch stamped on their Push command.
+            let epoch = cursor_epoch as u64;
             if let Some(rid) = &request_id
                 && let Some(stored) =
                     check_commit_idempotency(&mut tx, shard, rid, &fingerprint, ts_nanos(now))?
@@ -11651,6 +11654,48 @@ mod commit_transition_tests {
             .expect("replay record retained");
         assert_eq!(recovery.entries.len(), 1);
         assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    }
+
+    #[test]
+    fn commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (commit_transition_without_expected_epoch_mints_lifecycle_ids_at_locked_cursor_epoch) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = unique_schema("cursor_epoch_ids");
+        let backend = block_on(backend_for_schema(&url, &schema));
+        let claim_ref = block_on(push_and_claim(&backend, 0, 10));
+        let acquired_epoch = block_on(backend.acquire_epoch(&shard())).unwrap();
+        assert_eq!(acquired_epoch, 1);
+
+        let outcomes = block_on(backend.commit_transition(
+            &shard(),
+            CommitTransition {
+                request_id: None,
+                entries: vec![CommitTransitionEntry {
+                    claim_ref,
+                    additional_claim_refs: Vec::new(),
+                    finalize: FinalizeKind::Complete,
+                    side_records: Vec::new(),
+                    lifecycle_items: vec![item(20)],
+                    instance_fence: None,
+                }],
+            },
+            ts(1),
+            None,
+        ))
+        .unwrap();
+        let lifecycle_id = match outcomes.as_slice() {
+            [CommitEntryOutcome::Committed { lifecycle_item_ids }] => lifecycle_item_ids[0],
+            other => panic!("expected one committed transition, got {other:?}"),
+        };
+        assert_eq!(
+            lifecycle_id.epoch(),
+            acquired_epoch,
+            "omitting an optional fence must not fall back to epoch zero after reassignment"
+        );
     }
 
     #[test]
