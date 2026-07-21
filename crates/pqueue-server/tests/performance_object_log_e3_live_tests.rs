@@ -649,8 +649,7 @@ impl E3OrderProbe for SegmentedObjectLogInMemoryBackend {
 
 /// Drive `pushes` single-item pushes through one backend/profile over MinIO at `concurrency`, with the
 /// flusher running, recording each push's ack latency and end-to-end throughput.
-async fn run_ack_arm<B, F>(
-    s3: &S3Env,
+struct AckArmConfig {
     profile: &'static str,
     bound: BoundConfig,
     pushes: u64,
@@ -658,44 +657,49 @@ async fn run_ack_arm<B, F>(
     recorder_enabled: bool,
     paired_start: Arc<tokio::sync::Barrier>,
     paired_workers: Arc<Vec<Arc<tokio::sync::Barrier>>>,
-    open: F,
-) -> AckArm
+}
+
+async fn run_ack_arm<B, F>(s3: &S3Env, config: AckArmConfig, open: F) -> AckArm
 where
     B: E3Backend,
     F: Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
-    let arm = if recorder_enabled {
+    let arm = if config.recorder_enabled {
         "enabled"
     } else {
         "disabled"
     };
     let qid = format!(
-        "e3ack-{profile}-{}-{arm}-{}",
-        bound.label,
+        "e3ack-{}-{}-{arm}-{}",
+        config.profile,
+        config.bound.label,
         std::process::id()
     );
     let def = qdef("e3", &qid);
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-    let proj = projection_path(&format!("ack-{profile}-{}-{arm}", bound.label));
-    let cfg = SegmentConfig::new(bound.target_bytes, bound.max_latency_ms).unwrap();
+    let proj = projection_path(&format!(
+        "ack-{}-{}-{arm}",
+        config.profile, config.bound.label
+    ));
+    let cfg = SegmentConfig::new(config.bound.target_bytes, config.bound.max_latency_ms).unwrap();
 
-    let (store, recorder) = s3.instrumented_store(recorder_enabled);
+    let (store, recorder) = s3.instrumented_store(config.recorder_enabled);
     let backend = Arc::new(open(store, &proj, cfg).expect("open segmented backend over S3"));
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
     let store_baseline = recorder.snapshot();
     // Do not let setup time turn the control into two serial samples: both fully initialized arms enter
     // their identical worker partitions together and remain live concurrently.
-    paired_start.wait().await;
+    config.paired_start.wait().await;
     let started = Instant::now();
 
     let mut handles = Vec::new();
-    for t in 0..concurrency {
-        let start_index = t * pushes / concurrency;
-        let end_index = (t + 1) * pushes / concurrency;
+    for t in 0..config.concurrency {
+        let start_index = t * config.pushes / config.concurrency;
+        let end_index = (t + 1) * config.pushes / config.concurrency;
         let backend = backend.clone();
         let shard = shard.clone();
-        let paired_worker = paired_workers[t as usize].clone();
+        let paired_worker = config.paired_workers[t as usize].clone();
         handles.push(tokio::spawn(async move {
             let mut lat = Vec::with_capacity((end_index - start_index) as usize);
             for i in start_index..end_index {
@@ -714,7 +718,7 @@ where
         }));
     }
     let task_count = handles.len() as u64;
-    let mut latencies = Vec::with_capacity(pushes as usize);
+    let mut latencies = Vec::with_capacity(config.pushes as usize);
     for h in handles {
         latencies.extend(h.await.expect("ack task joined"));
     }
@@ -723,7 +727,7 @@ where
     let c = backend.snapshot_segment_counters();
     let pending = backend.metrics(&shard).await.unwrap().pending;
     let state_fingerprint =
-        fingerprint_ack_state(backend.as_ref(), &shard, pushes, concurrency).await;
+        fingerprint_ack_state(backend.as_ref(), &shard, config.pushes, config.concurrency).await;
     let snapshot = recorder.snapshot();
     let mut resource_bounds = backend.resource_bounds();
     resource_bounds.recorder_in_flight = snapshot.in_flight;
@@ -768,24 +772,28 @@ where
     let (mut enabled, disabled) = tokio::join!(
         run_ack_arm::<B, _>(
             s3,
-            profile,
-            bound,
-            pushes,
-            concurrency,
-            true,
-            paired_start.clone(),
-            paired_workers.clone(),
+            AckArmConfig {
+                profile,
+                bound,
+                pushes,
+                concurrency,
+                recorder_enabled: true,
+                paired_start: paired_start.clone(),
+                paired_workers: paired_workers.clone(),
+            },
             open,
         ),
         run_ack_arm::<B, _>(
             s3,
-            profile,
-            bound,
-            pushes,
-            concurrency,
-            false,
-            paired_start,
-            paired_workers,
+            AckArmConfig {
+                profile,
+                bound,
+                pushes,
+                concurrency,
+                recorder_enabled: false,
+                paired_start,
+                paired_workers,
+            },
             open,
         ),
     );

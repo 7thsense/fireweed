@@ -2012,12 +2012,18 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let emitted = backend.emitted.lock().expect("poisoned");
-                if emitted.contains(&later) {
-                    assert!(!emitted.contains(&blocked));
+                let later_advanced = {
+                    let emitted = backend.emitted.lock().expect("poisoned");
+                    if emitted.contains(&later) {
+                        assert!(!emitted.contains(&blocked));
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if later_advanced {
                     break;
                 }
-                drop(emitted);
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
@@ -2074,12 +2080,18 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let emitted = backend.emitted.lock().expect("poisoned");
-                if emitted.contains(&later) {
-                    assert!(!emitted.contains(&blocked));
+                let later_advanced = {
+                    let emitted = backend.emitted.lock().expect("poisoned");
+                    if emitted.contains(&later) {
+                        assert!(!emitted.contains(&blocked));
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if later_advanced {
                     break;
                 }
-                drop(emitted);
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
