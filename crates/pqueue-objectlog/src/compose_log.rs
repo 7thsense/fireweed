@@ -409,12 +409,13 @@ struct ObjectLogMaintenance {
 
 impl ObjectLogMaintenance {
     fn fenced_outcome(expected_epoch: u64) -> DetachedRetentionOutcome {
-        let mut summary = pqueue_engine::MaintenanceSummary::default();
-        summary.fenced = true;
-        summary.stopped_by = Some(pqueue_engine::MaintenanceStopReason::EpochFenced);
         DetachedRetentionOutcome {
             expected_epoch,
-            summary,
+            summary: pqueue_engine::MaintenanceSummary {
+                fenced: true,
+                stopped_by: Some(pqueue_engine::MaintenanceStopReason::EpochFenced),
+                ..Default::default()
+            },
             watermark: DetachedTrimWatermark::Clear,
         }
     }
