@@ -937,6 +937,39 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
         || require_u64(row, "recovery_pending_after", errors) != Some(10_000_000)
         || require_u64(row, "recovery_load_task_count", errors) != Some(8)
         || require_u64(row, "recovery_load_task_limit", errors) != Some(8)
+        || require_u64(row, "recovery_load_segment_target_bytes", errors) != Some(1_572_864)
+        || require_u64(row, "recovery_load_smallest_c_minus_one_raw_bytes", errors)
+            .is_none_or(|raw| raw.saturating_mul(100) < 1_572_864_u64.saturating_mul(110))
+        || require_u64(row, "recovery_load_full_wave_charged_bytes", errors)
+            .zip(require_u64(
+                row,
+                "recovery_load_queue_waiting_bytes",
+                errors,
+            ))
+            .is_none_or(|(charged, cap)| charged.saturating_mul(2) > cap)
+        || require_u64(row, "recovery_load_size_triggered_seals", errors)
+            .zip(require_u64(
+                row,
+                "recovery_load_latency_triggered_seals",
+                errors,
+            ))
+            .is_none_or(|(size, latency)| size == 0 || latency > 1 || size <= latency)
+        || require_u64(row, "recovery_load_forced_seals", errors) != Some(0)
+        || require_u64(row, "recovery_load_rollover_seals", errors) != Some(0)
+        || require_u64(row, "recovery_load_size_triggered_seals", errors)
+            .zip(require_u64(
+                row,
+                "recovery_load_latency_triggered_seals",
+                errors,
+            ))
+            .zip(require_u64(row, "recovery_load_segments_sealed", errors))
+            .is_none_or(|((size, latency), total)| size.checked_add(latency) != Some(total))
+        || require_u64(row, "recovery_load_group_commit_batch_sum", errors)
+            != require_u64(row, "recovery_load_command_count", errors)
+        || require_u64(row, "recovery_load_command_count", errors)
+            != command_count.map(|commands| {
+                commands - u64::from(row.backend_profile == "object_log_sqlite_projection")
+            })
         || require_u64(row, "recovery_replay_command_page_limit", errors) != Some(256)
         || require_u64(row, "recovery_peak_replay_commands_buffered", errors)
             .is_none_or(|peak| peak == 0 || peak > 256)

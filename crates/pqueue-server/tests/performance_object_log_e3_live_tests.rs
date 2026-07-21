@@ -62,10 +62,14 @@ use pqueue_core::{
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
-use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey};
+use pqueue_engine::{
+    CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore, EngineError, ProjectionRead,
+    PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, build_push_items,
+};
 use pqueue_objectlog::object_store_observability::{
     BlobBackendKind, BlobMetricsRecorder, BlobPhysicalTotals, InstrumentedBlobStore,
 };
+use pqueue_objectlog::prepare_serialized_commands;
 use pqueue_objectlog::segmented::{
     BlobStore, FaultCutPoint, PointerFencedBlobStore, S3_LIST_PAGE_MAX_KEYS, S3BlobStore,
     SegmentConfig, SegmentCounters, SegmentedObjectLog,
@@ -84,6 +88,8 @@ const RELEASE_ACK_PUSHES: u64 = 100_000;
 const RELEASE_ACK_CONCURRENCY: u64 = 384;
 const RELEASE_LOAD_BATCH: u64 = 1_000;
 const RELEASE_LOAD_CONCURRENCY: u64 = 8;
+const RELEASE_LOAD_SEGMENT_TARGET_BYTES: usize = 1_572_864;
+const RELEASE_QUEUE_WAITING_BYTES: usize = 16 * 1024 * 1024;
 const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
 
 struct FailNextManifestMirrorStore {
@@ -367,6 +373,13 @@ fn ack_spec(worker: u64, id: u64) -> PushSpec {
 
 fn ts() -> UtcTimestamp {
     UtcTimestamp::new(1_700_000_000, 0).unwrap()
+}
+
+fn wall_ts() -> UtcTimestamp {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after Unix epoch");
+    UtcTimestamp::new(now.as_secs() as i64, now.subsec_nanos()).unwrap()
 }
 
 fn pct(latencies_ms: &mut [f64], p: f64) -> f64 {
@@ -814,6 +827,10 @@ fn aggregate_ack_arms(arms: Vec<AckArm>) -> AckArm {
         counters
             .group_commit_batches
             .extend(arm.counters.group_commit_batches);
+        counters.size_triggered_seals += arm.counters.size_triggered_seals;
+        counters.latency_triggered_seals += arm.counters.latency_triggered_seals;
+        counters.forced_seals += arm.counters.forced_seals;
+        counters.rollover_seals += arm.counters.rollover_seals;
         counters.object_count += arm.counters.object_count;
         counters.total_bytes += arm.counters.total_bytes;
         counters.segment_bytes += arm.counters.segment_bytes;
@@ -1028,6 +1045,16 @@ struct RecoveryResult {
     resident: u64,
     load_batch: u64,
     load_task_count: u64,
+    load_command_count: u64,
+    load_segments_sealed: u64,
+    load_size_triggered_seals: u64,
+    load_latency_triggered_seals: u64,
+    load_forced_seals: u64,
+    load_rollover_seals: u64,
+    load_segment_bytes: u64,
+    load_mean_commands_per_segment: f64,
+    load_max_commands_per_segment: usize,
+    load_group_commit_batch_sum: u64,
     command_count: u64,
     total_commands: u64,
     start_seq: u64,
@@ -1374,7 +1401,7 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
 async fn push_with_retry<B: PushPort>(backend: &B, shard: &QueueKey, items: Vec<PushSpec>) {
     let mut attempt = 0u64;
     loop {
-        match backend.push(shard, items.clone(), ts(), None).await {
+        match backend.push(shard, items.clone(), wall_ts(), None).await {
             Ok(_) => return,
             Err(EngineError::Conflict) if attempt < 16 => {
                 attempt += 1;
@@ -1397,6 +1424,262 @@ fn concurrent_load_command_count(resident: u64, load_batch: u64, concurrency: u6
         .sum()
 }
 
+#[derive(Debug)]
+struct ReleaseLoadPreflight {
+    raw_bytes: Vec<usize>,
+    charged_bytes: Vec<usize>,
+}
+
+impl ReleaseLoadPreflight {
+    fn smallest_subset_raw_bytes(&self, count: usize) -> usize {
+        let mut raw = self.raw_bytes.clone();
+        raw.sort_unstable();
+        raw.into_iter().take(count).sum()
+    }
+
+    fn full_wave_charged_bytes(&self) -> usize {
+        self.charged_bytes.iter().sum()
+    }
+}
+
+/// Serialize the exact first wave emitted by the governed loader. This preflight makes the relationship
+/// between command shape, size sealing, and byte admission a release invariant instead of a host-speed
+/// assumption.
+fn release_load_preflight(
+    resident: u64,
+    load_batch: u64,
+    load_concurrency: u64,
+) -> ReleaseLoadPreflight {
+    let share = resident.div_ceil(load_concurrency);
+    let mut raw_bytes = Vec::new();
+    let mut charged_bytes = Vec::new();
+    for worker in 0..load_concurrency {
+        let start = worker * share;
+        let end = (start + load_batch).min(resident);
+        let specs = (start..end)
+            .map(|id| {
+                let key = format!("i{id}");
+                keyed_spec(&key, Some(ClientItemKey::new(key.clone()).unwrap()))
+            })
+            .collect();
+        let (items, ids) = build_push_items(
+            specs,
+            0,
+            0,
+            u32::try_from(worker * load_batch).expect("release counter fits u32"),
+            1_000_000,
+        );
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new(format!("seginmem-0-{worker}")),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: ids,
+            command: QueueCommand::Push(PushCommand { items }),
+            checksum: CommandChecksum(0),
+            created_at: ts(),
+        };
+        let (serialized, charged) =
+            prepare_serialized_commands(vec![envelope], RELEASE_QUEUE_WAITING_BYTES)
+                .expect("serialize release load command");
+        raw_bytes.push(serialized[0].record_len());
+        charged_bytes.push(charged);
+    }
+    ReleaseLoadPreflight {
+        raw_bytes,
+        charged_bytes,
+    }
+}
+
+fn assert_release_load_preflight() -> ReleaseLoadPreflight {
+    let preflight = release_load_preflight(
+        RELEASE_RESIDENT,
+        RELEASE_LOAD_BATCH,
+        RELEASE_LOAD_CONCURRENCY,
+    );
+    let smallest_seven_raw =
+        preflight.smallest_subset_raw_bytes(usize::try_from(RELEASE_LOAD_CONCURRENCY - 1).unwrap());
+    assert!(
+        smallest_seven_raw * 100 >= RELEASE_LOAD_SEGMENT_TARGET_BYTES * 110,
+        "seven smallest first-wave commands must exceed the target by at least ten percent"
+    );
+    assert!(
+        preflight
+            .raw_bytes
+            .iter()
+            .all(|bytes| *bytes < RELEASE_LOAD_SEGMENT_TARGET_BYTES),
+        "one command must not size-seal alone"
+    );
+    assert!(
+        preflight.full_wave_charged_bytes() <= RELEASE_QUEUE_WAITING_BYTES / 2,
+        "full first wave must consume at most half the queue byte-admission cap"
+    );
+    preflight
+}
+
+fn release_load_batch_shape_met(counters: &SegmentCounters) -> bool {
+    counters.size_triggered_seals > 0
+        && counters.latency_triggered_seals <= 1
+        && counters.forced_seals == 0
+        && counters.rollover_seals == 0
+        && counters.max_batch_size() > 1
+        && counters.group_commit_batches.iter().sum::<usize>() as u64 == counters.commands_committed
+}
+
+async fn run_release_load_shape_calibration(
+    s3: &S3Env,
+    label: &str,
+    resident: u64,
+    load_batch: u64,
+    load_concurrency: u64,
+    target_bytes: usize,
+    max_latency_ms: u64,
+) -> SegmentCounters {
+    let qid = format!("e3-load-calibration-{label}-{}", std::process::id());
+    let def = qdef("e3", &qid);
+    let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    let projection = projection_path(&format!("load-calibration-{label}"));
+    // Pass/fail is based only on explicit seal-trigger and batch counters, never on elapsed time. The tuned
+    // arm uses the governed 10 s cap; the one-wave negative control uses a shorter cap only to expose the
+    // otherwise unreachable 8 MiB target without repeating the same blocked wave.
+    let cfg = SegmentConfig::new(target_bytes, max_latency_ms).unwrap();
+    let (store, _) = s3.instrumented_store(true);
+    let backend = Arc::new(
+        SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, cfg)
+            .expect("open calibration backend"),
+    );
+    backend.create_queue(def).await.expect("create queue");
+    let flusher = backend.spawn_background_flusher();
+    let share = resident.div_ceil(load_concurrency);
+    let mut handles = Vec::new();
+    for worker in 0..load_concurrency {
+        let start = worker * share;
+        if start >= resident {
+            break;
+        }
+        let end = (start + share).min(resident);
+        let backend = Arc::clone(&backend);
+        let shard = shard.clone();
+        handles.push(tokio::spawn(async move {
+            let mut commands = 0;
+            let mut id = start;
+            while id < end {
+                let count = (end - id).min(load_batch);
+                let items = (0..count)
+                    .map(|offset| {
+                        let key = format!("i{}", id + offset);
+                        keyed_spec(&key, Some(ClientItemKey::new(key.clone()).unwrap()))
+                    })
+                    .collect();
+                push_with_retry(backend.as_ref(), &shard, items).await;
+                id += count;
+                commands += 1;
+            }
+            commands
+        }));
+    }
+    let mut commands = 0;
+    for handle in handles {
+        commands += handle.await.expect("calibration loader joined");
+    }
+    assert_eq!(
+        commands,
+        concurrent_load_command_count(resident, load_batch, load_concurrency)
+    );
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    while backend.metrics(&shard).await.unwrap().pending < resident && Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    flusher.abort();
+    assert_eq!(backend.metrics(&shard).await.unwrap().pending, resident);
+    let counters = backend.segment_counters();
+    let _ = std::fs::remove_file(projection);
+    counters
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires live MinIO release-shape batching calibration"]
+async fn e3_release_load_shape_calibration() {
+    let s3 = S3Env {
+        endpoint: std::env::var("PQUEUE_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
+        bucket: std::env::var("PQUEUE_S3_TEST_BUCKET")
+            .unwrap_or_else(|_| "pqueue-e3-load-calibration".into()),
+        access: std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into()),
+    };
+    S3BlobStore::new(
+        &s3.endpoint,
+        &s3.bucket,
+        &s3.access,
+        &s3.secret,
+        "us-east-1",
+    )
+    .expect("build S3 client")
+    .create_bucket()
+    .expect("create bucket");
+
+    let preflight = assert_release_load_preflight();
+    let smallest_seven_raw =
+        preflight.smallest_subset_raw_bytes(usize::try_from(RELEASE_LOAD_CONCURRENCY - 1).unwrap());
+    eprintln!(
+        "E3_LOAD_PREFLIGHT target_bytes={} smallest_seven_raw={} full_wave_raw={} full_wave_charged={} queue_cap={} raw_commands={:?} charged_commands={:?}",
+        RELEASE_LOAD_SEGMENT_TARGET_BYTES,
+        smallest_seven_raw,
+        preflight.raw_bytes.iter().sum::<usize>(),
+        preflight.full_wave_charged_bytes(),
+        RELEASE_QUEUE_WAITING_BYTES,
+        preflight.raw_bytes,
+        preflight.charged_bytes,
+    );
+
+    let old = run_release_load_shape_calibration(
+        &s3,
+        "old",
+        8_000,
+        RELEASE_LOAD_BATCH,
+        RELEASE_LOAD_CONCURRENCY,
+        8_388_608,
+        500,
+    )
+    .await;
+    let tuned = run_release_load_shape_calibration(
+        &s3,
+        "tuned",
+        64_000,
+        RELEASE_LOAD_BATCH,
+        RELEASE_LOAD_CONCURRENCY,
+        RELEASE_LOAD_SEGMENT_TARGET_BYTES,
+        10_000,
+    )
+    .await;
+    let report = |name: &str, counters: &SegmentCounters| {
+        eprintln!(
+            "E3_LOAD_CALIBRATION name={name} commands={} segments={} size={} latency={} forced={} rollover={} mean_batch={:.3} max_batch={} segment_bytes={} bytes_per_command={:.3} shape_met={}",
+            counters.commands_committed,
+            counters.segments_sealed,
+            counters.size_triggered_seals,
+            counters.latency_triggered_seals,
+            counters.forced_seals,
+            counters.rollover_seals,
+            counters.mean_batch_size(),
+            counters.max_batch_size(),
+            counters.segment_bytes,
+            counters.segment_bytes as f64 / counters.commands_committed.max(1) as f64,
+            release_load_batch_shape_met(counters),
+        );
+    };
+    report("old-8mib-1000x8", &old);
+    report("tuned-1.5mib-1000x8", &tuned);
+    assert!(
+        !release_load_batch_shape_met(&old),
+        "old underfilled release load shape must be rejected"
+    );
+    assert!(
+        release_load_batch_shape_met(&tuned),
+        "tuned release load shape must be dominated by size-triggered seals"
+    );
+}
+
 /// Load `resident` items over MinIO, then reopen and measure the projection-specific rebuild contract.
 async fn run_recovery<B, F>(
     s3: &S3Env,
@@ -1415,12 +1698,9 @@ where
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let proj = projection_path(&format!("recovery-{profile}"));
     let control_proj = projection_path(&format!("recovery-control-{profile}"));
-    // A large byte target + a generous latency cap so the bulk load seals FEW, LARGE segments: concurrent
-    // loaders fill the 8 MiB buffer fast (size-triggered seals), and the 10 s cap means even a load stall
-    // produces only a handful of latency-sealed segments. This keeps the per-queue manifest small (the seal
-    // cost amortizes over a big group-commit batch — the whole point of the segmented substrate) rather than
-    // one tiny segment per push.
-    let cfg = SegmentConfig::new(8_388_608, 10_000).unwrap();
+    // The target is below seven exact governed load commands with serialized-byte margin. Eight callers
+    // can therefore drive a size seal without depending on host timing or the latency flusher.
+    let cfg = SegmentConfig::new(RELEASE_LOAD_SEGMENT_TARGET_BYTES, 10_000).unwrap();
     let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
     let (store, recorder) = s3.instrumented_store(true);
     let verification_chunk_items = env_u64("PQUEUE_E3_VERIFY_CHUNK_ITEMS", 512).clamp(1, 512);
@@ -1430,13 +1710,7 @@ where
     } else {
         resident
     };
-    let (
-        command_count,
-        load_task_count,
-        pre_crash_committed_commands,
-        pending_loaded,
-        baseline_state,
-    ) = {
+    let (command_count, load_task_count, load_counters, pending_loaded, baseline_state) = {
         let backend = Arc::new(open(store.clone(), &proj, cfg).expect("open backend for load"));
         backend
             .create_queue(def.clone())
@@ -1496,6 +1770,7 @@ where
         }
         flusher.abort();
         let pending = backend.metrics(&shard).await.unwrap().pending;
+        let load_counters = backend.snapshot_segment_counters();
         let baseline_state = if requires_snapshot {
             copy_sqlite_projection(&proj, &control_proj);
             let hook = Arc::new(CommitBeforeApplyCrash {
@@ -1529,11 +1804,10 @@ where
                     .await,
             )
         };
-        let total_commands = backend.snapshot_segment_counters().commands_committed;
         (
             command_count + u64::from(requires_snapshot),
             load_task_count,
-            total_commands,
+            load_counters,
             pending,
             baseline_state,
         )
@@ -1591,7 +1865,7 @@ where
         .checked_add(tail_replayed)
         .expect("recovery command range must not overflow");
     assert_eq!(
-        pre_crash_committed_commands + u64::from(requires_snapshot),
+        load_counters.commands_committed + u64::from(requires_snapshot),
         total_commands,
         "production recovery range must include the deliberately committed crash tail exactly once"
     );
@@ -1658,7 +1932,8 @@ where
         && pending_after == resident
         && state_exact
         && replay_progress_monotonic
-        && resources_met;
+        && resources_met
+        && release_load_batch_shape_met(&load_counters);
 
     let _ = std::fs::remove_file(&proj);
     let _ = std::fs::remove_file(&control_proj);
@@ -1667,6 +1942,17 @@ where
         resident,
         load_batch,
         load_task_count,
+        load_command_count: load_counters.commands_committed,
+        load_segments_sealed: load_counters.segments_sealed,
+        load_size_triggered_seals: load_counters.size_triggered_seals,
+        load_latency_triggered_seals: load_counters.latency_triggered_seals,
+        load_forced_seals: load_counters.forced_seals,
+        load_rollover_seals: load_counters.rollover_seals,
+        load_segment_bytes: load_counters.segment_bytes,
+        load_mean_commands_per_segment: round3(load_counters.mean_batch_size()),
+        load_max_commands_per_segment: load_counters.max_batch_size(),
+        load_group_commit_batch_sum: load_counters.group_commit_batches.iter().sum::<usize>()
+            as u64,
         command_count,
         total_commands,
         start_seq,
@@ -1867,6 +2153,21 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                         recovery.tail_replayed,
                         recovery.total_commands,
                         recovery.command_count
+                    ));
+                }
+                if recovery.load_size_triggered_seals <= recovery.load_latency_triggered_seals
+                    || recovery.load_latency_triggered_seals > 1
+                    || recovery.load_forced_seals != 0
+                    || recovery.load_rollover_seals != 0
+                    || recovery
+                        .load_size_triggered_seals
+                        .checked_add(recovery.load_latency_triggered_seals)
+                        != Some(recovery.load_segments_sealed)
+                    || recovery.load_group_commit_batch_sum != recovery.load_command_count
+                {
+                    errors.push(format!(
+                        "profile {} recovery load lacks exact size-triggered group-commit batching",
+                        run.backend_profile
                     ));
                 }
                 if !recovery
@@ -2110,6 +2411,69 @@ fn profile_row(
             values.insert(
                 "recovery_load_task_count".into(),
                 serde_json::json!(recovery.load_task_count),
+            );
+            values.insert(
+                "recovery_load_command_count".into(),
+                serde_json::json!(recovery.load_command_count),
+            );
+            let load_preflight = release_load_preflight(
+                RELEASE_RESIDENT,
+                RELEASE_LOAD_BATCH,
+                RELEASE_LOAD_CONCURRENCY,
+            );
+            values.insert(
+                "recovery_load_segment_target_bytes".into(),
+                serde_json::json!(RELEASE_LOAD_SEGMENT_TARGET_BYTES),
+            );
+            values.insert(
+                "recovery_load_smallest_c_minus_one_raw_bytes".into(),
+                serde_json::json!(load_preflight.smallest_subset_raw_bytes(
+                    usize::try_from(RELEASE_LOAD_CONCURRENCY - 1).unwrap()
+                )),
+            );
+            values.insert(
+                "recovery_load_full_wave_charged_bytes".into(),
+                serde_json::json!(load_preflight.full_wave_charged_bytes()),
+            );
+            values.insert(
+                "recovery_load_queue_waiting_bytes".into(),
+                serde_json::json!(RELEASE_QUEUE_WAITING_BYTES),
+            );
+            values.insert(
+                "recovery_load_segments_sealed".into(),
+                serde_json::json!(recovery.load_segments_sealed),
+            );
+            values.insert(
+                "recovery_load_size_triggered_seals".into(),
+                serde_json::json!(recovery.load_size_triggered_seals),
+            );
+            values.insert(
+                "recovery_load_latency_triggered_seals".into(),
+                serde_json::json!(recovery.load_latency_triggered_seals),
+            );
+            values.insert(
+                "recovery_load_forced_seals".into(),
+                serde_json::json!(recovery.load_forced_seals),
+            );
+            values.insert(
+                "recovery_load_rollover_seals".into(),
+                serde_json::json!(recovery.load_rollover_seals),
+            );
+            values.insert(
+                "recovery_load_segment_bytes".into(),
+                serde_json::json!(recovery.load_segment_bytes),
+            );
+            values.insert(
+                "recovery_load_mean_commands_per_segment".into(),
+                serde_json::json!(recovery.load_mean_commands_per_segment),
+            );
+            values.insert(
+                "recovery_load_max_commands_per_segment".into(),
+                serde_json::json!(recovery.load_max_commands_per_segment),
+            );
+            values.insert(
+                "recovery_load_group_commit_batch_sum".into(),
+                serde_json::json!(recovery.load_group_commit_batch_sum),
             );
             values.insert(
                 "recovery_load_task_limit".into(),
@@ -2448,6 +2812,7 @@ async fn performance_object_log_e3_live_tests() {
         assert_eq!(ack_pushes, RELEASE_ACK_PUSHES);
         assert_eq!(ack_concurrency, RELEASE_ACK_CONCURRENCY);
         assert_eq!(load_concurrency, RELEASE_LOAD_CONCURRENCY);
+        let _ = assert_release_load_preflight();
         assert_eq!(
             env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000),
             1_000_000
@@ -2721,6 +3086,16 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
         resident: 10_000_000,
         load_batch: 1_000,
         load_task_count: RELEASE_LOAD_CONCURRENCY,
+        load_command_count: if requires_snapshot { 99 } else { 100 },
+        load_segments_sealed: 10,
+        load_size_triggered_seals: 9,
+        load_latency_triggered_seals: 1,
+        load_forced_seals: 0,
+        load_rollover_seals: 0,
+        load_segment_bytes: 80_000_000,
+        load_mean_commands_per_segment: 10.0,
+        load_max_commands_per_segment: 16,
+        load_group_commit_batch_sum: if requires_snapshot { 99 } else { 100 },
         command_count: 100,
         total_commands: 100,
         start_seq: if requires_snapshot { 10 } else { 0 },
@@ -2933,6 +3308,20 @@ fn e3_matrix_rejects_inexact_recovery_command_range() {
         errors
             .iter()
             .any(|error| error.contains("recovery command range is not exact")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_latency_driven_or_inexact_recovery_load_batching() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let recovery = run.recovery.as_mut().unwrap();
+    recovery.load_latency_triggered_seals = 5;
+    recovery.load_group_commit_batch_sum -= 1;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors.iter().any(|error| error
+            .contains("recovery load lacks exact size-triggered group-commit batching")),
         "{errors:?}"
     );
 }

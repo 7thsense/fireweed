@@ -23,7 +23,11 @@ PQUEUE_S3_TEST_ENDPOINT="http://$IP:9000" scripts/perf/tp002-e3-minio.sh
 ```
 
 The wrapper fixes the release workload at 10,000,000 resident items, 100,000 single-item acknowledgement
-pushes per bound, acknowledgement concurrency 384, load batch 1,000, load concurrency 8, and seed 0.
+pushes per bound, acknowledgement concurrency 384, load batch 1,000, load concurrency 8, a 1.5 MiB
+recovery-load segment target, and seed 0. Before the load starts, the harness canonically serializes the
+first eight commands and fails closed unless the smallest seven exceed the segment target by at least 10%,
+each command remains below the target, and the full wave's conservative byte-admission charge is at most
+half the 16 MiB per-queue cap. These are byte-shape checks, not elapsed-time or host-performance gates.
 
 ## Topology and hardware
 
@@ -64,7 +68,11 @@ genesis replay. Verification reads at most 512 items per batch, uses eight load
 tasks, replays at most 256 commands per production page, caps object-list pages
 at 1,000 keys, and bounds concurrent object-store requests independently of
 resident cardinality. Replay progress and peak work/page counts come from the
-production recovery loops. Recovery wall time is capacity evidence only.
+production recovery loops. Recovery wall time is capacity evidence only. The
+bulk load must be dominated by size-triggered seals, may use at most one latency
+seal for the final partial segment, may not use forced or rollover seals, and
+must reconcile the sum of all group-commit batch sizes exactly to committed
+commands.
 The in-memory profile loads 10,000 commands. The SQLite profile loads 9,999,999
 items in 10,000 commands, then commits one deliberately unacknowledged tail
 command, so its governed recovery command count is 10,001. Concurrent loader

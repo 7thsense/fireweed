@@ -2671,6 +2671,30 @@ pub mod cost {
                     "profile {profile} recovery cost source lacks an exact command range and replay progress endpoints"
                 ));
             }
+            let load_segments = value_u64(row, "recovery_load_segments_sealed", &mut errors);
+            let load_size = value_u64(row, "recovery_load_size_triggered_seals", &mut errors);
+            let load_latency = value_u64(row, "recovery_load_latency_triggered_seals", &mut errors);
+            let load_forced = value_u64(row, "recovery_load_forced_seals", &mut errors);
+            let load_rollover = value_u64(row, "recovery_load_rollover_seals", &mut errors);
+            let load_batch_sum =
+                value_u64(row, "recovery_load_group_commit_batch_sum", &mut errors);
+            let load_command_count = value_u64(row, "recovery_load_command_count", &mut errors);
+            let load_shape_exact = load_size.zip(load_latency).zip(load_segments).is_some_and(
+                |((size, latency), segments)| {
+                    size > latency && latency <= 1 && size.checked_add(latency) == Some(segments)
+                },
+            ) && load_forced == Some(0)
+                && load_rollover == Some(0)
+                && load_batch_sum == load_command_count
+                && load_command_count
+                    == command_count.map(|commands| {
+                        commands - u64::from(profile == "object_log_sqlite_projection")
+                    });
+            if !load_shape_exact {
+                errors.push(format!(
+                    "profile {profile} recovery cost source lacks exact size-triggered group-commit batching"
+                ));
+            }
 
             for bound in E3_BOUNDS {
                 let prefix = format!("bound_{bound}");
@@ -3825,6 +3849,28 @@ pub mod cost {
                 ),
                 ("recovery_total_commands".into(), serde_json::json!(100)),
                 ("recovery_command_count".into(), serde_json::json!(100)),
+                (
+                    "recovery_load_segments_sealed".into(),
+                    serde_json::json!(15),
+                ),
+                (
+                    "recovery_load_size_triggered_seals".into(),
+                    serde_json::json!(14),
+                ),
+                (
+                    "recovery_load_latency_triggered_seals".into(),
+                    serde_json::json!(1),
+                ),
+                ("recovery_load_forced_seals".into(), serde_json::json!(0)),
+                ("recovery_load_rollover_seals".into(), serde_json::json!(0)),
+                (
+                    "recovery_load_group_commit_batch_sum".into(),
+                    serde_json::json!(if sqlite { 99 } else { 100 }),
+                ),
+                (
+                    "recovery_load_command_count".into(),
+                    serde_json::json!(if sqlite { 99 } else { 100 }),
+                ),
                 (
                     "recovery_replay_progress_samples".into(),
                     serde_json::json!(if sqlite { vec![99, 100] } else { vec![0, 100] }),

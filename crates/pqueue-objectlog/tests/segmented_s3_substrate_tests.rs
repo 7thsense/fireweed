@@ -530,6 +530,10 @@ fn ack_is_withheld_until_segment_and_manifest_commit() {
     assert_eq!(c.segments_sealed, 1);
     assert_eq!(c.commands_committed, 3);
     assert_eq!(c.group_commit_batches, vec![3]);
+    assert_eq!(c.forced_seals, 1);
+    assert_eq!(c.size_triggered_seals, 0);
+    assert_eq!(c.latency_triggered_seals, 0);
+    assert_eq!(c.rollover_seals, 0);
     // One segment object + one manifest object PUT.
     assert_eq!(c.objects_put, 2);
 }
@@ -562,6 +566,8 @@ fn size_trigger_and_latency_trigger_both_seal_two_configurations() {
     );
     assert_eq!(a.counters().segments_sealed, 1);
     assert_eq!(a.counters().group_commit_batches, vec![5]);
+    assert_eq!(a.counters().size_triggered_seals, 1);
+    assert_eq!(a.counters().latency_triggered_seals, 0);
 
     // --- Config B: latency cap (huge target → only the age-based flush seals). ---
     let latency_cfg = SegmentConfig::new(10_000_000, 50).unwrap();
@@ -583,6 +589,12 @@ fn size_trigger_and_latency_trigger_both_seal_two_configurations() {
     );
     assert_eq!(b.counters().segments_sealed, 1);
     assert_eq!(b.counters().group_commit_batches, vec![4]);
+    assert_eq!(b.counters().size_triggered_seals, 0);
+    assert_eq!(b.counters().latency_triggered_seals, 1);
+    assert_eq!(
+        b.counters().group_commit_batches.iter().sum::<usize>() as u64,
+        b.counters().commands_committed
+    );
 }
 
 #[test]
