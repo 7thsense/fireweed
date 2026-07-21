@@ -92,7 +92,7 @@ struct FailNextManifestMirrorStore {
 
 impl BlobStore for FailNextManifestMirrorStore {
     fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
-        if key.contains("/manifest_head/")
+        if key.contains("/authority_head/")
             && self.fail_next_manifest_mirror.swap(false, Ordering::SeqCst)
         {
             return Err(EngineError::Storage(
@@ -124,6 +124,20 @@ impl BlobStore for FailNextManifestMirrorStore {
     fn backend_kind(&self) -> BlobBackendKind {
         self.inner.backend_kind()
     }
+}
+
+#[test]
+fn fence_failure_injector_targets_the_post_cas_authority_mirror() {
+    let store = FailNextManifestMirrorStore {
+        inner: Arc::new(pqueue_objectlog::segmented::InMemoryBlobStore::new()),
+        fail_next_manifest_mirror: AtomicBool::new(true),
+    };
+    let result = store.put(
+        "t/tenant/q/queue/authority_head/00000000000000000001.json",
+        b"mirror",
+    );
+    assert!(matches!(result, Err(EngineError::Storage(_))));
+    assert!(!store.fail_next_manifest_mirror.load(Ordering::SeqCst));
 }
 
 fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {
