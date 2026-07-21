@@ -34,6 +34,22 @@ pub(crate) struct OwnedBlockingExecutor {
 }
 
 impl OwnedBlockingExecutor {
+    pub(crate) fn new() -> EngineResult<Self> {
+        Ok(Self {
+            pool: Arc::new(WorkerPool::new(
+                DEFAULT_WORKERS,
+                DEFAULT_PENDING_PER_WORKER,
+            )?),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_bounds(workers: usize, pending: usize) -> EngineResult<Self> {
+        Ok(Self {
+            pool: Arc::new(WorkerPool::new(workers, pending)?),
+        })
+    }
+
     pub(crate) fn run<T, F>(
         &self,
         operation: F,
@@ -43,6 +59,21 @@ impl OwnedBlockingExecutor {
         F: FnOnce() -> EngineResult<T> + Send + 'static,
     {
         self.pool.submit(0, operation)
+    }
+
+    /// Run an operation on this executor's queue-affine, bounded owned worker
+    /// set.
+    pub(crate) fn run_for_queue<T, F>(
+        &self,
+        queue: &QueueKey,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
+    {
+        let worker = queue_worker_partition(queue, self.pool.worker_count());
+        self.pool.submit(worker, operation)
     }
 }
 
