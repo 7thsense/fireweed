@@ -7,6 +7,7 @@ const DENSITY_KIND_HARNESS: &str = include_str!("../../../scripts/perf/tp002-e2-
 const DENSITY_LOADGEN: &str = include_str!("../../pqueue-loadgen/src/main.rs");
 const RESP_SERVER: &str = include_str!("../../pqueue-resp/src/lib.rs");
 const SERVICE_MAIN: &str = include_str!("../../pqueue-server/src/bin/pqueue-service.rs");
+const SERVER_LIB: &str = include_str!("../../pqueue-server/src/lib.rs");
 const OBJECT_LOG_SQLITE_ADAPTER: &str =
     include_str!("../../pqueue-server/src/object_log_sqlite.rs");
 const POSTGRES_WHOLE_OPERATION_ADAPTER: &str =
@@ -41,6 +42,16 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
         .expect("recovery maintenance dispatch ends");
     assert!(recovery_maintenance.contains("pqueue_resp::try_spawn_governed"));
     assert!(!recovery_maintenance.contains("tokio::spawn"));
+    let control_plane_execute = SERVER_LIB
+        .split("async fn execute<T, F>")
+        .nth(1)
+        .expect("control-plane executor exists")
+        .split("impl ControlPlaneLifecycle")
+        .next()
+        .expect("control-plane executor ends");
+    assert!(control_plane_execute.contains("pqueue_resp::try_spawn_governed"));
+    assert!(control_plane_execute.contains("resource: \"runtime tasks\""));
+    assert!(!control_plane_execute.contains("pqueue_resp::spawn_governed"));
     assert!(SERVICE_MAIN.contains("set_max_runtime_tasks(64)"));
     let dispatch = POSTGRES_WHOLE_OPERATION_ADAPTER
         .split("fn dispatch")

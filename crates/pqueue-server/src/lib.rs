@@ -1106,7 +1106,7 @@ impl ControlPlaneExecutor {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         // Admission transfers the operation into an owned task. Caller cancellation cannot discard an
         // accepted lease mutation; shutdown rejects queued work and drains every operation that started.
-        pqueue_resp::spawn_governed(async move {
+        let admitted = pqueue_resp::try_spawn_governed(async move {
             let running = match state.running.clone().acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => {
@@ -1139,6 +1139,11 @@ impl ControlPlaneExecutor {
             drop(outstanding);
             let _ = sender.send(result);
         });
+        if admitted.is_none() {
+            return Err(EngineError::Backpressure {
+                resource: "runtime tasks",
+            });
+        }
         receiver
             .await
             .map_err(|_| EngineError::Storage("control-plane operation responder dropped".into()))?
