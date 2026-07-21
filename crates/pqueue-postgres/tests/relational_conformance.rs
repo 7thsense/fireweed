@@ -22,8 +22,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use pqueue_core::{EntitySchemaDocument, RequestId};
 use pqueue_engine::{
-    ClaimPort, CommandPosition, ControlPlaneStore, EngineError, ProjectionRead, ProjectionStore,
-    PushPort, RecoveryReadPort,
+    ClaimPort, CommandPosition, ControlPlaneStore, EngineError, HistoricalProjectionRead,
+    ProjectionRead, PushPort, RecoveryReadPort,
 };
 use pqueue_postgres::{PostgresRelationalBackend, composed_postgres_relational_in_schema};
 use serde_json::json;
@@ -367,25 +367,23 @@ fn postgres_relational_recovery_high_water() {
                     .await
                     .unwrap();
                 assert_eq!(
-                    backend.with_projection(|projection| {
-                        projection
-                            .recovery_high_water(&pqueue_conformance::shard())
-                            .unwrap()
-                    }),
+                    backend
+                        .current_position(&pqueue_conformance::shard())
+                        .await
+                        .unwrap(),
                     // CreateQueue is the atomic seq-0 command; push is seq 1 and claim is seq 2.
-                    Some(CommandPosition::new(pqueue_conformance::shard(), 0, 2))
+                    CommandPosition::new(pqueue_conformance::shard(), 0, 2)
                 );
             });
 
             let reopened = composed_postgres_relational_in_schema(&url, &schema)
                 .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
             assert_eq!(
-                reopened.with_projection(|projection| {
-                    projection
-                        .recovery_high_water(&pqueue_conformance::shard())
-                        .unwrap()
-                }),
-                Some(CommandPosition::new(pqueue_conformance::shard(), 0, 2)),
+                futures::executor::block_on(
+                    reopened.current_position(&pqueue_conformance::shard()),
+                )
+                .unwrap(),
+                CommandPosition::new(pqueue_conformance::shard(), 0, 2),
                 "the relational projection must reopen at the last applied position"
             );
         }

@@ -70,6 +70,7 @@ pub use env_config::ConfigError;
 mod postgres_native;
 pub use postgres_native::{
     PostgresBlockingLifecycle, PostgresNativeBackend, PostgresWholeOperationAdapter,
+    fixed_postgres_relational_pool,
 };
 
 /// The durable command-LOG axis (ADR-012): which substrate holds the command log + the co-located
@@ -2638,28 +2639,28 @@ pub async fn start(config: Config) -> EngineResult<Server> {
                 url: projection_url,
             },
         ) => {
-            // The composed postgres-log + postgres-projection backend (`ComposedBackend<PostgresLog,
-            // PostgresRelational, InProcessControlPlane>`): the durable postgres command log paired with a
-            // SEPARATE postgres connection driving the relational projection (distinct table sets, no
-            // collision — see `pqueue_postgres::compose_log`'s `log_entries`/`queue_defs` vs
-            // `pqueue_postgres::relational`'s `pqueue_items`/`queues`), recovery-on-open. Same off-reactor
-            // discipline: connect BOTH axes and recover inside `spawn_blocking`.
+            // TD-002: the selectable postgres/postgres profile is the unified relational backend. Every
+            // command envelope and projection mutation commits in the same database transaction. A fixed
+            // pool gives stable queue affinity: one hot queue is serialized on one member, while unrelated
+            // queues make progress on other members. Distinct log/projection URLs cannot provide this
+            // atomic boundary and are rejected rather than silently selecting the legacy split store.
+            if url != projection_url {
+                return Err(EngineError::Invalid(
+                    "postgres/postgres atomic mode requires identical log and projection URLs",
+                ));
+            }
             let backend = tokio::task::spawn_blocking(move || {
                 let mut connect_config = pqueue_postgres::PostgresConnectConfig::new(url);
                 if let Some(provider) = credentials {
                     connect_config = connect_config.with_credential_provider(provider);
                 }
-                let log = pqueue_postgres::PostgresLog::connect_with_config(connect_config)?;
-                let projection = pqueue_postgres::PostgresRelational::connect(&projection_url)?;
-                ComposedBackend::new(log, projection, InProcessControlPlane::new())
-                    .recover()
-                    .map(|b| b.with_node_id(node_id))
+                fixed_postgres_relational_pool(connect_config, None, postgres_pool_size, node_id)
             })
             .await
             .map_err(|e| {
                 EngineError::Storage(format!("postgres/postgres connect task join failed: {e}"))
             })??;
-            let (backend, lifecycle) = blocking_backend(Arc::new(backend));
+            let lifecycle = backend.lifecycle();
             run_owned_with_blocking_lifecycle(
                 backend,
                 lifecycle,
@@ -3726,5 +3727,21 @@ mod byte_admission_wiring_tests {
         assert_eq!(b_backend.current_epoch(&queue).await.unwrap(), 2);
         a_flusher.abort();
         b_flusher.abort();
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn postgres_postgres_factory_selects_fixed_unified_atomic_pool() {
+        let source = include_str!("lib.rs");
+        let arm = source
+            .split("// TD-002: the selectable postgres/postgres profile")
+            .nth(1)
+            .expect("postgres/postgres factory arm")
+            .split("(log, projection) =>")
+            .next()
+            .expect("factory arm boundary");
+        assert!(arm.contains("fixed_postgres_relational_pool"));
+        assert!(!arm.contains("PostgresLog::connect_with_config"));
+        assert!(!arm.contains("ComposedBackend::new"));
     }
 }

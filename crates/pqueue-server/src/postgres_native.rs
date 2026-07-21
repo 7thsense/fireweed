@@ -21,8 +21,18 @@ use std::sync::{Arc, Weak};
 use bytes::Bytes;
 use futures::StreamExt;
 use pqueue_core::{
-    ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueueDefinition, QueueId,
-    RequestId, TenantId, UtcTimestamp,
+    BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey,
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, GroupKey, GroupedAggregateRequest,
+    GroupedAggregateResponse, ItemId, LeaseToken, Metadata, MetricsByQueryRequest, PriorityValue,
+    QueryCapabilityFlags, QueueDefinition, QueueId, RangeScanRequest, RangeScanResponse, RequestId,
+    TenantId, UtcTimestamp,
+};
+use pqueue_engine::{
+    Backend, ClaimByQueryContext, CommitCapabilities, CommitEntryOutcome, CommitRecovery,
+    CommitTransition, CommitTransitionPort, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
+    HistoricalProjectionRead, HotProjectionQueryPort, IndexHit, IndexQueryPort, PayloadUpdate,
+    RawCommitOutcome, RawCommitRequest, ReclaimPort, RecoveryReadPort, ReschedulePort,
+    ScheduleUpdate, SetGatesCommand, SetGatesPort, UpdateFieldsPort,
 };
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
@@ -31,7 +41,7 @@ use pqueue_engine::{
     PushSpec, QueueKey, QueueMetrics, ReassignLeasePort, ReclaimDriver, RenewLeasePort,
     TerminalEmissionMetrics, TickReport, UpsertOutcome, UpsertPort,
 };
-use pqueue_postgres::PostgresBackend;
+use pqueue_postgres::{PostgresBackend, PostgresConnectConfig, PostgresRelationalBackend};
 use pqueue_resp::RespBackend;
 
 const DEFAULT_BLOCKING_OPERATIONS: usize = 8;
@@ -167,10 +177,33 @@ enum ExecutionMode {
     NativeAsync,
 }
 
-/// Back-compat alias: the blocking wrapper around the monolithic [`PostgresBackend`]. The composition root
-/// now wraps the composed postgres backend ([`pqueue_postgres::ComposedPostgresBackend`]) in the same
-/// generic [`PostgresWholeOperationAdapter`].
+/// Back-compat alias for callers that explicitly wrap the monolithic [`PostgresBackend`]. Production's
+/// postgres/postgres profile uses [`fixed_postgres_relational_pool`] and the unified relational backend.
 pub type PostgresNativeBackend = PostgresWholeOperationAdapter<PostgresBackend>;
+
+/// Shared production construction seam for the fixed unified PostgreSQL relational pool.
+pub fn fixed_postgres_relational_pool(
+    config: PostgresConnectConfig,
+    schema: Option<&str>,
+    pool_size: usize,
+    node_id: u8,
+) -> EngineResult<Arc<PostgresWholeOperationAdapter<PostgresRelationalBackend>>> {
+    if pool_size == 0 {
+        return Err(EngineError::Invalid("postgres pool size must be nonzero"));
+    }
+    let workers = (0..pool_size)
+        .map(|_| {
+            match schema {
+                Some(schema) => {
+                    PostgresRelationalBackend::connect_with_config_in_schema(config.clone(), schema)
+                }
+                None => PostgresRelationalBackend::connect_with_config(config.clone()),
+            }
+            .map(|backend| Arc::new(backend.with_node_id(node_id)))
+        })
+        .collect::<EngineResult<Vec<_>>>()?;
+    Ok(Arc::new(PostgresWholeOperationAdapter::from_arcs(workers)))
+}
 
 impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
     /// Wrap an already-constructed backend. The backend's `connect`/`with_node_id` must run on a non-reactor
@@ -375,6 +408,227 @@ impl<B: Send + Sync + 'static> Drop for PostgresWholeOperationAdapter<B> {
         if let Some(inner) = self.inner.take() {
             std::thread::spawn(move || drop(inner));
         }
+    }
+}
+
+impl<B> Backend for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + Backend,
+{
+    fn durability_class(&self) -> DurabilityClass {
+        self.inner.as_ref().expect("backend present")[0].durability_class()
+    }
+
+    fn supports_gates(&self) -> bool {
+        self.inner.as_ref().expect("backend present")[0].supports_gates()
+    }
+
+    fn commit_capabilities(&self) -> CommitCapabilities {
+        self.inner.as_ref().expect("backend present")[0].commit_capabilities()
+    }
+
+    fn commit_raw(
+        &self,
+        request: RawCommitRequest,
+    ) -> impl Future<Output = EngineResult<RawCommitOutcome>> + Send {
+        let queue = request.shard().clone();
+        let inner = self.arc_for(&queue);
+        self.dispatch(
+            queue,
+            move || async move { inner.commit_raw(request).await },
+        )
+    }
+}
+
+impl<B> UpdateFieldsPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + UpdateFieldsPort,
+{
+    fn update_fields(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        field_ops: BTreeMap<String, Option<Bytes>>,
+        payload: PayloadUpdate,
+        entity: Option<serde_json::Value>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl Future<Output = EngineResult<u64>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner
+                .update_fields(
+                    &shard,
+                    item_id,
+                    field_ops,
+                    payload,
+                    entity,
+                    expected_item_version,
+                    now,
+                    expected_epoch,
+                )
+                .await
+        })
+    }
+}
+
+impl<B> CommitTransitionPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + CommitTransitionPort,
+{
+    fn commit_transition(
+        &self,
+        shard: &QueueKey,
+        transition: CommitTransition,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl Future<Output = EngineResult<Vec<CommitEntryOutcome>>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner
+                .commit_transition(&shard, transition, now, expected_epoch)
+                .await
+        })
+    }
+}
+
+impl<B> RecoveryReadPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + RecoveryReadPort,
+{
+    fn explain_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: RequestId,
+    ) -> impl Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.explain_commit(&shard, request_id).await
+        })
+    }
+
+    fn side_record(
+        &self,
+        shard: &QueueKey,
+        key: &[u8],
+    ) -> impl Future<Output = EngineResult<Option<Bytes>>> + Send {
+        let shard = shard.clone();
+        let key = key.to_vec();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.side_record(&shard, &key).await
+        })
+    }
+}
+
+impl<B> ReclaimPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + ReclaimPort,
+{
+    fn reclaim_expired(
+        &self,
+        shard: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl Future<Output = EngineResult<Vec<ItemId>>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner
+                .reclaim_expired(&shard, limit, now, expected_epoch)
+                .await
+        })
+    }
+}
+
+impl<B> ReschedulePort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + ReschedulePort,
+{
+    fn reschedule(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        set_priority: ScheduleUpdate<PriorityValue>,
+        set_not_before: ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl Future<Output = EngineResult<u64>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner
+                .reschedule(
+                    &shard,
+                    item_id,
+                    set_priority,
+                    set_not_before,
+                    expected_item_version,
+                    now,
+                    expected_epoch,
+                )
+                .await
+        })
+    }
+}
+
+impl<B> SetGatesPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + SetGatesPort,
+{
+    fn set_gates(
+        &self,
+        shard: &QueueKey,
+        command: SetGatesCommand,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl Future<Output = EngineResult<()>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.set_gates(&shard, command, now, expected_epoch).await
+        })
+    }
+}
+
+impl<B> IndexQueryPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + IndexQueryPort,
+{
+    fn index_get_unique(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl Future<Output = EngineResult<Option<IndexHit>>> + Send {
+        let shard = shard.clone();
+        let index = index.to_owned();
+        let key = key.to_vec();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.index_get_unique(&shard, &index, &key).await
+        })
+    }
+
+    fn index_lookup(
+        &self,
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
+    ) -> impl Future<Output = EngineResult<Vec<IndexHit>>> + Send {
+        let shard = shard.clone();
+        let index = index.to_owned();
+        let key = key.to_vec();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.index_lookup(&shard, &index, &key).await
+        })
     }
 }
 
@@ -842,6 +1096,142 @@ impl<B: RespBackend> ProjectionRead for PostgresWholeOperationAdapter<B> {
                     emission_cursor.as_ref(),
                 )
                 .await
+        })
+    }
+}
+
+impl<B> DiscoveryPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + DiscoveryPort,
+{
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> impl Future<Output = EngineResult<Vec<pqueue_engine::ActiveScope>>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.discover_active_scopes(&shard, granularity, now).await
+        })
+    }
+}
+
+impl<B> HotProjectionQueryPort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + HotProjectionQueryPort,
+{
+    fn hot_projection_capabilities(&self, shard: &QueueKey) -> QueryCapabilityFlags {
+        self.backend_for_queue(shard)
+            .hot_projection_capabilities(shard)
+    }
+
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> impl Future<Output = EngineResult<RangeScanResponse>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.range_scan(&shard, request).await
+        })
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> impl Future<Output = EngineResult<GroupedAggregateResponse>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.grouped_aggregate(&shard, request).await
+        })
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> impl Future<Output = EngineResult<QueueMetrics>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.metrics_by_query(&shard, request).await
+        })
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> impl Future<Output = EngineResult<DeclaredBucketSegmentResponse>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.declared_bucket_segment(&shard, request).await
+        })
+    }
+
+    fn bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> impl Future<Output = EngineResult<BoundedMutationResponse>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.bounded_mutation(&shard, request).await
+        })
+    }
+
+    fn claim_by_query(
+        &self,
+        shard: &QueueKey,
+        request: ClaimByQueryRequest,
+        context: ClaimByQueryContext,
+    ) -> impl Future<Output = EngineResult<Claimed>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.claim_by_query(&shard, request, context).await
+        })
+    }
+}
+
+impl<B> HistoricalProjectionRead for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + HistoricalProjectionRead,
+{
+    type AsOfProjection = B::AsOfProjection;
+
+    fn current_position(
+        &self,
+        shard: &QueueKey,
+    ) -> impl Future<Output = EngineResult<CommandPosition>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.current_position(&shard).await
+        })
+    }
+
+    fn read_as_of<T, F>(
+        &self,
+        shard: &QueueKey,
+        position: CommandPosition,
+        query: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send
+    where
+        T: Send + 'static,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send + 'static,
+    {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner.read_as_of(&shard, position, query).await
         })
     }
 }

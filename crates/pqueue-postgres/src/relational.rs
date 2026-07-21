@@ -81,8 +81,8 @@ use pqueue_engine::{
     validate_purge_force,
 };
 use pqueue_engine::{
-    AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogLineageIdentity,
-    LogRead, LogStore, ProjectionSnapshot, ProjectionStore, RichClaimSelection, SnapshotRef,
+    AsOfProjectionStore, CommandPage, LogLineageIdentity, LogRead, LogStore, ProjectionSnapshot,
+    ProjectionStore, RichClaimSelection, SnapshotRef,
 };
 use sha2::{Digest, Sha256};
 
@@ -182,39 +182,6 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     next_item_seq BIGINT NOT NULL,
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
-);
-CREATE TABLE IF NOT EXISTS pqueue_commands (
-    tenant TEXT NOT NULL,
-    queue TEXT NOT NULL,
-    assignment_epoch BIGINT NOT NULL,
-    seq BIGINT NOT NULL,
-    envelope BYTEA NOT NULL,
-    envelope_sha256 BYTEA NOT NULL,
-    created_at BIGINT NOT NULL,
-    PRIMARY KEY (tenant, queue, seq)
-);
-CREATE INDEX IF NOT EXISTS pqueue_commands_read_idx
-    ON pqueue_commands (tenant, queue, seq);
-CREATE TABLE IF NOT EXISTS pqueue_command_baselines (
-    tenant TEXT NOT NULL,
-    queue TEXT NOT NULL,
-    generation TEXT NOT NULL,
-    schema_version BIGINT NOT NULL,
-    assignment_epoch BIGINT NOT NULL,
-    next_seq BIGINT NOT NULL,
-    row_count BIGINT NOT NULL,
-    snapshot_digest BYTEA NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (tenant, queue)
-);
-CREATE TABLE IF NOT EXISTS pqueue_command_baseline_rows (
-    tenant TEXT NOT NULL,
-    queue TEXT NOT NULL,
-    generation TEXT NOT NULL,
-    relation_name TEXT NOT NULL,
-    row_ordinal BIGINT NOT NULL,
-    payload JSONB NOT NULL,
-    PRIMARY KEY (tenant, queue, generation, relation_name, row_ordinal)
 );
 CREATE TABLE IF NOT EXISTS pqueue_id_high_water (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL,
@@ -354,6 +321,7 @@ CREATE TABLE IF NOT EXISTS pqueue_commands (
     queue TEXT NOT NULL,
     assignment_epoch BIGINT NOT NULL,
     seq BIGINT NOT NULL,
+    command_id TEXT NOT NULL,
     envelope BYTEA NOT NULL,
     envelope_sha256 BYTEA NOT NULL,
     created_at BIGINT NOT NULL,
@@ -361,6 +329,8 @@ CREATE TABLE IF NOT EXISTS pqueue_commands (
 );
 CREATE INDEX IF NOT EXISTS pqueue_commands_read_idx
     ON pqueue_commands (tenant, queue, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS pqueue_commands_command_id_idx
+    ON pqueue_commands (tenant, queue, command_id);
 CREATE TABLE IF NOT EXISTS pqueue_command_baselines (
     tenant TEXT NOT NULL,
     queue TEXT NOT NULL,
@@ -381,6 +351,20 @@ CREATE TABLE IF NOT EXISTS pqueue_command_baseline_rows (
     row_ordinal BIGINT NOT NULL,
     payload JSONB NOT NULL,
     PRIMARY KEY (tenant, queue, generation, relation_name, row_ordinal)
+);
+CREATE TABLE IF NOT EXISTS pqueue_command_baseline_migrations (
+    tenant TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    expected_epoch BIGINT NOT NULL,
+    expected_next_seq BIGINT NOT NULL,
+    relation_index BIGINT NOT NULL DEFAULT 0,
+    last_ctid TEXT NOT NULL DEFAULT '(0,0)',
+    rows_copied BIGINT NOT NULL DEFAULT 0,
+    hash_a NUMERIC NOT NULL DEFAULT 0,
+    hash_b NUMERIC NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (tenant, queue)
 );
 "#;
 
@@ -1577,6 +1561,7 @@ fn persist_command_envelopes(
         let mut queues = Vec::with_capacity(chunk_end - chunk_start);
         let mut epochs = Vec::with_capacity(chunk_end - chunk_start);
         let mut sequences = Vec::with_capacity(chunk_end - chunk_start);
+        let mut command_ids = Vec::with_capacity(chunk_end - chunk_start);
         let mut envelopes = Vec::with_capacity(chunk_end - chunk_start);
         let mut checksums = Vec::with_capacity(chunk_end - chunk_start);
         let mut created_at = Vec::with_capacity(chunk_end - chunk_start);
@@ -1592,20 +1577,22 @@ fn persist_command_envelopes(
             queues.push(queue);
             epochs.push(position.backend_epoch as i64);
             sequences.push(position.sequence as i64);
-            checksums.push(Sha256::digest(&encoded).to_vec());
+            command_ids.push(envelope.command_id.0.clone());
+            checksums.push(command_storage_checksum(position, &encoded));
             envelopes.push(encoded);
             created_at.push(ts_nanos(envelope.created_at));
         }
         st(tx.execute(
             "INSERT INTO pqueue_commands \
-             (tenant,queue,assignment_epoch,seq,envelope,envelope_sha256,created_at) \
+             (tenant,queue,assignment_epoch,seq,command_id,envelope,envelope_sha256,created_at) \
              SELECT * FROM UNNEST($1::text[],$2::text[],$3::bigint[],$4::bigint[],\
-                                  $5::bytea[],$6::bytea[],$7::bigint[])",
+                                  $5::text[],$6::bytea[],$7::bytea[],$8::bigint[])",
             &[
                 &tenants,
                 &queues,
                 &epochs,
                 &sequences,
+                &command_ids,
                 &envelopes,
                 &checksums,
                 &created_at,
@@ -1613,6 +1600,20 @@ fn persist_command_envelopes(
         ))?;
     }
     Ok(())
+}
+
+fn command_storage_checksum(position: &CommandPosition, encoded: &[u8]) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    let tenant = position.queue.tenant_id.as_str().as_bytes();
+    let queue = position.queue.queue_id.as_str().as_bytes();
+    digest.update((tenant.len() as u64).to_be_bytes());
+    digest.update(tenant);
+    digest.update((queue.len() as u64).to_be_bytes());
+    digest.update(queue);
+    digest.update(position.backend_epoch.to_be_bytes());
+    digest.update(position.sequence.to_be_bytes());
+    digest.update(encoded);
+    digest.finalize().to_vec()
 }
 
 fn direct_command_envelope(
@@ -1705,8 +1706,8 @@ struct Inner {
 }
 
 impl Inner {
-    /// Reload the queue-def cache from the durable `queues` table. The item projection itself is already
-    /// durable in `pqueue_items` as a rebuildable cache - nothing to replay.
+    /// Reload the queue-def cache from the durable `queues` table. Command-log integrity and any explicit
+    /// snapshot-tail rebuild are handled by the owning backend before this cache is served.
     ///
     /// NOTE: item-id restart-safety is handled by `restore_counters` (it seeds `QueueCounters` past the
     /// highest durable id, decoding `(epoch, counter)` straight from the packed id — ADR-009).
@@ -4467,6 +4468,30 @@ impl PostgresRelationalBackend {
         Self::from_client(client)
     }
 
+    /// Connect with the production credential-provider configuration.
+    pub fn connect_with_config(config: PostgresConnectConfig) -> EngineResult<Self> {
+        let client = connect(config)?;
+        Self::from_client(client)
+    }
+
+    /// Schema-isolated production-config variant used by the shared fixed-pool constructor and live proofs.
+    pub fn connect_with_config_in_schema(
+        config: PostgresConnectConfig,
+        schema: &str,
+    ) -> EngineResult<Self> {
+        if !schema
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return Err(EngineError::Invalid("schema name must be [A-Za-z0-9_]"));
+        }
+        let mut client = connect(config)?;
+        st(client.batch_execute(&format!(
+            "CREATE SCHEMA IF NOT EXISTS {schema}; SET search_path TO {schema}"
+        )))?;
+        Self::from_client(client)
+    }
+
     /// Connect isolated in a dedicated `schema` (the postgres analogue of a fresh sqlite file).
     /// Reconnecting with the SAME `schema` reopens the same rebuildable projection cache — used by the
     /// conformance + relational-reconnect suites.
@@ -4520,6 +4545,7 @@ impl PostgresRelationalBackend {
                    AND to_regclass('pqueue_commands') IS NOT NULL \
                    AND to_regclass('pqueue_command_baselines') IS NOT NULL \
                    AND to_regclass('pqueue_commands_read_idx') IS NOT NULL \
+                   AND to_regclass('pqueue_commands_command_id_idx') IS NOT NULL \
                    AND to_regprocedure('pqueue_apply_metrics_delta()') IS NOT NULL \
                    AND to_regprocedure('pqueue_index_components(bytea)') IS NOT NULL \
                    AND to_regprocedure('pqueue_sync_index_components()') IS NOT NULL \
@@ -4571,6 +4597,7 @@ impl PostgresRelationalBackend {
         }
         if fresh {
             st(client.batch_execute(RELATIONAL_SCHEMA))?;
+            st(client.batch_execute(COMMAND_LOG_MIGRATION))?;
             st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
             st(client.execute(
                 "INSERT INTO pqueue_metrics_migration_state(migration_name,status) \
@@ -4791,7 +4818,15 @@ impl PostgresRelationalBackend {
                 let sequence: i64 = row.get(1);
                 let encoded: Vec<u8> = row.get(2);
                 let checksum: Vec<u8> = row.get(3);
-                if sequence != next || epoch < 0 || Sha256::digest(&encoded).as_slice() != checksum
+                let position = CommandPosition::new(
+                    shard.clone(),
+                    epoch.max(0) as u64,
+                    sequence.max(0) as u64,
+                );
+                if sequence != next
+                    || epoch < 0
+                    || sequence < 0
+                    || command_storage_checksum(&position, &encoded) != checksum
                 {
                     return Err(EngineError::DurableDataCorrupt {
                         stage: DurableIntegrityStage::Position,
@@ -4876,66 +4911,145 @@ fn apply_concurrent_migrations(client: &mut Client) -> EngineResult<()> {
 }
 
 fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
-    let mut tx = st(client.transaction())?;
-    st(tx.batch_execute(COMMAND_LOG_MIGRATION))?;
-    st(tx.batch_execute("LOCK TABLE relational_cursor IN EXCLUSIVE MODE"))?;
-    let queues = st(tx.query(
-        "SELECT tenant,queue,next_seq,assignment_epoch FROM relational_cursor ORDER BY tenant,queue",
+    // Explicit operator migration. Writers must be quiesced; each committed copy transaction is bounded
+    // to 1024 rows and resumable. Finalization locks the cursor and refuses to activate a partial/drifted
+    // generation. Ordinary startup never creates or blesses a baseline.
+    st(client.batch_execute(COMMAND_LOG_MIGRATION))?;
+    let has_orphan_history: bool = st(client.query_one(
+        "SELECT EXISTS(SELECT 1 FROM pqueue_commands p \
+         LEFT JOIN pqueue_command_baselines b USING(tenant,queue) WHERE b.tenant IS NULL)",
+        &[],
+    ))?
+    .get(0);
+    if has_orphan_history {
+        return Err(EngineError::Storage(
+            "command history exists without a snapshot baseline".into(),
+        ));
+    }
+    st(client.execute(
+        "INSERT INTO pqueue_command_baseline_migrations \
+           (tenant,queue,generation,expected_epoch,expected_next_seq) \
+         SELECT c.tenant,c.queue,'baseline-'||c.assignment_epoch||'-'||c.next_seq, \
+                c.assignment_epoch,c.next_seq FROM relational_cursor c \
+         LEFT JOIN pqueue_command_baselines b USING(tenant,queue) \
+         WHERE b.tenant IS NULL ON CONFLICT(tenant,queue) DO NOTHING",
         &[],
     ))?;
-    for row in queues {
-        let tenant: String = row.get(0);
-        let queue: String = row.get(1);
-        let next_seq: i64 = row.get(2);
-        let assignment_epoch: i64 = row.get(3);
-        let generation = format!("baseline-{assignment_epoch}-{next_seq}");
-        let has_baseline: bool = st(tx.query_one(
-            "SELECT EXISTS(SELECT 1 FROM pqueue_command_baselines \
-             WHERE tenant=$1 AND queue=$2)",
-            &[&tenant, &queue],
-        ))?
-        .get(0);
-        if has_baseline {
+
+    loop {
+        let state = st(client.query_opt(
+            "SELECT tenant,queue,generation,expected_epoch,expected_next_seq,relation_index, \
+                    last_ctid,rows_copied,hash_a::text,hash_b::text \
+             FROM pqueue_command_baseline_migrations ORDER BY tenant,queue LIMIT 1",
+            &[],
+        ))?;
+        let Some(state) = state else {
+            return Ok(());
+        };
+        let tenant: String = state.get(0);
+        let queue: String = state.get(1);
+        let generation: String = state.get(2);
+        let expected_epoch: i64 = state.get(3);
+        let expected_next_seq: i64 = state.get(4);
+        let relation_index: i64 = state.get(5);
+        let last_ctid: String = state.get(6);
+        let rows_copied: i64 = state.get(7);
+        let hash_a: String = state.get(8);
+        let hash_b: String = state.get(9);
+
+        if let Some(&(relation, tenant_column, queue_column)) =
+            BASELINE_RELATIONS.get(relation_index as usize)
+        {
+            let mut tx = st(client.transaction())?;
+            let sql = format!(
+                "WITH batch AS MATERIALIZED ( \
+                   SELECT ctid,to_jsonb(source) AS payload FROM {relation} source \
+                   WHERE {tenant_column}=$1 AND {queue_column}=$2 AND ctid>$5::text::tid \
+                   ORDER BY ctid LIMIT 1024 \
+                 ), inserted AS ( \
+                   INSERT INTO pqueue_command_baseline_rows \
+                     (tenant,queue,generation,relation_name,row_ordinal,payload) \
+                   SELECT $1,$2,$3,$4,$6+row_number() OVER (ORDER BY ctid),payload FROM batch \
+                   RETURNING relation_name,payload \
+                 ), stats AS ( \
+                   SELECT COUNT(*)::bigint AS copied, \
+                          (array_agg(ctid ORDER BY ctid DESC))[1]::text AS last_ctid, \
+                          (SELECT COUNT(*) FROM inserted) AS inserted_count, \
+                          (SELECT COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,0)::numeric),0) \
+                             FROM inserted) AS hash_a, \
+                          (SELECT COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,2147483647)::numeric),0) \
+                             FROM inserted) AS hash_b FROM batch \
+                 ) \
+                 UPDATE pqueue_command_baseline_migrations m SET \
+                   relation_index=CASE WHEN stats.copied=0 THEN m.relation_index+1 ELSE m.relation_index END, \
+                   last_ctid=CASE WHEN stats.copied=0 THEN '(0,0)' ELSE stats.last_ctid END, \
+                   rows_copied=m.rows_copied+stats.inserted_count, \
+                   hash_a=m.hash_a+stats.hash_a,hash_b=m.hash_b+stats.hash_b,updated_at=clock_timestamp() \
+                 FROM stats WHERE m.tenant=$1 AND m.queue=$2 RETURNING stats.copied"
+            );
+            st(tx.query_one(
+                &sql,
+                &[
+                    &tenant,
+                    &queue,
+                    &generation,
+                    &relation,
+                    &last_ctid,
+                    &rows_copied,
+                ],
+            ))?;
+            st(tx.commit())?;
             continue;
         }
-        let command_count: i64 = st(tx.query_one(
-            "SELECT COUNT(*) FROM pqueue_commands WHERE tenant=$1 AND queue=$2",
+
+        let mut tx = st(client.transaction())?;
+        let cursor = st(tx.query_one(
+            "SELECT assignment_epoch,next_seq FROM relational_cursor \
+             WHERE tenant=$1 AND queue=$2 FOR UPDATE",
             &[&tenant, &queue],
+        ))?;
+        let actual_epoch: i64 = cursor.get(0);
+        let actual_next_seq: i64 = cursor.get(1);
+        let metadata_stable: bool = st(tx.query_one(
+            "WITH live AS ( \
+               SELECT 'queues'::text relation_name,to_jsonb(q) payload FROM queues q \
+                 WHERE tenant=$1 AND queue=$2 \
+               UNION ALL \
+               SELECT 'relational_emission_cursor',to_jsonb(e) FROM relational_emission_cursor e \
+                 WHERE tenant=$1 AND queue=$2 \
+             ), snap AS ( \
+               SELECT relation_name,payload FROM pqueue_command_baseline_rows \
+                 WHERE tenant=$1 AND queue=$2 AND generation=$3 \
+                   AND relation_name IN ('queues','relational_emission_cursor') \
+             ) \
+             SELECT NOT EXISTS((SELECT * FROM live) EXCEPT ALL (SELECT * FROM snap)) \
+                AND NOT EXISTS((SELECT * FROM snap) EXCEPT ALL (SELECT * FROM live))",
+            &[&tenant, &queue, &generation],
         ))?
         .get(0);
-        if command_count != 0 {
+        if actual_epoch != expected_epoch
+            || actual_next_seq != expected_next_seq
+            || !metadata_stable
+        {
+            st(tx.execute(
+                "DELETE FROM pqueue_command_baseline_rows \
+                 WHERE tenant=$1 AND queue=$2 AND generation=$3",
+                &[&tenant, &queue, &generation],
+            ))?;
+            st(tx.execute(
+                "DELETE FROM pqueue_command_baseline_migrations WHERE tenant=$1 AND queue=$2",
+                &[&tenant, &queue],
+            ))?;
+            st(tx.commit())?;
             return Err(EngineError::Storage(
-                "command history exists without a snapshot baseline".into(),
+                "command baseline migration drifted; restart under quiescence".into(),
             ));
         }
-        for &(relation, tenant_column, queue_column) in BASELINE_RELATIONS {
-            let sql = format!(
-                "INSERT INTO pqueue_command_baseline_rows \
-                   (tenant,queue,generation,relation_name,row_ordinal,payload) \
-                 SELECT $1,$2,$3,$4,row_number() OVER (ORDER BY ctid),to_jsonb(source) \
-                 FROM {relation} source WHERE {tenant_column}=$1 AND {queue_column}=$2"
-            );
-            st(tx.execute(&sql, &[&tenant, &queue, &generation, &relation]))?;
-        }
-        // The baseline is a real, database-resident, set-based restorable snapshot. Seal its rows without
-        // materializing them in the client; ordinary startup validates the anchor and never blesses state.
-        let digest_row = st(tx.query_one(
-            "SELECT COUNT(*)::text, \
-                    COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,0)::numeric),0)::text, \
-                    COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,2147483647)::numeric),0)::text \
-             FROM pqueue_command_baseline_rows WHERE tenant=$1 AND queue=$2 AND generation=$3",
-            &[&tenant, &queue, &generation],
-        ))?;
-        let summary = format!(
-            "{}:{}:{}",
-            digest_row.get::<_, String>(0),
-            digest_row.get::<_, String>(1),
-            digest_row.get::<_, String>(2)
-        );
+        // O(1) manifest seal while the cursor is locked: batch transactions accumulated all integrity
+        // inputs. Full row verification happens only during the explicitly offline restore.
+        let summary = format!("{rows_copied}:{hash_a}:{hash_b}");
+        let row_count = rows_copied;
         let snapshot_digest = Sha256::digest(summary.as_bytes()).to_vec();
-        let row_count = digest_row.get::<_, String>(0).parse::<i64>().map_err(|_| {
-            EngineError::Storage("snapshot row count exceeds postgres range".into())
-        })?;
         st(tx.execute(
             "INSERT INTO pqueue_command_baselines \
                (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
@@ -4944,14 +5058,18 @@ fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
                 &tenant,
                 &queue,
                 &generation,
-                &assignment_epoch,
-                &next_seq,
+                &expected_epoch,
+                &expected_next_seq,
                 &row_count,
                 &snapshot_digest,
             ],
         ))?;
+        st(tx.execute(
+            "DELETE FROM pqueue_command_baseline_migrations WHERE tenant=$1 AND queue=$2",
+            &[&tenant, &queue],
+        ))?;
+        st(tx.commit())?;
     }
-    st(tx.commit())
 }
 
 fn migrate_id_high_water(client: &mut Client) -> EngineResult<()> {
@@ -5357,7 +5475,9 @@ impl Backend for PostgresRelationalBackend {
                 log_txn.append(&shard, &commands, expected_epoch)?
             };
             if fault == pqueue_engine::RawCommitFault::AfterAppendBeforeApply {
-                return Ok(pqueue_engine::RawCommitOutcome::appended(positions));
+                // Atomic storage has no durable append-only cut: dropping this transaction rolls back the
+                // staged rows. Never report a phantom durable append to the fault harness.
+                return Err(EngineError::Unavailable);
             }
             {
                 let mut projection_txn = PgRelProjectionTxn {
@@ -5891,7 +6011,8 @@ impl LogRead for PostgresRelationalBackend {
                         locator: format!("command:{expected_sequence}"),
                     });
                 }
-                if Sha256::digest(&encoded).as_slice() != stored_checksum.as_slice() {
+                let position = CommandPosition::new(shard.clone(), epoch as u64, sequence as u64);
+                if command_storage_checksum(&position, &encoded) != stored_checksum {
                     return Err(EngineError::DurableDataCorrupt {
                         stage: DurableIntegrityStage::Sha256,
                         manifest_index: sequence as u64,
@@ -5905,10 +6026,7 @@ impl LogRead for PostgresRelationalBackend {
                         locator: format!("command:{sequence}"),
                     }
                 })?;
-                entries.push((
-                    CommandPosition::new(shard.clone(), epoch as u64, sequence as u64),
-                    envelope,
-                ));
+                entries.push((position, envelope));
                 expected_sequence += 1;
             }
             if !has_more && expected_sequence != durable_head as u64 {
@@ -6490,7 +6608,8 @@ impl CommitTransitionPort for PostgresRelationalBackend {
             let (t, q) = parts(shard);
             let mut tx = st(client.transaction())?;
             let row = st(tx.query_opt(
-                "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
+                "SELECT next_seq, assignment_epoch FROM relational_cursor \
+                 WHERE tenant=$1 AND queue=$2 FOR UPDATE",
                 &[&t, &q],
             ))?
             .ok_or(EngineError::NotFound)?;
@@ -7515,10 +7634,11 @@ impl PostgresRelational {
         let fresh: bool =
             st(client.query_one("SELECT to_regclass('pqueue_items') IS NULL", &[]))?.get(0);
         st(client.batch_execute(RELATIONAL_SCHEMA))?;
-        st(client.batch_execute(
-            "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';\
-             ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
-             ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;",
+        st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
+        st(client.execute(
+            "INSERT INTO pqueue_metrics_migration_state(migration_name,status) \
+             VALUES('queue_metrics_v2_counted','complete') ON CONFLICT(migration_name) DO NOTHING",
+            &[],
         ))?;
         migrate_id_high_water(&mut client)?;
         verify_group_summary_indexes(&mut client, fresh)?;
@@ -7540,11 +7660,8 @@ impl PostgresRelational {
             .expect("postgres relational store poisoned")
     }
 
-    /// Delete the rebuildable projection while leaving any external authoritative log untouched.
-    ///
-    /// This is intended for object-log-backed compositions. The PostgreSQL schema owned by this store
-    /// contains projection state only in that posture, so clearing it is safe and a subsequent recovery
-    /// can replay the retained object log from genesis.
+    /// Delete only the rebuildable projection. The authoritative object/Postgres log in a supported
+    /// composition is external to this projection store and replays it after truncation.
     pub fn delete_projection(&self) -> EngineResult<()> {
         let mut g = self.lock();
         st(g.client.batch_execute(
@@ -7998,33 +8115,11 @@ impl LogStore for PostgresRelational {
 
     fn append(
         &mut self,
-        shard: &QueueKey,
-        commands: &[CommandEnvelope],
-        expected_epoch: u64,
+        _shard: &QueueKey,
+        _commands: &[CommandEnvelope],
+        _expected_epoch: u64,
     ) -> EngineResult<Vec<CommandPosition>> {
-        // STAGE only: read cursor + assignment_epoch, fence, MINT positions. No durable write — the apply
-        // axis advances the cursor inside its own transaction (no phantom log row).
-        let mut g = self.lock();
-        let (t, q) = parts(shard);
-        let row = st(g.client.query_opt(
-            "SELECT next_seq, assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2",
-            &[&t, &q],
-        ))?
-        .ok_or(EngineError::NotFound)?;
-        let next: i64 = row.get(0);
-        let epoch: i64 = row.get(1);
-        if expected_epoch != epoch as u64 {
-            return Err(EngineError::EpochFenced);
-        }
-        let mut positions = Vec::with_capacity(commands.len());
-        for (i, _) in commands.iter().enumerate() {
-            positions.push(CommandPosition::new(
-                shard.clone(),
-                epoch as u64,
-                (next as u64) + i as u64,
-            ));
-        }
-        Ok(positions)
+        Err(EngineError::Unavailable)
     }
 
     fn read_from(
@@ -8033,11 +8128,7 @@ impl LogStore for PostgresRelational {
         _from: Option<CommandPosition>,
         _limit: usize,
     ) -> EngineResult<CommandPage> {
-        // DB-authoritative: no replayable command log (the CORE class never reads it).
-        Ok(CommandPage {
-            entries: Vec::new(),
-            next: None,
-        })
+        Err(EngineError::Unavailable)
     }
 
     fn high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
@@ -8209,31 +8300,6 @@ impl ProjectionStore for PostgresRelational {
              ON CONFLICT (tenant,queue) DO NOTHING",
             &[&t, &q],
         ))?;
-        let empty_snapshot_digest = Sha256::digest([]).to_vec();
-        st(tx.execute(
-            "INSERT INTO pqueue_command_baselines \
-               (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
-             VALUES($1,$2,'genesis',1,0,0,0,$3) ON CONFLICT (tenant,queue) DO NOTHING",
-            &[&t, &q, &empty_snapshot_digest],
-        ))?;
-        let create = direct_command_envelope(
-            &key,
-            QueueCommand::CreateQueue(pqueue_engine::CreateQueueCommand {
-                definition: definition.clone(),
-            }),
-            UtcTimestamp::new(0, 0).expect("unix epoch is valid"),
-            0,
-            0,
-        );
-        persist_command_envelopes(
-            &mut tx,
-            std::slice::from_ref(&CommandPosition::new(key.clone(), 0, 0)),
-            std::slice::from_ref(&create),
-        )?;
-        st(tx.execute(
-            "UPDATE relational_cursor SET next_seq=1 WHERE tenant=$1 AND queue=$2 AND next_seq=0",
-            &[&t, &q],
-        ))?;
         st(tx.commit())?;
         g.queues.insert(key, definition.clone());
         Ok(())
@@ -8260,7 +8326,6 @@ impl ProjectionStore for PostgresRelational {
         let mut tx = st(client.transaction())?;
         let mut token_ops = Vec::new();
         let mut max_position: HashMap<QueueKey, (u64, u64)> = HashMap::new();
-        persist_command_envelopes(&mut tx, positions, commands)?;
         for (pos, env) in positions.iter().zip(commands) {
             let (tenant, queue) = parts(&pos.queue);
             let epoch_row = st(tx.query_one(
@@ -8711,16 +8776,37 @@ impl ProjectionStore for PostgresRelational {
 
     fn reap_terminal_items(
         &mut self,
-        _shard: &QueueKey,
-        _now: UtcTimestamp,
-        _terminal_retention_ms: u64,
-        _emit_change_records: bool,
-        _emission_cursor: Option<&CommandPosition>,
+        shard: &QueueKey,
+        now: UtcTimestamp,
+        terminal_retention_ms: u64,
+        emit_change_records: bool,
+        emission_cursor: Option<&CommandPosition>,
     ) -> EngineResult<Vec<ItemId>> {
-        // This legacy generic projection axis cannot append the matching PurgeItems envelope. Keep the
-        // unsafe capability explicitly unavailable; production uses PostgresRelationalBackend, whose tick
-        // routes retention through the atomic logged command path.
-        Err(EngineError::Unavailable)
+        let mut g = self.lock();
+        let mut tx = st(g.client.transaction())?;
+        let ids = terminal_items_to_reap_sql(
+            &mut tx,
+            shard,
+            now,
+            terminal_retention_ms,
+            emit_change_records,
+            emission_cursor,
+        )?;
+        if !ids.is_empty() {
+            let (tenant, queue) = parts(shard);
+            let id_strings = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+            st(tx.execute(
+                "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+                &[&tenant, &queue, &id_strings],
+            ))?;
+            st(tx.execute(
+                "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+                &[&tenant, &queue, &id_strings],
+            ))?;
+            delete_typed_index_rows(&mut tx, &tenant, &queue, &id_strings)?;
+        }
+        st(tx.commit())?;
+        Ok(ids)
     }
 
     fn index_get_unique(
@@ -8745,7 +8831,8 @@ impl ProjectionStore for PostgresRelational {
 impl AsOfProjectionStore for PostgresRelational {
     type AsOfProjection = PostgresRelational;
 
-    // No replayable command log: cannot serve historical reads. Decline as-of up-front.
+    // The command tail is replayable, but this legacy axis cannot safely construct an isolated historical
+    // SQL store through this trait. Decline as-of up front rather than overclaiming the capability.
     fn supports_as_of(&self) -> bool {
         false
     }
@@ -8759,23 +8846,16 @@ impl AsOfProjectionStore for PostgresRelational {
     }
 }
 
-/// The composed unified postgres-relational backend (ADR-012 P1b-ii):
-/// `ComposedBackend<PostgresRelational, PostgresRelational, InProcessControlPlane>` — one relational store
-/// on both axes, so append+apply commit as one postgres transaction. Capability-equivalent to the
-/// monolithic [`PostgresRelationalBackend`] on the CORE conformance class.
-pub type ComposedPostgresRelationalBackend =
-    ComposedBackend<PostgresRelational, PostgresRelational, InProcessControlPlane>;
+/// Retired legacy alias retained for source compatibility. `PostgresRelational` is projection-only; the
+/// selectable unified atomic implementation is [`PostgresRelationalBackend`].
+pub type ComposedPostgresRelationalBackend = PostgresRelationalBackend;
 
-/// Assemble a unified postgres-relational composition isolated in `schema`. Both axes are clones of the SAME
-/// store (shared `Client`), so the orthogonal `commit_locked` drives one durable transaction. Runs
-/// recovery-on-open (ADR-012 P2): a reconnect to the same schema repopulates the in-process control plane
-/// from the durable `queues` catalog and re-seeds the id-mint counters (the DB projection needs no replay).
+/// The former same-value log/projection composition was not atomic and is no longer selectable.
 pub fn composed_postgres_relational_in_schema(
     url: &str,
     schema: &str,
 ) -> EngineResult<ComposedPostgresRelationalBackend> {
-    let store = PostgresRelational::connect_in_schema(url, schema)?;
-    ComposedBackend::new(store.clone(), store, InProcessControlPlane::new()).recover()
+    PostgresRelationalBackend::connect_in_schema(url, schema)
 }
 
 #[cfg(test)]
@@ -11687,20 +11767,16 @@ mod commit_transition_tests {
         assert!(read_side_record(&b1, "state/stale").is_none());
         assert!(read_side_record(&b1, "state/live").is_some());
     }
-
-    // pqueue-29bef1e4 scope note: the relational recovery-poison from an in-commit duplicate unique
-    // typed-index key is SQLITE_LOG-specific (see the sqlite `composed_commit_duplicate_unique_index` test).
-    // The composed postgres-relational backend is NOT vulnerable: `PostgresRelational` does not override
-    // `supports_commit_transition` (trait default `false`), so it does not offer the vectorized commit path
-    // at all, AND its append+apply commit in ONE postgres transaction — a failed apply rolls the append back,
-    // so no durable-but-unappliable batch can exist. Hence there is no postgres analog of the sqlite fix.
 }
 
 #[cfg(test)]
 mod command_log_recovery_tests {
     use super::*;
     use futures::executor::block_on;
-    use pqueue_engine::{ControlPlaneStore, LogRead, ProjectionRead, PushPort};
+    use pqueue_engine::{
+        Backend, ControlPlaneStore, LogRead, ProjectionRead, PushPort, RawCommitFault,
+        RawCommitRequest,
+    };
 
     fn live_url() -> Option<String> {
         std::env::var("PQUEUE_PG_TEST_URL").ok()
@@ -11817,6 +11893,31 @@ mod command_log_recovery_tests {
     }
 
     #[test]
+    fn durable_position_tamper_breaks_command_checksum() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("position_tamper");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(pqueue_conformance::qdef())).unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            st(inner.client.execute(
+                "UPDATE pqueue_commands SET assignment_epoch=assignment_epoch+1 \
+                 WHERE tenant=$1 AND queue=$2 AND seq=0",
+                &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
+            ))
+            .unwrap();
+        }
+        assert!(matches!(
+            block_on(backend.read_from(&shard, None, 10)),
+            Err(EngineError::DurableDataCorrupt { .. })
+        ));
+    }
+
+    #[test]
     fn projection_failure_rolls_back_command_append() {
         let Some(url) = live_url() else {
             eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
@@ -11853,6 +11954,42 @@ mod command_log_recovery_tests {
         .unwrap()
         .get(0);
         assert_eq!(count, 1, "failed projection must leave no phantom command");
+    }
+
+    #[test]
+    fn atomic_fault_cut_never_reports_or_leaves_append_only_state() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("fault_cut");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(pqueue_conformance::qdef())).unwrap();
+        let envelope = direct_command_envelope(
+            &shard,
+            QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                records: Vec::new(),
+            }),
+            pqueue_conformance::ts(1),
+            0,
+            1,
+        );
+        let result = block_on(
+            backend.commit_raw(
+                RawCommitRequest::new(shard.clone(), vec![envelope], 0)
+                    .with_fault(RawCommitFault::AfterAppendBeforeApply),
+            ),
+        );
+        assert_eq!(result, Err(EngineError::Unavailable));
+        let mut inner = backend.inner.lock().unwrap();
+        let count: i64 = st(inner.client.query_one(
+            "SELECT COUNT(*) FROM pqueue_commands WHERE tenant=$1 AND queue=$2",
+            &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
+        ))
+        .unwrap()
+        .get(0);
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -11898,7 +12035,7 @@ mod command_log_recovery_tests {
     }
 
     #[test]
-    fn legacy_projection_axis_cannot_bypass_logged_terminal_reap() {
+    fn projection_only_store_has_no_internal_command_log() {
         let Some(url) = live_url() else {
             eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
             return;
@@ -11906,7 +12043,7 @@ mod command_log_recovery_tests {
         let schema = unique_schema("reap_guard");
         let mut store = PostgresRelational::connect_in_schema(&url, &schema).unwrap();
         ProjectionStore::ensure_shard(&mut store, &pqueue_conformance::qdef()).unwrap();
-        assert!(matches!(
+        assert!(
             ProjectionStore::reap_terminal_items(
                 &mut store,
                 &pqueue_conformance::shard(),
@@ -11914,8 +12051,16 @@ mod command_log_recovery_tests {
                 0,
                 false,
                 None,
-            ),
-            Err(EngineError::Unavailable)
-        ));
+            )
+            .unwrap()
+            .is_empty()
+        );
+        let mut inner = store.lock();
+        let exists: bool = st(inner
+            .client
+            .query_one("SELECT to_regclass('pqueue_commands') IS NOT NULL", &[]))
+        .unwrap()
+        .get(0);
+        assert!(!exists);
     }
 }

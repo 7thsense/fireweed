@@ -8,7 +8,7 @@
 //! To run live:
 //!   docker run -d --name pq-pg -p 5433:5432 -e POSTGRES_PASSWORD=pq postgres:16
 //!   PQUEUE_PG_TEST_URL=postgres://postgres:pq@127.0.0.1:5433/postgres \
-//!     cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests -- --nocapture
+//!     cargo test -p pqueue-server --features postgres --test performance_single_deployment_baseline_tests -- --nocapture
 //!   # the full E1 resident shape (10M retained terminal rows) is the heavier release configuration:
 //!   PQUEUE_E1_RESIDENT=10000000 PQUEUE_PG_TEST_URL=... cargo test ... --release
 //!
@@ -28,10 +28,10 @@
 //! A row's `exit_status` is always 0 (the measurement run completed; the strict verifier requires it) and so
 //! carries NO pass/fail signal — pass/fail lives in `measurements.bars_met` and `evidence_tier`.
 //!
-//! Defaults are small (`PQUEUE_E1_RESIDENT`, default 1000) so a routine run is short; the relational backend
-//! issues per-item INSERT round-trips, so the full release shape (`PQUEUE_E1_RESIDENT=10000000 PQUEUE_E1_FULL=1`)
-//! is the provisioned perf-env run. Wall-clock capacity remains visible without making evidence depend on
-//! a quiet or specially fast host.
+//! Defaults are small (`PQUEUE_E1_RESIDENT`, default 1000) so a routine run is short. The relational backend
+//! drives configured batches through set-based downstream primitives; the full release shape
+//! (`PQUEUE_E1_RESIDENT=10000000 PQUEUE_E1_FULL=1`) is the provisioned perf-env run. Wall-clock capacity
+//! remains visible without becoming a host-speed gate.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -46,7 +46,8 @@ use pqueue_core::{
     RecurrencePolicy, RetryPolicy, TenantId,
 };
 use pqueue_engine::{ControlPlaneStore, DiscoveryGranularity, EngineError, QueueKey};
-use pqueue_postgres::PostgresRelationalBackend;
+use pqueue_postgres::{PostgresConnectConfig, PostgresRelationalBackend};
+use pqueue_server::{PostgresWholeOperationAdapter, fixed_postgres_relational_pool};
 
 const CONFIGURED_MAX_BATCH_SIZE: u64 = 1_000;
 const CONFIGURED_CONCURRENCY: u64 = 2;
@@ -516,7 +517,7 @@ fn insert_measured_contract(
         ),
         (
             "topology".into(),
-            serde_json::json!("single-process+single-postgres+two-production-connections"),
+            serde_json::json!("single-process+single-postgres+fixed-2-member-affinity-pool"),
         ),
         (
             "topology_declared".into(),
@@ -676,8 +677,8 @@ fn representative_item(sequence: u64, sentinel: bool) -> NewItem {
     }
 }
 
-async fn push_batch(
-    pq: &Pqueue<PostgresRelationalBackend>,
+async fn push_batch<B: pqueue::LibBackend>(
+    pq: &Pqueue<B>,
     shard: &QueueKey,
     base: u64,
     n: u64,
@@ -693,8 +694,8 @@ async fn push_batch(
 }
 
 /// Claim up to `n` eligible items from `shard`, returning their ids.
-async fn claim(
-    pq: &Pqueue<PostgresRelationalBackend>,
+async fn claim<B: pqueue::LibBackend>(
+    pq: &Pqueue<B>,
     shard: &QueueKey,
     n: usize,
     operations: &OperationProbe,
@@ -709,8 +710,8 @@ async fn claim(
 }
 
 /// Finalize-complete the given ids on `shard`.
-async fn finalize(
-    pq: &Pqueue<PostgresRelationalBackend>,
+async fn finalize<B: pqueue::LibBackend>(
+    pq: &Pqueue<B>,
     shard: &QueueKey,
     ids: &[ItemId],
     operations: &OperationProbe,
@@ -771,6 +772,127 @@ struct ConsumerResult {
     claim_finalize_operation_ns: u64,
 }
 
+fn single_deployment_evidence_row(
+    tag: &str,
+    full_shape: bool,
+    passed: bool,
+    environment: String,
+    pass_bar: &str,
+    mut values: BTreeMap<String, serde_json::Value>,
+) -> pqueue_release::LedgerRow {
+    let evidence_id = match tag {
+        "e0" => "E0",
+        "e1" => "E1",
+        other => panic!("unsupported single-deployment evidence tag {other}"),
+    };
+    values.insert("bars_met".into(), serde_json::json!(passed));
+    pqueue_release::LedgerRow {
+        suite: "performance_single_deployment_baseline_tests".into(),
+        command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
+        backend_profile: "postgres_native".into(),
+        scale: if full_shape { "release".into() } else { "baseline".into() },
+        seed: 0,
+        environment,
+        exit_status: 0,
+        ac_ids: vec![],
+        inv_ids: vec![],
+        pass_bar: pass_bar.into(),
+        evidence_tier: if passed { "release".into() } else { "smoke".into() },
+        measurements: pqueue_release::Measurements {
+            tp002_evidence_ids: vec![evidence_id.into()],
+            values,
+        },
+    }
+}
+
+#[test]
+fn passing_e0_row_is_exact_governed_release_evidence() {
+    let row = single_deployment_evidence_row(
+        "e0",
+        true,
+        true,
+        "declared topology under ordinary load".into(),
+        "portable contract",
+        BTreeMap::new(),
+    );
+    assert_eq!(row.scale, "release");
+    assert_eq!(row.evidence_tier, "release");
+    assert_eq!(row.measurements.tp002_evidence_ids, ["E0"]);
+    assert_eq!(
+        row.measurements.values.get("bars_met"),
+        Some(&serde_json::json!(true))
+    );
+}
+
+#[test]
+fn nonpassing_e0_row_remains_identified_smoke_evidence() {
+    let row = single_deployment_evidence_row(
+        "e0",
+        false,
+        false,
+        "local smoke".into(),
+        "portable contract",
+        BTreeMap::new(),
+    );
+    assert_eq!(row.scale, "baseline");
+    assert_eq!(row.evidence_tier, "smoke");
+    assert_eq!(row.measurements.tp002_evidence_ids, ["E0"]);
+    assert_eq!(
+        row.measurements.values.get("bars_met"),
+        Some(&serde_json::json!(false))
+    );
+}
+
+#[test]
+fn production_wrapper_batches_10k_through_native_ports() {
+    let Ok(observer_url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!("POSTGRES WRAPPER 10K BATCH PROOF SKIPPED — set PQUEUE_PG_TEST_URL");
+        return;
+    };
+    let schema = fresh_schema();
+    let application_name = format!("pqueue_e0_batch_proof_{}", std::process::id());
+    let separator = if observer_url.contains('?') { '&' } else { '?' };
+    let pool_url = format!("{observer_url}{separator}application_name={application_name}_pool");
+    let backend =
+        fixed_postgres_relational_pool(PostgresConnectConfig::new(pool_url), Some(&schema), 2, 0)
+            .expect("connect production pool");
+    let pq = Pqueue::new(backend, Arc::new(SystemClock));
+    let shard = sk("batch-proof", "hot");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .expect("build batch-proof runtime");
+    runtime.block_on(async {
+        pq.create_queue(big_qdef("batch-proof", "hot", 60_000))
+            .await
+            .unwrap();
+        let operations = OperationProbe::default();
+        let mut push_sizes = Vec::new();
+        for base in (0..10_000).step_by(1_000) {
+            let ids = push_batch(&pq, &shard, base, 1_000, &operations).await;
+            push_sizes.push(ids.len());
+        }
+        let mut claim_sizes = Vec::new();
+        let mut finalize_sizes = Vec::new();
+        while claim_sizes.iter().sum::<usize>() < 10_000 {
+            let ids = claim(&pq, &shard, 1_000, &operations).await;
+            assert!(!ids.is_empty(), "10K batch proof must keep making progress");
+            claim_sizes.push(ids.len());
+            finalize(&pq, &shard, &ids, &operations).await;
+            finalize_sizes.push(ids.len());
+        }
+        assert_eq!(push_sizes, vec![1_000; 10]);
+        assert_eq!(claim_sizes, vec![1_000; 10]);
+        assert_eq!(finalize_sizes, vec![1_000; 10]);
+        let metrics = pq.metrics(&shard).await.unwrap();
+        assert_eq!(
+            (metrics.pending, metrics.leased, metrics.complete),
+            (0, 0, 10_000)
+        );
+    });
+}
+
 #[test]
 fn performance_single_deployment_baseline_tests() {
     let Ok(observer_url) = std::env::var("PQUEUE_PG_TEST_URL") else {
@@ -803,7 +925,7 @@ fn performance_single_deployment_baseline_tests() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1_000);
-    let load_batch = 500u64;
+    let load_batch = CONFIGURED_MAX_BATCH_SIZE;
     // Latency probe batch sizes: [1, 100] by default; the full release shape (+1000) needs PQUEUE_E1_FULL.
     let full = perf_env || std::env::var("PQUEUE_E1_FULL").is_ok();
     let batch_sizes: &[u64] = if full { &[1, 100, 1000] } else { &[1, 100] };
@@ -812,17 +934,23 @@ fn performance_single_deployment_baseline_tests() {
     let shard = sk("e0e1", "hot");
     let application_name = format!("pqueue_e0e1_evidence_{}", std::process::id());
     let separator = if observer_url.contains('?') { '&' } else { '?' };
-    let url = format!("{observer_url}{separator}application_name={application_name}_producer");
-    let b = Arc::new(
-        PostgresRelationalBackend::connect_in_schema(&url, &schema)
-            .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)"),
-    );
+    let pool_url = format!("{observer_url}{separator}application_name={application_name}_pool");
+    let b: Arc<PostgresWholeOperationAdapter<PostgresRelationalBackend>> =
+        fixed_postgres_relational_pool(PostgresConnectConfig::new(pool_url), Some(&schema), 2, 0)
+            .expect("connect fixed postgres production pool");
     let pq = Arc::new(Pqueue::new(Arc::clone(&b), Arc::new(SystemClock)));
     let operations = Arc::new(OperationProbe::default());
     let workers = Arc::new(WorkerProbe::default());
     let caps = RunCaps::from_env(perf_env);
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .expect("build benchmark runtime"),
+    );
 
-    futures::executor::block_on(async {
+    runtime.clone().block_on(async {
         pq.create_queue(big_qdef("e0e1", "hot", progress_bound_ms))
             .await
             .unwrap();
@@ -830,115 +958,159 @@ fn performance_single_deployment_baseline_tests() {
         assert_eq!(persisted.max_push_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.max_claim_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.progress_bound_ms, progress_bound_ms);
-        let consumer_url =
-            format!("{observer_url}{separator}application_name={application_name}_consumer");
-        let consumer_backend = Arc::new(
-            PostgresRelationalBackend::connect_in_schema(&consumer_url, &schema)
-                .expect("connect independent Postgres claimant"),
-        );
-        let consumer_pq = Arc::new(Pqueue::new(consumer_backend, Arc::new(SystemClock)));
+        let consumer_pq = Arc::clone(&pq);
 
-        // E0: two independent production connections and worker loops overlap naturally. The bounded
-        // accepted-but-not-yet-claimed map is also the identity/timestamp authority for progress.
+        let hot_pool_partition = pqueue_engine::queue_worker_partition(&shard, 2);
+        let (canary_queue_id, canary_shard, canary_pool_partition) = (0..100)
+            .map(|index| format!("canary-{index}"))
+            .map(|queue_id| {
+                let key = sk("e0e1", &queue_id);
+                let partition = pqueue_engine::queue_worker_partition(&key, 2);
+                (queue_id, key, partition)
+            })
+            .find(|(_, _, partition)| *partition != hot_pool_partition)
+            .expect("two queue keys must cover both production pool members");
+        pq.create_queue(big_qdef("e0e1", &canary_queue_id, progress_bound_ms))
+            .await
+            .unwrap();
+
+        // The first hot insert cannot finish until the affinity-routed canary reaches the other pool
+        // member and removes this row. This makes canary progress causal, not a host-speed comparison.
+        let gate_url = observer_url.clone();
+        let gate_schema = schema.clone();
+        let gate_canary = canary_queue_id.clone();
+        std::thread::spawn(move || {
+            let mut gate_admin = postgres::Client::connect(&gate_url, postgres::NoTls)
+                .expect("connect causal-gate observer");
+            gate_admin
+                .batch_execute(&format!(
+                "SET search_path TO {schema};
+                 CREATE TABLE e0_pool_hold(queue_id TEXT PRIMARY KEY);
+                 INSERT INTO e0_pool_hold(queue_id) VALUES('hot');
+                 CREATE FUNCTION e0_pool_causal_gate() RETURNS trigger LANGUAGE plpgsql AS $$
+                 BEGIN
+                   IF NEW.queue_id = 'hot' THEN
+                     WHILE EXISTS (SELECT 1 FROM e0_pool_hold WHERE queue_id = 'hot') LOOP
+                       PERFORM pg_sleep(0.01);
+                     END LOOP;
+                   ELSIF NEW.queue_id = '{gate_canary}' THEN
+                     DELETE FROM e0_pool_hold WHERE queue_id = 'hot';
+                   END IF;
+                   RETURN NEW;
+                 END $$;
+                 CREATE TRIGGER e0_pool_causal_gate BEFORE INSERT ON pqueue_items
+                   FOR EACH ROW EXECUTE FUNCTION e0_pool_causal_gate();",
+                schema = gate_schema,
+            ))
+                .expect("install causal production-pool gate");
+        })
+        .join()
+        .expect("causal-gate setup thread");
+
+        // E0: one fixed two-member production pool. Stable affinity serializes the hot queue on one member;
+        // the causally gated canary proves an unrelated queue progresses on the other member under load.
         let pending = Arc::new(Mutex::new(HashMap::<ItemId, (Instant, Instant)>::new()));
         let pending_peak = Arc::new(AtomicU64::new(0));
         let producer_done = Arc::new(AtomicBool::new(false));
         let consumer_done = Arc::new(AtomicBool::new(false));
-        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
         let (signal_tx, signal_rx) = std::sync::mpsc::sync_channel::<()>(2);
 
-        let (producer_result, consumer_result, mut resources) = std::thread::scope(|scope| {
-            let producer = scope.spawn({
-                let pq = Arc::clone(&pq);
-                let shard = shard.clone();
-                let operations = Arc::clone(&operations);
-                let workers = Arc::clone(&workers);
-                let pending = Arc::clone(&pending);
-                let pending_peak = Arc::clone(&pending_peak);
+        let (producer_result, consumer_result, canary_causal_progress, mut resources) =
+            std::thread::scope(|scope| {
+                let producer = scope.spawn({
+                    let pq = Arc::clone(&pq);
+                    let shard = shard.clone();
+                    let operations = Arc::clone(&operations);
+                    let workers = Arc::clone(&workers);
+                    let pending = Arc::clone(&pending);
+                    let pending_peak = Arc::clone(&pending_peak);
                 let producer_done = Arc::clone(&producer_done);
                 let barrier = Arc::clone(&barrier);
+                let runtime = Arc::clone(&runtime);
                 move || {
+                    let _runtime = runtime.enter();
                     let _worker = workers.start();
-                    barrier.wait();
-                    let mut result = ProducerResult {
-                        accepted: 0,
-                        duplicate_ids: 0,
-                        seen_ids: vec![false; resident as usize + 2],
-                        identity_prefix: None,
-                        counter_min: u64::MAX,
-                        counter_max: 0,
-                        payload_size_counts: BTreeMap::new(),
-                        group_counts: vec![0; GROUP_CARDINALITY as usize],
-                        priority_counts: BTreeMap::new(),
-                        push_batches: 0,
-                        push_operation_ns: 0,
-                    };
-                    while result.accepted < resident {
-                        let n = (resident - result.accepted).min(load_batch);
-                        let accept_started = Instant::now();
-                        let ids = futures::executor::block_on(push_batch(
-                            &pq,
-                            &shard,
-                            result.accepted,
-                            n,
-                            &operations,
-                        ));
-                        let accept_completed = Instant::now();
-                        result.push_operation_ns +=
-                            accept_completed.duration_since(accept_started).as_nanos() as u64;
-                        {
-                            let mut map = pending.lock().unwrap();
-                            for id in &ids {
-                                map.insert(*id, (accept_started, accept_completed));
-                            }
-                            pending_peak.fetch_max(map.len() as u64, Ordering::SeqCst);
-                        }
-                        for offset in 0..n {
-                            let sequence = result.accepted + offset;
-                            *result
-                                .payload_size_counts
-                                .entry([512, 1024, 2048][sequence as usize % 3] as u64)
-                                .or_default() += 1;
-                            result.group_counts[sequence as usize % GROUP_CARDINALITY as usize] +=
-                                1;
-                            let class = if offset + 1 == n {
-                                "sentinel"
-                            } else if sequence.is_multiple_of(10) {
-                                "high"
-                            } else {
-                                "regular"
-                            };
-                            *result.priority_counts.entry(class.into()).or_default() += 1;
-                        }
-                        for id in ids {
-                            let raw = id.as_u64();
-                            let prefix = raw >> 32;
-                            if result
-                                .identity_prefix
-                                .replace(prefix)
-                                .is_some_and(|seen| seen != prefix)
+                        barrier.wait();
+                        let mut result = ProducerResult {
+                            accepted: 0,
+                            duplicate_ids: 0,
+                            seen_ids: vec![false; resident as usize + 2],
+                            identity_prefix: None,
+                            counter_min: u64::MAX,
+                            counter_max: 0,
+                            payload_size_counts: BTreeMap::new(),
+                            group_counts: vec![0; GROUP_CARDINALITY as usize],
+                            priority_counts: BTreeMap::new(),
+                            push_batches: 0,
+                            push_operation_ns: 0,
+                        };
+                        while result.accepted < resident {
+                            let n = (resident - result.accepted).min(load_batch);
+                            let accept_started = Instant::now();
+                            let ids = futures::executor::block_on(push_batch(
+                                &pq,
+                                &shard,
+                                result.accepted,
+                                n,
+                                &operations,
+                            ));
+                            let accept_completed = Instant::now();
+                            result.push_operation_ns +=
+                                accept_completed.duration_since(accept_started).as_nanos() as u64;
                             {
-                                result.duplicate_ids += 1;
+                                let mut map = pending.lock().unwrap();
+                                for id in &ids {
+                                    map.insert(*id, (accept_started, accept_completed));
+                                }
+                                pending_peak.fetch_max(map.len() as u64, Ordering::SeqCst);
                             }
-                            let counter = (id.as_u64() & u32::MAX as u64) as usize;
-                            result.counter_min = result.counter_min.min(counter as u64);
-                            result.counter_max = result.counter_max.max(counter as u64);
-                            if counter >= result.seen_ids.len() || result.seen_ids[counter] {
-                                result.duplicate_ids += 1;
-                            } else {
-                                result.seen_ids[counter] = true;
+                            for offset in 0..n {
+                                let sequence = result.accepted + offset;
+                                *result
+                                    .payload_size_counts
+                                    .entry([512, 1024, 2048][sequence as usize % 3] as u64)
+                                    .or_default() += 1;
+                                result.group_counts
+                                    [sequence as usize % GROUP_CARDINALITY as usize] += 1;
+                                let class = if offset + 1 == n {
+                                    "sentinel"
+                                } else if sequence.is_multiple_of(10) {
+                                    "high"
+                                } else {
+                                    "regular"
+                                };
+                                *result.priority_counts.entry(class.into()).or_default() += 1;
                             }
+                            for id in ids {
+                                let raw = id.as_u64();
+                                let prefix = raw >> 32;
+                                if result
+                                    .identity_prefix
+                                    .replace(prefix)
+                                    .is_some_and(|seen| seen != prefix)
+                                {
+                                    result.duplicate_ids += 1;
+                                }
+                                let counter = (id.as_u64() & u32::MAX as u64) as usize;
+                                result.counter_min = result.counter_min.min(counter as u64);
+                                result.counter_max = result.counter_max.max(counter as u64);
+                                if counter >= result.seen_ids.len() || result.seen_ids[counter] {
+                                    result.duplicate_ids += 1;
+                                } else {
+                                    result.seen_ids[counter] = true;
+                                }
+                            }
+                            result.accepted += n;
+                            result.push_batches += 1;
+                            signal_tx.send(()).expect("claimant remains live");
                         }
-                        result.accepted += n;
-                        result.push_batches += 1;
-                        signal_tx.send(()).expect("claimant remains live");
+                        producer_done.store(true, Ordering::SeqCst);
+                        result
                     }
-                    producer_done.store(true, Ordering::SeqCst);
-                    result
-                }
-            });
+                });
 
-            let consumer = scope.spawn({
+                let consumer = scope.spawn({
                 let pq = Arc::clone(&consumer_pq);
                 let shard = shard.clone();
                 let operations = Arc::clone(&operations);
@@ -947,7 +1119,9 @@ fn performance_single_deployment_baseline_tests() {
                 let producer_done = Arc::clone(&producer_done);
                 let consumer_done = Arc::clone(&consumer_done);
                 let barrier = Arc::clone(&barrier);
+                let runtime = Arc::clone(&runtime);
                 move || {
+                    let _runtime = runtime.enter();
                     let _worker = workers.start();
                     barrier.wait();
                     let mut result = ConsumerResult {
@@ -992,9 +1166,9 @@ fn performance_single_deployment_baseline_tests() {
                             .unwrap();
                             result.discovery_query_count += 1;
                             result.discovery_nonempty_count += u64::from(!scopes.is_empty());
-                            result
-                                .oldest_eligible_age_samples_ms
-                                .extend(scopes.iter().map(|scope| scope.oldest_eligible_age_ms));
+                            result.oldest_eligible_age_samples_ms.extend(
+                                scopes.iter().map(|scope| scope.oldest_eligible_age_ms),
+                            );
                             next_scope_sample += sample_stride;
                         }
                         let claim_started = Instant::now();
@@ -1092,11 +1266,11 @@ fn performance_single_deployment_baseline_tests() {
                             .unwrap();
                             result.discovery_query_count += 1;
                             result.discovery_nonempty_count += u64::from(!scopes.is_empty());
+                            result.oldest_eligible_age_samples_ms.extend(
+                                scopes.iter().map(|scope| scope.oldest_eligible_age_ms),
+                            );
                             result.finalized_samples.push(result.finalized);
                             result.cursor_samples.push(cursor);
-                            result
-                                .oldest_eligible_age_samples_ms
-                                .extend(scopes.iter().map(|scope| scope.oldest_eligible_age_ms));
                             result.lifecycle_snapshots.push(serde_json::json!({
                                 "pending": metrics.pending,
                                 "leased": metrics.leased,
@@ -1112,25 +1286,80 @@ fn performance_single_deployment_baseline_tests() {
                 }
             });
 
-            let sampler = scope.spawn({
-                let consumer_done = Arc::clone(&consumer_done);
+                let canary = scope.spawn({
+                let pq = Arc::clone(&pq);
+                let canary_shard = canary_shard.clone();
+                let producer_done = Arc::clone(&producer_done);
+                let barrier = Arc::clone(&barrier);
                 let observer_url = observer_url.clone();
                 let application_name = application_name.clone();
+                let runtime = Arc::clone(&runtime);
                 move || {
-                    let mut observations = ResourceObservations::default();
-                    while !consumer_done.load(Ordering::SeqCst) || observations.samples < 3 {
-                        observations.sample(&observer_url, &application_name);
-                        std::thread::sleep(std::time::Duration::from_millis(25));
-                    }
-                    observations
+                    let _runtime = runtime.enter();
+                    barrier.wait();
+                    let mut observer = postgres::Client::connect(&observer_url, postgres::NoTls)
+                        .expect("connect canary causal observer");
+                    let observed_hot_sleep = loop {
+                        let sleeping: bool = observer
+                            .query_one(
+                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name LIKE $1 AND wait_event='PgSleep')",
+                                &[&format!("{application_name}%")],
+                            )
+                            .expect("observe hot production pool member")
+                            .get(0);
+                        if sleeping {
+                            break true;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    };
+                    assert!(observed_hot_sleep, "hot queue never reached causal pg_sleep gate");
+                    let canary_ops = OperationProbe::default();
+                    let ids = futures::executor::block_on(push_batch(
+                        &pq,
+                        &canary_shard,
+                        resident + 10_000,
+                        1,
+                        &canary_ops,
+                    ));
+                    let claimed = futures::executor::block_on(claim(
+                        &pq,
+                        &canary_shard,
+                        1,
+                        &canary_ops,
+                    ));
+                    futures::executor::block_on(finalize(
+                        &pq,
+                        &canary_shard,
+                        &claimed,
+                        &canary_ops,
+                    ));
+                    observed_hot_sleep
+                        && ids == claimed
+                        && ids.len() == 1
+                        && !producer_done.load(Ordering::SeqCst)
                 }
             });
-            (
-                producer.join().unwrap(),
-                consumer.join().unwrap(),
-                sampler.join().unwrap(),
-            )
-        });
+
+                let sampler = scope.spawn({
+                    let consumer_done = Arc::clone(&consumer_done);
+                    let observer_url = observer_url.clone();
+                    let application_name = application_name.clone();
+                    move || {
+                        let mut observations = ResourceObservations::default();
+                        while !consumer_done.load(Ordering::SeqCst) || observations.samples < 3 {
+                            observations.sample(&observer_url, &application_name);
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                        observations
+                    }
+                });
+                (
+                    producer.join().unwrap(),
+                    consumer.join().unwrap(),
+                    canary.join().unwrap(),
+                    sampler.join().unwrap(),
+                )
+            });
         let accepted = producer_result.accepted;
         let claimed = consumer_result.claimed;
         let finalized = consumer_result.finalized;
@@ -1148,7 +1377,14 @@ fn performance_single_deployment_baseline_tests() {
         let checkpoint = pq.metrics(&shard).await.unwrap();
         finalized_samples.push(finalized);
         cursor_samples.push(pq.current_position(&shard).await.unwrap().sequence);
-        resources.sample(&observer_url, &application_name);
+        let sample_url = observer_url.clone();
+        let sample_application = application_name.clone();
+        resources = std::thread::spawn(move || {
+            resources.sample(&sample_url, &sample_application);
+            resources
+        })
+        .join()
+        .expect("resource sample thread");
         assert_eq!(
             (
                 checkpoint.pending,
@@ -1190,9 +1426,9 @@ fn performance_single_deployment_baseline_tests() {
         let mut probe_claimed_ids = BTreeSet::new();
         let mut probe_finalized_ids = BTreeSet::new();
 
-        // At the exact 10M resident checkpoint, prove that a max-batch write overlaps a max-batch
-        // claim/finalize on the two independent production connections. The first batch is an active
-        // pending window; the second write happens while that window is being claimed.
+        // At the exact 10M resident checkpoint, submit a max-batch write and claim/finalize concurrently
+        // to the same hot queue. Caller intervals overlap, while stable affinity and the queue gate serialize
+        // their database transactions on the hot member. The separate canary proves cross-queue progress.
         let control_seed = push_batch(&pq, &shard, next_id, 1_000, &operations).await;
         next_id += 1_000;
         probe_push_batches += 1;
@@ -1217,7 +1453,9 @@ fn performance_single_deployment_baseline_tests() {
             let producer_operations = Arc::clone(&control_operations);
             let producer_pq = Arc::clone(&pq);
             let producer_shard = shard.clone();
+            let producer_runtime = Arc::clone(&runtime);
             let producer = scope.spawn(move || {
+                let _runtime = producer_runtime.enter();
                 barrier.wait();
                 let started = Instant::now();
                 let ids = futures::executor::block_on(push_batch(
@@ -1233,7 +1471,9 @@ fn performance_single_deployment_baseline_tests() {
             let claimant_operations = Arc::clone(&control_operations);
             let claimant_pq = Arc::clone(&consumer_pq);
             let claimant_shard = shard.clone();
+            let claimant_runtime = Arc::clone(&runtime);
             let claimant = scope.spawn(move || {
+                let _runtime = claimant_runtime.enter();
                 barrier.wait();
                 let started = Instant::now();
                 let ids = futures::executor::block_on(claim(
@@ -1270,14 +1510,14 @@ fn performance_single_deployment_baseline_tests() {
         probe_finalized += second_claim.len() as u64;
         probe_claimed_ids.extend(second_claim.iter().copied());
         probe_finalized_ids.extend(second_claim.iter().copied());
-        let post10m_concurrent_probe = active_pending_before == 1_000
+        let post10m_affinity_serialization_probe = active_pending_before == 1_000
             && control_write.len() == 1_000
             && first_claim.len() == 1_000
             && second_claim.len() == 1_000
             && write_started < claim_completed
             && claim_started < write_completed
             && control_operations.max_observed() >= 2;
-        let post10m_overlap_observed =
+        let post10m_caller_interval_overlap_observed =
             write_started < claim_completed && claim_started < write_completed;
         actual_push_sizes.insert(1_000);
         actual_update_window_sizes.insert(1_000);
@@ -1344,7 +1584,14 @@ fn performance_single_deployment_baseline_tests() {
             }
             let metrics = pq.metrics(&shard).await.unwrap();
             assert_eq!(metrics.pending, 0, "probe cycles must fully finalize");
-            resources.sample(&observer_url, &application_name);
+            let sample_url = observer_url.clone();
+            let sample_application = application_name.clone();
+            resources = std::thread::spawn(move || {
+                resources.sample(&sample_url, &sample_application);
+                resources
+            })
+            .join()
+            .expect("resource sample thread");
         }
         let oversize_push_rejected = matches!(
             pq.push_batch(
@@ -1483,7 +1730,9 @@ fn performance_single_deployment_baseline_tests() {
             && exact_outcomes
             && monotonic_progress
             && progress_evidence_complete
-            && bounded_resources;
+            && bounded_resources
+            && canary_causal_progress
+            && resources.max_connections == 2;
         let e1_pass = e0_pass
             && probe_accepted == probe_claimed
             && probe_claimed == probe_finalized
@@ -1502,7 +1751,7 @@ fn performance_single_deployment_baseline_tests() {
             && actual_finalize_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
             && oversize_push_rejected
             && oversize_claim_rejected
-            && post10m_concurrent_probe;
+            && post10m_affinity_serialization_probe;
 
         println!(
             "\nTP-002 E0/E1 postgres_native single-deployment baseline (resident={resident}, perf_env={perf_env}):"
@@ -1520,16 +1769,14 @@ fn performance_single_deployment_baseline_tests() {
             );
         }
 
-        // ----- Emit legacy overlap diagnostics + E1 ledger rows from the REAL measured values -----
-        // This test constructs separate relational backend instances and therefore MUST NOT qualify E0.
-        // The one-instance production-wrapper E0 proof lives in
-        // `pqueue-server/tests/postgres_native.rs::postgres_native_one_instance_pool_progresses_other_queue_during_pg_sleep`.
+        // ----- Emit E0 and E1 ledger rows from the REAL measured values -----
+        // The fixed two-member pool is a declared shared-resource bound. The hot queue uses one affinity
+        // member; the causal cross-queue canary proves the other member remains live under hot load.
         // RELEASE-tier only when a perf env actually met the bar; otherwise SMOKE (recorded, gate-visible, but
         // never satisfies a release E0/E1 requirement). A failing/non-perf run is honest evidence, not fake.
         let env_note = format!(
             "live postgres_native (TD-002 PostgresRelationalBackend), single deployment, resident={resident}, perf_env={perf_env}; the full TP-002 E1 shape is a provisioned instance with PQUEUE_E1_RESIDENT=10000000 + PQUEUE_PERF_ENV=1"
         );
-        let tier = |pass: bool| if pass { "release" } else { "smoke" }.to_string();
         let lost_items = producer_result
             .seen_ids
             .iter()
@@ -1575,14 +1822,38 @@ fn performance_single_deployment_baseline_tests() {
                 "retained_terminal_items".to_string(),
                 serde_json::json!(checkpoint.resident_terminal_count),
             ),
-            ("bars_met".to_string(), serde_json::json!(false)),
             (
                 "one_instance_production_wrapper".to_string(),
-                serde_json::json!(false),
+                serde_json::json!(true),
+            ),
+            ("production_pool_size".to_string(), serde_json::json!(2)),
+            (
+                "production_pool_connections_observed".to_string(),
+                serde_json::json!(resources.max_connections),
             ),
             (
-                "superseded_by".to_string(),
-                serde_json::json!("pqueue-server postgres_native one-instance pool E0"),
+                "hot_queue_pool_partition".to_string(),
+                serde_json::json!(hot_pool_partition),
+            ),
+            (
+                "canary_queue_pool_partition".to_string(),
+                serde_json::json!(canary_pool_partition),
+            ),
+            (
+                "canary_observed_hot_pg_sleep".to_string(),
+                serde_json::json!(canary_causal_progress),
+            ),
+            (
+                "canary_exact_outcomes".to_string(),
+                serde_json::json!(canary_causal_progress),
+            ),
+            (
+                "canary_completed_before_hot".to_string(),
+                serde_json::json!(canary_causal_progress),
+            ),
+            (
+                "canary_causal_progress".to_string(),
+                serde_json::json!(canary_causal_progress),
             ),
             ("portable_gate".to_string(), serde_json::json!(true)),
             ("quiet_host_required".to_string(), serde_json::json!(false)),
@@ -1707,23 +1978,14 @@ fn performance_single_deployment_baseline_tests() {
         );
         emit(
             "e0",
-            pqueue_release::LedgerRow {
-                suite: "performance_single_deployment_baseline_tests".into(),
-                command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
-                backend_profile: "postgres_native".into(),
-                scale: if resident >= 10_000_000 { "release".into() } else { "baseline".into() },
-                seed: 0,
-                environment: env_note.clone(),
-                exit_status: 0,
-                ac_ids: vec![],
-                inv_ids: vec![],
-                pass_bar: "Legacy separate-backend overlap diagnostic only; cannot satisfy E0. E0 requires the one-instance production wrapper.".into(),
-                evidence_tier: "smoke".into(),
-                measurements: pqueue_release::Measurements {
-                    tp002_evidence_ids: vec![],
-                    values: e0_vals,
-                },
-            },
+            single_deployment_evidence_row(
+                "e0",
+                full_shape,
+                e0_pass,
+                env_note.clone(),
+                "E0: exact accepted, claimed, and finalized outcomes; monotonic configured-bound progress; bounded shared resources; timings are capacity observations only",
+                e0_vals,
+            ),
         );
 
         let mut e1_vals: std::collections::BTreeMap<String, serde_json::Value> =
@@ -1793,7 +2055,6 @@ fn performance_single_deployment_baseline_tests() {
             "worst_op_p99_ms".into(),
             serde_json::json!((worst_p99 * 1000.0).round() / 1000.0),
         );
-        e1_vals.insert("bars_met".into(), serde_json::json!(e1_pass));
         e1_vals.insert("portable_gate".into(), serde_json::json!(true));
         e1_vals.insert("quiet_host_required".into(), serde_json::json!(false));
         e1_vals.insert("host_speed_gate".into(), serde_json::json!(false));
@@ -1914,15 +2175,15 @@ fn performance_single_deployment_baseline_tests() {
             }),
         );
         e1_vals.insert(
-            "post10m_concurrent_probe".into(),
-            serde_json::json!(post10m_concurrent_probe),
+            "post10m_affinity_serialization_probe".into(),
+            serde_json::json!(post10m_affinity_serialization_probe),
         );
         e1_vals.insert(
-            "post10m_overlap_observed".into(),
-            serde_json::json!(post10m_overlap_observed),
+            "post10m_caller_interval_overlap_observed".into(),
+            serde_json::json!(post10m_caller_interval_overlap_observed),
         );
         e1_vals.insert(
-            "post10m_max_in_flight_observed".into(),
+            "post10m_caller_in_flight_observed".into(),
             serde_json::json!(control_operations.max_observed()),
         );
         e1_vals.insert(
@@ -1994,23 +2255,14 @@ fn performance_single_deployment_baseline_tests() {
         );
         emit(
             "e1",
-            pqueue_release::LedgerRow {
-                suite: "performance_single_deployment_baseline_tests".into(),
-                command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
-                backend_profile: "postgres_native".into(),
-                scale: if resident >= 10_000_000 { "release".into() } else { "baseline".into() },
-                seed: 0,
-                environment: env_note,
-                exit_status: 0,
-                ac_ids: vec![],
-                inv_ids: vec![],
-                pass_bar: "E1: exact batch outcomes, monotonic progress, and bounded resources at the full resident shape; latency percentiles are capacity observations only".into(),
-                evidence_tier: tier(e1_pass),
-                measurements: pqueue_release::Measurements {
-                    tp002_evidence_ids: vec!["E1".into()],
-                    values: e1_vals,
-                },
-            },
+            single_deployment_evidence_row(
+                "e1",
+                full_shape,
+                e1_pass,
+                env_note,
+                "E1: exact batch outcomes, monotonic progress, and bounded resources at the full resident shape; latency percentiles are capacity observations only",
+                e1_vals,
+            ),
         );
     });
 }
@@ -2022,17 +2274,26 @@ fn ms(t: Instant) -> f64 {
 /// Write a single-row ledger file `<suite-tag>.jsonl` and assert it round-trips strict validation as a
 /// release-tier row carrying its evidence id. (E0 and E1 each get their own file so both are gate-visible.)
 fn emit(tag: &str, row: pqueue_release::LedgerRow) {
+    let expected_id = match tag {
+        "e0" => "E0",
+        "e1" => "E1",
+        other => panic!("unsupported single-deployment evidence tag {other}"),
+    };
+    assert_eq!(
+        row.measurements.tp002_evidence_ids.as_slice(),
+        [expected_id],
+        "single-deployment evidence must carry exactly its governed identity"
+    );
     let suite = format!("performance_single_deployment_baseline_tests_{tag}");
     let path = pqueue_release::ledger_path(env!("CARGO_MANIFEST_DIR"), &suite);
     let _ = std::fs::remove_file(&path);
     pqueue_release::append_row(&path, &row).expect("emit ledger row");
     let summary = pqueue_release::verify_ledger(&path, true).expect("emitted row validates strict");
-    let id = &row.measurements.tp002_evidence_ids[0];
     // Release-tier ids count as headline evidence; smoke-tier ids are tracked separately.
     let seen = if row.evidence_tier == "smoke" {
-        summary.smoke_evidence_ids.contains(id)
+        summary.smoke_evidence_ids.contains(expected_id)
     } else {
-        summary.evidence_ids.contains(id)
+        summary.evidence_ids.contains(expected_id)
     };
-    assert!(seen, "emitted row must carry the {id} evidence id");
+    assert!(seen, "emitted row must carry the {expected_id} evidence id");
 }

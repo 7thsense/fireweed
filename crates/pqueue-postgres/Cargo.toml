@@ -43,13 +43,6 @@ tls = ["dep:native-tls", "dep:postgres-native-tls"]
 pqueue = { path = "../pqueue", default-features = false }
 # Runs the shared backend-conformance suite against the postgres backend (env-gated on PQUEUE_PG_TEST_URL).
 pqueue-conformance = { path = "../pqueue-conformance" }
-# The E0/E1 single-deployment baseline suite emits verification-ledger rows (TP-002 E0/E1) via this crate.
-pqueue-release = { path = "../pqueue-release" }
-
-[[test]]
-name = "performance_single_deployment_baseline_tests"
-path = "tests/performance_single_deployment_baseline_tests.rs"
-
 [[test]]
 name = "conformance"
 path = "tests/conformance.rs"

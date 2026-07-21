@@ -175,7 +175,7 @@ fn portable(id: &str) -> LedgerRow {
         ("postgres_storage_class".into(), serde_json::json!("gp3")),
         (
             "topology".into(),
-            serde_json::json!("single-process+single-postgres+two-production-connections"),
+            serde_json::json!("single-process+single-postgres+fixed-2-member-affinity-pool"),
         ),
         (
             "telemetry_surface".into(),
@@ -219,6 +219,27 @@ fn portable(id: &str) -> LedgerRow {
             ("accepted_items".into(), serde_json::json!(10_000_000)),
             ("claimed_items".into(), serde_json::json!(10_000_000)),
             ("finalized_items".into(), serde_json::json!(10_000_000)),
+            (
+                "one_instance_production_wrapper".into(),
+                serde_json::json!(true),
+            ),
+            ("production_pool_size".into(), serde_json::json!(2)),
+            (
+                "production_pool_connections_observed".into(),
+                serde_json::json!(2),
+            ),
+            ("hot_queue_pool_partition".into(), serde_json::json!(0)),
+            ("canary_queue_pool_partition".into(), serde_json::json!(1)),
+            (
+                "canary_observed_hot_pg_sleep".into(),
+                serde_json::json!(true),
+            ),
+            ("canary_exact_outcomes".into(), serde_json::json!(true)),
+            (
+                "canary_completed_before_hot".into(),
+                serde_json::json!(true),
+            ),
+            ("canary_causal_progress".into(), serde_json::json!(true)),
         ]);
     } else {
         for operation in ["push", "update_window", "claim", "finalize"] {
@@ -269,10 +290,16 @@ fn portable(id: &str) -> LedgerRow {
             "probe_operation_mix".into(),
             serde_json::json!({"push_items": 1101, "push_batches": 10, "update_item_calls": 1000, "claim_items": 1101, "claim_batches": 10, "finalize_items": 1101, "finalize_batches": 10}),
         );
-        values.insert("post10m_concurrent_probe".into(), serde_json::json!(true));
-        values.insert("post10m_overlap_observed".into(), serde_json::json!(true));
         values.insert(
-            "post10m_max_in_flight_observed".into(),
+            "post10m_affinity_serialization_probe".into(),
+            serde_json::json!(true),
+        );
+        values.insert(
+            "post10m_caller_interval_overlap_observed".into(),
+            serde_json::json!(true),
+        );
+        values.insert(
+            "post10m_caller_in_flight_observed".into(),
             serde_json::json!(2),
         );
         values.insert(
@@ -310,6 +337,51 @@ fn portable_e0_e1_accept_semantics_not_machine_speed() {
     for id in ["E0", "E1"] {
         pqueue_release::single_deployment::validate_row(&portable(id), id, REV).unwrap();
     }
+}
+
+#[test]
+fn portable_e0_e1_require_exact_governed_evidence_identity() {
+    for id in ["E0", "E1"] {
+        let row = portable(id);
+        pqueue_release::single_deployment::validate_row(&row, id, REV).unwrap();
+
+        for evidence_ids in [vec![], vec![id.into(), "E2".into()]] {
+            let mut malformed = row.clone();
+            malformed.measurements.tp002_evidence_ids = evidence_ids;
+            assert!(
+                pqueue_release::single_deployment::validate_row(&malformed, id, REV).is_err(),
+                "{id} authority must carry exactly one matching governed evidence id"
+            );
+        }
+    }
+}
+
+#[test]
+fn e0_rejects_legacy_nonwrapper_and_noncausal_rows() {
+    let row = portable("E0");
+    for key in [
+        "one_instance_production_wrapper",
+        "production_pool_size",
+        "production_pool_connections_observed",
+        "canary_observed_hot_pg_sleep",
+        "canary_exact_outcomes",
+        "canary_completed_before_hot",
+        "canary_causal_progress",
+    ] {
+        let mut legacy = row.clone();
+        legacy.measurements.values.remove(key);
+        assert!(
+            pqueue_release::single_deployment::validate_row(&legacy, "E0", REV).is_err(),
+            "legacy E0 row missing {key} must fail closed"
+        );
+    }
+
+    let mut same_member = row;
+    same_member
+        .measurements
+        .values
+        .insert("canary_queue_pool_partition".into(), serde_json::json!(0));
+    assert!(pqueue_release::single_deployment::validate_row(&same_member, "E0", REV).is_err());
 }
 
 #[test]
@@ -494,8 +566,14 @@ fn e0_e1_fail_closed_on_progress_topology_workload_and_reconciliation_drift() {
             "probe_operation_mix",
             serde_json::json!({"push_items": 1101, "push_batches": 10, "update_item_calls": 0, "claim_items": 1101, "claim_batches": 10, "finalize_items": 1101, "finalize_batches": 10}),
         ),
-        ("post10m_concurrent_probe", serde_json::json!(false)),
-        ("post10m_overlap_observed", serde_json::json!(false)),
+        (
+            "post10m_affinity_serialization_probe",
+            serde_json::json!(false),
+        ),
+        (
+            "post10m_caller_interval_overlap_observed",
+            serde_json::json!(false),
+        ),
         ("total_finalized_items", serde_json::json!(10_001_100)),
     ] {
         let mut row = portable("E1");
