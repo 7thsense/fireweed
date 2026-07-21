@@ -3032,53 +3032,40 @@ fn select_item_claim_sql(
     if queue_paused(client, shard)? {
         return Ok(Vec::new());
     }
-    const PAGE_SIZE: i64 = 128;
     let (tenant, queue) = parts(shard);
-    let mut selected = Vec::new();
     let now_n = ts_nanos(now);
-    let mut offset = 0_i64;
-    loop {
-        let rows = st(client.query(
-            "SELECT item_id,group_key,metadata FROM pqueue_items \
+    let limit = max as i64;
+    let required_group = compatibility.group_key.as_ref().map(GroupKey::as_str);
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let rows = st(client.query(
+        "SELECT item_id FROM pqueue_items \
              WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' AND superseded=false \
              AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=$3) \
              AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
              JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
              AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
              AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
-             ORDER BY priority_sort,created_seq LIMIT $4 OFFSET $5",
-            &[&tenant, &queue, &now_n, &PAGE_SIZE, &offset],
-        ))?;
-        let page_len = rows.len();
-        for row in rows {
-            let group_key: Option<String> = row.get(1);
-            if compatibility
-                .group_key
-                .as_ref()
-                .is_some_and(|required| group_key.as_deref() != Some(required.as_str()))
-            {
-                continue;
-            }
-            let metadata = metadata_from_json(row.get(2))?;
-            if compatibility
-                .metadata_equals
-                .iter()
-                .all(|(key, expected)| metadata.get(key) == Some(expected))
-            {
-                let id: String = row.get(0);
-                selected.push(
-                    ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))?,
-                );
-                if selected.len() == max {
-                    return Ok(selected);
-                }
-            }
-        }
-        if page_len < PAGE_SIZE as usize {
-            return Ok(selected);
-        }
-        offset += PAGE_SIZE;
-    }
+             AND ($5::text IS NULL OR group_key=$5) \
+             AND NOT EXISTS (SELECT 1 FROM jsonb_each($6::text::jsonb) wanted(key,value) \
+               WHERE metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value) \
+             ORDER BY priority_sort,created_seq LIMIT $4",
+        &[
+            &tenant,
+            &queue,
+            &now_n,
+            &limit,
+            &required_group,
+            &metadata_filter,
+        ],
+    ))?;
+    rows.into_iter()
+        .map(|row| {
+            ItemId::new(row.get::<_, String>(0))
+                .map_err(|error| EngineError::Storage(error.to_string()))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3092,67 +3079,6 @@ fn select_item_claim_sql(
 /// whole locked group leases together — no SKIP LOCKED inside a locked group), capped at `limit`.
 struct GroupEligibility {
     item_ids: Vec<ItemId>,
-    eligible_count: usize,
-}
-
-fn active_group_member_count(
-    tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-    group: &GroupKey,
-    cohort: bool,
-) -> EngineResult<usize> {
-    let (tenant, queue) = parts(shard);
-    let cohort_predicate = if cohort {
-        "cohort_size IS NOT NULL"
-    } else {
-        "cohort_size IS NULL"
-    };
-    let row = st(tx.query_one(
-        &format!(
-            "SELECT COUNT(*)::bigint FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
-             AND group_key=$3 AND superseded=false AND {cohort_predicate} \
-             AND lifecycle_state NOT IN ('Complete','Failed')"
-        ),
-        &[&tenant, &queue, &group.as_str()],
-    ))?;
-    let count: i64 = row.get(0);
-    usize::try_from(count).map_err(|error| EngineError::Storage(error.to_string()))
-}
-
-fn eligible_group_member_count(
-    tx: &mut postgres::Transaction<'_>,
-    shard: &QueueKey,
-    group: &GroupKey,
-    now: UtcTimestamp,
-    cohort: bool,
-    compatibility: &ClaimCompatibility,
-) -> EngineResult<usize> {
-    let (tenant, queue) = parts(shard);
-    let cohort_predicate = if cohort {
-        "cohort_size IS NOT NULL"
-    } else {
-        "cohort_size IS NULL"
-    };
-    let now_n = ts_nanos(now);
-    let metadata_filter = metadata_to_json(&Metadata::from_entries(
-        compatibility.metadata_equals.clone(),
-    ))?;
-    let row = st(tx.query_one(
-        &format!(
-            "SELECT COUNT(*)::bigint FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
-             AND group_key=$3 AND lifecycle_state='Pending' AND superseded=false \
-             AND {cohort_predicate} AND (not_before IS NULL OR not_before<=$4) \
-             AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
-             AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
-             AND NOT EXISTS (SELECT 1 FROM jsonb_each($5::text::jsonb) AS wanted(key,value) \
-             WHERE metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value)"
-        ),
-        &[&tenant, &queue, &group.as_str(), &now_n, &metadata_filter],
-    ))?;
-    let count: i64 = row.get(0);
-    usize::try_from(count).map_err(|error| EngineError::Storage(error.to_string()))
 }
 
 /// `group_batching` selection (API-001 whole-eligible-group, `max_groups=N`): accumulate the oldest-N
@@ -3195,9 +3121,6 @@ fn select_group_batching(
            ) r ON true WHERE s.tenant_id=$1 AND s.queue_id=$2 \
              AND (s.oldest_eligible_at IS NOT NULL OR $7) \
              AND ($6::text IS NULL OR s.group_key=$6) \
-             AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=$1 \
-               AND leased.queue_id=$2 AND leased.group_key=s.group_key AND leased.superseded=false \
-               AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased') \
            ORDER BY r.priority_sort,r.created_seq,r.item_id,s.group_key \
            LIMIT $4 FOR UPDATE OF s SKIP LOCKED \
          ), locked AS MATERIALIZED ( \
@@ -3321,45 +3244,45 @@ fn select_whole_cohort(
     compatibility: &ClaimCompatibility,
 ) -> EngineResult<Option<SelectedCohort>> {
     let (t, q) = parts(shard);
-    let cohorts: Vec<(String, String, i64)> = {
-        let rows = st(tx.query(
-            "SELECT group_key, cohort_id, cohort_size FROM pqueue_cohorts \
-             WHERE tenant_id=$1 AND queue_id=$2 AND state='complete' \
-             ORDER BY cohort_created_at, group_key FOR UPDATE SKIP LOCKED",
-            &[&t, &q],
-        ))?;
-        rows.into_iter()
-            .map(|r| (r.get(0), r.get(1), r.get(2)))
-            .collect()
+    let now_n = ts_nanos(now);
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let candidate = st(tx.query_opt(
+        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM pqueue_cohorts c \
+         WHERE c.tenant_id=$1 AND c.queue_id=$2 AND c.state='complete' \
+         AND (SELECT COUNT(*)::bigint FROM pqueue_items a WHERE a.tenant_id=$1 AND a.queue_id=$2 \
+           AND a.group_key=c.group_key AND a.superseded=false AND a.cohort_size IS NOT NULL \
+           AND a.lifecycle_state NOT IN ('Complete','Failed'))=c.cohort_size \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_items i WHERE i.tenant_id=$1 AND i.queue_id=$2 \
+           AND i.group_key=c.group_key AND i.superseded=false AND i.cohort_size IS NOT NULL \
+           AND i.lifecycle_state NOT IN ('Complete','Failed') AND NOT (i.lifecycle_state='Pending' \
+             AND (i.not_before IS NULL OR i.not_before<=$3) AND i.eligible_since IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+               WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+             AND NOT EXISTS (SELECT 1 FROM jsonb_each($4::text::jsonb) wanted(key,value) \
+               WHERE i.metadata::jsonb -> wanted.key IS DISTINCT FROM wanted.value))) \
+         ORDER BY c.cohort_created_at,c.group_key LIMIT 1 FOR UPDATE OF c SKIP LOCKED",
+        &[&t,&q,&now_n,&metadata_filter],
+    ))?;
+    let Some(candidate) = candidate else {
+        return Ok(None);
     };
-    for (gk, cohort_id, size) in cohorts {
-        let size = size as usize;
-        let group = GroupKey::new(gk).map_err(|e| EngineError::Storage(e.to_string()))?;
-        let members: i64 = st(tx.query_one(
-            "SELECT COUNT(*)::bigint FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
-             AND group_key=$3 AND superseded=false AND cohort_size IS NOT NULL \
-             AND lifecycle_state NOT IN ('Complete','Failed')",
-            &[&t, &q, &group.as_str()],
-        ))?
-        .get(0);
-        if members as usize != size {
-            continue; // incomplete cohort
-        }
-        let elig = cohort_eligible_items(tx, shard, &group, now, size + 1, compatibility)?;
-        if elig.eligible_count != size
-            || elig.eligible_count != active_group_member_count(tx, shard, &group, true)?
-        {
-            continue; // a member is leased / terminal / not-due
-        }
-        if size > max_items {
-            return Err(EngineError::BatchTooLarge);
-        }
-        return Ok(Some(SelectedCohort {
-            cohort_id: CohortId::new(cohort_id).map_err(|e| EngineError::Storage(e.to_string()))?,
-            item_ids: elig.item_ids,
-        }));
+    let group = GroupKey::new(candidate.get::<_, String>(0))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let cohort_id = CohortId::new(candidate.get::<_, String>(1))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let size = usize::try_from(candidate.get::<_, i64>(2))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    if size > max_items {
+        return Err(EngineError::BatchTooLarge);
     }
-    Ok(None)
+    let item_ids = cohort_eligible_items(tx, shard, &group, now, size, compatibility)?.item_ids;
+    Ok(Some(SelectedCohort {
+        cohort_id,
+        item_ids,
+    }))
 }
 
 /// The live currently-eligible COHORT members of one group (`cohort_size IS NOT NULL`), capped at `limit`,
@@ -3392,15 +3315,11 @@ fn cohort_eligible_items(
         &[&t, &q, &group.as_str(), &now_n, &lim, &metadata_filter],
     ))?;
     let mut out = Vec::with_capacity(rows.len());
-    let eligible_count = eligible_group_member_count(tx, shard, group, now, true, compatibility)?;
     for row in rows {
         let id: String = row.get(0);
         out.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
     }
-    Ok(GroupEligibility {
-        item_ids: out,
-        eligible_count,
-    })
+    Ok(GroupEligibility { item_ids: out })
 }
 
 fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult<Vec<ItemView>> {
@@ -7963,6 +7882,31 @@ mod sql_shape_tests {
         assert!(claim_fn.contains("max_items_i.saturating_add(1)"));
         assert!(claim_fn.contains("array_agg(l.item_id ORDER BY"));
         assert!(claim_fn.contains("SUM(item_count) OVER"));
+    }
+
+    #[test]
+    fn filtered_and_cohort_claims_have_bounded_seek_shapes() {
+        let source = include_str!("relational.rs");
+        let filtered = source
+            .split("fn select_item_claim_sql(")
+            .nth(1)
+            .unwrap()
+            .split("fn select_group_batching(")
+            .next()
+            .unwrap();
+        assert_eq!(filtered.matches("client.query(").count(), 1);
+        assert!(filtered.contains("LIMIT $4"));
+        assert!(!filtered.contains("OFFSET"));
+
+        let cohort = source
+            .split("fn select_whole_cohort(")
+            .nth(1)
+            .unwrap()
+            .split("fn cohort_eligible_items(")
+            .next()
+            .unwrap();
+        assert!(cohort.contains("LIMIT 1 FOR UPDATE OF c SKIP LOCKED"));
+        assert!(!cohort.contains("Vec<(String, String, i64)>") && !cohort.contains("for (gk"));
     }
 
     #[test]
