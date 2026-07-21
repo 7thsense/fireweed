@@ -287,7 +287,7 @@ impl RecoveryMaintenanceDispatcher {
                 let task_log = Arc::clone(&log);
                 let executor = self.executor.clone();
                 let task_shard = shard.clone();
-                let handle = tokio::spawn(async move {
+                let handle = pqueue_resp::spawn_governed(async move {
                     let operation_shard = task_shard.clone();
                     let result = executor
                         .execute(move || {

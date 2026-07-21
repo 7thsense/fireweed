@@ -7,6 +7,8 @@ const DENSITY_KIND_HARNESS: &str = include_str!("../../../scripts/perf/tp002-e2-
 const DENSITY_LOADGEN: &str = include_str!("../../pqueue-loadgen/src/main.rs");
 const RESP_SERVER: &str = include_str!("../../pqueue-resp/src/lib.rs");
 const SERVICE_MAIN: &str = include_str!("../../pqueue-server/src/bin/pqueue-service.rs");
+const OBJECT_LOG_SQLITE_ADAPTER: &str =
+    include_str!("../../pqueue-server/src/object_log_sqlite.rs");
 const POSTGRES_WHOLE_OPERATION_ADAPTER: &str =
     include_str!("../../pqueue-server/src/postgres_native.rs");
 
@@ -30,6 +32,15 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
     assert!(RESP_SERVER.contains("let _task_guard = task_guard"));
     assert!(!SERVICE_MAIN.contains("metrics.num_alive_tasks()"));
     assert!(SERVICE_MAIN.contains("runtime_task_resource_counts()"));
+    let recovery_maintenance = OBJECT_LOG_SQLITE_ADAPTER
+        .split("for shard in shards {")
+        .nth(1)
+        .expect("recovery maintenance dispatch exists")
+        .split("match first_error")
+        .next()
+        .expect("recovery maintenance dispatch ends");
+    assert!(recovery_maintenance.contains("pqueue_resp::spawn_governed"));
+    assert!(!recovery_maintenance.contains("tokio::spawn"));
     assert!(SERVICE_MAIN.contains("set_max_runtime_tasks(64)"));
     let dispatch = POSTGRES_WHOLE_OPERATION_ADAPTER
         .split("fn dispatch")
