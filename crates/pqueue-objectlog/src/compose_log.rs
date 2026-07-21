@@ -18,8 +18,10 @@
 //! commit_transition) — exactly the monolith's capability set.
 
 use pqueue_engine::{
-    CommandEnvelope, CommandPage, CommandPosition, ComposedBackend, DurabilityClass, EngineResult,
-    InProcessControlPlane, LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
+    CommandEnvelope, CommandPage, CommandPosition, ComposedBackend, DetachedLogMaintenance,
+    DetachedRetentionOutcome, DetachedRetentionRequest, DetachedTrimWatermark, DurabilityClass,
+    EngineError, EngineResult, InProcessControlPlane, LogStore, ProjectionSnapshot, QueueKey,
+    SnapshotRef,
 };
 use pqueue_projection::InMemoryProjection;
 
@@ -90,7 +92,7 @@ const APPEND_MAX_LATENCY_MS: u64 = u64::MAX;
 /// The segmented object-log command-log axis (ADR-012): the production group-commit substrate over a local
 /// filesystem blob store, surfaced as a [`LogStore`].
 pub struct ObjectLog {
-    log: SegmentedObjectLog<Arc<dyn BlobStore>>,
+    log: Arc<SegmentedObjectLog<Arc<dyn BlobStore>>>,
     config: SegmentConfig,
     durability_class: DurabilityClass,
     /// Whether this axis exposes the [`LogStore`] group-commit facet (ack-after-seal co-buffering). `false`
@@ -108,7 +110,7 @@ impl ObjectLog {
         let store: Arc<dyn BlobStore> = Arc::new(LocalFsBlobStore::open(root)?);
         let config = SegmentConfig::new(APPEND_TARGET_BYTES, APPEND_MAX_LATENCY_MS)?;
         Ok(Self {
-            log: SegmentedObjectLog::open(store, config),
+            log: Arc::new(SegmentedObjectLog::open(store, config)),
             config,
             durability_class: DurabilityClass::EventualApply,
             group_commit: false,
@@ -119,7 +121,7 @@ impl ObjectLog {
     pub fn open_with_blob_store(store: Arc<dyn BlobStore>) -> EngineResult<Self> {
         let config = SegmentConfig::new(APPEND_TARGET_BYTES, APPEND_MAX_LATENCY_MS)?;
         Ok(Self {
-            log: SegmentedObjectLog::open(store, config),
+            log: Arc::new(SegmentedObjectLog::open(store, config)),
             config,
             durability_class: DurabilityClass::EventualApply,
             group_commit: false,
@@ -144,7 +146,7 @@ impl ObjectLog {
         config: SegmentConfig,
     ) -> EngineResult<Self> {
         Ok(Self {
-            log: SegmentedObjectLog::open(store, config),
+            log: Arc::new(SegmentedObjectLog::open(store, config)),
             config,
             durability_class: DurabilityClass::EventualApply,
             group_commit: true,
@@ -162,7 +164,7 @@ impl ObjectLog {
         config: SegmentConfig,
     ) -> EngineResult<Self> {
         Ok(Self {
-            log: SegmentedObjectLog::open(store, config),
+            log: Arc::new(SegmentedObjectLog::open(store, config)),
             config,
             durability_class: DurabilityClass::Atomic,
             group_commit: true,
@@ -401,6 +403,172 @@ impl ObjectLog {
     }
 }
 
+struct ObjectLogMaintenance {
+    log: Arc<SegmentedObjectLog<Arc<dyn BlobStore>>>,
+}
+
+impl ObjectLogMaintenance {
+    fn fenced_outcome(expected_epoch: u64) -> DetachedRetentionOutcome {
+        let mut summary = pqueue_engine::MaintenanceSummary::default();
+        summary.fenced = true;
+        summary.stopped_by = Some(pqueue_engine::MaintenanceStopReason::EpochFenced);
+        DetachedRetentionOutcome {
+            expected_epoch,
+            summary,
+            watermark: DetachedTrimWatermark::Clear,
+        }
+    }
+
+    fn completed_watermark(
+        &self,
+        shard: &QueueKey,
+        target: u64,
+        now_ms: i64,
+    ) -> EngineResult<DetachedTrimWatermark> {
+        Ok(
+            if self
+                .log
+                .lowest_branch_pinned_below(shard, target, now_ms)?
+                .is_some()
+            {
+                DetachedTrimWatermark::Clear
+            } else {
+                DetachedTrimWatermark::Set(target)
+            },
+        )
+    }
+}
+
+impl DetachedLogMaintenance for ObjectLogMaintenance {
+    fn execute_retention(
+        &self,
+        request: DetachedRetentionRequest,
+    ) -> EngineResult<DetachedRetentionOutcome> {
+        if self.log.maintenance_owner_epoch(&request.shard) != Some(request.expected_epoch)
+            || self.log.current_epoch(&request.shard)? != request.expected_epoch
+        {
+            return Ok(Self::fenced_outcome(request.expected_epoch));
+        }
+
+        let mut summary = pqueue_engine::MaintenanceSummary::default();
+        let mut watermark = DetachedTrimWatermark::Unchanged;
+        let durable_floor = self.log.read_retention_floor(&request.shard)?;
+
+        // Finish a crash-interrupted delete before attempting a new floor. The durable floor is already the
+        // safety barrier, so this replay is idempotent and remains owner-fenced inside the segmented substrate.
+        if let Some(floor) = &durable_floor
+            && request
+                .completed_through
+                .is_none_or(|completed| completed < floor.sequence)
+        {
+            let pass = self.log.expire_segments_through_bounded_default(
+                &request.shard,
+                floor.sequence,
+                request.now_ms,
+            )?;
+            let complete = pass.cursor.is_none() && pass.stopped_by.is_none();
+            summary.merge(maintenance_summary(pass, false));
+            if !complete {
+                return Ok(DetachedRetentionOutcome {
+                    expected_epoch: request.expected_epoch,
+                    summary,
+                    watermark,
+                });
+            }
+            watermark = self.completed_watermark(&request.shard, floor.sequence, request.now_ms)?;
+        }
+
+        if !request.allow_floor_advance {
+            return Ok(DetachedRetentionOutcome {
+                expected_epoch: request.expected_epoch,
+                summary,
+                watermark,
+            });
+        }
+        let Some(checkpoint) = request.checkpoint else {
+            return Ok(DetachedRetentionOutcome {
+                expected_epoch: request.expected_epoch,
+                summary,
+                watermark,
+            });
+        };
+        let Some(time_expired_seq) = self
+            .log
+            .max_trimmable_seq_before(&request.shard, request.cutoff_ms)?
+        else {
+            return Ok(DetachedRetentionOutcome {
+                expected_epoch: request.expected_epoch,
+                summary,
+                watermark,
+            });
+        };
+        let trim_through = checkpoint.sequence.min(time_expired_seq);
+        let floor_position = CommandPosition::new(
+            request.shard.clone(),
+            checkpoint.backend_epoch,
+            trim_through,
+        );
+
+        // The manifest CAS is the crash barrier and owner fence. No segment object is deleted unless this
+        // owner durably published (or idempotently observed) the floor first.
+        match self.log.advance_retention_floor(
+            &request.shard,
+            floor_position,
+            request.expected_epoch,
+        ) {
+            Ok(()) => {}
+            Err(EngineError::EpochFenced) | Err(EngineError::Conflict) => {
+                return Ok(Self::fenced_outcome(request.expected_epoch));
+            }
+            Err(error) => return Err(error),
+        }
+        let pass = self.log.expire_segments_through_bounded_default(
+            &request.shard,
+            trim_through,
+            request.now_ms,
+        )?;
+        let complete = pass.cursor.is_none() && pass.stopped_by.is_none();
+        summary.merge(maintenance_summary(pass, false));
+        if complete {
+            watermark = self.completed_watermark(&request.shard, trim_through, request.now_ms)?;
+        }
+        Ok(DetachedRetentionOutcome {
+            expected_epoch: request.expected_epoch,
+            summary,
+            watermark,
+        })
+    }
+
+    fn execute_orphan_gc(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<pqueue_engine::MaintenanceSummary> {
+        if self.log.maintenance_owner_epoch(shard) != Some(expected_epoch)
+            || self.log.current_epoch(shard)? != expected_epoch
+        {
+            return Ok(Self::fenced_outcome(expected_epoch).summary);
+        }
+        let limits = crate::maintenance::MaintenanceLimits::new(
+            256,
+            64 * 1024 * 1024,
+            2_048,
+            std::time::Duration::from_millis(50),
+            64,
+        )?;
+        let report = self.log.gc_orphaned_branches_bounded(
+            shard,
+            expected_epoch,
+            now_ms,
+            60_000,
+            limits,
+            false,
+        )?;
+        Ok(maintenance_summary(report, true))
+    }
+}
+
 impl LogStore for ObjectLog {
     fn durability_class(&self) -> DurabilityClass {
         self.durability_class
@@ -420,6 +588,12 @@ impl LogStore for ObjectLog {
 
     fn supports_objectlog_maintenance(&self) -> bool {
         true
+    }
+
+    fn detached_maintenance(&self) -> Option<Arc<dyn DetachedLogMaintenance>> {
+        Some(Arc::new(ObjectLogMaintenance {
+            log: Arc::clone(&self.log),
+        }))
     }
 
     fn acquire_epoch(&mut self, shard: &QueueKey) -> EngineResult<u64> {

@@ -192,6 +192,16 @@ pub trait LogStore: Send {
         false
     }
 
+    /// Clone an owned maintenance handle whose provider I/O does not borrow the composed unit-of-work.
+    ///
+    /// The normal log methods intentionally run while `ComposedBackend` holds its atomic append/apply lock.
+    /// Object-log retention is different: bounded LIST/GET/DELETE and manifest-CAS calls may wait on a remote
+    /// provider and therefore must execute after that lock is released. Implementations expose a handle only
+    /// when the underlying substrate is independently shared and every destructive operation is owner-fenced.
+    fn detached_maintenance(&self) -> Option<Arc<dyn DetachedLogMaintenance>> {
+        None
+    }
+
     /// Acquire a strictly-greater, durably-recorded `assignment_epoch` (TD-003 acquire). Returns the new
     /// epoch. `NotFound` if the shard's log does not exist.
     fn acquire_epoch(&mut self, shard: &QueueKey) -> EngineResult<u64>;
@@ -452,6 +462,53 @@ pub trait LogStore: Send {
     fn gc_max_latency_ms(&self) -> u64 {
         0
     }
+}
+
+/// Immutable authority captured while the composition lock and the queue-local mutation permit are held.
+/// The owned log handle executes this request after the global composition lock is released; the queue permit
+/// remains held, so a new local claim replay cannot appear between preparation and the floor CAS.
+#[derive(Debug, Clone)]
+pub struct DetachedRetentionRequest {
+    pub shard: QueueKey,
+    pub expected_epoch: u64,
+    pub now_ms: i64,
+    pub cutoff_ms: i64,
+    pub checkpoint: Option<CommandPosition>,
+    pub allow_floor_advance: bool,
+    pub completed_through: Option<u64>,
+}
+
+/// How a completed detached pass updates the process-local crash-recovery scan watermark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachedTrimWatermark {
+    Unchanged,
+    Clear,
+    Set(u64),
+}
+
+#[derive(Debug, Clone)]
+pub struct DetachedRetentionOutcome {
+    pub expected_epoch: u64,
+    pub summary: MaintenanceSummary,
+    pub watermark: DetachedTrimWatermark,
+}
+
+/// An owned, epoch-fenced object-log maintenance substrate.
+///
+/// Implementations must re-read durable owner authority before destructive provider calls. A successful floor
+/// publication is the crash barrier before segment deletion; stale/raced owners return a fenced/empty outcome.
+pub trait DetachedLogMaintenance: Send + Sync {
+    fn execute_retention(
+        &self,
+        request: DetachedRetentionRequest,
+    ) -> EngineResult<DetachedRetentionOutcome>;
+
+    fn execute_orphan_gc(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+    ) -> EngineResult<MaintenanceSummary>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1297,6 +1354,9 @@ pub trait ComposeFaultHook: Send + Sync {
 pub struct ComposedBackend<L, P, C> {
     inner: Mutex<Inner<L, P>>,
     control: C,
+    /// Independently owned object-log substrate used only for fenced bounded maintenance. Keeping it outside
+    /// `Inner` is what lets remote provider I/O run without holding the global append/apply mutex.
+    detached_maintenance: Option<Arc<dyn DetachedLogMaintenance>>,
     /// Cancellation-safe queue-local admission. A permit never contains a standard mutex guard.
     mutation_gate: crate::KeyedQueueGate<QueueKey>,
     /// Test-only composed-layer projection-apply fault hook (TP-003 §3.10 AC-TXN-4). `None` in every
@@ -1342,6 +1402,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         let supports_commit_transition = projection.supports_commit_transition();
         let supports_group_commit = log.supports_group_commit();
         let group_commit_flush_interval_ms = (log.gc_max_latency_ms() / 4).max(1);
+        let detached_maintenance = log.detached_maintenance();
         Self {
             inner: Mutex::new(Inner {
                 log,
@@ -1357,6 +1418,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 queue_byte_limit: None,
             }),
             control,
+            detached_maintenance,
             mutation_gate: crate::KeyedQueueGate::new(1024),
             fault_hook: Mutex::new(None),
             node_id: 0,
@@ -1851,6 +1913,104 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         Ok(())
     }
 
+    /// Capture only composition-owned authority while the queue-local permit and global mutex are held.
+    /// Provider-backed log reads deliberately do not happen here.
+    fn prepare_detached_retention_locked(
+        inner: &Inner<L, P>,
+        shard: &QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<DetachedRetentionRequest>> {
+        if !inner.projection.retention_may_advance(shard) {
+            return Ok(None);
+        }
+        let Some(expected_epoch) = inner.log.maintenance_owner_epoch(shard) else {
+            return Ok(None);
+        };
+        let complete_required = inner.projection.requires_complete_retention_frontier();
+        let complete_proven = inner
+            .projection
+            .complete_retention_frontier_is_proven(shard);
+        let in_memory_claim_replay_pinned = inner
+            .claim_by_query_idempotency
+            .get(shard)
+            .is_some_and(|cache| {
+                cache.has_unexpired_matching(now, |(item_ids, _)| !item_ids.is_empty())
+            });
+        let now_ms = ts_to_ms(now);
+        Ok(Some(DetachedRetentionRequest {
+            shard: shard.clone(),
+            expected_epoch,
+            now_ms,
+            cutoff_ms: now_ms
+                .saturating_sub(request_id_retention_ms as i64)
+                .saturating_sub(RETENTION_TRIM_SKEW_MARGIN_MS),
+            checkpoint: inner.projection.recovery_high_water(shard)?,
+            // Complete-frontier stores intentionally remain withheld until every frontier axis is represented
+            // in the authority snapshot. This preserves the previous policy's fail-closed Unknown fields.
+            allow_floor_advance: !complete_required
+                && complete_proven
+                && !in_memory_claim_replay_pinned,
+            completed_through: inner.trim_completed_through.get(shard).copied(),
+        }))
+    }
+
+    /// Revalidate process-local authority after provider I/O before publishing its process-local progress.
+    /// Durable deletion safety does not rely on this watermark: the detached handle already fenced the floor
+    /// CAS and every destructive request. A raced owner/projection state simply leaves the watermark absent so
+    /// a later tick re-scans idempotently.
+    fn finalize_detached_retention_locked(
+        inner: &mut Inner<L, P>,
+        shard: &QueueKey,
+        outcome: &DetachedRetentionOutcome,
+    ) {
+        if inner.log.maintenance_owner_epoch(shard) != Some(outcome.expected_epoch)
+            || !inner.projection.retention_may_advance(shard)
+        {
+            inner.trim_completed_through.remove(shard);
+            return;
+        }
+        match outcome.watermark {
+            DetachedTrimWatermark::Unchanged => {}
+            DetachedTrimWatermark::Clear => {
+                inner.trim_completed_through.remove(shard);
+            }
+            DetachedTrimWatermark::Set(sequence) => {
+                inner.trim_completed_through.insert(shard.clone(), sequence);
+            }
+        }
+    }
+
+    fn trim_reclaimable_segments_detached(
+        &self,
+        shard: &QueueKey,
+        request_id_retention_ms: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<MaintenanceSummary> {
+        let Some(handle) = self.detached_maintenance.as_ref() else {
+            let mut inner = self.inner.lock().expect("composed backend poisoned");
+            return Self::trim_reclaimable_segments_locked(
+                &mut inner,
+                shard,
+                request_id_retention_ms,
+                now,
+            );
+        };
+        let request = {
+            let inner = self.inner.lock().expect("composed backend poisoned");
+            Self::prepare_detached_retention_locked(&inner, shard, request_id_retention_ms, now)?
+        };
+        let Some(request) = request else {
+            return Ok(MaintenanceSummary::default());
+        };
+        let outcome = handle.execute_retention(request)?;
+        {
+            let mut inner = self.inner.lock().expect("composed backend poisoned");
+            Self::finalize_detached_retention_locked(&mut inner, shard, &outcome);
+        }
+        Ok(outcome.summary)
+    }
+
     /// Public entry to [`Self::trim_reclaimable_segments_locked`] (the background sink loop drives this after
     /// its reap, mirroring the reap tick). Acquires the unit-of-work lock.
     pub fn trim_reclaimable_segments(
@@ -1859,8 +2019,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         request_id_retention_ms: u64,
         now: UtcTimestamp,
     ) -> EngineResult<MaintenanceSummary> {
-        let mut g = self.inner.lock().expect("composed backend poisoned");
-        Self::trim_reclaimable_segments_locked(&mut g, shard, request_id_retention_ms, now)
+        self.trim_reclaimable_segments_detached(shard, request_id_retention_ms, now)
     }
 
     /// Async port-facing retention helper. Work begins only when polled and is queue-serialized.
@@ -4200,71 +4359,80 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
         &self,
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
-        deferred(move || {
-            let mut g = self.inner.lock().expect("poisoned");
-            let gc = self.gc_active(&g);
-            if gc {
-                // Force-seal every queue's buffered batch so the lease-expiry sweep observes applied state.
-                let shards: Vec<QueueKey> = g
-                    .coords
-                    .iter()
-                    .filter(|(_, c)| !c.pending.is_empty())
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for shard in shards {
-                    Self::gc_force_seal(&mut g, &shard, ts_to_ms(now))?;
-                }
-            }
-            let expired = g.projection.all_expired_leases(now);
-            let definitions = Self::durable_definitions_locked(&g)?;
-            let mut report = TickReport::default();
-            for (shard, ids) in expired
-                .into_iter()
-                .filter(|(shard, _)| self.owns_worker_queue(shard))
-            {
-                let env = Self::make_envelope(
-                    &mut g,
-                    self.node_id,
-                    QueueCommand::LeaseExpired(LeaseExpiredCommand {
-                        item_ids: ids.clone(),
-                    }),
-                    ids.clone(),
-                    now,
-                );
+        Box::pin(async move {
+            let (definitions, mut report) = {
+                let mut g = self.inner.lock().expect("poisoned");
+                let gc = self.gc_active(&g);
                 if gc {
-                    Self::gc_commit_sync(&mut g, &shard, env, None)?;
-                } else {
-                    Self::commit_locked(&mut g, &shard, env, None)?;
+                    // Force-seal every queue's buffered batch so the lease-expiry sweep observes applied state.
+                    let shards: Vec<QueueKey> = g
+                        .coords
+                        .iter()
+                        .filter(|(_, c)| !c.pending.is_empty())
+                        .map(|(k, _)| k.clone())
+                        .collect();
+                    for shard in shards {
+                        Self::gc_force_seal(&mut g, &shard, ts_to_ms(now))?;
+                    }
                 }
-                report.leases_reclaimed += ids.len() as u64;
-            }
+                let expired = g.projection.all_expired_leases(now);
+                let definitions = Self::durable_definitions_locked(&g)?;
+                let mut report = TickReport::default();
+                for (shard, ids) in expired
+                    .into_iter()
+                    .filter(|(shard, _)| self.owns_worker_queue(shard))
+                {
+                    let env = Self::make_envelope(
+                        &mut g,
+                        self.node_id,
+                        QueueCommand::LeaseExpired(LeaseExpiredCommand {
+                            item_ids: ids.clone(),
+                        }),
+                        ids.clone(),
+                        now,
+                    );
+                    if gc {
+                        Self::gc_commit_sync(&mut g, &shard, env, None)?;
+                    } else {
+                        Self::commit_locked(&mut g, &shard, env, None)?;
+                    }
+                    report.leases_reclaimed += ids.len() as u64;
+                }
+                (definitions, report)
+            };
+
             for def in definitions {
                 let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
                 if !self.owns_worker_queue(&shard) {
                     continue;
                 }
-                if def.emit_change_records {
-                    Self::reap_terminal_items_locked(
-                        &mut g,
-                        &shard,
-                        now,
-                        def.terminal_retention_ms,
-                        def.emit_change_records,
-                    )?;
-                }
-                // Segment-object reclamation (bead pqueue-b5cc2bc7): gated INSIDE on retention_may_advance +
-                // the durable checkpoint high-water, so it is a no-op for every non-hybrid-async backend (no
-                // durable checkpoint => nothing trimmed) and withheld under Hard debt. Runs for ALL queues
-                // (not just emit-enabled ones) because segment reclamation is independent of change records.
-                if g.projection.requires_complete_retention_frontier()
-                    && !g.projection.complete_retention_frontier_is_proven(&shard)
-                {
+                // Keep local state stable for this queue across prepare/execute/finalize, but never hold the
+                // backend-global mutex across provider I/O. Other queues use distinct permits and progress.
+                let _queue_permit = self
+                    .mutation_gate
+                    .acquire(shard.clone())
+                    .await
+                    .map_err(|_| EngineError::Unavailable)?;
+                let frontier_missing = {
+                    let mut g = self.inner.lock().expect("poisoned");
+                    if def.emit_change_records {
+                        Self::reap_terminal_items_locked(
+                            &mut g,
+                            &shard,
+                            now,
+                            def.terminal_retention_ms,
+                            def.emit_change_records,
+                        )?;
+                    }
+                    g.projection.requires_complete_retention_frontier()
+                        && !g.projection.complete_retention_frontier_is_proven(&shard)
+                };
+                if frontier_missing {
                     report.maintenance.retained += 1;
                     report.maintenance.stopped_by =
                         Some(MaintenanceStopReason::FrontierProofMissing);
                 } else {
-                    let maintenance = Self::trim_reclaimable_segments_locked(
-                        &mut g,
+                    let maintenance = self.trim_reclaimable_segments_detached(
                         &shard,
                         def.request_id_retention_ms
                             .max(def.client_item_key_retention_ms),
@@ -4272,21 +4440,53 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     )?;
                     report.maintenance.merge(maintenance);
                 }
-                // Orphan branches join the same maintenance driver rather than relying on an unwired manual
-                // loop. The log adapter enforces nonzero object/byte/request/time/page bounds and rechecks this
-                // owner epoch while holding its create/GC exclusion guard.
-                if !g.log.supports_objectlog_maintenance() {
-                    continue;
-                }
-                let Some(expected_epoch) = g.log.maintenance_owner_epoch(&shard) else {
-                    report.maintenance.retained += 1;
-                    report.maintenance.stopped_by = Some(MaintenanceStopReason::OwnershipUnproven);
-                    continue;
+
+                let owner_epoch = {
+                    let g = self.inner.lock().expect("poisoned");
+                    g.log.maintenance_owner_epoch(&shard)
                 };
-                let maintenance =
-                    g.log
-                        .gc_orphaned_branches_bounded(&shard, expected_epoch, ts_to_ms(now))?;
-                report.maintenance.merge(maintenance);
+                if let Some(handle) = self.detached_maintenance.as_ref() {
+                    let Some(expected_epoch) = owner_epoch else {
+                        report.maintenance.retained += 1;
+                        report.maintenance.stopped_by =
+                            Some(MaintenanceStopReason::OwnershipUnproven);
+                        continue;
+                    };
+                    let maintenance =
+                        handle.execute_orphan_gc(&shard, expected_epoch, ts_to_ms(now))?;
+                    // Revalidate the local owner token after detached provider I/O. The substrate fenced every
+                    // delete; a raced token only prevents us from treating the page as current progress.
+                    let still_owned = self
+                        .inner
+                        .lock()
+                        .expect("poisoned")
+                        .log
+                        .maintenance_owner_epoch(&shard)
+                        == Some(expected_epoch);
+                    if still_owned {
+                        report.maintenance.merge(maintenance);
+                    } else {
+                        report.maintenance.fenced = true;
+                        report.maintenance.stopped_by = Some(MaintenanceStopReason::EpochFenced);
+                    }
+                } else {
+                    let mut g = self.inner.lock().expect("poisoned");
+                    if !g.log.supports_objectlog_maintenance() {
+                        continue;
+                    }
+                    let Some(expected_epoch) = owner_epoch else {
+                        report.maintenance.retained += 1;
+                        report.maintenance.stopped_by =
+                            Some(MaintenanceStopReason::OwnershipUnproven);
+                        continue;
+                    };
+                    let maintenance = g.log.gc_orphaned_branches_bounded(
+                        &shard,
+                        expected_epoch,
+                        ts_to_ms(now),
+                    )?;
+                    report.maintenance.merge(maintenance);
+                }
             }
             Ok(report)
         })
