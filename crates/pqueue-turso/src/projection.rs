@@ -217,10 +217,47 @@ const PUSH_GATE_CHUNK: usize = 225; // 225 * 4 binds = 900
 const PUSH_INDEX_CHUNK: usize = 180; // 180 * 5 binds = 900
 const UNIQUE_CHECK_CHUNK: usize = 448; // 2 common + 448 * 2 binds = 898
 const GROUP_SUMMARY_CHUNK: usize = 897; // tenant + queue + now + 897 group binds = 900
+const VALIDATION_ITEM_CHUNK: usize = 897; // tenant + queue + 897 item-id binds = 899
 
 fn values_rows(rows: usize, columns: usize) -> String {
     let row = format!("({})", vec!["?"; columns].join(","));
     vec![row; rows].join(",")
+}
+
+async fn validation_rows_by_item(
+    connection: &Connection,
+    tenant: &str,
+    queue: &str,
+    ids: &[ItemId],
+    columns: &str,
+) -> EngineResult<HashMap<ItemId, Vec<Value>>> {
+    debug_assert!(ids.len() <= VALIDATION_ITEM_CHUNK);
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = (0..ids.len())
+        .map(|index| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!(
+        "SELECT item_id,{columns} FROM pqueue_items \
+         WHERE tenant_id=?1 AND queue_id=?2 AND item_id IN ({placeholders})"
+    );
+    let mut params = Vec::with_capacity(ids.len() + 2);
+    params.push(Value::Text(tenant.to_string()));
+    params.push(Value::Text(queue.to_string()));
+    params.extend(ids.iter().map(|id| Value::Text(id.to_string())));
+    let mut rows = connection.query(&query, params).await.map_err(storage)?;
+    let mut by_item = HashMap::with_capacity(ids.len());
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        let item_id = ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?;
+        let mut values = Vec::with_capacity(row.column_count().saturating_sub(1));
+        for index in 1..row.column_count() {
+            values.push(row.get_value(index).map_err(storage)?);
+        }
+        by_item.insert(item_id, values);
+    }
+    Ok(by_item)
 }
 
 struct PushInsert<'a> {
@@ -2471,13 +2508,24 @@ impl TursoRelational {
         force: bool,
     ) -> EngineResult<Vec<ItemId>> {
         let connection = self.writer.lock().await;
-        let mut present = Vec::new();
+        let mut unique = Vec::with_capacity(ids.len());
+        let mut seen = HashSet::with_capacity(ids.len());
         for id in ids {
-            if present.contains(id) {
-                continue;
+            if seen.insert(*id) {
+                unique.push(*id);
             }
-            let row=one_row(&connection,"SELECT lifecycle_state FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",vec![Value::Text(shard.tenant_id.as_str().to_string()),Value::Text(shard.queue_id.as_str().to_string()),Value::Text(id.to_string())]).await?;
-            if let Some(row) = row {
+        }
+        let mut present = Vec::with_capacity(unique.len());
+        let tenant = shard.tenant_id.as_str();
+        let queue = shard.queue_id.as_str();
+        for chunk in unique.chunks(VALIDATION_ITEM_CHUNK) {
+            let rows =
+                validation_rows_by_item(&connection, tenant, queue, chunk, "lifecycle_state")
+                    .await?;
+            for id in chunk {
+                let Some(row) = rows.get(id) else {
+                    continue;
+                };
                 let state = parse_state(&text(&row[0])?).map_err(storage)?;
                 pqueue_engine::validate_purge_force(state == ItemState::Leased, force)?;
                 present.push(*id);
@@ -2908,40 +2956,39 @@ impl AsyncProjectionStore for TursoRelational {
             let tenant = shard.tenant_id.as_str().to_string();
             let queue = shard.queue_id.as_str().to_string();
             let now_nanos = ts_nanos(now);
-            for target in targets {
-                let row = one_row(
+            for chunk in targets.chunks(VALIDATION_ITEM_CHUNK) {
+                let rows = validation_rows_by_item(
                     &connection,
-                    "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash FROM pqueue_items \
-                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                    vec![
-                        tenant.clone().into(),
-                        queue.clone().into(),
-                        target.item_id.to_string().into(),
-                    ],
+                    &tenant,
+                    &queue,
+                    &chunk.iter().map(|target| target.item_id).collect::<Vec<_>>(),
+                    "lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash",
                 )
-                .await?
-                .ok_or(EngineError::NotFound)?;
-                let state = parse_state(&text(&row[0])?).map_err(storage)?;
-                if integer(&row[1])? != 0 {
-                    return Err(EngineError::StaleLease);
-                }
-                if state.is_terminal() {
-                    return Err(EngineError::Terminal);
-                }
-                if integer(&row[2])? != 0 {
-                    return Err(EngineError::Superseded);
-                }
-                if !matches!(row[3], Value::Null) {
-                    return Err(EngineError::Invalid("cohort member requires cohort lease"));
-                }
-                if state != ItemState::Leased {
-                    return Err(EngineError::Invalid("item is not leased"));
-                }
-                if blob(&row[5])? != lease_hash(&target.lease_token)
-                    || matches!(row[4], Value::Null)
-                    || integer(&row[4])? < now_nanos
-                {
-                    return Err(EngineError::StaleLease);
+                .await?;
+                for target in chunk {
+                    let row = rows.get(&target.item_id).ok_or(EngineError::NotFound)?;
+                    let state = parse_state(&text(&row[0])?).map_err(storage)?;
+                    if integer(&row[1])? != 0 {
+                        return Err(EngineError::StaleLease);
+                    }
+                    if state.is_terminal() {
+                        return Err(EngineError::Terminal);
+                    }
+                    if integer(&row[2])? != 0 {
+                        return Err(EngineError::Superseded);
+                    }
+                    if !matches!(row[3], Value::Null) {
+                        return Err(EngineError::Invalid("cohort member requires cohort lease"));
+                    }
+                    if state != ItemState::Leased {
+                        return Err(EngineError::Invalid("item is not leased"));
+                    }
+                    if blob(&row[5])? != lease_hash(&target.lease_token)
+                        || matches!(row[4], Value::Null)
+                        || integer(&row[4])? < now_nanos
+                    {
+                        return Err(EngineError::StaleLease);
+                    }
                 }
             }
             Ok(())
@@ -2968,47 +3015,46 @@ impl AsyncProjectionStore for TursoRelational {
             let now_nanos = ts_nanos(now);
             let result = async {
                 let mut attempts = Vec::with_capacity(targets.len());
-                for target in targets {
-                    let row = one_row(
+                for chunk in targets.chunks(VALIDATION_ITEM_CHUNK) {
+                    let rows = validation_rows_by_item(
                         &transaction,
-                        "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts FROM pqueue_items \
-                         WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                        vec![
-                            tenant.clone().into(),
-                            queue.clone().into(),
-                            target.item_id.to_string().into(),
-                        ],
+                        &tenant,
+                        &queue,
+                        &chunk.iter().map(|target| target.item_id).collect::<Vec<_>>(),
+                        "lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts",
                     )
-                    .await?
-                    .ok_or(EngineError::NotFound)?;
-                    let state = parse_state(&text(&row[0])?).map_err(storage)?;
-                    if integer(&row[1])? != 0 { return Err(EngineError::StaleLease); }
-                    if state.is_terminal() { return Err(EngineError::Terminal); }
-                    if integer(&row[2])? != 0 { return Err(EngineError::Superseded); }
-                    if !matches!(row[3], Value::Null) {
-                        return Err(EngineError::Invalid("cohort member requires cohort lease"));
+                    .await?;
+                    for target in chunk {
+                        let row = rows.get(&target.item_id).ok_or(EngineError::NotFound)?;
+                        let state = parse_state(&text(&row[0])?).map_err(storage)?;
+                        if integer(&row[1])? != 0 { return Err(EngineError::StaleLease); }
+                        if state.is_terminal() { return Err(EngineError::Terminal); }
+                        if integer(&row[2])? != 0 { return Err(EngineError::Superseded); }
+                        if !matches!(row[3], Value::Null) {
+                            return Err(EngineError::Invalid("cohort member requires cohort lease"));
+                        }
+                        if state != ItemState::Leased {
+                            return Err(EngineError::Invalid("item is not leased"));
+                        }
+                        if blob(&row[5])? != lease_hash(&target.lease_token)
+                            || matches!(row[4], Value::Null)
+                            || integer(&row[4])? < now_nanos
+                        {
+                            return Err(EngineError::StaleLease);
+                        }
+                        let version = integer(&row[6])?;
+                        if version < 0 || version as u64 != target.item_version {
+                            return Err(EngineError::Conflict);
+                        }
+                        attempts.push(pqueue_engine::FinalizeLeaseMember {
+                            item_id: target.item_id,
+                            attempt_count: nonnegative_u32(integer(&row[7])?, "retry_count")?,
+                            max_attempts: nonnegative_u32(
+                                integer(&row[8])?,
+                                "max_attempts",
+                            )?,
+                        });
                     }
-                    if state != ItemState::Leased {
-                        return Err(EngineError::Invalid("item is not leased"));
-                    }
-                    if blob(&row[5])? != lease_hash(&target.lease_token)
-                        || matches!(row[4], Value::Null)
-                        || integer(&row[4])? < now_nanos
-                    {
-                        return Err(EngineError::StaleLease);
-                    }
-                    let version = integer(&row[6])?;
-                    if version < 0 || version as u64 != target.item_version {
-                        return Err(EngineError::Conflict);
-                    }
-                    attempts.push(pqueue_engine::FinalizeLeaseMember {
-                        item_id: target.item_id,
-                        attempt_count: nonnegative_u32(integer(&row[7])?, "retry_count")?,
-                        max_attempts: nonnegative_u32(
-                            integer(&row[8])?,
-                            "max_attempts",
-                        )?,
-                    });
                 }
                 Ok(attempts)
             }
@@ -3589,7 +3635,7 @@ mod push_batch_lowering_tests {
 
     use super::{
         GROUP_SUMMARY_CHUNK, PUSH_GATE_CHUNK, PUSH_INDEX_CHUNK, PUSH_ITEM_CHUNK,
-        UNIQUE_CHECK_CHUNK, index_is_unique, typed_index_keys,
+        UNIQUE_CHECK_CHUNK, VALIDATION_ITEM_CHUNK, index_is_unique, typed_index_keys,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3686,6 +3732,51 @@ mod push_batch_lowering_tests {
         assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK), 1);
         assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK + 1), 2);
         assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK * 10), 10);
+    }
+
+    #[test]
+    fn lease_validation_select_count_grows_only_at_bind_safe_chunk_boundaries() {
+        let awaited_selects = |items: usize| items.div_ceil(VALIDATION_ITEM_CHUNK);
+        assert_eq!(awaited_selects(0), 0);
+        assert_eq!(awaited_selects(1), 1);
+        assert_eq!(awaited_selects(100), 1);
+        assert_eq!(awaited_selects(1_000), 2);
+
+        let source = include_str!("projection.rs");
+        let helper = source
+            .split("async fn validation_rows_by_item(")
+            .nth(1)
+            .unwrap()
+            .split("struct PushInsert")
+            .next()
+            .unwrap();
+        assert_eq!(helper.matches(".query(").count(), 1);
+
+        let purge = source
+            .split("pub(crate) async fn purge_items_validate(")
+            .nth(1)
+            .unwrap()
+            .split("/// RESP/server read surface")
+            .next()
+            .unwrap();
+        let renew = source
+            .split("fn renew_validate(")
+            .nth(1)
+            .unwrap()
+            .split("fn finalize_validate(")
+            .next()
+            .unwrap();
+        let finalize = source
+            .split("fn finalize_validate(")
+            .nth(1)
+            .unwrap()
+            .split("fn cohort_lease_validate(")
+            .next()
+            .unwrap();
+        for operation in [purge, renew, finalize] {
+            assert_eq!(operation.matches("validation_rows_by_item(").count(), 1);
+            assert!(!operation.contains("one_row("));
+        }
     }
 
     #[test]
