@@ -1085,10 +1085,10 @@ fn cmd_density_run(args: &[String]) -> ! {
         keys.len()
     );
     io::stdout().flush().expect("flush density inventory stage");
+    let mut inventory_conn = Conn::connect(&addr).expect("density inventory probe connect");
     for key in &keys {
-        let mut conn = Conn::connect(&addr).expect("density inventory probe connect");
         assert!(
-            xlen(&mut conn, key)
+            xlen(&mut inventory_conn, key)
                 .expect("density inventory XLEN")
                 .is_ok(),
             "generated queue {key} is absent"

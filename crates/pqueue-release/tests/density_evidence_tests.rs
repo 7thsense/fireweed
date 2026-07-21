@@ -39,6 +39,25 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
     assert!(!dispatch.contains("tokio::spawn"));
 }
 
+#[test]
+fn density_inventory_reuses_one_connection_for_all_queues() {
+    let inventory = DENSITY_LOADGEN
+        .split("DENSITY_STAGE stage=INVENTORY status=START")
+        .nth(1)
+        .expect("inventory stage exists")
+        .split("DENSITY_STAGE stage=INVENTORY status=DONE")
+        .next()
+        .expect("inventory stage ends");
+    let queue_loop = inventory
+        .split("for key in &keys")
+        .nth(1)
+        .expect("inventory iterates queues");
+
+    assert_eq!(inventory.matches("Conn::connect(&addr)").count(), 1);
+    assert!(!queue_loop.contains("Conn::connect"));
+    assert!(queue_loop.contains("xlen(&mut inventory_conn, key)"));
+}
+
 fn measurement() -> DensityMeasurement {
     DensityMeasurement {
         hot_items: 300_000,
