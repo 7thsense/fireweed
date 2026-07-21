@@ -5,11 +5,12 @@
 //! futures are polled. This adapter transfers every complete port operation to
 //! a fixed set of owned OS workers before polling it. Queue affinity preserves
 //! queue-local order; bounded per-worker channels provide finite admission;
-//! accepted jobs survive caller cancellation; and dropping the final adapter
-//! closes and joins every worker.
+//! accepted jobs survive caller cancellation. Production handles share one
+//! process-wide bounded pool, so dropping a handle never joins durable-I/O
+//! threads on an async runtime worker or multiplies threads per queue/backend.
 
 use std::future::Future;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::JoinHandle;
 
 use bytes::Bytes;
@@ -23,14 +24,14 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 
 struct WorkerPool {
     senders: Mutex<Option<Vec<mpsc::SyncSender<Job>>>>,
-    workers: Mutex<Option<Vec<JoinHandle<()>>>>,
+    _workers: Mutex<Option<Vec<JoinHandle<()>>>>,
 }
 
 /// Cloneable handle for non-port lifecycle operations that must use the same
 /// owned blocking boundary as queue operations.
 #[derive(Clone)]
 pub(crate) struct OwnedBlockingExecutor {
-    pool: Arc<WorkerPool>,
+    pool: &'static WorkerPool,
 }
 
 impl OwnedBlockingExecutor {
@@ -109,7 +110,7 @@ impl WorkerPool {
         }
         Ok(Self {
             senders: Mutex::new(Some(senders)),
-            workers: Mutex::new(Some(workers)),
+            _workers: Mutex::new(Some(workers)),
         })
     }
 
@@ -153,16 +154,15 @@ impl WorkerPool {
             .as_ref()
             .map_or(1, Vec::len)
     }
-}
 
-impl Drop for WorkerPool {
-    fn drop(&mut self) {
+    #[cfg(test)]
+    fn shutdown(&self) {
         self.senders
             .lock()
             .expect("blocking worker senders poisoned")
             .take();
         if let Some(workers) = self
-            .workers
+            ._workers
             .lock()
             .expect("blocking workers poisoned")
             .take()
@@ -174,28 +174,33 @@ impl Drop for WorkerPool {
     }
 }
 
+fn shared_worker_pool() -> EngineResult<&'static WorkerPool> {
+    static POOL: OnceLock<Result<WorkerPool, String>> = OnceLock::new();
+    match POOL.get_or_init(|| {
+        WorkerPool::new(DEFAULT_WORKERS, DEFAULT_PENDING_PER_WORKER)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(pool) => Ok(pool),
+        Err(error) => Err(EngineError::Storage(error.clone())),
+    }
+}
+
 /// Complete, bounded blocking boundary for the library's full backend surface.
 pub(crate) struct BlockingLibBackend<B: super::LibBackend + 'static> {
     inner: Arc<B>,
-    pool: Arc<WorkerPool>,
+    pool: &'static WorkerPool,
 }
 
 impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
     pub(crate) fn new(inner: Arc<B>) -> EngineResult<Self> {
-        Self::with_bounds(inner, DEFAULT_WORKERS, DEFAULT_PENDING_PER_WORKER)
+        Ok(Self {
+            inner,
+            pool: shared_worker_pool()?,
+        })
     }
 
     pub(crate) fn executor(&self) -> OwnedBlockingExecutor {
-        OwnedBlockingExecutor {
-            pool: Arc::clone(&self.pool),
-        }
-    }
-
-    fn with_bounds(inner: Arc<B>, workers: usize, pending: usize) -> EngineResult<Self> {
-        Ok(Self {
-            inner,
-            pool: Arc::new(WorkerPool::new(workers, pending)?),
-        })
+        OwnedBlockingExecutor { pool: self.pool }
     }
 
     fn worker(queue: &QueueKey, workers: usize) -> usize {
@@ -213,7 +218,7 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
         F: FnOnce(Arc<B>) -> Fut + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
-        let pool = Arc::clone(&self.pool);
+        let pool = self.pool;
         let worker = Self::worker(&queue, pool.worker_count());
         pool.submit(worker, move || {
             futures::executor::block_on(operation(inner))
@@ -841,8 +846,8 @@ mod tests {
     }
 
     #[test]
-    fn accepted_job_survives_response_cancellation_and_drop_joins_workers() {
-        let pool = Arc::new(WorkerPool::new(1, 1).unwrap());
+    fn accepted_job_survives_response_cancellation_and_explicit_shutdown_drains() {
+        let pool = WorkerPool::new(1, 1).unwrap();
         let ran = Arc::new(AtomicBool::new(false));
         let ran_job = Arc::clone(&ran);
         let mut future = Box::pin(pool.submit(0, move || {
@@ -852,7 +857,7 @@ mod tests {
         }));
         admit(&mut future);
         drop(future);
-        drop(pool);
+        pool.shutdown();
         assert!(ran.load(Ordering::Acquire));
     }
 
@@ -878,6 +883,7 @@ mod tests {
         release_tx.send(()).unwrap();
         futures::executor::block_on(first).unwrap();
         futures::executor::block_on(second).unwrap();
+        pool.shutdown();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -902,5 +908,6 @@ mod tests {
         ticker.await.unwrap();
         assert_ne!(worker_thread, reactor_thread);
         assert_eq!(ticks.load(Ordering::Relaxed), 32);
+        pool.shutdown();
     }
 }
