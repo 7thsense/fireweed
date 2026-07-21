@@ -3365,6 +3365,29 @@ impl ProjectionData {
             .map(|r| r.item_id)
             .collect()
     }
+
+    /// A bounded, ordered expired-lease slice for composed background maintenance. This scans the hot
+    /// in-memory map but never materializes the queue's complete expired set.
+    pub(crate) fn expired_leases_after(
+        &self,
+        now: UtcTimestamp,
+        after: Option<ItemId>,
+        limit: usize,
+    ) -> Vec<ItemId> {
+        let mut ids = self
+            .items
+            .values()
+            .filter(|record| {
+                record.state == ItemState::Leased
+                    && record.lease_expires_at.is_some_and(|expires| expires < now)
+                    && after.is_none_or(|after| record.item_id > after)
+            })
+            .map(|record| record.item_id)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.truncate(limit);
+        ids
+    }
 }
 
 #[cfg(test)]

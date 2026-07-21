@@ -435,6 +435,16 @@ impl ProjectionStore for SqliteRelational {
         all_expired_leases_sql(&self.lock().conn, now).unwrap_or_default()
     }
 
+    fn expired_leases_page(
+        &self,
+        now: UtcTimestamp,
+        cursor: Option<&pqueue_engine::ExpiredLeaseCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::ExpiredLeasePage> {
+        expired_leases_page_sql(&self.lock().conn, now, cursor, limit, worker_partition)
+    }
+
     fn finalize_validate(
         &self,
         shard: &QueueKey,

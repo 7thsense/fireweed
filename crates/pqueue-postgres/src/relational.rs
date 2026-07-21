@@ -6486,6 +6486,87 @@ fn all_expired_leases_sql(
     Ok(by_queue.into_iter().collect())
 }
 
+fn expired_leases_page_sql(
+    client: &mut Client,
+    now: UtcTimestamp,
+    cursor: Option<&pqueue_engine::ExpiredLeaseCursor>,
+    limit: usize,
+    worker_partition: Option<(usize, usize)>,
+) -> EngineResult<pqueue_engine::ExpiredLeasePage> {
+    if limit == 0 {
+        return Err(EngineError::Invalid(
+            "expired lease page limit must be nonzero",
+        ));
+    }
+    let (has_cursor, after_expiry, after_tenant, after_queue, after_item) = match cursor {
+        Some(cursor) => {
+            let (expiry, tenant, queue, item) = cursor.row_parts()?;
+            (true, expiry, tenant, queue, item)
+        }
+        None => (false, 0_i64, String::new(), String::new(), String::new()),
+    };
+    let row_limit = i64::try_from(limit.saturating_add(1))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let rows = st(client.query(
+        "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items \
+         WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
+         AND cohort_size IS NULL AND fenced=false AND superseded=false \
+         AND lease_expires_at<$1 AND ($2=false OR \
+           (lease_expires_at,tenant_id,queue_id,item_id)>($3,$4,$5,$6)) \
+         ORDER BY lease_expires_at,tenant_id,queue_id,item_id LIMIT $7",
+        &[
+            &ts_nanos(now),
+            &has_cursor,
+            &after_expiry,
+            &after_tenant,
+            &after_queue,
+            &after_item,
+            &row_limit,
+        ],
+    ))?;
+    let has_more = rows.len() > limit;
+    let rows = rows.into_iter().take(limit).collect::<Vec<_>>();
+    let next = if has_more {
+        let row = rows.last().expect("nonzero bounded page");
+        let queue = QueueKey::new(
+            TenantId::new(row.get::<_, String>(1))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            QueueId::new(row.get::<_, String>(2))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+        );
+        let item = ItemId::new(row.get::<_, String>(3))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        Some(pqueue_engine::ExpiredLeaseCursor::from_row(
+            row.get(0),
+            &queue,
+            &item,
+        ))
+    } else {
+        None
+    };
+    let mut leases = Vec::<(QueueKey, Vec<ItemId>)>::new();
+    for row in rows {
+        let queue = QueueKey::new(
+            TenantId::new(row.get::<_, String>(1))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            QueueId::new(row.get::<_, String>(2))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+        );
+        if worker_partition.is_some_and(|(index, partitions)| {
+            pqueue_engine::queue_worker_partition(&queue, partitions) != index
+        }) {
+            continue;
+        }
+        let item = ItemId::new(row.get::<_, String>(3))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        match leases.last_mut() {
+            Some((last, ids)) if *last == queue => ids.push(item),
+            _ => leases.push((queue, vec![item])),
+        }
+    }
+    Ok(pqueue_engine::ExpiredLeasePage { leases, next })
+}
+
 /// Terminal records that are past both the retention window and, for emit-enabled queues, the durable
 /// emission frontier. `emit_change_records=false` keeps the retention-only opt-out path.
 fn reap_terminal_items_sql(
@@ -7563,6 +7644,22 @@ impl ProjectionStore for PostgresRelational {
         all_expired_leases_sql(&mut self.lock().client, now).unwrap_or_default()
     }
 
+    fn expired_leases_page(
+        &self,
+        now: UtcTimestamp,
+        cursor: Option<&pqueue_engine::ExpiredLeaseCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::ExpiredLeasePage> {
+        expired_leases_page_sql(
+            &mut self.lock().client,
+            now,
+            cursor,
+            limit,
+            worker_partition,
+        )
+    }
+
     fn finalize_validate(
         &self,
         shard: &QueueKey,
@@ -7874,6 +7971,19 @@ mod sql_shape_tests {
         assert!(source.contains("unnest($3::text[],$4::bigint[],$5::bigint[])"));
         assert!(source.contains("pqueue_items_global_expired_lease_idx"));
         assert!(source.contains("LIMIT $2\""));
+        let reclaim_page = source
+            .split("fn expired_leases_page_sql(")
+            .nth(1)
+            .unwrap()
+            .split("/// Terminal records")
+            .next()
+            .unwrap();
+        assert!(reclaim_page.contains("(lease_expires_at,tenant_id,queue_id,item_id)>"));
+        assert!(
+            reclaim_page.contains("ORDER BY lease_expires_at,tenant_id,queue_id,item_id LIMIT $7")
+        );
+        assert!(reclaim_page.contains("limit.saturating_add(1)"));
+        assert!(reclaim_page.contains("worker_partition.is_some_and"));
         let metrics_fn = source
             .split("fn metrics_sql")
             .nth(1)
