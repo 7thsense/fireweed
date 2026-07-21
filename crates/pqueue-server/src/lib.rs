@@ -3184,14 +3184,13 @@ mod byte_admission_wiring_tests {
             })
         };
         entered_rx.recv().unwrap();
-        let completed = Arc::new(AtomicUsize::new(0));
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
         let second = {
             let executor = executor.clone();
-            let completed = Arc::clone(&completed);
             tokio::spawn(async move {
                 executor
                     .execute(move || {
-                        completed.fetch_add(1, Ordering::AcqRel);
+                        completed_tx.send(()).unwrap();
                         Ok::<_, EngineError>(2)
                     })
                     .await
@@ -3207,13 +3206,7 @@ mod byte_admission_wiring_tests {
         second.abort();
         release_tx.send(()).unwrap();
         assert_eq!(first.await.unwrap().unwrap(), 1);
-        for _ in 0..100 {
-            if completed.load(Ordering::Acquire) == 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(completed.load(Ordering::Acquire), 1);
+        completed_rx.recv().unwrap();
         lifecycle.close();
         lifecycle.drain_started().await;
         assert!(matches!(
