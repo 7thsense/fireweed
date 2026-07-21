@@ -7,6 +7,10 @@ use crate::segmented::FaultCutPoint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SimulationBlobPhase {
+    /// Durable helper objects that are not themselves a protocol cut (recovery-index nodes, initialization
+    /// markers, snapshots, and similar support records). Fault scripts for an authoritative head must never
+    /// be consumed by one of these earlier writes.
+    Auxiliary,
     Segment,
     ManifestCandidate,
     ManifestHead,
