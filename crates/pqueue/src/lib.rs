@@ -1341,11 +1341,109 @@ enum Coordination {
     Owner {
         owner_id: OwnerId,
         control_plane: Arc<dyn QueueControlPlane>,
+        /// Present for synchronous durable control planes. It owns each full
+        /// authority sequence, including its async storage-fence phase.
+        control_plane_runtime: Option<Arc<dyn OwnedControlPlaneRuntime>>,
         sessions: Mutex<HashMap<QueueKey, OwnedSession>>,
         /// Queues observed `Draining` on the renew loop (TD-003 §Graceful Drain). While a queue is here the
         /// owner serves in-flight ops but refuses a NEW claim with a retryable `Unavailable` (drain split).
         draining: Mutex<HashSet<QueueKey>>,
     },
+}
+
+type OwnedControlPlaneFuture<'a, T> = Pin<Box<dyn Future<Output = EngineResult<T>> + Send + 'a>>;
+
+trait OwnedControlPlaneRuntime: Send + Sync {
+    fn establish(
+        &self,
+        queue: QueueKey,
+        owner: OwnerId,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, OwnershipOutcome>;
+    fn resolve(
+        &self,
+        queue: QueueKey,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, pqueue_engine::OwnerResolution>;
+    fn renew(
+        &self,
+        owner: OwnerId,
+        renewals: Vec<pqueue_engine::LeaseRenewal>,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<pqueue_engine::LeaseRenewalOutcome>>;
+}
+
+struct BlockingControlPlaneRuntime<B: LibBackend + 'static> {
+    backend: Arc<B>,
+    control_plane: Arc<dyn QueueControlPlane>,
+    executor: blocking_backend::OwnedBlockingExecutor,
+}
+
+impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneRuntime<B> {
+    fn establish(
+        &self,
+        queue: QueueKey,
+        owner: OwnerId,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, OwnershipOutcome> {
+        let backend = Arc::clone(&self.backend);
+        let control_plane = Arc::clone(&self.control_plane);
+        let executor = self.executor.clone();
+        Box::pin(async move {
+            executor
+                .run_for_control_plane_queue(&queue.clone(), move || {
+                    control_plane.register_owner(&owner, now)?;
+                    let resolution = control_plane.resolve_queue_owner(&queue, now)?;
+                    if resolution
+                        .active_owner
+                        .as_ref()
+                        .is_some_and(|active| active != &owner)
+                    {
+                        return Err(EngineError::Forbidden("queue owned by another live owner"));
+                    }
+                    if resolution.target_owner.as_ref() != Some(&owner) {
+                        return Err(EngineError::Forbidden("queue targets another owner"));
+                    }
+                    futures::executor::block_on(acquire_and_fence(
+                        control_plane.as_ref(),
+                        backend.as_ref(),
+                        &queue,
+                        &owner,
+                        now,
+                    ))
+                })
+                .await
+        })
+    }
+
+    fn resolve(
+        &self,
+        queue: QueueKey,
+        now: UtcTimestamp,
+    ) -> OwnedControlPlaneFuture<'_, pqueue_engine::OwnerResolution> {
+        let control_plane = Arc::clone(&self.control_plane);
+        let executor = self.executor.clone();
+        Box::pin(async move {
+            executor
+                .run_for_control_plane_queue(&queue.clone(), move || {
+                    control_plane.resolve_queue_owner(&queue, now)
+                })
+                .await
+        })
+    }
+
+    fn renew(
+        &self,
+        owner: OwnerId,
+        renewals: Vec<pqueue_engine::LeaseRenewal>,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<pqueue_engine::LeaseRenewalOutcome>> {
+        let control_plane = Arc::clone(&self.control_plane);
+        futures::executor::block_on(self.executor.run(move || {
+            control_plane.heartbeat(&owner, now)?;
+            control_plane.renew_queue_leases(&renewals, now)
+        }))
+    }
 }
 
 /// The ergonomic library handle. Holds an injected backend + clock; generates ids/lease tokens.
@@ -1453,6 +1551,37 @@ impl<B: LibBackend> Pqueue<B> {
             coordination: Coordination::Owner {
                 owner_id: instance_id,
                 control_plane,
+                control_plane_runtime: None,
+                sessions: Mutex::new(HashMap::new()),
+                draining: Mutex::new(HashSet::new()),
+            },
+        }
+    }
+
+    fn with_owned_control_plane_executor(
+        backend: Arc<B>,
+        clock: Arc<dyn Clock>,
+        instance_id: OwnerId,
+        control_plane: Arc<dyn QueueControlPlane>,
+        control_plane_executor: blocking_backend::OwnedBlockingExecutor,
+    ) -> Self
+    where
+        B: 'static,
+    {
+        let control_plane_runtime: Arc<dyn OwnedControlPlaneRuntime> =
+            Arc::new(BlockingControlPlaneRuntime {
+                backend: Arc::clone(&backend),
+                control_plane: Arc::clone(&control_plane),
+                executor: control_plane_executor,
+            });
+        Self {
+            backend,
+            clock,
+            ids: AtomicU64::new(0),
+            coordination: Coordination::Owner {
+                owner_id: instance_id,
+                control_plane,
+                control_plane_runtime: Some(control_plane_runtime),
                 sessions: Mutex::new(HashMap::new()),
                 draining: Mutex::new(HashSet::new()),
             },
@@ -1472,6 +1601,7 @@ impl<B: LibBackend> Pqueue<B> {
         let Coordination::Owner {
             owner_id,
             control_plane,
+            control_plane_runtime,
             sessions,
             ..
         } = &self.coordination
@@ -1482,32 +1612,34 @@ impl<B: LibBackend> Pqueue<B> {
             return Ok(Some(s.fence_epoch));
         }
         let now = self.clock.now();
-        control_plane.register_owner(owner_id, now)?;
-        let res = control_plane.resolve_queue_owner(queue, now)?;
-        // A DIFFERENT live owner holds the queue → owned elsewhere; never contend a live lease (TD-003:
-        // online handoff is begin_drain, not a contended acquire). Surface it (callers inspect via
-        // `ownership`); the explicit redirect is the RESP server's `-MOVED`.
-        if res
-            .active_owner
-            .as_ref()
-            .is_some_and(|active| active != owner_id)
-        {
-            return Err(EngineError::Forbidden("queue owned by another live owner"));
-        }
-        // Target-affinity (ADR-009 / TD-003): only the rendezvous `target_owner` acquires an unowned/expired
-        // queue, so two instances never ping-pong a queue's epoch. A non-target surfaces owned-elsewhere.
-        if res.target_owner.as_ref() != Some(owner_id) {
-            return Err(EngineError::Forbidden("queue targets another owner"));
-        }
-        match acquire_and_fence(
-            control_plane.as_ref(),
-            self.backend.as_ref(),
-            queue,
-            owner_id,
-            now,
-        )
-        .await?
-        {
+        let outcome = if let Some(runtime) = control_plane_runtime {
+            runtime
+                .establish(queue.clone(), owner_id.clone(), now)
+                .await?
+        } else {
+            control_plane.register_owner(owner_id, now)?;
+            let res = control_plane.resolve_queue_owner(queue, now)?;
+            // A DIFFERENT live owner holds the queue → owned elsewhere; never contend a live lease.
+            if res
+                .active_owner
+                .as_ref()
+                .is_some_and(|active| active != owner_id)
+            {
+                return Err(EngineError::Forbidden("queue owned by another live owner"));
+            }
+            if res.target_owner.as_ref() != Some(owner_id) {
+                return Err(EngineError::Forbidden("queue targets another owner"));
+            }
+            acquire_and_fence(
+                control_plane.as_ref(),
+                self.backend.as_ref(),
+                queue,
+                owner_id,
+                now,
+            )
+            .await?
+        };
+        match outcome {
             OwnershipOutcome::Owned(session) => {
                 let epoch = session.fence_epoch;
                 sessions
@@ -1547,12 +1679,18 @@ impl<B: LibBackend> Pqueue<B> {
         let Coordination::Owner {
             owner_id,
             control_plane,
+            control_plane_runtime,
             ..
         } = &self.coordination
         else {
             return Ok(Ownership::Mine { epoch: None });
         };
-        let res = control_plane.resolve_queue_owner(queue, self.clock.now())?;
+        let now = self.clock.now();
+        let res = if let Some(runtime) = control_plane_runtime {
+            runtime.resolve(queue.clone(), now).await?
+        } else {
+            control_plane.resolve_queue_owner(queue, now)?
+        };
         Ok(match res.active_owner {
             Some(o) if &o == owner_id => Ownership::Mine {
                 epoch: res.assignment_epoch,
@@ -1573,6 +1711,7 @@ impl<B: LibBackend> Pqueue<B> {
         let Coordination::Owner {
             owner_id,
             control_plane,
+            control_plane_runtime,
             sessions,
             draining,
         } = &self.coordination
@@ -1580,7 +1719,6 @@ impl<B: LibBackend> Pqueue<B> {
             return Ok(());
         };
         let now = self.clock.now();
-        control_plane.heartbeat(owner_id, now)?;
         let owned: Vec<(QueueKey, u64)> = sessions
             .lock()
             .expect("poisoned")
@@ -1595,7 +1733,12 @@ impl<B: LibBackend> Pqueue<B> {
                 expected_epoch: *lease_epoch,
             })
             .collect();
-        let outcomes = control_plane.renew_queue_leases(&renewals, now)?;
+        let outcomes = if let Some(runtime) = control_plane_runtime {
+            runtime.renew(owner_id.clone(), renewals, now)?
+        } else {
+            control_plane.heartbeat(owner_id, now)?;
+            control_plane.renew_queue_leases(&renewals, now)?
+        };
         if outcomes.len() != owned.len() {
             return Err(EngineError::Storage(format!(
                 "control-plane batch renewal returned {} outcomes for {} inputs",
@@ -2755,17 +2898,27 @@ pub fn open_postgres_coordinated(
         pqueue_postgres::PostgresControlPlane::connect(url, control_plane_config)?,
     );
     let backend = Arc::new(blocking_backend::BlockingLibBackend::new(backend)?);
-    Pqueue::with_control_plane(backend, clock, instance_id, control_plane)
+    let control_plane_executor = backend.executor();
+    Ok(Pqueue::with_owned_control_plane_executor(
+        backend,
+        clock,
+        instance_id,
+        control_plane,
+        control_plane_executor,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, HashSet};
+    use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll};
+    use std::time::{Duration, Instant};
 
     use pqueue_core::{
-        ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField,
+        ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField, OwnerId,
         PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex, SortDirection, TenantId,
         TypedValue, UtcTimestamp, WorkerId,
     };
@@ -2773,8 +2926,106 @@ mod tests {
     use super::{ClaimByQueryAt, NewItem, Pqueue, SystemClock, apply_owned_renewal_outcomes};
     use crate::EngineResult;
     use pqueue_engine::{
-        Clock, LeaseRenewalOutcome, LeaseState, OwnedSession, QueueKey, QueueLease,
+        Clock, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
+        QueueControlPlane, QueueKey, QueueLease,
     };
+
+    #[cfg(feature = "memory")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_control_plane_boundary_builds_a_working_coordinated_owner() -> EngineResult<()> {
+        let raw = Arc::new(pqueue_memory::composed_memory_backend());
+        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
+        let executor = bounded.executor();
+        let control_plane = Arc::new(InMemoryControlPlane::default());
+        let pq = Pqueue::with_owned_control_plane_executor(
+            bounded,
+            Arc::new(SystemClock),
+            OwnerId::new("coordinated-owner").unwrap(),
+            control_plane,
+            executor,
+        );
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+
+        pq.create_queue(definition).await?;
+        pq.push(&queue, NewItem::default()).await?;
+
+        assert!(matches!(
+            pq.ownership(&queue).await?,
+            super::Ownership::Mine { epoch: Some(epoch) } if epoch >= 1
+        ));
+        assert_eq!(pq.metrics(&queue).await?.pending, 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "memory")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_final_coordinated_handle_never_joins_blocked_control_plane_worker()
+    -> EngineResult<()> {
+        let raw = Arc::new(pqueue_memory::composed_memory_backend());
+        let definition = query_definition();
+        let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        Pqueue::new(Arc::clone(&raw), Arc::new(SystemClock))
+            .create_queue(definition)
+            .await?;
+
+        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
+        let executor = bounded.executor();
+        let blocker_executor = executor.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut blocker = Box::pin(blocker_executor.run_for_control_plane_queue(
+            &queue,
+            move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            },
+        ));
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        assert!(matches!(blocker.as_mut().poll(&mut context), Poll::Pending));
+        started_rx.recv().unwrap();
+
+        let control_plane = Arc::new(InMemoryControlPlane::default());
+        let owner = OwnerId::new("cancelled-waiter-owner").unwrap();
+        let pq = Pqueue::with_owned_control_plane_executor(
+            bounded,
+            Arc::new(SystemClock),
+            owner.clone(),
+            control_plane.clone(),
+            executor,
+        );
+        let mut session = Box::pin(pq.session_epoch(&queue));
+        assert!(matches!(session.as_mut().poll(&mut context), Poll::Pending));
+        drop(session);
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            release_tx.send(()).unwrap();
+        });
+        let drop_started = Instant::now();
+        drop(pq);
+        assert!(
+            drop_started.elapsed() < Duration::from_millis(100),
+            "final coordinated-handle drop joined a blocked durable-I/O worker"
+        );
+
+        blocker.await?;
+        releaser.join().unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if control_plane.lease(&queue)?.active_owner_id.as_ref() == Some(&owner) {
+                    return Ok::<_, crate::EngineError>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted ownership work did not complete after waiter/handle drop")?;
+        Ok(())
+    }
 
     fn ts(seconds: i64) -> UtcTimestamp {
         UtcTimestamp::new(seconds, 0).unwrap()

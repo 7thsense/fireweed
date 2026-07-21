@@ -45,6 +45,24 @@ impl OwnedBlockingExecutor {
     {
         self.pool.submit(0, operation)
     }
+
+    /// Run a complete control-plane sequence on the worker adjacent to the
+    /// queue's data-plane worker. This keeps both on the shared bounded pool
+    /// while allowing the sequence to synchronously await queue-affine backend
+    /// fencing without recursively submitting to its own worker.
+    pub(crate) fn run_for_control_plane_queue<T, F>(
+        &self,
+        queue: &QueueKey,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
+    {
+        let workers = self.pool.worker_count();
+        let data_worker = queue_worker_partition(queue, workers);
+        self.pool.submit((data_worker + 1) % workers, operation)
+    }
 }
 
 impl WorkerPool {
