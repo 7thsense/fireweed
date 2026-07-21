@@ -79,6 +79,7 @@ const RELEASE_RESIDENT: u64 = 10_000_000;
 /// SP-04 slice 6: production recorder overhead versus an interleaved,
 /// byte-identical disabled-recorder control must stay within two percent.
 const MAX_RECORDER_OVERHEAD_RATIO: f64 = 1.02;
+const RECORDER_CONTROL_BLOCKS: usize = 5;
 const RELEASE_ACK_PUSHES: u64 = 100_000;
 const RELEASE_ACK_CONCURRENCY: u64 = 384;
 const RELEASE_LOAD_BATCH: u64 = 1_000;
@@ -141,7 +142,7 @@ fn fence_failure_injector_targets_the_post_cas_authority_mirror() {
 }
 
 fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {
-    use pqueue_conformance::{envelope, item, qdef as conformance_qdef, shard};
+    use pqueue_conformance::{envelope, item};
     use pqueue_engine::{PushCommand, QueueCommand};
 
     let postgres_url = std::env::var("PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL")
@@ -156,6 +157,43 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
         )
         .expect("build no-CAS S3 object store"),
     );
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let push = |id: &str, suffix: &str| {
+        vec![envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item(id, &format!("e3-fence-{suffix}"), 0)],
+            }),
+            vec![],
+        )]
+    };
+
+    // Execute the release store's native create-only-CAS fence path over MinIO. These observations are
+    // independent of the Postgres pointer fallback below; neither path may lend booleans to the other.
+    let native_def = qdef("e3", &format!("e3-native-fence-{}", std::process::id()));
+    let native_shard = QueueKey::new(native_def.tenant_id.clone(), native_def.queue_id.clone());
+    let native_a = SegmentedObjectLog::open(raw_objects.clone(), cfg);
+    native_a.create_queue(&native_def).unwrap();
+    assert_eq!(native_a.fence_epoch(&native_shard, 0, 1).unwrap(), 0);
+    native_a
+        .enqueue(&native_shard, &push("1", "native-a"), 0, 2)
+        .unwrap();
+    native_a.seal(&native_shard, 0, 3).unwrap();
+    let native_b = SegmentedObjectLog::open(raw_objects.clone(), cfg);
+    native_b.create_queue(&native_def).unwrap();
+    assert_eq!(native_b.acquire_epoch(&native_shard, 4).unwrap(), 1);
+    native_b
+        .enqueue(&native_shard, &push("2", "native-b"), 1, 5)
+        .unwrap();
+    native_b.seal(&native_shard, 1, 6).unwrap();
+    let native_current_epoch_committed = native_b.read_all(&native_shard).unwrap().len() == 2;
+    native_a
+        .enqueue(&native_shard, &push("3", "native-stale"), 0, 7)
+        .unwrap();
+    let native_stale_epoch_rejected =
+        native_a.seal(&native_shard, 0, 8) == Err(EngineError::EpochFenced);
+    assert!(native_current_epoch_committed);
+    assert!(native_stale_epoch_rejected);
+
     let objects = Arc::new(FailNextManifestMirrorStore {
         inner: raw_objects,
         fail_next_manifest_mirror: AtomicBool::new(false),
@@ -169,26 +207,18 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
         pqueue_postgres::PostgresManifestPointer::open(&postgres_url)
             .expect("open owner-B Postgres pointer"),
     );
-    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let shard = shard();
-    let push = |id: &str, suffix: &str| {
-        vec![envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item(id, &format!("e3-pg-{suffix}"), 0)],
-            }),
-            vec![],
-        )]
-    };
+    let no_cas_def = qdef("e3", &format!("e3-pg-fence-{}", std::process::id()));
+    let shard = QueueKey::new(no_cas_def.tenant_id.clone(), no_cas_def.queue_id.clone());
     let adapter_a = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_a));
     let owner_a = SegmentedObjectLog::open(adapter_a, cfg);
-    owner_a.create_queue(&conformance_qdef()).unwrap();
+    owner_a.create_queue(&no_cas_def).unwrap();
     assert_eq!(owner_a.fence_epoch(&shard, 0, 1).unwrap(), 0);
     owner_a.enqueue(&shard, &push("1", "a"), 0, 2).unwrap();
     owner_a.seal(&shard, 0, 3).unwrap();
 
     let adapter_b = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_b));
     let owner_b = SegmentedObjectLog::open(adapter_b.clone(), cfg);
-    owner_b.create_queue(&conformance_qdef()).unwrap();
+    owner_b.create_queue(&no_cas_def).unwrap();
     assert_eq!(owner_b.acquire_epoch(&shard, 4).unwrap(), 1);
     owner_b.enqueue(&shard, &push("2", "b"), 1, 5).unwrap();
     objects
@@ -226,8 +256,8 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     let row = pqueue_release::e3_contract::build_e3_fence_evidence(
         pqueue_release::e3_contract::E3FenceObservation {
             source_revision: source_revision.to_owned(),
-            stale_epoch_rejected: true,
-            current_epoch_committed: true,
+            stale_epoch_rejected: native_stale_epoch_rejected,
+            current_epoch_committed: native_current_epoch_committed,
             no_cas_stale_epoch_rejected: true,
             no_cas_current_epoch_committed: true,
             no_cas_pointer_and_epoch_atomic: true,
@@ -508,6 +538,8 @@ struct AckResult {
     throughput_per_s: f64,
     disabled_control_throughput_per_s: f64,
     recorder_overhead_ratio: f64,
+    recorder_overhead_ratio_samples: Vec<f64>,
+    recorder_control_order_seed: u64,
     recorder_control_schedule: &'static str,
     recorder_control_fingerprint_algorithm: &'static str,
     recorder_enabled_state_fingerprint: String,
@@ -673,8 +705,7 @@ struct AckArmConfig {
     pushes: u64,
     concurrency: u64,
     recorder_enabled: bool,
-    paired_start: Arc<tokio::sync::Barrier>,
-    paired_workers: Arc<Vec<Arc<tokio::sync::Barrier>>>,
+    block: usize,
 }
 
 async fn run_ack_arm<B, F>(s3: &S3Env, config: AckArmConfig, open: F) -> AckArm
@@ -688,9 +719,10 @@ where
         "disabled"
     };
     let qid = format!(
-        "e3ack-{}-{}-{arm}-{}",
+        "e3ack-{}-{}-{arm}-block{}-{}",
         config.profile,
         config.bound.label,
+        config.block,
         std::process::id()
     );
     let def = qdef("e3", &qid);
@@ -706,9 +738,6 @@ where
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
     let store_baseline = recorder.snapshot();
-    // Do not let setup time turn the control into two serial samples: both fully initialized arms enter
-    // their identical worker partitions together and remain live concurrently.
-    config.paired_start.wait().await;
     let started = Instant::now();
 
     let mut handles = Vec::new();
@@ -717,14 +746,9 @@ where
         let end_index = (t + 1) * config.pushes / config.concurrency;
         let backend = backend.clone();
         let shard = shard.clone();
-        let paired_worker = config.paired_workers[t as usize].clone();
         handles.push(tokio::spawn(async move {
             let mut lat = Vec::with_capacity((end_index - start_index) as usize);
             for i in start_index..end_index {
-                // Each enabled/disabled worker pair launches the same logical operation together. Other
-                // worker pairs remain independent, preserving concurrent load while making the cross-arm
-                // interleaving explicit and reproducible.
-                paired_worker.wait().await;
                 let start = Instant::now();
                 backend
                     .push(&shard, vec![ack_spec(t, i)], ts(), None)
@@ -767,8 +791,101 @@ where
     }
 }
 
-/// Interleave an enabled recorder arm with a disabled-recorder control over byte-identical seeded work.
-/// Logical equality is a release bar; elapsed-time ratio is only declared-topology capacity evidence.
+fn aggregate_ack_arms(arms: Vec<AckArm>) -> AckArm {
+    assert!(!arms.is_empty());
+    let mut counters = SegmentCounters::default();
+    let mut store_operations = StoreOperations::default();
+    let mut resource_bounds = ResourceBounds::default();
+    let mut wall_s = 0.0;
+    let mut latencies = Vec::new();
+    let mut pending = 0;
+    let mut digest = StreamingDigest::new();
+    let mut fingerprint = StateFingerprint {
+        digest: String::new(),
+        verified: 0,
+        missing: 0,
+        duplicates: 0,
+        invalid: 0,
+    };
+    for arm in arms {
+        counters.segments_sealed += arm.counters.segments_sealed;
+        counters.objects_put += arm.counters.objects_put;
+        counters.commands_committed += arm.counters.commands_committed;
+        counters
+            .group_commit_batches
+            .extend(arm.counters.group_commit_batches);
+        counters.object_count += arm.counters.object_count;
+        counters.total_bytes += arm.counters.total_bytes;
+        counters.segment_bytes += arm.counters.segment_bytes;
+        counters.max_object_bytes = counters.max_object_bytes.max(arm.counters.max_object_bytes);
+        counters.put_count += arm.counters.put_count;
+        counters.get_count += arm.counters.get_count;
+        counters.list_count += arm.counters.list_count;
+        counters.delete_count += arm.counters.delete_count;
+        counters.request_bytes += arm.counters.request_bytes;
+        counters.response_bytes += arm.counters.response_bytes;
+        store_operations.puts += arm.store_operations.puts;
+        store_operations.gets += arm.store_operations.gets;
+        store_operations.lists += arm.store_operations.lists;
+        store_operations.deletes += arm.store_operations.deletes;
+        store_operations.request_bytes += arm.store_operations.request_bytes;
+        store_operations.response_bytes += arm.store_operations.response_bytes;
+        resource_bounds.configured_global_bytes = resource_bounds
+            .configured_global_bytes
+            .max(arm.resource_bounds.configured_global_bytes);
+        resource_bounds.current_bytes += arm.resource_bounds.current_bytes;
+        resource_bounds.peak_bytes = resource_bounds
+            .peak_bytes
+            .max(arm.resource_bounds.peak_bytes);
+        resource_bounds.waiters += arm.resource_bounds.waiters;
+        resource_bounds.recorder_in_flight += arm.resource_bounds.recorder_in_flight;
+        resource_bounds.recorder_peak_in_flight = resource_bounds
+            .recorder_peak_in_flight
+            .max(arm.resource_bounds.recorder_peak_in_flight);
+        resource_bounds.task_count = resource_bounds
+            .task_count
+            .max(arm.resource_bounds.task_count);
+        resource_bounds.task_limit = resource_bounds
+            .task_limit
+            .max(arm.resource_bounds.task_limit);
+        resource_bounds.store_in_flight_limit = resource_bounds
+            .store_in_flight_limit
+            .max(arm.resource_bounds.store_in_flight_limit);
+        resource_bounds.object_page_limit = resource_bounds
+            .object_page_limit
+            .max(arm.resource_bounds.object_page_limit);
+        wall_s += arm.wall_s;
+        latencies.extend(arm.latencies);
+        pending += arm.pending;
+        digest.update(arm.state_fingerprint.digest.as_bytes());
+        fingerprint.verified += arm.state_fingerprint.verified;
+        fingerprint.missing += arm.state_fingerprint.missing;
+        fingerprint.duplicates += arm.state_fingerprint.duplicates;
+        fingerprint.invalid += arm.state_fingerprint.invalid;
+    }
+    fingerprint.digest = digest.finish();
+    AckArm {
+        counters,
+        store_operations,
+        resource_bounds,
+        wall_s,
+        latencies,
+        pending,
+        state_fingerprint: fingerprint,
+    }
+}
+
+fn recorder_control_order_seed(profile: &str, bound: BoundConfig) -> u64 {
+    let mut seed = 0xcbf2_9ce4_8422_2325u64 ^ bound.max_latency_ms;
+    for byte in profile.bytes() {
+        seed ^= u64::from(byte);
+        seed = seed.wrapping_mul(0x100_0000_01b3);
+    }
+    seed
+}
+
+/// Compare independent, bounded enabled/disabled blocks over byte-identical seeded work. The seeded first
+/// arm alternates on every block so neither recorder mode always benefits from warm caches or run order.
 async fn run_ack_config<B, F>(
     s3: &S3Env,
     profile: &'static str,
@@ -781,45 +898,55 @@ where
     B: E3Backend,
     F: Copy + Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
-    let paired_start = Arc::new(tokio::sync::Barrier::new(2));
-    let paired_workers = Arc::new(
-        (0..concurrency)
-            .map(|_| Arc::new(tokio::sync::Barrier::new(2)))
-            .collect::<Vec<_>>(),
-    );
-    let (mut enabled, disabled) = tokio::join!(
-        run_ack_arm::<B, _>(
-            s3,
-            AckArmConfig {
-                profile,
-                bound,
-                pushes,
-                concurrency,
-                recorder_enabled: true,
-                paired_start: paired_start.clone(),
-                paired_workers: paired_workers.clone(),
-            },
-            open,
-        ),
-        run_ack_arm::<B, _>(
-            s3,
-            AckArmConfig {
-                profile,
-                bound,
-                pushes,
-                concurrency,
-                recorder_enabled: false,
-                paired_start,
-                paired_workers,
-            },
-            open,
-        ),
-    );
+    let order_seed = recorder_control_order_seed(profile, bound);
+    let first_block_enabled_first = order_seed & 1 == 0;
+    let mut enabled_blocks = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
+    let mut disabled_blocks = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
+    let mut overhead_samples = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
+    for block in 0..RECORDER_CONTROL_BLOCKS {
+        let block_start = block as u64 * pushes / RECORDER_CONTROL_BLOCKS as u64;
+        let block_end = (block as u64 + 1) * pushes / RECORDER_CONTROL_BLOCKS as u64;
+        let block_pushes = block_end - block_start;
+        let run = |recorder_enabled| {
+            run_ack_arm::<B, _>(
+                s3,
+                AckArmConfig {
+                    profile,
+                    bound,
+                    pushes: block_pushes,
+                    concurrency,
+                    recorder_enabled,
+                    block,
+                },
+                open,
+            )
+        };
+        let enabled_first = if block % 2 == 0 {
+            first_block_enabled_first
+        } else {
+            !first_block_enabled_first
+        };
+        let (enabled, disabled) = if enabled_first {
+            let enabled = run(true).await;
+            let disabled = run(false).await;
+            (enabled, disabled)
+        } else {
+            let disabled = run(false).await;
+            let enabled = run(true).await;
+            (enabled, disabled)
+        };
+        overhead_samples.push(enabled.wall_s / disabled.wall_s.max(f64::MIN_POSITIVE));
+        enabled_blocks.push(enabled);
+        disabled_blocks.push(disabled);
+    }
+    let mut enabled = aggregate_ack_arms(enabled_blocks);
+    let disabled = aggregate_ack_arms(disabled_blocks);
 
     let c = enabled.counters;
     let throughput_per_s = pushes as f64 / enabled.wall_s.max(f64::MIN_POSITIVE);
     let disabled_control_throughput_per_s = pushes as f64 / disabled.wall_s.max(f64::MIN_POSITIVE);
-    let recorder_overhead_ratio = enabled.wall_s / disabled.wall_s.max(f64::MIN_POSITIVE);
+    let mut ordered_overhead_samples = overhead_samples.clone();
+    let recorder_overhead_ratio = pct(&mut ordered_overhead_samples, 0.50);
     let recorder_degradation_met = recorder_overhead_ratio.is_finite()
         && recorder_overhead_ratio <= MAX_RECORDER_OVERHEAD_RATIO;
     let ack_p50 = pct(&mut enabled.latencies, 0.50);
@@ -878,7 +1005,9 @@ where
         throughput_per_s: round3(throughput_per_s),
         disabled_control_throughput_per_s: round3(disabled_control_throughput_per_s),
         recorder_overhead_ratio: round3(recorder_overhead_ratio),
-        recorder_control_schedule: "paired-operation-barriers-concurrent-worker-partitions-v1",
+        recorder_overhead_ratio_samples: overhead_samples.into_iter().map(round3).collect(),
+        recorder_control_order_seed: order_seed,
+        recorder_control_schedule: "independent-bounded-blocks-seeded-alternating-order-v1",
         recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
         recorder_enabled_state_fingerprint: enabled.state_fingerprint.digest,
         recorder_disabled_state_fingerprint: disabled.state_fingerprint.digest,
@@ -1301,7 +1430,13 @@ where
     } else {
         resident
     };
-    let (command_count, load_task_count, total_commands, pending_loaded, baseline_state) = {
+    let (
+        command_count,
+        load_task_count,
+        pre_crash_committed_commands,
+        pending_loaded,
+        baseline_state,
+    ) = {
         let backend = Arc::new(open(store.clone(), &proj, cfg).expect("open backend for load"));
         backend
             .create_queue(def.clone())
@@ -1452,6 +1587,18 @@ where
     let start_seq = recovery_stats.start_seq;
     let tail_replayed = recovery_stats.tail_replayed;
     let snapshot_used = recovery_stats.snapshot_used;
+    let total_commands = start_seq
+        .checked_add(tail_replayed)
+        .expect("recovery command range must not overflow");
+    assert_eq!(
+        pre_crash_committed_commands + u64::from(requires_snapshot),
+        total_commands,
+        "production recovery range must include the deliberately committed crash tail exactly once"
+    );
+    assert_eq!(
+        total_commands, command_count,
+        "recovery command authority must reconcile with executed load commands"
+    );
 
     // SQLite must prove snapshot-bounded replay. The ephemeral in-memory projection must prove the opposite
     // exact contract: a full durable-log replay, still bounded by the same command budget.
@@ -1659,6 +1806,28 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                     MAX_RECORDER_OVERHEAD_RATIO
                 ));
             }
+            let mut overhead_samples = result.recorder_overhead_ratio_samples.clone();
+            let sample_distribution_valid = overhead_samples.len() == RECORDER_CONTROL_BLOCKS
+                && overhead_samples
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0);
+            let measured_median = if sample_distribution_valid {
+                pct(&mut overhead_samples, 0.50)
+            } else {
+                f64::NAN
+            };
+            if result.recorder_control_schedule
+                != "independent-bounded-blocks-seeded-alternating-order-v1"
+                || result.recorder_control_order_seed == 0
+                || !sample_distribution_valid
+                || (measured_median - result.recorder_overhead_ratio).abs() > 0.001
+                || measured_median > MAX_RECORDER_OVERHEAD_RATIO
+            {
+                errors.push(format!(
+                    "profile {} bound {} lacks a valid independent bounded-block recorder-control distribution",
+                    run.backend_profile, result.label
+                ));
+            }
         }
         for bound in E3_BOUND_CONFIGS {
             if !seen_bounds.contains(bound.label) {
@@ -1685,6 +1854,19 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                     errors.push(format!(
                         "profile {} recovery did not reproduce the exact complete state",
                         run.backend_profile
+                    ));
+                }
+                if recovery.start_seq.checked_add(recovery.tail_replayed)
+                    != Some(recovery.total_commands)
+                    || recovery.total_commands != recovery.command_count
+                {
+                    errors.push(format!(
+                        "profile {} recovery command range is not exact: start_seq={} + tail_replayed={} != total_commands={} == command_count={}",
+                        run.backend_profile,
+                        recovery.start_seq,
+                        recovery.tail_replayed,
+                        recovery.total_commands,
+                        recovery.command_count
                     ));
                 }
                 if !recovery
@@ -2057,6 +2239,18 @@ fn profile_row(
         values.insert(
             format!("{prefix}_recorder_overhead_ratio"),
             serde_json::json!(result.recorder_overhead_ratio),
+        );
+        values.insert(
+            format!("{prefix}_recorder_overhead_ratio_samples"),
+            serde_json::json!(result.recorder_overhead_ratio_samples),
+        );
+        values.insert(
+            format!("{prefix}_recorder_control_block_count"),
+            serde_json::json!(result.recorder_overhead_ratio_samples.len()),
+        );
+        values.insert(
+            format!("{prefix}_recorder_control_order_seed"),
+            serde_json::json!(result.recorder_control_order_seed),
         );
         values.insert(
             format!("{prefix}_recorder_control_schedule"),
@@ -2440,6 +2634,31 @@ async fn performance_object_log_e3_live_tests() {
     );
 }
 
+#[test]
+#[ignore = "requires live MinIO and Postgres release-fence endpoints"]
+fn e3_release_fence_proofs_only() {
+    let s3 = S3Env {
+        endpoint: std::env::var("PQUEUE_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
+        bucket: std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into()),
+        access: std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into()),
+    };
+    S3BlobStore::new(
+        &s3.endpoint,
+        &s3.bucket,
+        &s3.access,
+        &s3.secret,
+        "us-east-1",
+    )
+    .expect("build S3 client")
+    .create_bucket()
+    .expect("create/ensure bucket");
+    let source_revision =
+        std::env::var("PQUEUE_E3_SOURCE_REVISION").expect("exact source revision");
+    let output = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT").expect("fence evidence path");
+    prove_postgres_pointer_fence(&s3, &source_revision, std::path::Path::new(&output));
+}
+
 fn synthetic_ack(
     label: &'static str,
     throughput_per_s: f64,
@@ -2478,7 +2697,9 @@ fn synthetic_ack(
         throughput_per_s,
         disabled_control_throughput_per_s: throughput_per_s,
         recorder_overhead_ratio: 1.0,
-        recorder_control_schedule: "paired-operation-barriers-concurrent-worker-partitions-v1",
+        recorder_overhead_ratio_samples: vec![1.0; RECORDER_CONTROL_BLOCKS],
+        recorder_control_order_seed: 7,
+        recorder_control_schedule: "independent-bounded-blocks-seeded-alternating-order-v1",
         recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
         recorder_enabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
         recorder_disabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
@@ -2500,10 +2721,10 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
         resident: 10_000_000,
         load_batch: 1_000,
         load_task_count: RELEASE_LOAD_CONCURRENCY,
-        command_count: 10,
+        command_count: 100,
         total_commands: 100,
         start_seq: if requires_snapshot { 10 } else { 0 },
-        tail_replayed: if requires_snapshot { 0 } else { 100 },
+        tail_replayed: if requires_snapshot { 90 } else { 100 },
         snapshot_used: requires_snapshot,
         recovery_max_tail: 1_000_000,
         recovery_wall_ms: 5.0,
@@ -2664,6 +2885,30 @@ fn e3_matrix_rejects_unbounded_recorder_degradation() {
 }
 
 #[test]
+fn e3_matrix_rejects_forged_or_lockstepped_recorder_distribution() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_overhead_ratio_samples = vec![1.0, 1.0, 1.5, 1.5, 1.5];
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("independent bounded-block recorder-control distribution")),
+        "{errors:?}"
+    );
+
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_control_schedule =
+        "paired-operation-barriers-concurrent-worker-partitions-v1";
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("independent bounded-block recorder-control distribution")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn e3_matrix_rejects_recovery_digest_drift() {
     let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
     let recovery = run.recovery.as_mut().unwrap();
@@ -2674,6 +2919,20 @@ fn e3_matrix_rejects_recovery_digest_drift() {
         errors
             .iter()
             .any(|error| error.contains("exact complete state")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_inexact_recovery_command_range() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let recovery = run.recovery.as_mut().unwrap();
+    recovery.tail_replayed -= 1;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("recovery command range is not exact")),
         "{errors:?}"
     );
 }

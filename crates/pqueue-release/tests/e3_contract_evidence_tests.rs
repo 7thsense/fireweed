@@ -161,12 +161,56 @@ fn rejects_missing_or_unbounded_interleaved_recorder_degradation() {
 }
 
 #[test]
+fn rejects_lockstepped_or_forged_recorder_control_distribution() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "independent-bounded-blocks-seeded-alternating-order-v1",
+        "paired-operation-barriers-concurrent-worker-partitions-v1",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(fixture.errors().contains("recorder_control_schedule"));
+
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"bound_1ms_recorder_overhead_ratio_samples\":[1.0,1.0,1.0,1.0,1.0]",
+        "\"bound_1ms_recorder_overhead_ratio_samples\":[1.0,1.0,1.5,1.5,1.5]",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("must prove recorder overhead ratio <= 1.02")
+    );
+}
+
+#[test]
 fn rejects_profile_incorrect_canonical_recovery_command_count() {
     let fixture = Fixture::new();
     let path = fixture.root.join("e3.jsonl");
     let body = fs::read_to_string(&path).unwrap().replacen(
         "\"recovery_command_count\":10001",
         "\"recovery_command_count\":10000",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("exact streaming 10M recovery with monotonic replay progress")
+    );
+}
+
+#[test]
+fn rejects_inexact_recovery_command_range_even_with_matching_state_digest() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"recovery_tail_replayed\":10000",
+        "\"recovery_tail_replayed\":9999",
         1,
     );
     fs::write(path, body).unwrap();

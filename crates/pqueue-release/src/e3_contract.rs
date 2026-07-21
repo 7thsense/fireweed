@@ -21,6 +21,7 @@ pub const REQUIRED_E3_PROFILES: [&str; 2] = [
 ];
 pub const REQUIRED_BOUNDS_MS: [u64; 4] = [1, 5, 20, 100];
 pub const MAX_RECORDER_OVERHEAD_RATIO: f64 = 1.02;
+pub const RECORDER_CONTROL_BLOCKS: usize = 5;
 pub const REQUIRED_TXN_ACS: [&str; 6] = [
     "AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-4", "AC-TXN-6", "AC-TXN-7",
 ];
@@ -709,7 +710,18 @@ fn require_complete_recorder_control(
     require_value(
         row,
         &format!("{prefix}_recorder_control_schedule"),
-        serde_json::json!("paired-operation-barriers-concurrent-worker-partitions-v1"),
+        serde_json::json!("independent-bounded-blocks-seeded-alternating-order-v1"),
+        errors,
+    );
+    require_value(
+        row,
+        &format!("{prefix}_recorder_control_block_count"),
+        serde_json::json!(RECORDER_CONTROL_BLOCKS),
+        errors,
+    );
+    require_u64(
+        row,
+        &format!("{prefix}_recorder_control_order_seed"),
         errors,
     );
     require_value(
@@ -749,6 +761,29 @@ fn require_complete_recorder_control(
         .values
         .get(&format!("{prefix}_recorder_overhead_ratio"))
         .and_then(serde_json::Value::as_f64);
+    let overhead_samples = row
+        .measurements
+        .values
+        .get(&format!("{prefix}_recorder_overhead_ratio_samples"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|samples| {
+            samples
+                .iter()
+                .map(serde_json::Value::as_f64)
+                .collect::<Option<Vec<_>>>()
+        });
+    let measured_median = overhead_samples.as_ref().and_then(|samples| {
+        if samples.len() != RECORDER_CONTROL_BLOCKS
+            || samples
+                .iter()
+                .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return None;
+        }
+        let mut ordered = samples.clone();
+        ordered.sort_by(|left, right| left.total_cmp(right));
+        Some(ordered[ordered.len() / 2])
+    });
     if enabled.is_none()
         || enabled != disabled
         || enabled.is_some_and(|digest| !digest_valid(digest))
@@ -761,9 +796,13 @@ fn require_complete_recorder_control(
         )));
     }
     if disabled_throughput.is_none_or(|value| !value.is_finite() || value <= 0.0)
-        || overhead_ratio.is_none_or(|value| {
-            !value.is_finite() || value <= 0.0 || value > MAX_RECORDER_OVERHEAD_RATIO
-        })
+        || overhead_ratio.is_none_or(|value| !value.is_finite() || value <= 0.0)
+        || measured_median.is_none()
+        || overhead_ratio
+            .zip(measured_median)
+            .is_none_or(|(reported, measured)| {
+                (reported - measured).abs() > 0.001 || measured > MAX_RECORDER_OVERHEAD_RATIO
+            })
     {
         errors.push(E3ContractError(format!(
             "E3 ledger profile {} {prefix} must prove recorder overhead ratio <= {MAX_RECORDER_OVERHEAD_RATIO} against a positive interleaved disabled-recorder control",
@@ -843,6 +882,7 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
     let start = require_u64(row, "recovery_start_seq", errors);
     let tail = require_u64(row, "recovery_tail_replayed", errors);
     let total = require_u64(row, "recovery_total_commands", errors);
+    let command_count = require_u64(row, "recovery_command_count", errors);
     let tail_budget = require_u64(row, "recovery_max_tail_budget", errors);
     let snapshot_used = values
         .get("recovery_snapshot_used")
@@ -856,6 +896,11 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
     } else {
         snapshot_used == Some(false) && start == Some(0) && tail == total
     };
+    let command_range_exact = start.zip(tail).zip(total).zip(command_count).is_some_and(
+        |(((start, tail), total), command_count)| {
+            start.checked_add(tail) == Some(total) && total == command_count
+        },
+    );
     let progress_monotonic = samples.is_some_and(|samples| {
         samples.len() >= 2
             && samples.windows(2).all(|pair| {
@@ -940,6 +985,7 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
             .is_none_or(|chunk| chunk == 0 || chunk > 512)
         || !progress_monotonic
         || !mode_exact
+        || !command_range_exact
         || tail
             .zip(tail_budget)
             .is_none_or(|(tail, budget)| tail > budget)
