@@ -1080,6 +1080,95 @@ pub trait UpdateFieldsPort: Send + Sync {
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send;
 }
 
+/// Full API-001 `BatchUpdate` operation.
+///
+/// The request is idempotent at the envelope level through
+/// [`BatchUpdateRequest::request_id`]. Implementations MUST preserve update order in the returned
+/// outcomes, apply successful entries independently, and reject leased items with
+/// [`BatchUpdateOutcome::Conflict`]. Successful entries replace every field whose disposition is
+/// [`BatchUpdateValue::Replace`], leave `Keep` fields unchanged, preserve `eligible_since`, and bump
+/// `item_version`. The default deliberately reports `Unavailable`: a backend must implement the
+/// operation as a batch rather than inheriting an N-call scalar loop.
+pub trait BatchUpdatePort: Send + Sync {
+    fn batch_update(
+        &self,
+        _shard: &QueueKey,
+        _request: BatchUpdateRequest,
+        _now: UtcTimestamp,
+        _expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<BatchUpdateResponse>> + Send {
+        std::future::ready(Err(EngineError::Unavailable))
+    }
+}
+
+/// Envelope for API-001 `BatchUpdate`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BatchUpdateRequest {
+    /// Stable idempotency key for this logical batch. Reuse with a different body is a conflict.
+    pub request_id: RequestId,
+    /// One or more independent updates. Outcomes are returned in this order.
+    pub updates: Vec<BatchUpdateEntry>,
+}
+
+/// API-001 response envelope. Echoing `request_id` is part of retry convergence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatchUpdateResponse {
+    pub request_id: RequestId,
+    /// Exactly one result per request update, in request order.
+    pub results: Vec<BatchUpdateOutcome>,
+}
+
+/// One target in an API-001 `BatchUpdate` request.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BatchUpdateItemRef {
+    ItemId(ItemId),
+    ClientItemKey(ClientItemKey),
+    /// When both identifiers are supplied, they MUST resolve to the same live item.
+    Both {
+        item_id: ItemId,
+        client_item_key: ClientItemKey,
+    },
+}
+
+/// Presence-aware full-replacement disposition for a `BatchUpdate` field.
+///
+/// `Keep` means the request omitted the field. `Replace(value)` means it was present. Optional
+/// values use `Replace(None)` for the contract's explicit JSON `null`/clear operation.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum BatchUpdateValue<T> {
+    #[default]
+    Keep,
+    Replace(T),
+}
+
+/// One API-001 `BatchUpdate` entry. Every mutable value has full-replacement semantics; this is not
+/// a patch API. A pending gate-blocked item remains updateable because gate state affects
+/// eligibility, not lifecycle.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BatchUpdateEntry {
+    pub item_ref: BatchUpdateItemRef,
+    pub expected_item_version: Option<u64>,
+    pub priority: BatchUpdateValue<PriorityValue>,
+    pub not_before: BatchUpdateValue<Option<UtcTimestamp>>,
+    pub payload: BatchUpdateValue<Option<Bytes>>,
+    pub metadata: BatchUpdateValue<Metadata>,
+    pub gate_keys: BatchUpdateValue<Vec<String>>,
+    pub fields: BatchUpdateValue<BTreeMap<String, Bytes>>,
+}
+
+/// Ordered per-item API-001 `BatchUpdate` result.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum BatchUpdateOutcome {
+    Updated {
+        item_id: ItemId,
+        client_item_key: ClientItemKey,
+        item_version: u64,
+    },
+    Conflict,
+    NotFound,
+    Terminal,
+}
+
 /// Reschedule a **live** item's `priority`/`not_before` after push (BQ pqueue-7a96f929) — the operator/
 /// owner-runtime "change when/where this item is delivered" seam, distinct from the [`UpdateFieldsPort`]
 /// field/payload merge. Pre-validated exactly like [`UpdateFieldsPort::update_fields`]: an absent / terminal

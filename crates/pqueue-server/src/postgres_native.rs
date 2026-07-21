@@ -28,11 +28,12 @@ use pqueue_core::{
     TenantId, UtcTimestamp,
 };
 use pqueue_engine::{
-    Backend, ClaimByQueryContext, CommitCapabilities, CommitEntryOutcome, CommitRecovery,
-    CommitTransition, CommitTransitionPort, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
-    HistoricalProjectionRead, HotProjectionQueryPort, IndexHit, IndexQueryPort, PayloadUpdate,
-    RawCommitOutcome, RawCommitRequest, ReclaimPort, RecoveryReadPort, ReschedulePort,
-    ScheduleUpdate, SetGatesCommand, SetGatesPort, UpdateFieldsPort,
+    Backend, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, ClaimByQueryContext,
+    CommitCapabilities, CommitEntryOutcome, CommitRecovery, CommitTransition, CommitTransitionPort,
+    DiscoveryGranularity, DiscoveryPort, DurabilityClass, HistoricalProjectionRead,
+    HotProjectionQueryPort, IndexHit, IndexQueryPort, PayloadUpdate, RawCommitOutcome,
+    RawCommitRequest, ReclaimPort, RecoveryReadPort, ReschedulePort, ScheduleUpdate,
+    SetGatesCommand, SetGatesPort, UpdateFieldsPort,
 };
 use pqueue_engine::{
     ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
@@ -469,6 +470,27 @@ where
                     now,
                     expected_epoch,
                 )
+                .await
+        })
+    }
+}
+
+impl<B> BatchUpdatePort for PostgresWholeOperationAdapter<B>
+where
+    B: RespBackend + BatchUpdatePort,
+{
+    fn batch_update(
+        &self,
+        shard: &QueueKey,
+        request: BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl Future<Output = EngineResult<BatchUpdateResponse>> + Send {
+        let shard = shard.clone();
+        let inner = self.arc_for(&shard);
+        self.dispatch(shard.clone(), move || async move {
+            inner
+                .batch_update(&shard, request, now, expected_epoch)
                 .await
         })
     }
