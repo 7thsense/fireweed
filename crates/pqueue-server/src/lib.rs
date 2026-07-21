@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1024,6 +1024,148 @@ pub struct OwnershipRuntime<B, CP: ?Sized> {
     /// double-bumping the epoch and fencing the laggard. This gate (taken only on the unowned path, never on
     /// the hot already-owned path) lets the first acquirer win and the rest reuse its session.
     acquire_gates: Mutex<std::collections::HashMap<QueueKey, Arc<tokio::sync::Mutex<()>>>>,
+    control_plane_executor: ControlPlaneExecutor,
+}
+
+const CONTROL_PLANE_RUNNING: usize = 8;
+const CONTROL_PLANE_OUTSTANDING: usize = 256;
+
+struct ControlPlaneExecutorState {
+    running: Arc<tokio::sync::Semaphore>,
+    outstanding: Arc<tokio::sync::Semaphore>,
+    start_gate: Mutex<()>,
+    closed: AtomicBool,
+    started: AtomicUsize,
+    drained: tokio::sync::Notify,
+}
+
+#[derive(Clone)]
+struct ControlPlaneExecutor {
+    state: Arc<ControlPlaneExecutorState>,
+}
+
+#[derive(Clone)]
+struct ControlPlaneLifecycle {
+    state: Arc<ControlPlaneExecutorState>,
+}
+
+struct StartedControlPlaneOperation {
+    state: Arc<ControlPlaneExecutorState>,
+}
+
+impl Drop for StartedControlPlaneOperation {
+    fn drop(&mut self) {
+        if self.state.started.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.state.drained.notify_waiters();
+        }
+    }
+}
+
+impl ControlPlaneExecutor {
+    fn new() -> Self {
+        Self::with_limits(CONTROL_PLANE_RUNNING, CONTROL_PLANE_OUTSTANDING)
+    }
+
+    fn with_limits(running: usize, outstanding: usize) -> Self {
+        assert!(running > 0 && outstanding >= running);
+        Self {
+            state: Arc::new(ControlPlaneExecutorState {
+                running: Arc::new(tokio::sync::Semaphore::new(running)),
+                outstanding: Arc::new(tokio::sync::Semaphore::new(outstanding)),
+                start_gate: Mutex::new(()),
+                closed: AtomicBool::new(false),
+                started: AtomicUsize::new(0),
+                drained: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    fn lifecycle(&self) -> ControlPlaneLifecycle {
+        ControlPlaneLifecycle {
+            state: Arc::clone(&self.state),
+        }
+    }
+
+    async fn execute<T, F>(&self, operation: F) -> EngineResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
+    {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(EngineError::Unavailable);
+        }
+        let outstanding = self
+            .state
+            .outstanding
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| EngineError::Backpressure {
+                resource: "control-plane operations",
+            })?;
+        let state = Arc::clone(&self.state);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // Admission transfers the operation into an owned task. Caller cancellation cannot discard an
+        // accepted lease mutation; shutdown rejects queued work and drains every operation that started.
+        pqueue_resp::spawn_governed(async move {
+            let running = match state.running.clone().acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let _ = sender.send(Err(EngineError::Unavailable));
+                    return;
+                }
+            };
+            {
+                let _start_gate = state
+                    .start_gate
+                    .lock()
+                    .expect("control-plane start gate poisoned");
+                if state.closed.load(Ordering::Acquire) {
+                    let _ = sender.send(Err(EngineError::Unavailable));
+                    return;
+                }
+                state.started.fetch_add(1, Ordering::AcqRel);
+            }
+            let started = StartedControlPlaneOperation {
+                state: Arc::clone(&state),
+            };
+            let result = tokio::task::spawn_blocking(operation)
+                .await
+                .map_err(|error| {
+                    EngineError::Storage(format!("control-plane task failed: {error}"))
+                })
+                .and_then(|result| result);
+            drop(started);
+            drop(running);
+            drop(outstanding);
+            let _ = sender.send(result);
+        });
+        receiver
+            .await
+            .map_err(|_| EngineError::Storage("control-plane operation responder dropped".into()))?
+    }
+}
+
+impl ControlPlaneLifecycle {
+    fn close(&self) {
+        let _start_gate = self
+            .state
+            .start_gate
+            .lock()
+            .expect("control-plane start gate poisoned");
+        self.state.closed.store(true, Ordering::Release);
+        self.state.running.close();
+        self.state.outstanding.close();
+    }
+
+    async fn drain_started(&self) {
+        loop {
+            let notified = self.state.drained.notified();
+            if self.state.started.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1061,6 +1203,7 @@ where
             managed_queues: Mutex::new(std::collections::HashSet::new()),
             sessions: Mutex::new(std::collections::HashMap::new()),
             acquire_gates: Mutex::new(std::collections::HashMap::new()),
+            control_plane_executor: ControlPlaneExecutor::new(),
         }
     }
 
@@ -1095,8 +1238,8 @@ where
     pub async fn acquire_queue(&self, queue: &QueueKey, now: UtcTimestamp) -> EngineResult<()> {
         // Read prior active owner before acquire (for restart-reconciliation with ephemeral CP).
         let prior_owner = if self.control_plane.is_ephemeral() {
-            self.control_plane
-                .lease(queue)
+            self.cp_lease(queue.clone())
+                .await
                 .ok()
                 .and_then(|l| l.active_owner_id)
         } else {
@@ -1502,7 +1645,9 @@ where
 
     async fn cp_register(&self, owner: OwnerId, now: UtcTimestamp) -> EngineResult<()> {
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.register_owner(&owner, now)).await
+        self.control_plane_executor
+            .execute(move || cp.register_owner(&owner, now))
+            .await
     }
 
     async fn cp_advertise_endpoint(
@@ -1515,7 +1660,9 @@ where
             "owner endpoint must be a dialable IP socket address with a nonzero port",
         ))?;
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.advertise_owner_endpoint(&owner, &endpoint, now)).await
+        self.control_plane_executor
+            .execute(move || cp.advertise_owner_endpoint(&owner, &endpoint, now))
+            .await
     }
 
     async fn cp_live_owner_endpoints(
@@ -1523,7 +1670,9 @@ where
         now: UtcTimestamp,
     ) -> EngineResult<Vec<pqueue_engine::OwnerEndpointAdvertisement>> {
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.live_owner_endpoints(now)).await
+        self.control_plane_executor
+            .execute(move || cp.live_owner_endpoints(now))
+            .await
     }
 
     /// One advertisement write and one bounded live-owner read per node-level ownership tick. The entire
@@ -1564,7 +1713,16 @@ where
         now: UtcTimestamp,
     ) -> EngineResult<pqueue_engine::OwnerResolution> {
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.resolve_queue_owner(&queue, now)).await
+        self.control_plane_executor
+            .execute(move || cp.resolve_queue_owner(&queue, now))
+            .await
+    }
+
+    async fn cp_lease(&self, queue: QueueKey) -> EngineResult<pqueue_engine::QueueLease> {
+        let cp = self.control_plane.clone();
+        self.control_plane_executor
+            .execute(move || cp.lease(&queue))
+            .await
     }
 
     async fn cp_resolve_batch(
@@ -1574,7 +1732,9 @@ where
     ) -> EngineResult<Vec<pqueue_engine::OwnerResolution>> {
         self.resolution_batch_tasks.fetch_add(1, Ordering::Relaxed);
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.resolve_queue_owners(&queues, now)).await
+        self.control_plane_executor
+            .execute(move || cp.resolve_queue_owners(&queues, now))
+            .await
     }
 
     async fn cp_acquire(
@@ -1584,7 +1744,9 @@ where
         now: UtcTimestamp,
     ) -> EngineResult<AcquireOutcome> {
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.acquire_queue_lease(&queue, &owner, now)).await
+        self.control_plane_executor
+            .execute(move || cp.acquire_queue_lease(&queue, &owner, now))
+            .await
     }
 
     async fn cp_renew_batch(
@@ -1594,7 +1756,9 @@ where
     ) -> EngineResult<Vec<pqueue_engine::LeaseRenewalOutcome>> {
         self.renewal_batch_tasks.fetch_add(1, Ordering::Relaxed);
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.renew_queue_leases(&renewals, now)).await
+        self.control_plane_executor
+            .execute(move || cp.renew_queue_leases(&renewals, now))
+            .await
     }
 
     async fn cp_confirm(
@@ -1605,10 +1769,9 @@ where
         now: UtcTimestamp,
     ) -> EngineResult<pqueue_engine::QueueLease> {
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || {
-            cp.confirm_queue_lease_fence(&queue, &owner, expected_epoch, now)
-        })
-        .await
+        self.control_plane_executor
+            .execute(move || cp.confirm_queue_lease_fence(&queue, &owner, expected_epoch, now))
+            .await
     }
 
     async fn cp_begin_drain(
@@ -1619,7 +1782,8 @@ where
         now: UtcTimestamp,
     ) -> EngineResult<pqueue_engine::QueueLease> {
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.begin_drain(&queue, expected_epoch, &target_owner, now))
+        self.control_plane_executor
+            .execute(move || cp.begin_drain(&queue, expected_epoch, &target_owner, now))
             .await
     }
 
@@ -1631,19 +1795,10 @@ where
         now: UtcTimestamp,
     ) -> EngineResult<()> {
         let cp = self.control_plane.clone();
-        blocking_control_plane(move || cp.release_queue_lease(&queue, &owner, expected_epoch, now))
+        self.control_plane_executor
+            .execute(move || cp.release_queue_lease(&queue, &owner, expected_epoch, now))
             .await
     }
-}
-
-async fn blocking_control_plane<T, F>(f: F) -> EngineResult<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> EngineResult<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| EngineError::Storage(format!("control-plane task failed: {e}")))?
 }
 
 impl<B, CP: ?Sized> RespHooks for OwnershipRuntime<B, CP>
@@ -1674,6 +1829,20 @@ where
             self.acquire_queue(&queue, now).await?;
             return Ok(RouteDecision::Serve);
         }
+        if resolution.active_owner.as_ref() == Some(&self.owner)
+            && matches!(
+                resolution.state,
+                LeaseState::Assigned | LeaseState::Draining
+            )
+        {
+            if resolution.state == LeaseState::Draining && is_new_claim {
+                return Ok(RouteDecision::Unavailable);
+            }
+            let epoch = resolution
+                .assignment_epoch
+                .ok_or(EngineError::Unavailable)?;
+            self.establish_owned_session(&queue, epoch, now).await?;
+        }
         let endpoints = self.owner_endpoints.lock().expect("poisoned").clone();
         Ok(route(
             &self.owner,
@@ -1697,6 +1866,18 @@ where
         now: UtcTimestamp,
         is_new_claim: bool,
     ) -> EngineResult<Option<u64>> {
+        if let Some(epoch) = self
+            .sessions
+            .lock()
+            .expect("poisoned")
+            .get(shard)
+            .map(|session| session.fence_epoch)
+        {
+            // RESP routing established this session from the same command's authoritative resolution.
+            // Renewal removes fenced/missing sessions, so repeating registration and resolution here adds
+            // no safety and used to double every write's control-plane round trips.
+            return Ok(Some(epoch));
+        }
         self.ensure_epoch(shard, now, is_new_claim).await
     }
 }
@@ -1758,6 +1939,7 @@ pub struct Server {
     /// cannot silently detach accepted durable work from the server lifecycle.
     maintenance_tasks: Vec<JoinHandle<()>>,
     blocking_lifecycles: Vec<PostgresBlockingLifecycle>,
+    control_plane_lifecycles: Vec<ControlPlaneLifecycle>,
     /// Signals the RESP serve loop to stop accepting and drain in-flight connection handlers.
     cancel: CancellationToken,
     reclaim: Arc<ReclaimCounters>,
@@ -1809,6 +1991,9 @@ impl Server {
         for lifecycle in &self.blocking_lifecycles {
             lifecycle.close();
         }
+        for lifecycle in &self.control_plane_lifecycles {
+            lifecycle.close();
+        }
         self.cancel.cancel();
         if let Some(t) = &self.serve_task {
             t.abort();
@@ -1836,6 +2021,9 @@ impl Server {
         for lifecycle in &self.blocking_lifecycles {
             lifecycle.close();
         }
+        for lifecycle in &self.control_plane_lifecycles {
+            lifecycle.close();
+        }
         self.cancel.cancel();
         if let Some(mut serve) = self.serve_task.take()
             && tokio::time::timeout(timeout, &mut serve).await.is_err()
@@ -1854,6 +2042,9 @@ impl Server {
         // Segment sealers remain live until every accepted mutation has crossed its response barrier.
         // Otherwise a graceful shutdown could abort the only task capable of resolving a started push.
         for lifecycle in &self.blocking_lifecycles {
+            let _ = tokio::time::timeout(timeout, lifecycle.drain_started()).await;
+        }
+        for lifecycle in &self.control_plane_lifecycles {
             let _ = tokio::time::timeout(timeout, lifecycle.drain_started()).await;
         }
         for task in self.maintenance_tasks.drain(..) {
@@ -2762,6 +2953,7 @@ pub async fn start_with<B: RespBackend>(
         fjord_task: None,
         maintenance_tasks: Vec::new(),
         blocking_lifecycles: Vec::new(),
+        control_plane_lifecycles: Vec::new(),
         cancel,
         reclaim,
         ownership,
@@ -2833,6 +3025,7 @@ where
         owner,
         endpoint,
     ));
+    let control_plane_lifecycle = hooks.control_plane_executor.lifecycle();
     let now = clock.now();
     hooks.advertise_and_refresh_owner_endpoints(now).await?;
     for def in queues {
@@ -2874,6 +3067,7 @@ where
         fjord_task: None,
         maintenance_tasks: Vec::new(),
         blocking_lifecycles: Vec::new(),
+        control_plane_lifecycles: vec![control_plane_lifecycle],
         cancel,
         reclaim,
         ownership,
@@ -2950,6 +3144,63 @@ mod byte_admission_wiring_tests {
     };
     use pqueue_objectlog::segmented::InMemoryBlobStore;
     use std::sync::mpsc;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn control_plane_executor_bounds_admission_and_owns_cancelled_calls() {
+        let executor = ControlPlaneExecutor::with_limits(1, 2);
+        let lifecycle = executor.lifecycle();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let first = {
+            let executor = executor.clone();
+            tokio::spawn(async move {
+                executor
+                    .execute(move || {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok::<_, EngineError>(1)
+                    })
+                    .await
+            })
+        };
+        entered_rx.recv().unwrap();
+        let completed = Arc::new(AtomicUsize::new(0));
+        let second = {
+            let executor = executor.clone();
+            let completed = Arc::clone(&completed);
+            tokio::spawn(async move {
+                executor
+                    .execute(move || {
+                        completed.fetch_add(1, Ordering::AcqRel);
+                        Ok::<_, EngineError>(2)
+                    })
+                    .await
+            })
+        };
+        while executor.state.outstanding.available_permits() != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            executor.execute(|| Ok::<_, EngineError>(3)).await,
+            Err(EngineError::Backpressure { .. })
+        ));
+        second.abort();
+        release_tx.send(()).unwrap();
+        assert_eq!(first.await.unwrap().unwrap(), 1);
+        for _ in 0..100 {
+            if completed.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(completed.load(Ordering::Acquire), 1);
+        lifecycle.close();
+        lifecycle.drain_started().await;
+        assert!(matches!(
+            executor.execute(|| Ok::<_, EngineError>(4)).await,
+            Err(EngineError::Unavailable)
+        ));
+    }
 
     struct PauseAfterAcquire {
         inner: Arc<InMemoryControlPlane>,

@@ -269,6 +269,20 @@ impl ProjectionStore for SqliteRelational {
         Ok(self.lock().queues.values().cloned().collect())
     }
 
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&pqueue_engine::DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::DefinitionPage> {
+        pqueue_engine::definition_page_from_sorted_rows(
+            self.lock().queues.values().cloned(),
+            cursor,
+            limit,
+            worker_partition,
+        )
+    }
+
     fn recovery_high_water(&self, shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
         // `SqliteRelational` is the unified log+projection store, so the durable replay cursor is the
         // relational high-water already tracked by the shared sqlite cursor.
@@ -586,10 +600,12 @@ impl ProjectionStore for SqliteRelational {
             &g.live_tokens,
             &g.live_tokens_by_consumer,
             shard,
-            start,
-            end,
-            consumer,
-            limit,
+            crate::relational::query::PendingRange {
+                start,
+                end,
+                consumer,
+                limit,
+            },
         )
     }
 

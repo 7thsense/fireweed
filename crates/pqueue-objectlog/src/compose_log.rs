@@ -18,10 +18,10 @@
 //! commit_transition) — exactly the monolith's capability set.
 
 use pqueue_engine::{
-    CommandEnvelope, CommandPage, CommandPosition, ComposedBackend, DetachedLogMaintenance,
-    DetachedRetentionOutcome, DetachedRetentionRequest, DetachedTrimWatermark, DurabilityClass,
-    EngineError, EngineResult, InProcessControlPlane, LogStore, ProjectionSnapshot, QueueKey,
-    SnapshotRef,
+    CommandEnvelope, CommandPage, CommandPosition, ComposedBackend, DefinitionCursor,
+    DefinitionPage, DetachedLogMaintenance, DetachedRetentionOutcome, DetachedRetentionRequest,
+    DetachedTrimWatermark, DurabilityClass, EngineError, EngineResult, InProcessControlPlane,
+    LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
 };
 use pqueue_projection::InMemoryProjection;
 
@@ -418,25 +418,6 @@ impl ObjectLogMaintenance {
             watermark: DetachedTrimWatermark::Clear,
         }
     }
-
-    fn completed_watermark(
-        &self,
-        shard: &QueueKey,
-        target: u64,
-        now_ms: i64,
-    ) -> EngineResult<DetachedTrimWatermark> {
-        Ok(
-            if self
-                .log
-                .lowest_branch_pinned_below(shard, target, now_ms)?
-                .is_some()
-            {
-                DetachedTrimWatermark::Clear
-            } else {
-                DetachedTrimWatermark::Set(target)
-            },
-        )
-    }
 }
 
 impl DetachedLogMaintenance for ObjectLogMaintenance {
@@ -475,7 +456,9 @@ impl DetachedLogMaintenance for ObjectLogMaintenance {
                     watermark,
                 });
             }
-            watermark = self.completed_watermark(&request.shard, floor.sequence, request.now_ms)?;
+            // The bounded expiry pass pages the complete pin registry and remains incomplete while a live
+            // branch blocks the target, so its completion is the pin proof carried into finalization.
+            watermark = DetachedTrimWatermark::Set(floor.sequence);
         }
 
         if !request.allow_floor_advance {
@@ -530,7 +513,7 @@ impl DetachedLogMaintenance for ObjectLogMaintenance {
         let complete = pass.cursor.is_none() && pass.stopped_by.is_none();
         summary.merge(maintenance_summary(pass, false));
         if complete {
-            watermark = self.completed_watermark(&request.shard, trim_through, request.now_ms)?;
+            watermark = DetachedTrimWatermark::Set(trim_through);
         }
         Ok(DetachedRetentionOutcome {
             expected_epoch: request.expected_epoch,
@@ -811,6 +794,16 @@ impl LogStore for ObjectLog {
 
     fn recover_definitions(&self) -> EngineResult<Vec<pqueue_core::QueueDefinition>> {
         self.log.recover_definitions()
+    }
+
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<DefinitionPage> {
+        self.log
+            .recover_definitions_page(cursor, limit, worker_partition)
     }
 
     // -- group-commit facet: delegate to the substrate's existing &self primitives (ADR-012 P2) -----------

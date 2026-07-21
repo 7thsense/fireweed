@@ -838,10 +838,12 @@ impl ProjectionRead for SqliteProjectionStore {
                 &g.live_tokens,
                 &g.live_tokens_by_consumer,
                 shard,
-                start,
-                end,
-                consumer,
-                limit,
+                crate::relational::query::PendingRange {
+                    start,
+                    end,
+                    consumer,
+                    limit,
+                },
             )
         };
         std::future::ready(result)
@@ -976,6 +978,20 @@ impl ProjectionStore for SqliteProjectionStore {
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         Ok(self.lock().queues.values().cloned().collect())
+    }
+
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&pqueue_engine::DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::DefinitionPage> {
+        pqueue_engine::definition_page_from_sorted_rows(
+            self.lock().queues.values().cloned(),
+            cursor,
+            limit,
+            worker_partition,
+        )
     }
 
     fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
@@ -1210,10 +1226,12 @@ impl ProjectionStore for SqliteProjectionStore {
             &g.live_tokens,
             &g.live_tokens_by_consumer,
             shard,
-            start,
-            end,
-            consumer,
-            limit,
+            crate::relational::query::PendingRange {
+                start,
+                end,
+                consumer,
+                limit,
+            },
         )
     }
 

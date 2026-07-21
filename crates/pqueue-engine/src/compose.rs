@@ -155,6 +155,146 @@ where
     }
 }
 
+/// Opaque, storage-ordered durable queue-catalog cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefinitionCursor {
+    pub storage_key: String,
+}
+
+/// One bounded durable queue-catalog page. `next` may be present when `definitions` is empty because the
+/// storage page contained only queues assigned to other workers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DefinitionPage {
+    pub definitions: Vec<QueueDefinition>,
+    pub next: Option<DefinitionCursor>,
+}
+
+const DEFINITION_PAGE_LIMIT: usize = 256;
+
+fn definition_storage_key(definition: &QueueDefinition) -> String {
+    serde_json::to_string(&(definition.tenant_id.as_str(), definition.queue_id.as_str()))
+        .expect("queue identity serializes")
+}
+
+impl DefinitionCursor {
+    pub fn from_queue(queue: &QueueKey) -> Self {
+        Self {
+            storage_key: serde_json::to_string(&(
+                queue.tenant_id.as_str(),
+                queue.queue_id.as_str(),
+            ))
+            .expect("queue identity serializes"),
+        }
+    }
+
+    pub fn queue_parts(&self) -> EngineResult<(String, String)> {
+        serde_json::from_str(&self.storage_key)
+            .map_err(|error| EngineError::Storage(format!("invalid definition cursor: {error}")))
+    }
+}
+
+pub fn definition_page_from_storage_rows(
+    mut rows: Vec<QueueDefinition>,
+    has_more: bool,
+    worker_partition: Option<(usize, usize)>,
+) -> DefinitionPage {
+    let next = has_more.then(|| {
+        let last = rows.last().expect("continued page is nonempty");
+        DefinitionCursor::from_queue(&QueueKey::new(
+            last.tenant_id.clone(),
+            last.queue_id.clone(),
+        ))
+    });
+    rows.retain(|definition| {
+        worker_partition.is_none_or(|(index, partitions)| {
+            queue_worker_partition(
+                &QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                partitions,
+            ) == index
+        })
+    });
+    DefinitionPage {
+        definitions: rows,
+        next,
+    }
+}
+
+pub fn definition_page_from_sorted_rows(
+    definitions: impl IntoIterator<Item = QueueDefinition>,
+    cursor: Option<&DefinitionCursor>,
+    limit: usize,
+    worker_partition: Option<(usize, usize)>,
+) -> EngineResult<DefinitionPage> {
+    if limit == 0 {
+        return Err(EngineError::Invalid(
+            "definition page limit must be nonzero",
+        ));
+    }
+    let after = cursor.map(DefinitionCursor::queue_parts).transpose()?;
+    let mut rows = definitions
+        .into_iter()
+        .filter(|definition| {
+            after.as_ref().is_none_or(|(tenant, queue)| {
+                definition.tenant_id.as_str() > tenant.as_str()
+                    || (definition.tenant_id.as_str() == tenant.as_str()
+                        && definition.queue_id.as_str() > queue.as_str())
+            })
+        })
+        .take(limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    Ok(definition_page_from_storage_rows(
+        rows,
+        has_more,
+        worker_partition,
+    ))
+}
+
+/// Bounded fallback for in-process adapters. Durable adapters override the page method with storage-level
+/// keyset pagination; this helper preserves the same cursor/partition contract for tests and memory stores.
+fn definition_page_from_iter(
+    definitions: impl IntoIterator<Item = QueueDefinition>,
+    cursor: Option<&DefinitionCursor>,
+    limit: usize,
+    worker_partition: Option<(usize, usize)>,
+) -> EngineResult<DefinitionPage> {
+    if limit == 0 {
+        return Err(EngineError::Invalid(
+            "definition page limit must be nonzero",
+        ));
+    }
+    let mut rows: Vec<_> = definitions
+        .into_iter()
+        .map(|definition| (definition_storage_key(&definition), definition))
+        .collect();
+    rows.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let after = cursor.map(|cursor| cursor.storage_key.as_str());
+    let mut raw = rows
+        .into_iter()
+        .filter(|(key, _)| after.is_none_or(|after| key.as_str() > after))
+        .take(limit.saturating_add(1))
+        .collect::<Vec<_>>();
+    let has_more = raw.len() > limit;
+    raw.truncate(limit);
+    let next = has_more.then(|| DefinitionCursor {
+        storage_key: raw.last().expect("nonzero bounded page").0.clone(),
+    });
+    let definitions = raw
+        .into_iter()
+        .map(|(_, definition)| definition)
+        .filter(|definition| {
+            worker_partition.is_none_or(|(index, partitions)| {
+                queue_worker_partition(
+                    &QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone()),
+                    partitions,
+                ) == index
+            })
+        })
+        .collect();
+    Ok(DefinitionPage { definitions, next })
+}
+
 // ---------------------------------------------------------------------------
 // Axis 1: LogStore — the durable command log + epoch/fence authority
 // ---------------------------------------------------------------------------
@@ -294,10 +434,8 @@ pub trait LogStore: Send {
         Ok(MaintenanceSummary::default())
     }
 
-    /// The lowest segment sequence at or below `through_seq` that bounded expiry SKIPS only because
-    /// a live branch pins it (a transient condition). The composed trim caller uses this to keep its
-    /// completed-deletion watermark BELOW a branch-pinned segment so a released pin is re-scanned later (bug
-    /// 2b). Default: `None` (no branch-pin concept).
+    /// Legacy diagnostic surface for locating a branch-pinned segment. Bounded expiry must carry its own
+    /// paged pin proof; the composed trim path does not invoke this unbounded compatibility query.
     fn lowest_branch_pinned_below(
         &self,
         _shard: &QueueKey,
@@ -381,6 +519,19 @@ pub trait LogStore: Send {
     /// empty — a reopened in-process log is a fresh process with nothing to recover.
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
         Ok(Vec::new())
+    }
+
+    /// Read one bounded page of the durable queue catalog. The cursor advances over the underlying
+    /// catalog, including definitions owned by other worker partitions, so an empty returned page can still
+    /// carry progress. Durable adapters override this to issue a keyset/LIST-page read instead of allocating
+    /// the complete catalog.
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<DefinitionPage> {
+        definition_page_from_iter(self.recover_definitions()?, cursor, limit, worker_partition)
     }
 
     // -- group-commit facet (ADR-012 P2, runtime-agnostic) -------------------
@@ -1152,6 +1303,16 @@ pub trait ProjectionStore: Send {
         Ok(Vec::new())
     }
 
+    /// Projection-axis counterpart to [`LogStore::recover_definitions_page`].
+    fn recover_definitions_page(
+        &self,
+        cursor: Option<&DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<DefinitionPage> {
+        definition_page_from_iter(self.recover_definitions()?, cursor, limit, worker_partition)
+    }
+
     /// Seed the composition's per-queue id-mint `counters` past every item id already materialized in the
     /// durable projection snapshot, so a push after a snapshot-tail reopen never re-mints an existing id.
     /// Default: no-op — the in-memory projection has no persisted snapshot, so its counters are restored by
@@ -1287,6 +1448,11 @@ struct Inner<L, P> {
     /// watermark keeps subsequent idle ticks from re-scanning the manifest once the durable floor is fully
     /// reclaimed. NOT durable: a restart re-verifies against the durable floor.
     trim_completed_through: HashMap<QueueKey, u64>,
+    /// Persisted across maintenance ticks so one tick performs one bounded durable-catalog page instead of
+    /// serially walking every queue. Each pooled backend owns an independent cursor and therefore advances
+    /// its partition concurrently with the other fixed workers.
+    maintenance_catalog_projection: bool,
+    maintenance_definition_cursor: Option<DefinitionCursor>,
     byte_budget: Option<BufferedByteBudget>,
     queue_byte_limit: Option<usize>,
 }
@@ -1414,6 +1580,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 coords: HashMap::new(),
                 known_shards: HashSet::new(),
                 trim_completed_through: HashMap::new(),
+                maintenance_catalog_projection: true,
+                maintenance_definition_cursor: None,
                 byte_budget: None,
                 queue_byte_limit: None,
             }),
@@ -1716,8 +1884,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     /// advance is therefore an EPOCH-FENCED MANIFEST CAS inside `advance_retention_floor` — a superseded owner
     /// LOSES the CAS or is `EpochFenced` and cannot regress a newer owner's floor (which would strand recovery
     /// at a reclaimed segment). A fenced/raced advance is treated here as a benign skip (delete nothing, don't
-    /// error the tick). BRANCH PINS (bug 2b): the completed-deletion watermark is held BELOW any branch-pinned
-    /// segment (a transient condition) so a released pin is re-scanned and reclaimed on a later tick.
+    /// error the tick). BRANCH PINS (bug 2b): bounded expiry remains incomplete while a live pin blocks the
+    /// target, so the completed-deletion watermark is written only after the pin has released.
     fn trim_reclaimable_segments_locked(
         inner: &mut Inner<L, P>,
         shard: &QueueKey,
@@ -1756,7 +1924,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 if !complete {
                     return Ok(summary);
                 }
-                Self::record_trim_watermark_locked(inner, shard, floor.sequence, now_ms)?;
+                Self::record_trim_watermark_locked(inner, shard, floor.sequence);
             }
         }
 
@@ -1884,33 +2052,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             Err(error) => return Err(error),
         }
         // (c) The typed boundary has now deleted the segment objects after the floor publication. Record the
-        // completed watermark below any branch pin.
-        Self::record_trim_watermark_locked(inner, shard, trim_through_seq, now_ms)?;
+        // completed watermark only after the bounded pass proved the whole target complete.
+        Self::record_trim_watermark_locked(inner, shard, trim_through_seq);
         Ok(summary)
     }
 
-    /// Record the completed-deletion watermark after bounded expiry through `target` (bug 2b). If nothing
-    /// at/below `target` is branch-pinned, record `target` (idle ticks then skip the re-scan). If ANY segment
-    /// at/below `target` was skipped ONLY because a live branch pins it — a TRANSIENT condition — CLEAR the
-    /// watermark instead, so every subsequent tick re-scans up to the floor and reclaims the segment the
-    /// instant the pin is released (correct even when `target == 0`, where a numeric "below the pin" watermark
-    /// could not go lower).
-    fn record_trim_watermark_locked(
-        inner: &mut Inner<L, P>,
-        shard: &QueueKey,
-        target: u64,
-        now_ms: i64,
-    ) -> EngineResult<()> {
-        if inner
-            .log
-            .lowest_branch_pinned_below(shard, target, now_ms)?
-            .is_some()
-        {
-            inner.trim_completed_through.remove(shard);
-        } else {
-            inner.trim_completed_through.insert(shard.clone(), target);
-        }
-        Ok(())
+    /// Record completion only after the bounded expiry pass returned without a cursor/stop/fence/failure.
+    /// That pass pages the complete branch-pin registry before deleting and deliberately remains incomplete
+    /// while any live pin blocks the target. Re-listing the full registry and manifest here duplicated that
+    /// proof with unbounded provider I/O under the composed lock.
+    fn record_trim_watermark_locked(inner: &mut Inner<L, P>, shard: &QueueKey, target: u64) {
+        inner.trim_completed_through.insert(shard.clone(), target);
     }
 
     /// Capture only composition-owned authority while the queue-local permit and global mutex are held.
@@ -2032,23 +2184,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             self.trim_reclaimable_segments(&shard, request_id_retention_ms, now)
         })
-    }
-
-    fn durable_definitions_locked(inner: &Inner<L, P>) -> EngineResult<Vec<QueueDefinition>> {
-        let mut seen: std::collections::HashSet<QueueKey> = std::collections::HashSet::new();
-        let mut defs = Vec::new();
-        for def in inner
-            .projection
-            .recover_definitions()?
-            .into_iter()
-            .chain(inner.log.recover_definitions()?)
-        {
-            let key = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-            if seen.insert(key) {
-                defs.push(def);
-            }
-        }
-        Ok(defs)
     }
 
     // -- group-commit write-path helpers (ADR-012 P2) -----------------------
@@ -2368,170 +2503,181 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     }
 
     fn run_recovery(&self) -> EngineResult<()> {
-        // 1. Gather the durable definitions, projection catalog first then log catalog, deduped by key.
-        let definitions: Vec<QueueDefinition> = {
-            let g = self.inner.lock().expect("composed backend poisoned");
-            Self::durable_definitions_locked(&g)?
-        }
-        .into_iter()
-        .filter(|definition| {
-            self.owns_worker_queue(&QueueKey::new(
-                definition.tenant_id.clone(),
-                definition.queue_id.clone(),
-            ))
-        })
-        .collect();
-        if definitions.is_empty() {
-            return Ok(());
-        }
-
         let mut max_cmd_seq: Option<u64> = None;
-        for def in definitions {
-            let key = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-            // Repopulate the in-process control plane (idempotent for a compatible re-create).
-            self.control.create_queue(def.clone())?;
-            let mut g = self.inner.lock().expect("composed backend poisoned");
-            let Inner {
-                log,
-                projection,
-                idempotency,
-                claim_by_query_idempotency,
-                commit_idempotency,
-                known_shards,
-                ..
-            } = &mut *g;
-            known_shards.insert(key.clone());
-            log.ensure_shard(&key)?;
-            projection.ensure_shard(&def)?;
-            // Seed counters from the durable projection snapshot (no-op for the in-memory projection).
-            projection.restore_counters(&key, &self.counters)?;
-            // Cross-validate the (now hydrated) durable projection's recorded object-log lineage against the
-            // log's actual identity (TD-004 async lineage validation), BEFORE trusting its high-water as a
-            // replay-skip point. A hybrid projection whose recorded lineage does not descend from this log
-            // fails closed here (the in-memory / relational projections record no lineage → no-op default).
-            let identity = LogLineageIdentity {
-                shard: key.clone(),
-                current_epoch: log.current_epoch(&key)?,
-                high_water: log.high_water(&key)?,
-            };
-            projection.validate_recovery_lineage(&identity)?;
-            // Fold async-apply poison / hard-backpressure health into the replay-start decision (TD-004
-            // §backpressure/poison): a poisoned projection fails closed here (unresolved replay poison must
-            // stop serving; high-water must not advance past poison), and a hard-backpressured one replays
-            // from genesis rather than trusting its lagging high-water as a safe skip point.
-            let recovery_poison = projection.recovery_poison(&key);
-            let hard_backpressure = projection.recovery_backpressured(&key);
-            // The durable retention floor (bead pqueue-b5cc2bc7): the highest command position whose segment
-            // OBJECTS have been trimmed, an EXCLUSIVE lower bound. `None` (a never-trimmed / pre-floor log)
-            // means genesis, so every fold below starts from the beginning — BYTE-IDENTICAL to a pre-floor
-            // log. When a trim HAS run, the below-floor segments are gone from the store, so both idempotency
-            // folds AND the projection replay must start at `floor + 1` (the trim guarantees every below-floor
-            // request_id is already past request_id_retention_ms, so none is dropped — see AC-TXN-3 proof).
-            let floor = log.retention_floor(&key)?;
-            // Rebuild the in-memory `request_id -> result` push-idempotency map from the durable log for
-            // EVERY composed-log backend, not only the eventual-apply ones. `push_with_request_id`
-            // consults/records only this in-memory map (see the `check`/`record` calls), which starts
-            // empty on reopen. Atomic composed-log backends (sqlite/postgres, DurabilityClass::Atomic)
-            // durably record the request_id + request_outcome on the log at commit time but previously
-            // did NOT rebuild the map on recovery, so a post-restart retry of an already-committed
-            // request_id re-executed instead of replaying its one committed result — a violation of the
-            // unknown-outcome contract (INV-14). The rebuild is a pure log fold and is correct for both
-            // durability classes (the relational, DB-authoritative family is a separate backend type, not
-            // a ComposedBackend, and is unaffected).
-            let recovered_max_cmd_seq = Self::rebuild_idempotency_from_log(
-                log,
-                RecoveryIdempotencyCaches {
-                    push: idempotency,
-                    claim: claim_by_query_idempotency,
-                    commit: commit_idempotency,
-                },
-                &key,
-                def.request_id_retention_ms,
-                floor.clone(),
-                &self.counters,
-            )?;
-            // Symmetric rebuild for the OTHER request_id-bearing mutating op: `commit_transition` (the
-            // authoritative vectorized claimed-work commit). Its in-memory `commit_idempotency` cache is
-            // likewise empty on reopen; without this rebuild a post-restart retry of an already-committed
-            // request_id would NOT replay the one committed per-entry outcome — it would be lease-fenced
-            // (input already finalized) and reject (0-duplicate, but not an unknown-outcome cached replay,
-            // violating INV-14 for commit_transition). The rebuild is a pure durable-state reconstruction:
-            // the committed per-entry `EntryRecovery` is rebuilt from the durable commit envelopes on the
-            // log (Finalize/WriteSideRecords/AdvanceInstanceFence/Push), and the body fingerprint is the one
-            // stamped onto those envelopes at commit time. See `rebuild_idempotency_from_log`.
-            if let Some(sequence) = recovered_max_cmd_seq {
-                max_cmd_seq = Some(max_cmd_seq.map_or(sequence, |max| max.max(sequence)));
-            }
-            // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
-            // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
-            let recorded_high_water = projection.recovery_high_water(&key)?;
-            // FAIL-CLOSED (bead pqueue-b5cc2bc7 bug 3): if this shard has a durable retention floor, the
-            // below-floor object-log segments are RECLAIMED, so the durable projection image MUST already
-            // cover the floor (`recovery_high_water >= floor`). It always does for a consistent store (the
-            // floor was advanced only while `checkpoint >= floor`, and the checkpoint is monotone). A
-            // projection BEHIND the floor — a restored, rolled-back, or FOREIGN SQLite image over a trimmed
-            // log — would make the R1 replay-start flooring omit the commands between the image and the floor
-            // (absent from BOTH the reclaimed log AND the behind image): a SILENT data loss. Refuse to serve.
-            // (At reopen the async-apply monitor is Clear — it is memoryless across restart — so
-            // `recovery_high_water` here is the REAL durable high-water, not a withheld one; a poisoned
-            // projection already failed in `resolve_recovery_start` below.)
-            if let Some(fl) = &floor {
-                let covers_floor = recorded_high_water
-                    .as_ref()
-                    .is_some_and(|hw| hw.sequence >= fl.sequence);
-                if !covers_floor {
-                    let hw_seq = recorded_high_water.as_ref().map(|hw| hw.sequence);
-                    return Err(EngineError::Storage(format!(
-                        "read below retention floor: projection high-water {:?} <= reclaimed floor {} \
+        // Page the projection catalog first and the log catalog second. A page can be empty after worker
+        // partition filtering while still carrying a cursor over the underlying storage rows.
+        for projection_catalog in [true, false] {
+            let mut cursor = None;
+            loop {
+                let page = {
+                    let g = self.inner.lock().expect("composed backend poisoned");
+                    if projection_catalog {
+                        g.projection.recover_definitions_page(
+                            cursor.as_ref(),
+                            DEFINITION_PAGE_LIMIT,
+                            self.worker_partition,
+                        )?
+                    } else {
+                        g.log.recover_definitions_page(
+                            cursor.as_ref(),
+                            DEFINITION_PAGE_LIMIT,
+                            self.worker_partition,
+                        )?
+                    }
+                };
+                for def in page.definitions {
+                    let key = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+                    // Repopulate the in-process control plane (idempotent for a compatible re-create).
+                    self.control.create_queue(def.clone())?;
+                    let mut g = self.inner.lock().expect("composed backend poisoned");
+                    if !g.known_shards.insert(key.clone()) {
+                        continue;
+                    }
+                    let Inner {
+                        log,
+                        projection,
+                        idempotency,
+                        claim_by_query_idempotency,
+                        commit_idempotency,
+                        ..
+                    } = &mut *g;
+                    log.ensure_shard(&key)?;
+                    projection.ensure_shard(&def)?;
+                    // Seed counters from the durable projection snapshot (no-op for the in-memory projection).
+                    projection.restore_counters(&key, &self.counters)?;
+                    // Cross-validate the (now hydrated) durable projection's recorded object-log lineage against the
+                    // log's actual identity (TD-004 async lineage validation), BEFORE trusting its high-water as a
+                    // replay-skip point. A hybrid projection whose recorded lineage does not descend from this log
+                    // fails closed here (the in-memory / relational projections record no lineage → no-op default).
+                    let identity = LogLineageIdentity {
+                        shard: key.clone(),
+                        current_epoch: log.current_epoch(&key)?,
+                        high_water: log.high_water(&key)?,
+                    };
+                    projection.validate_recovery_lineage(&identity)?;
+                    // Fold async-apply poison / hard-backpressure health into the replay-start decision (TD-004
+                    // §backpressure/poison): a poisoned projection fails closed here (unresolved replay poison must
+                    // stop serving; high-water must not advance past poison), and a hard-backpressured one replays
+                    // from genesis rather than trusting its lagging high-water as a safe skip point.
+                    let recovery_poison = projection.recovery_poison(&key);
+                    let hard_backpressure = projection.recovery_backpressured(&key);
+                    // The durable retention floor (bead pqueue-b5cc2bc7): the highest command position whose segment
+                    // OBJECTS have been trimmed, an EXCLUSIVE lower bound. `None` (a never-trimmed / pre-floor log)
+                    // means genesis, so every fold below starts from the beginning — BYTE-IDENTICAL to a pre-floor
+                    // log. When a trim HAS run, the below-floor segments are gone from the store, so both idempotency
+                    // folds AND the projection replay must start at `floor + 1` (the trim guarantees every below-floor
+                    // request_id is already past request_id_retention_ms, so none is dropped — see AC-TXN-3 proof).
+                    let floor = log.retention_floor(&key)?;
+                    // Rebuild the in-memory `request_id -> result` push-idempotency map from the durable log for
+                    // EVERY composed-log backend, not only the eventual-apply ones. `push_with_request_id`
+                    // consults/records only this in-memory map (see the `check`/`record` calls), which starts
+                    // empty on reopen. Atomic composed-log backends (sqlite/postgres, DurabilityClass::Atomic)
+                    // durably record the request_id + request_outcome on the log at commit time but previously
+                    // did NOT rebuild the map on recovery, so a post-restart retry of an already-committed
+                    // request_id re-executed instead of replaying its one committed result — a violation of the
+                    // unknown-outcome contract (INV-14). The rebuild is a pure log fold and is correct for both
+                    // durability classes (the relational, DB-authoritative family is a separate backend type, not
+                    // a ComposedBackend, and is unaffected).
+                    let recovered_max_cmd_seq = Self::rebuild_idempotency_from_log(
+                        log,
+                        RecoveryIdempotencyCaches {
+                            push: idempotency,
+                            claim: claim_by_query_idempotency,
+                            commit: commit_idempotency,
+                        },
+                        &key,
+                        def.request_id_retention_ms,
+                        floor.clone(),
+                        &self.counters,
+                    )?;
+                    // Symmetric rebuild for the OTHER request_id-bearing mutating op: `commit_transition` (the
+                    // authoritative vectorized claimed-work commit). Its in-memory `commit_idempotency` cache is
+                    // likewise empty on reopen; without this rebuild a post-restart retry of an already-committed
+                    // request_id would NOT replay the one committed per-entry outcome — it would be lease-fenced
+                    // (input already finalized) and reject (0-duplicate, but not an unknown-outcome cached replay,
+                    // violating INV-14 for commit_transition). The rebuild is a pure durable-state reconstruction:
+                    // the committed per-entry `EntryRecovery` is rebuilt from the durable commit envelopes on the
+                    // log (Finalize/WriteSideRecords/AdvanceInstanceFence/Push), and the body fingerprint is the one
+                    // stamped onto those envelopes at commit time. See `rebuild_idempotency_from_log`.
+                    if let Some(sequence) = recovered_max_cmd_seq {
+                        max_cmd_seq = Some(max_cmd_seq.map_or(sequence, |max| max.max(sequence)));
+                    }
+                    // Replay the durable log tail from the projection's recovery high-water (genesis when `None`),
+                    // after the poison/backpressure gate above resolves whether that high-water is trustworthy.
+                    let recorded_high_water = projection.recovery_high_water(&key)?;
+                    // FAIL-CLOSED (bead pqueue-b5cc2bc7 bug 3): if this shard has a durable retention floor, the
+                    // below-floor object-log segments are RECLAIMED, so the durable projection image MUST already
+                    // cover the floor (`recovery_high_water >= floor`). It always does for a consistent store (the
+                    // floor was advanced only while `checkpoint >= floor`, and the checkpoint is monotone). A
+                    // projection BEHIND the floor — a restored, rolled-back, or FOREIGN SQLite image over a trimmed
+                    // log — would make the R1 replay-start flooring omit the commands between the image and the floor
+                    // (absent from BOTH the reclaimed log AND the behind image): a SILENT data loss. Refuse to serve.
+                    // (At reopen the async-apply monitor is Clear — it is memoryless across restart — so
+                    // `recovery_high_water` here is the REAL durable high-water, not a withheld one; a poisoned
+                    // projection already failed in `resolve_recovery_start` below.)
+                    if let Some(fl) = &floor {
+                        let covers_floor = recorded_high_water
+                            .as_ref()
+                            .is_some_and(|hw| hw.sequence >= fl.sequence);
+                        if !covers_floor {
+                            let hw_seq = recorded_high_water.as_ref().map(|hw| hw.sequence);
+                            return Err(EngineError::Storage(format!(
+                                "read below retention floor: projection high-water {:?} <= reclaimed floor {} \
                          (recovery refused: the projection image is behind the durable floor; a restored, \
                          rolled-back, or foreign projection image over a trimmed log is an unrecoverable \
                          inconsistency)",
-                        hw_seq, fl.sequence,
-                    )));
-                }
-            }
-            let resolved_start = match resolve_recovery_start(
-                recovery_poison.as_deref(),
-                hard_backpressure,
-                recorded_high_water,
-            )? {
-                RecoveryStart::FromHighWater(pos) => pos,
-                RecoveryStart::FromGenesis => None,
-            };
-            // R1 FIX (bead pqueue-b5cc2bc7): floor the replay start at the durable retention floor. Under Hard
-            // backpressure `resolve_recovery_start` returns `FromGenesis` (start = None) which, on a trimmed
-            // log, would read a DELETED below-floor segment and fail "missing segment". Flooring is safe: the
-            // floor is <= checkpoint_high_water at trim time, and the durable SQLite next_seq guard skips any
-            // below-floor command it has already applied when the tail replays over its durable image. The
-            // healthy path is unchanged — floor <= checkpoint, so the max is the checkpoint high-water.
-            let mut from = max_position(resolved_start, floor.clone());
-            let mut tail: u64 = 0;
-            loop {
-                let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
-                if !page.entries.is_empty() {
-                    let entries = page.entries;
-                    let mut positions = Vec::with_capacity(entries.len());
-                    let mut envelopes = Vec::with_capacity(entries.len());
-                    for (pos, env) in entries {
-                        positions.push(pos);
-                        envelopes.push(env);
+                                hw_seq, fl.sequence,
+                            )));
+                        }
                     }
-                    tail += positions.len() as u64;
-                    projection.apply_recovery(&positions, &envelopes)?;
+                    let resolved_start = match resolve_recovery_start(
+                        recovery_poison.as_deref(),
+                        hard_backpressure,
+                        recorded_high_water,
+                    )? {
+                        RecoveryStart::FromHighWater(pos) => pos,
+                        RecoveryStart::FromGenesis => None,
+                    };
+                    // R1 FIX (bead pqueue-b5cc2bc7): floor the replay start at the durable retention floor. Under Hard
+                    // backpressure `resolve_recovery_start` returns `FromGenesis` (start = None) which, on a trimmed
+                    // log, would read a DELETED below-floor segment and fail "missing segment". Flooring is safe: the
+                    // floor is <= checkpoint_high_water at trim time, and the durable SQLite next_seq guard skips any
+                    // below-floor command it has already applied when the tail replays over its durable image. The
+                    // healthy path is unchanged — floor <= checkpoint, so the max is the checkpoint high-water.
+                    let mut from = max_position(resolved_start, floor.clone());
+                    let mut tail: u64 = 0;
+                    loop {
+                        let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
+                        if !page.entries.is_empty() {
+                            let entries = page.entries;
+                            let mut positions = Vec::with_capacity(entries.len());
+                            let mut envelopes = Vec::with_capacity(entries.len());
+                            for (pos, env) in entries {
+                                positions.push(pos);
+                                envelopes.push(env);
+                            }
+                            tail += positions.len() as u64;
+                            projection.apply_recovery(&positions, &envelopes)?;
+                        }
+                        match page.next {
+                            Some(next) => from = Some(next),
+                            None => break,
+                        }
+                    }
+                    if tail > self.recovery_max_tail {
+                        eprintln!(
+                            "[recovery] composed backend tail for {}:{} replayed {tail} commands beyond the \
+                     projection high-water (budget {}); the projection may have fallen behind the log",
+                            key.tenant_id.as_str(),
+                            key.queue_id.as_str(),
+                            self.recovery_max_tail,
+                        );
+                    }
                 }
                 match page.next {
-                    Some(next) => from = Some(next),
+                    Some(next) => cursor = Some(next),
                     None => break,
                 }
-            }
-            if tail > self.recovery_max_tail {
-                eprintln!(
-                    "[recovery] composed backend tail for {}:{} replayed {tail} commands beyond the \
-                     projection high-water (budget {}); the projection may have fallen behind the log",
-                    key.tenant_id.as_str(),
-                    key.queue_id.as_str(),
-                    self.recovery_max_tail,
-                );
             }
         }
         if let Some(m) = max_cmd_seq {
@@ -4360,7 +4506,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
         now: UtcTimestamp,
     ) -> impl std::future::Future<Output = EngineResult<TickReport>> + Send {
         Box::pin(async move {
-            let (definitions, mut report) = {
+            let (definition_page, mut report) = {
                 let mut g = self.inner.lock().expect("poisoned");
                 let gc = self.gc_active(&g);
                 if gc {
@@ -4376,7 +4522,51 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     }
                 }
                 let expired = g.projection.all_expired_leases(now);
-                let definitions = Self::durable_definitions_locked(&g)?;
+                let mut projection_catalog = g.maintenance_catalog_projection;
+                let catalog_cursor = g.maintenance_definition_cursor.clone();
+                let mut definition_page = if projection_catalog {
+                    g.projection.recover_definitions_page(
+                        catalog_cursor.as_ref(),
+                        DEFINITION_PAGE_LIMIT,
+                        self.worker_partition,
+                    )?
+                } else {
+                    g.log.recover_definitions_page(
+                        catalog_cursor.as_ref(),
+                        DEFINITION_PAGE_LIMIT,
+                        self.worker_partition,
+                    )?
+                };
+                // An axis with no catalog is common (e.g. composed sqlite/object-log definitions live in the
+                // log). Cross that exhausted empty axis in the same tick; a foreign-only page has `next` and is
+                // deliberately persisted for the next bounded tick instead.
+                if definition_page.definitions.is_empty() && definition_page.next.is_none() {
+                    projection_catalog = !projection_catalog;
+                    definition_page = if projection_catalog {
+                        g.projection.recover_definitions_page(
+                            None,
+                            DEFINITION_PAGE_LIMIT,
+                            self.worker_partition,
+                        )?
+                    } else {
+                        g.log.recover_definitions_page(
+                            None,
+                            DEFINITION_PAGE_LIMIT,
+                            self.worker_partition,
+                        )?
+                    };
+                }
+                match definition_page.next.clone() {
+                    Some(next) => g.maintenance_definition_cursor = Some(next),
+                    None if projection_catalog => {
+                        g.maintenance_catalog_projection = false;
+                        g.maintenance_definition_cursor = None;
+                    }
+                    None => {
+                        g.maintenance_catalog_projection = true;
+                        g.maintenance_definition_cursor = None;
+                    }
+                }
                 let mut report = TickReport::default();
                 for (shard, ids) in expired
                     .into_iter()
@@ -4398,16 +4588,16 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     }
                     report.leases_reclaimed += ids.len() as u64;
                 }
-                (definitions, report)
+                (definition_page, report)
             };
 
-            for def in definitions {
+            for def in definition_page.definitions {
                 let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
                 if !self.owns_worker_queue(&shard) {
                     continue;
                 }
-                // Keep local state stable for this queue across prepare/execute/finalize, but never hold the
-                // backend-global mutex across provider I/O. Other queues use distinct permits and progress.
+                // The paged catalog bounds one tick's queue count. The queue permit spans detached provider
+                // execution so local same-queue authority stays stable while unrelated queues keep moving.
                 let _queue_permit = self
                     .mutation_gate
                     .acquire(shard.clone())
@@ -5646,6 +5836,7 @@ mod ordered_tests {
     struct FakeGroupCommitLog {
         state: Mutex<FakeLogState>,
         read_calls: AtomicUsize,
+        catalog_page_calls: AtomicUsize,
     }
 
     impl Clone for FakeGroupCommitLog {
@@ -5653,6 +5844,9 @@ mod ordered_tests {
             Self {
                 state: Mutex::new(self.state.lock().expect("fake log poisoned").clone()),
                 read_calls: AtomicUsize::new(self.read_calls.load(AtomicOrdering::Relaxed)),
+                catalog_page_calls: AtomicUsize::new(
+                    self.catalog_page_calls.load(AtomicOrdering::Relaxed),
+                ),
             }
         }
     }
@@ -5832,6 +6026,27 @@ mod ordered_tests {
                 .values()
                 .cloned()
                 .collect())
+        }
+
+        fn recover_definitions_page(
+            &self,
+            cursor: Option<&DefinitionCursor>,
+            limit: usize,
+            worker_partition: Option<(usize, usize)>,
+        ) -> EngineResult<DefinitionPage> {
+            self.catalog_page_calls
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            definition_page_from_iter(
+                self.state
+                    .lock()
+                    .expect("fake log poisoned")
+                    .definitions
+                    .values()
+                    .cloned(),
+                cursor,
+                limit,
+                worker_partition,
+            )
         }
 
         fn emission_cursor(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
@@ -6439,6 +6654,53 @@ mod ordered_tests {
             }
             assert_eq!(recovered_by.len(), 65);
         }
+    }
+
+    #[test]
+    fn durable_catalog_pages_progress_past_an_empty_partition_page() {
+        let log = FakeGroupCommitLog::default();
+        let tenant = TenantId::new("tenant").unwrap();
+        let target_worker = 1;
+        let width = 2;
+        let mut created = 0usize;
+        let mut suffix = 0usize;
+        while created < DEFINITION_PAGE_LIMIT {
+            let queue_id = QueueId::new(format!("a-{suffix:06}")).unwrap();
+            suffix += 1;
+            let shard = QueueKey::new(tenant.clone(), queue_id.clone());
+            if queue_worker_partition(&shard, width) != target_worker {
+                let mut definition = qdef();
+                definition.queue_id = queue_id;
+                log.record_definition(&definition);
+                created += 1;
+            }
+        }
+        let owned = loop {
+            let queue_id = QueueId::new(format!("z-{suffix:06}")).unwrap();
+            suffix += 1;
+            let shard = QueueKey::new(tenant.clone(), queue_id.clone());
+            if queue_worker_partition(&shard, width) == target_worker {
+                let mut definition = qdef();
+                definition.queue_id = queue_id;
+                log.record_definition(&definition);
+                break definition;
+            }
+        };
+
+        let first = log
+            .recover_definitions_page(None, DEFINITION_PAGE_LIMIT, Some((target_worker, width)))
+            .unwrap();
+        assert!(first.definitions.is_empty());
+        let second = log
+            .recover_definitions_page(
+                first.next.as_ref(),
+                DEFINITION_PAGE_LIMIT,
+                Some((target_worker, width)),
+            )
+            .unwrap();
+        assert_eq!(second.definitions, vec![owned]);
+        assert!(second.next.is_none());
+        assert_eq!(log.catalog_page_calls.load(AtomicOrdering::Relaxed), 2);
     }
 
     fn ts(seconds: i64) -> UtcTimestamp {

@@ -5636,53 +5636,47 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             cursor = next;
         }
 
-        if out.len() < RECOVERY_COMMAND_PAGE_LIMIT {
-            if let Some(head) = head {
-                let live_start_index = horizon
-                    .map(|index| index.saturating_add(1))
-                    .unwrap_or(head.value.legacy_next_manifest_index)
-                    .max(head.value.legacy_next_manifest_index);
-                let mut remaining = head
-                    .value
-                    .next_manifest_index
-                    .saturating_sub(live_start_index);
-                let mut cursor = head.value.tail_candidate_key;
-                let mut earliest = VecDeque::with_capacity(RECOVERY_COMMAND_PAGE_LIMIT);
-                while remaining > 0 {
-                    let Some(key) = cursor else {
-                        return Err(EngineError::Conflict);
-                    };
-                    let Some(bytes) = self.store_get(&key)? else {
-                        return Err(EngineError::Conflict);
-                    };
-                    let candidate: ManifestCandidate =
-                        self.decode_manifest_json(&key, &bytes, manifest_index_from_any_key(&key))?;
-                    cursor = candidate.previous_candidate_key.clone();
-                    let entry = candidate.entry;
-                    if !entry.fence
-                        && !Self::is_reclaimed_manifest_marker(&entry)
-                        && entry.segment_key.is_some()
-                        && Self::visible_last_seq(&entry) >= from_seq
-                    {
-                        earliest.push_front(entry);
-                        if earliest.len() > RECOVERY_COMMAND_PAGE_LIMIT {
-                            earliest.pop_back();
-                        }
+        if out.len() < RECOVERY_COMMAND_PAGE_LIMIT
+            && let Some(head) = head
+        {
+            let live_start_index = horizon
+                .map(|index| index.saturating_add(1))
+                .unwrap_or(head.value.legacy_next_manifest_index)
+                .max(head.value.legacy_next_manifest_index);
+            let mut remaining = head
+                .value
+                .next_manifest_index
+                .saturating_sub(live_start_index);
+            let mut cursor = head.value.tail_candidate_key;
+            let mut earliest = VecDeque::with_capacity(RECOVERY_COMMAND_PAGE_LIMIT);
+            while remaining > 0 {
+                let Some(key) = cursor else {
+                    return Err(EngineError::Conflict);
+                };
+                let Some(bytes) = self.store_get(&key)? else {
+                    return Err(EngineError::Conflict);
+                };
+                let candidate: ManifestCandidate =
+                    self.decode_manifest_json(&key, &bytes, manifest_index_from_any_key(&key))?;
+                cursor = candidate.previous_candidate_key.clone();
+                let entry = candidate.entry;
+                if !entry.fence
+                    && !Self::is_reclaimed_manifest_marker(&entry)
+                    && entry.segment_key.is_some()
+                    && Self::visible_last_seq(&entry) >= from_seq
+                {
+                    earliest.push_front(entry);
+                    if earliest.len() > RECOVERY_COMMAND_PAGE_LIMIT {
+                        earliest.pop_back();
                     }
-                    remaining -= 1;
                 }
-                peak_objects = peak_objects.max(earliest.len());
-                for entry in earliest {
-                    self.append_recovery_entry(
-                        shard,
-                        &entry,
-                        from_seq,
-                        is_committed_branch,
-                        &mut out,
-                    )?;
-                    if out.len() == RECOVERY_COMMAND_PAGE_LIMIT {
-                        break;
-                    }
+                remaining -= 1;
+            }
+            peak_objects = peak_objects.max(earliest.len());
+            for entry in earliest {
+                self.append_recovery_entry(shard, &entry, from_seq, is_committed_branch, &mut out)?;
+                if out.len() == RECOVERY_COMMAND_PAGE_LIMIT {
+                    break;
                 }
             }
         }
@@ -8600,6 +8594,51 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
         }
         Ok(out)
+    }
+
+    /// Read one bounded provider LIST page of the durable queue catalog. The cursor is the last raw object
+    /// key, not the last matching `queue.json`, so stores with many non-catalog objects still make bounded
+    /// forward progress without materializing the namespace.
+    pub fn recover_definitions_page(
+        &self,
+        cursor: Option<&pqueue_engine::DefinitionCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::DefinitionPage> {
+        if limit == 0 {
+            return Err(EngineError::Invalid(
+                "definition page limit must be nonzero",
+            ));
+        }
+        let mut keys = self.store.list_page(
+            "t/",
+            cursor.map(|cursor| cursor.storage_key.as_str()),
+            limit.saturating_add(1),
+        )?;
+        let has_more = keys.len() > limit;
+        keys.truncate(limit);
+        let next = has_more.then(|| pqueue_engine::DefinitionCursor {
+            storage_key: keys.last().expect("continued page is nonempty").clone(),
+        });
+        let mut definitions = Vec::new();
+        for key in keys {
+            if !key.ends_with("/queue.json") {
+                continue;
+            }
+            let Some(bytes) = self.store_get(&key)? else {
+                return Err(EngineError::Storage(format!(
+                    "missing durable queue definition {key}"
+                )));
+            };
+            let definition: QueueDefinition = serde_json::from_slice(&bytes).map_err(store_err)?;
+            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            if worker_partition.is_none_or(|(index, partitions)| {
+                pqueue_engine::queue_worker_partition(&shard, partitions) == index
+            }) {
+                definitions.push(definition);
+            }
+        }
+        Ok(pqueue_engine::DefinitionPage { definitions, next })
     }
 }
 

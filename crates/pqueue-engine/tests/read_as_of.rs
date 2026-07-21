@@ -34,10 +34,11 @@ fn read_as_of_reconstructs_prior_state() {
     ))
     .unwrap();
 
+    let query_shard = shard.clone();
     let as_of: Vec<pqueue_engine::ItemView> = futures::executor::block_on(backend.read_as_of(
         &shard,
         position,
-        |projection: &InMemoryProjection| projection.peek(&shard, 10),
+        move |projection: &InMemoryProjection| projection.peek(&query_shard, 10),
     ))
     .unwrap();
 

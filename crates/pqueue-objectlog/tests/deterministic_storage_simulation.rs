@@ -170,7 +170,7 @@ impl VersionedFakeStore {
             }
             return BlobPhase::EpochHead;
         }
-        BlobPhase::ManifestHead
+        BlobPhase::Auxiliary
     }
 
     fn scripted(state: &mut StoreState, phase: BlobPhase) -> StoreResult {
@@ -1504,8 +1504,18 @@ fn phase_scripts_hit_intended_durable_effects() {
             .iter()
             .any(|event| event.phase == BlobPhase::ManifestHead
                 && event.result == StoreResult::EffectThenError
-                && event.effect)
+                && event.effect
+                && event.key.contains("/authority_head/"))
     );
+    assert!(runner.store.events().iter().any(|event| {
+        event.phase == BlobPhase::Auxiliary
+            && event.result == StoreResult::Success
+            && event.effect
+            && event.key.contains("/recovery_index/")
+    }));
+    assert!(!runner.store.events().iter().any(|event| {
+        event.phase == BlobPhase::Auxiliary && event.result == StoreResult::EffectThenError
+    }));
     assert_eq!(
         runner.disposition,
         Disposition::Success,
@@ -1529,7 +1539,8 @@ fn phase_scripts_hit_intended_durable_effects() {
             .iter()
             .any(|event| event.phase == BlobPhase::ManifestHead
                 && event.result == StoreResult::CasLoss
-                && !event.effect)
+                && !event.effect
+                && event.key.contains("/authority_head/"))
     );
 
     let mut segment_failure = ProductionRunner::new(SutMutant::None);

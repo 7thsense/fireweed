@@ -341,9 +341,7 @@ pub(crate) fn refresh_due_group_summaries(
         groups.push(GroupKey::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
     }
     drop(stmt);
-    for group in groups {
-        refresh_group_summary(tx, shard, &group, now)?;
-    }
+    refresh_group_summaries(tx, shard, &groups, now)?;
     Ok(())
 }
 
@@ -735,7 +733,7 @@ pub(crate) fn peek_page_sql(
 ///
 /// `progress_bound_risk_count` is reported as `None` ("no signal"), NOT `Some(0)`: the summary's
 /// `at_risk_count` is a hardcoded `0` placeholder while the progress-guard/at-risk derivation is deferred
-/// (see `refresh_group_summary`), and the [`ActiveScope`] contract reserves `None` for an uncomputed
+/// (see `refresh_group_summaries`), and the [`ActiveScope`] contract reserves `None` for an uncomputed
 /// signal vs `Some(0)` for a measured zero. When at-risk becomes live, map it to `Some` here.
 ///
 /// PAUSE (intentional divergence from the claim path): discovery reports a group's INTRINSIC eligibility
@@ -923,29 +921,33 @@ pub(crate) fn pending_page_sql(
     Ok(PendingPage { entries, next })
 }
 
+pub(crate) struct PendingRange<'a> {
+    pub(crate) start: Option<ItemId>,
+    pub(crate) end: Option<ItemId>,
+    pub(crate) consumer: Option<&'a LeaseToken>,
+    pub(crate) limit: usize,
+}
+
 pub(crate) fn pending_range_sql(
     conn: &Connection,
     live_tokens: &HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
     by_consumer: &HashMap<QueueKey, HashMap<LeaseToken, BTreeSet<ItemId>>>,
     shard: &QueueKey,
-    start: Option<ItemId>,
-    end: Option<ItemId>,
-    consumer: Option<&LeaseToken>,
-    limit: usize,
+    query: PendingRange<'_>,
 ) -> EngineResult<Vec<LeaseView>> {
     use std::ops::Bound::{Included, Unbounded};
     let bounds = (
-        start.map_or(Unbounded, Included),
-        end.map_or(Unbounded, Included),
+        query.start.map_or(Unbounded, Included),
+        query.end.map_or(Unbounded, Included),
     );
-    let ids: Vec<_> = if let Some(consumer) = consumer {
+    let ids: Vec<_> = if let Some(consumer) = query.consumer {
         by_consumer
             .get(shard)
             .and_then(|consumers| consumers.get(consumer))
             .into_iter()
             .flat_map(|ids| ids.range(bounds))
             .copied()
-            .take(limit)
+            .take(query.limit)
             .collect()
     } else {
         live_tokens
@@ -953,7 +955,7 @@ pub(crate) fn pending_range_sql(
             .into_iter()
             .flat_map(|tokens| tokens.range(bounds))
             .map(|(id, _)| *id)
-            .take(limit)
+            .take(query.limit)
             .collect()
     };
     pending_by_ids_sql(conn, live_tokens, shard, &ids)

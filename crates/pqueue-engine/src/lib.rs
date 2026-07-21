@@ -78,11 +78,12 @@ pub use claim_validation::{
     validate_claim_compatibility,
 };
 pub use compose::{
-    ComposeFaultHook, ComposeFaultPoint, ComposedBackend, ControlPlane, DetachedLogMaintenance,
-    DetachedRetentionOutcome, DetachedRetentionRequest, DetachedTrimWatermark,
-    InProcessControlPlane, LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart,
-    RichClaimSelection, max_position, push_items_fingerprint_sha256, push_specs_fingerprint_sha256,
-    queue_worker_partition, resolve_recovery_start,
+    ComposeFaultHook, ComposeFaultPoint, ComposedBackend, ControlPlane, DefinitionCursor,
+    DefinitionPage, DetachedLogMaintenance, DetachedRetentionOutcome, DetachedRetentionRequest,
+    DetachedTrimWatermark, InProcessControlPlane, LogLineageIdentity, LogStore, ProjectionStore,
+    RecoveryStart, RichClaimSelection, definition_page_from_sorted_rows,
+    definition_page_from_storage_rows, max_position, push_items_fingerprint_sha256,
+    push_specs_fingerprint_sha256, queue_worker_partition, resolve_recovery_start,
 };
 pub use control_plane::{
     AcquireOutcome, ControlPlaneConfig, InMemoryControlPlane, LeaseRenewal, LeaseRenewalOutcome,

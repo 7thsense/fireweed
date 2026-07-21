@@ -754,15 +754,6 @@ pub(crate) fn cohort_item_ids(
 /// per-item `select_eligible` path re-evaluates `not_before` on read and is unaffected. BQ-14 g1/g4
 /// consumers refresh due groups before mutation-backed group claims; read-only discovery still cannot
 /// mutate and therefore may under-report until a due sweep or later mutation refreshes the group.
-pub(crate) fn refresh_group_summary(
-    tx: &Transaction<'_>,
-    shard: &QueueKey,
-    group_key: &GroupKey,
-    now: UtcTimestamp,
-) -> EngineResult<()> {
-    refresh_group_summaries(tx, shard, std::slice::from_ref(group_key), now)
-}
-
 /// Refresh an arbitrary number of group summaries with one set-based statement.  The target CTE is
 /// deliberately authoritative: groups which now have no eligible items are still upserted with a zero
 /// count, so callers never need a per-group cleanup loop.
@@ -917,9 +908,8 @@ pub(crate) fn apply_command_sql(
                 token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
             if grouped_shards.contains(shard) {
-                for g in groups_of(tx, shard, &c.item_ids)? {
-                    refresh_group_summary(tx, shard, &g, now)?;
-                }
+                let groups = groups_of(tx, shard, &c.item_ids)?;
+                refresh_group_summaries(tx, shard, &groups, now)?;
             }
             Ok(())
         }
@@ -952,9 +942,8 @@ pub(crate) fn apply_command_sql(
                 token_ops.push(TokenOp::Set(shard.clone(), *id, c.lease_token.clone()));
             }
             if grouped_shards.contains(shard) {
-                for g in groups_of(tx, shard, &c.item_ids)? {
-                    refresh_group_summary(tx, shard, &g, now)?;
-                }
+                let groups = groups_of(tx, shard, &c.item_ids)?;
+                refresh_group_summaries(tx, shard, &groups, now)?;
             }
             Ok(())
         }
@@ -1317,9 +1306,8 @@ pub(crate) fn apply_command_sql(
                 reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
             }
             if grouped_shards.contains(shard) {
-                for g in groups_of(tx, shard, &ids)? {
-                    refresh_group_summary(tx, shard, &g, now)?;
-                }
+                let groups = groups_of(tx, shard, &ids)?;
+                refresh_group_summaries(tx, shard, &groups, now)?;
             }
             Ok(())
         }
@@ -1440,9 +1428,7 @@ pub(crate) fn apply_command_sql(
                 grouped_shards.insert(shard.clone());
                 groups.push(g.clone());
             }
-            for g in &groups {
-                refresh_group_summary(tx, shard, g, now)?;
-            }
+            refresh_group_summaries(tx, shard, &groups, now)?;
             Ok(())
         }
         QueueCommand::LeaseExpired(c) => {
@@ -1462,9 +1448,8 @@ pub(crate) fn apply_command_sql(
                 token_ops.push(TokenOp::Clear(shard.clone(), *id));
             }
             if grouped_shards.contains(shard) {
-                for g in groups_of(tx, shard, &c.item_ids)? {
-                    refresh_group_summary(tx, shard, &g, now)?;
-                }
+                let groups = groups_of(tx, shard, &c.item_ids)?;
+                refresh_group_summaries(tx, shard, &groups, now)?;
             }
             Ok(())
         }
@@ -1518,7 +1503,7 @@ pub(crate) fn apply_command_sql(
                 ],
             ))?;
             // The whole cohort (group) is now terminal — refresh its summary to empty.
-            refresh_group_summary(tx, shard, &c.group_key, now)?;
+            refresh_group_summaries(tx, shard, std::slice::from_ref(&c.group_key), now)?;
             Ok(())
         }
         QueueCommand::FenceLease(c) => {
@@ -1653,9 +1638,7 @@ pub(crate) fn apply_command_sql(
             for id in &c.item_ids {
                 token_ops.push(TokenOp::Clear(shard.clone(), *id));
             }
-            for g in &groups {
-                refresh_group_summary(tx, shard, g, now)?;
-            }
+            refresh_group_summaries(tx, shard, &groups, now)?;
             Ok(())
         }
         QueueCommand::SetGates(c) => {

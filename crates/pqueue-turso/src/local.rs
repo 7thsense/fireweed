@@ -163,6 +163,8 @@ pub struct SchemaReport {
     pub indexes: Vec<String>,
 }
 
+pub(crate) type ConsumerLeaseIndex = BTreeMap<(QueueKey, String, ItemId), ()>;
+
 /// Async embedded Turso store with a single serialized write connection.
 ///
 /// SQLite-family stores have one durable writer. The async mutex preserves that invariant without
@@ -173,7 +175,7 @@ pub struct TursoRelational {
     database: Database,
     pub(crate) writer: Arc<Mutex<Connection>>,
     pub(crate) live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
-    pub(crate) live_tokens_by_consumer: Arc<Mutex<BTreeMap<(QueueKey, String, ItemId), ()>>>,
+    pub(crate) live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
     config: TursoConfig,
 }
 

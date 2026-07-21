@@ -926,10 +926,12 @@ impl ProjectionRead for SqliteRelationalBackend {
                 &g.live_tokens,
                 &g.live_tokens_by_consumer,
                 shard,
-                start,
-                end,
-                consumer,
-                limit,
+                crate::relational::query::PendingRange {
+                    start,
+                    end,
+                    consumer,
+                    limit,
+                },
             )
         };
         std::future::ready(result)
@@ -3420,6 +3422,8 @@ mod hot_query_sql_tests {
     static MUTATION_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_PUSH_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static GROUP_CLAIM_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static GROUP_FINALIZE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static COUNTER_RESTORE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     fn count_pel_statement(_: &str) {
@@ -3436,6 +3440,14 @@ mod hot_query_sql_tests {
 
     fn count_group_push_statement(_: &str) {
         GROUP_PUSH_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_group_claim_statement(_: &str) {
+        GROUP_CLAIM_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_group_finalize_statement(_: &str) {
+        GROUP_FINALIZE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 
     fn count_counter_restore_statement(_: &str) {
@@ -3647,11 +3659,93 @@ mod hot_query_sql_tests {
         COUNTER_RESTORE_TRACE_COUNT.load(Ordering::Relaxed)
     }
 
+    async fn grouped_claim_finalize_statement_count(groups: usize) -> (usize, usize) {
+        use pqueue_engine::{FinalizeKind, FinalizeOutcome, FinalizePort};
+
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                (0..groups)
+                    .map(|ordinal| PushSpec {
+                        group_key: Some(GroupKey::new(format!("group-{ordinal:04}")).unwrap()),
+                        ..PushSpec::default()
+                    })
+                    .collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        GROUP_CLAIM_TRACE_COUNT.store(0, Ordering::Relaxed);
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .trace(Some(count_group_claim_statement));
+        let claimed = backend
+            .claim(ClaimRequest {
+                eligibility_time: None,
+                shard: shard.clone(),
+                worker_id: pqueue_core::WorkerId::new("worker").unwrap(),
+                max_items: groups,
+                lease_token: LeaseToken::new("lease").unwrap(),
+                lease_expires_at: UtcTimestamp::new(60, 0).unwrap(),
+                now: UtcTimestamp::new(0, 0).unwrap(),
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        backend.inner.lock().unwrap().conn.trace(None);
+        assert_eq!(claimed.items.len(), groups);
+        let claim_count = GROUP_CLAIM_TRACE_COUNT.load(Ordering::Relaxed);
+
+        GROUP_FINALIZE_TRACE_COUNT.store(0, Ordering::Relaxed);
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .trace(Some(count_group_finalize_statement));
+        backend
+            .finalize(
+                &shard,
+                claimed
+                    .items
+                    .iter()
+                    .map(|item| FinalizeOutcome::new(item.item_id, FinalizeKind::Complete))
+                    .collect(),
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend.inner.lock().unwrap().conn.trace(None);
+        (
+            claim_count,
+            GROUP_FINALIZE_TRACE_COUNT.load(Ordering::Relaxed),
+        )
+    }
+
     #[tokio::test]
     async fn grouped_push_statement_count_is_independent_of_distinct_groups() {
         let one = grouped_push_statement_count(1).await;
         let hundred = grouped_push_statement_count(100).await;
         let thousand = grouped_push_statement_count(1_000).await;
+        assert_eq!((one, hundred, thousand), (one, one, one));
+    }
+
+    #[tokio::test]
+    async fn grouped_claim_and_finalize_statements_are_independent_of_distinct_groups() {
+        let one = grouped_claim_finalize_statement_count(1).await;
+        let hundred = grouped_claim_finalize_statement_count(100).await;
+        let thousand = grouped_claim_finalize_statement_count(1_000).await;
         assert_eq!((one, hundred, thousand), (one, one, one));
     }
 
