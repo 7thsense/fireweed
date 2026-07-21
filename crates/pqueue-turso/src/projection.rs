@@ -25,7 +25,7 @@ use pqueue_relational::{
 use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
 
-use crate::TursoRelational;
+use crate::{TursoRelational, local::ConsumerLeaseIndex};
 
 fn storage(error: impl std::fmt::Display) -> EngineError {
     EngineError::Storage(error.to_string())
@@ -223,15 +223,19 @@ fn values_rows(rows: usize, columns: usize) -> String {
     vec![row; rows].join(",")
 }
 
+struct PushInsert<'a> {
+    definition: &'a QueueDefinition,
+    items: &'a [PushItem],
+    incoming: i64,
+    base: i64,
+    now: i64,
+}
+
 async fn insert_push_items_batched(
     transaction: &Connection,
     tenant: &str,
     queue: &str,
-    definition: &QueueDefinition,
-    items: &[PushItem],
-    incoming: i64,
-    base: i64,
-    now: i64,
+    insert: PushInsert<'_>,
 ) -> EngineResult<()> {
     const COLUMNS: &str = "tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,\
         priority_sort,not_before,eligible_since,group_key,cohort_size,recurrence_until,payload,\
@@ -241,7 +245,7 @@ async fn insert_push_items_batched(
     const ROW: &str =
         "(?,?,?,?,'Pending',?,?,?,?,?,?,NULL,?,?,?,?,0,1,NULL,NULL,NULL,?,?,?,NULL,NULL,0,0,?,?)";
 
-    for (chunk_index, chunk) in items.chunks(PUSH_ITEM_CHUNK).enumerate() {
+    for (chunk_index, chunk) in insert.items.chunks(PUSH_ITEM_CHUNK).enumerate() {
         let mut parameters: Vec<Value> = Vec::with_capacity(chunk.len() * 19);
         let chunk_base = chunk_index * PUSH_ITEM_CHUNK;
         for (offset, item) in chunk.iter().enumerate() {
@@ -266,7 +270,8 @@ async fn insert_push_items_batched(
             let ordinal = chunk_base
                 .checked_add(offset)
                 .ok_or_else(|| storage("item sequence overflow"))?;
-            let created_seq = base
+            let created_seq = insert
+                .base
                 .checked_add(i64::try_from(ordinal).map_err(storage)?)
                 .ok_or_else(|| storage("item sequence overflow"))?;
             parameters.extend([
@@ -275,9 +280,9 @@ async fn insert_push_items_batched(
                 item.item_id.to_string().into(),
                 item.client_item_key.as_str().to_string().into(),
                 priority.map_or(Value::Null, Value::Text),
-                Value::Blob(elig_sort(&item.priority, &definition.priority_model)),
+                Value::Blob(elig_sort(&item.priority, &insert.definition.priority_model)),
                 not_before.map_or(Value::Null, Value::Integer),
-                Value::Integer(not_before.unwrap_or(now)),
+                Value::Integer(not_before.unwrap_or(insert.now)),
                 item.group_key
                     .as_ref()
                     .map_or(Value::Null, |group| Value::Text(group.as_str().to_string())),
@@ -288,9 +293,9 @@ async fn insert_push_items_batched(
                 Value::Text(fields_to_json(&item.fields)?),
                 Value::Text(metadata_to_json(&item.metadata)?),
                 entity.map_or(Value::Null, Value::Text),
-                Value::Integer(incoming),
-                Value::Integer(now),
-                Value::Integer(now),
+                Value::Integer(insert.incoming),
+                Value::Integer(insert.now),
+                Value::Integer(insert.now),
                 Value::Integer(i64::from(item.max_attempts)),
                 Value::Integer(created_seq),
             ]);
@@ -1315,7 +1320,7 @@ async fn definition_in_transaction(
 async fn apply_owned(
     writer: Arc<Mutex<Connection>>,
     live_tokens: Arc<Mutex<BTreeMap<(QueueKey, ItemId), LeaseToken>>>,
-    live_tokens_by_consumer: Arc<Mutex<BTreeMap<(QueueKey, String, ItemId), ()>>>,
+    live_tokens_by_consumer: Arc<Mutex<ConsumerLeaseIndex>>,
     positions: Vec<CommandPosition>,
     commands: Vec<CommandEnvelope>,
     enforce_live_epoch: bool,
@@ -1438,11 +1443,13 @@ async fn apply_owned(
                     &transaction,
                     &tenant,
                     &queue,
-                    &definition,
-                    &push.items,
-                    incoming,
-                    base,
-                    now,
+                    PushInsert {
+                        definition: &definition,
+                        items: &push.items,
+                        incoming,
+                        base,
+                        now,
+                    },
                 )
                 .await?;
                 insert_push_gates_batched(&transaction, &tenant, &queue, &push.items).await?;
