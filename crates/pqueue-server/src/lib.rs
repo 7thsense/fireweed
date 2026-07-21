@@ -1866,16 +1866,18 @@ where
         now: UtcTimestamp,
         is_new_claim: bool,
     ) -> EngineResult<Option<u64>> {
-        if let Some(epoch) = self
-            .sessions
-            .lock()
-            .expect("poisoned")
-            .get(shard)
-            .map(|session| session.fence_epoch)
+        if !is_new_claim
+            && let Some(epoch) = self
+                .sessions
+                .lock()
+                .expect("poisoned")
+                .get(shard)
+                .map(|session| session.fence_epoch)
         {
             // RESP routing established this session from the same command's authoritative resolution.
-            // Renewal removes fenced/missing sessions, so repeating registration and resolution here adds
-            // no safety and used to double every write's control-plane round trips.
+            // Renewal removes fenced/missing sessions. New deliveries deliberately re-resolve because an
+            // already-cached session can transition to Draining between commands; in-flight mutations can
+            // reuse the fence while new claims must observe and refuse that transition.
             return Ok(Some(epoch));
         }
         self.ensure_epoch(shard, now, is_new_claim).await
@@ -2032,12 +2034,15 @@ impl Server {
         }
         if let Some(reclaim) = self.reclaim_task.take() {
             reclaim.abort();
+            let _ = reclaim.await;
         }
         if let Some(ownership) = self.ownership_task.take() {
             ownership.abort();
+            let _ = ownership.await;
         }
         if let Some(fjord) = self.fjord_task.take() {
             fjord.abort();
+            let _ = fjord.await;
         }
         // Segment sealers remain live until every accepted mutation has crossed its response barrier.
         // Otherwise a graceful shutdown could abort the only task capable of resolving a started push.

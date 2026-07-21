@@ -136,6 +136,8 @@ fn tmp_runtime_paths(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     ));
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&projection);
+    let _ = std::fs::remove_file(format!("{}-wal", projection.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", projection.display()));
     (root, projection)
 }
 
@@ -885,9 +887,14 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
         produced
     };
 
-    let _ = std::fs::remove_file(&projection_path);
+    // Reopen against a distinct absent projection path. This is the exact logical-loss condition without
+    // unlinking SQLite files that an asynchronously terminating OS handle may still be closing.
+    let rebuilt_projection_path = projection_path.with_extension("rebuilt.db");
+    let _ = std::fs::remove_file(&rebuilt_projection_path);
+    let _ = std::fs::remove_file(format!("{}-wal", rebuilt_projection_path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", rebuilt_projection_path.display()));
     let server = start(Config::new(
-        objectlog_sqlite_spec(object_root.clone(), projection_path.clone()),
+        objectlog_sqlite_spec(object_root.clone(), rebuilt_projection_path.clone()),
         0,
         "127.0.0.1:0".to_string(),
         Duration::from_secs(60),
@@ -926,6 +933,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
     server.shutdown_and_drain(Duration::from_secs(5)).await;
     let _ = std::fs::remove_dir_all(&object_root);
     let _ = std::fs::remove_file(&projection_path);
+    let _ = std::fs::remove_file(&rebuilt_projection_path);
 }
 
 #[cfg(feature = "turso-projection")]
