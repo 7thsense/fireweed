@@ -1647,18 +1647,40 @@ pub(crate) fn apply_command_sql(
             // item carrying it ineligible (enforced by the eligibility anti-join). This is exact-on-read:
             // toggling a gate flips eligibility on the next claim with no per-item rewrite.
             if c.blocked {
-                for gk in &c.gate_keys {
+                for chunk in c.gate_keys.chunks((SQLITE_BATCH / 3).max(1)) {
+                    let values = vec!["(?,?,?)"; chunk.len()].join(",");
+                    let mut parameters = Vec::with_capacity(chunk.len() * 3);
+                    for gate in chunk {
+                        parameters.extend([
+                            Value::Text(t.clone()),
+                            Value::Text(q.clone()),
+                            Value::Text(gate.as_str().to_string()),
+                        ]);
+                    }
                     st(tx.execute(
-                        "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) VALUES (?1,?2,?3) \
-                         ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING",
-                        params![t, q, gk.as_str()],
+                        &format!(
+                            "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) VALUES {values} \
+                             ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING"
+                        ),
+                        params_from_iter(parameters.iter()),
                     ))?;
                 }
             } else {
-                for gk in &c.gate_keys {
+                for chunk in c.gate_keys.chunks(SQLITE_BATCH) {
+                    let placeholders = vec!["?"; chunk.len()].join(",");
+                    let mut parameters = Vec::with_capacity(chunk.len() + 2);
+                    parameters.extend([Value::Text(t.clone()), Value::Text(q.clone())]);
+                    parameters.extend(
+                        chunk
+                            .iter()
+                            .map(|gate| Value::Text(gate.as_str().to_string())),
+                    );
                     st(tx.execute(
-                        "DELETE FROM pqueue_gate_state WHERE tenant_id=?1 AND queue_id=?2 AND gate_key=?3",
-                        params![t, q, gk.as_str()],
+                        &format!(
+                            "DELETE FROM pqueue_gate_state WHERE tenant_id=? AND queue_id=? \
+                             AND gate_key IN ({placeholders})"
+                        ),
+                        params_from_iter(parameters.iter()),
                     ))?;
                 }
             }
@@ -1669,12 +1691,24 @@ pub(crate) fn apply_command_sql(
         // side record is never claimable/eligible/peekable nor counted as work. Apply is infallible
         // (insert-or-overwrite by key), exactly like the in-memory `side_records` map.
         QueueCommand::WriteSideRecords(c) => {
-            for rec in &c.records {
+            for chunk in c.records.chunks((SQLITE_BATCH / 4).max(1)) {
+                let values = vec!["(?,?,?,?)"; chunk.len()].join(",");
+                let mut parameters = Vec::with_capacity(chunk.len() * 4);
+                for record in chunk {
+                    parameters.extend([
+                        Value::Text(t.clone()),
+                        Value::Text(q.clone()),
+                        Value::Blob(record.key.clone()),
+                        Value::Blob(record.payload.to_vec()),
+                    ]);
+                }
                 st(tx.execute(
-                    "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
-                     VALUES (?1,?2,?3,?4) \
-                     ON CONFLICT(tenant_id,queue_id,key) DO UPDATE SET payload=excluded.payload",
-                    params![t, q, rec.key, rec.payload.as_ref()],
+                    &format!(
+                        "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                         VALUES {values} ON CONFLICT(tenant_id,queue_id,key) DO UPDATE SET \
+                         payload=excluded.payload"
+                    ),
+                    params_from_iter(parameters.iter()),
                 ))?;
             }
             Ok(())

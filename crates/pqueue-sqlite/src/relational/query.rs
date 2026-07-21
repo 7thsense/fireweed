@@ -1015,52 +1015,68 @@ pub(crate) fn live_items_sql(
     keys: &[ClientItemKey],
 ) -> EngineResult<Vec<Option<LiveItemView>>> {
     let (t, q) = parts(shard);
-    let mut out = Vec::with_capacity(keys.len());
-    for key in keys {
-        let row = st(conn
-            .query_row(
-                "SELECT item_id, item_version, lifecycle_state, priority, group_key, not_before, \
-                 retry_count, payload, fields FROM pqueue_items \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key=?3 \
-                   AND superseded=0 AND lifecycle_state IN ('Pending','Leased')",
-                params![t, q, key.as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<i64>>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, Option<Vec<u8>>>(7)?,
-                        row.get::<_, String>(8)?,
-                    ))
-                },
-            )
-            .optional())?;
-        out.push(match row {
-            Some((id, version, state, priority, group, not_before, retry, payload, fields)) => {
-                Some(LiveItemView {
-                    item_id: ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?,
-                    client_item_key: key.clone(),
+    let mut found = HashMap::<String, LiveItemView>::with_capacity(keys.len());
+    for chunk in keys.chunks(SQLITE_BATCH) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!(
+            "SELECT client_item_key, item_id, item_version, lifecycle_state, priority, group_key, \
+             not_before, retry_count, payload, fields FROM pqueue_items \
+             WHERE tenant_id=? AND queue_id=? AND client_item_key IN ({placeholders}) \
+               AND superseded=0 AND lifecycle_state IN ('Pending','Leased')"
+        );
+        let mut parameters = Vec::with_capacity(chunk.len() + 2);
+        parameters.extend([Value::Text(t.to_string()), Value::Text(q.to_string())]);
+        parameters.extend(
+            chunk
+                .iter()
+                .map(|key| Value::Text(key.as_str().to_string())),
+        );
+        let mut statement = st(conn.prepare(&sql))?;
+        let rows = st(
+            statement.query_map(params_from_iter(parameters.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<Vec<u8>>>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            }),
+        )?;
+        for row in rows {
+            let (key, id, version, state, priority, group, not_before, retry, payload, fields) =
+                st(row)?;
+            found.insert(
+                key.clone(),
+                LiveItemView {
+                    item_id: ItemId::new(id)
+                        .map_err(|error| EngineError::Storage(error.to_string()))?,
+                    client_item_key: ClientItemKey::new(key.clone())
+                        .map_err(|error| EngineError::Storage(error.to_string()))?,
                     item_version: version as u64,
                     lifecycle_state: parse_state(&state)?,
                     priority: parse_priority(priority)?,
                     group_key: group
                         .map(GroupKey::new)
                         .transpose()
-                        .map_err(|e| EngineError::Storage(e.to_string()))?,
+                        .map_err(|error| EngineError::Storage(error.to_string()))?,
                     not_before: not_before.map(nanos_ts),
                     attempt_count: retry as u32,
                     payload: payload.map(Bytes::from),
                     fields: fields_from_json(fields)?,
-                })
-            }
-            None => None,
-        });
+                },
+            );
+        }
     }
-    Ok(out)
+    Ok(keys
+        .iter()
+        .map(|key| found.get(key.as_str()).cloned())
+        .collect())
 }
 
 pub(crate) fn metrics_sql(conn: &Connection, shard: &QueueKey) -> EngineResult<QueueMetrics> {

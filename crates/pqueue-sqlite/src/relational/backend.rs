@@ -3425,6 +3425,9 @@ mod hot_query_sql_tests {
     static GROUP_CLAIM_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static GROUP_FINALIZE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static COUNTER_RESTORE_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static LIVE_ITEMS_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static SET_GATES_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static SIDE_RECORD_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
     fn count_pel_statement(_: &str) {
         PEL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -3452,6 +3455,24 @@ mod hot_query_sql_tests {
 
     fn count_counter_restore_statement(_: &str) {
         COUNTER_RESTORE_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_live_items_statement(sql: &str) {
+        if sql.starts_with("SELECT client_item_key, item_id") {
+            LIVE_ITEMS_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn count_set_gates_statement(sql: &str) {
+        if sql.starts_with("INSERT INTO pqueue_gate_state") {
+            SET_GATES_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn count_side_record_statement(sql: &str) {
+        if sql.starts_with("INSERT INTO pqueue_side_records") {
+            SIDE_RECORD_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn mutation_queue() -> QueueDefinition {
@@ -3659,6 +3680,147 @@ mod hot_query_sql_tests {
         COUNTER_RESTORE_TRACE_COUNT.load(Ordering::Relaxed)
     }
 
+    async fn live_items_statement_count(items: usize) -> usize {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let keys = (0..items)
+            .map(|ordinal| ClientItemKey::new(format!("key-{ordinal:04}")).unwrap())
+            .collect::<Vec<_>>();
+        backend
+            .push(
+                &shard,
+                keys.iter()
+                    .cloned()
+                    .map(|client_item_key| PushSpec {
+                        client_item_key: Some(client_item_key),
+                        ..PushSpec::default()
+                    })
+                    .collect(),
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        LIVE_ITEMS_TRACE_COUNT.store(0, Ordering::Relaxed);
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .trace(Some(count_live_items_statement));
+        let rows = backend.live_items(&shard, &keys).await.unwrap();
+        backend.inner.lock().unwrap().conn.trace(None);
+        assert_eq!(rows.len(), items);
+        assert!(rows.into_iter().all(|row| row.is_some()));
+        LIVE_ITEMS_TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
+    async fn set_gates_statement_count(gates: usize) -> usize {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        SET_GATES_TRACE_COUNT.store(0, Ordering::Relaxed);
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .trace(Some(count_set_gates_statement));
+        backend
+            .set_gates(
+                &shard,
+                SetGatesCommand {
+                    gate_keys: (0..gates)
+                        .map(|ordinal| format!("gate-{ordinal:04}"))
+                        .collect(),
+                    blocked: true,
+                },
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend.inner.lock().unwrap().conn.trace(None);
+        SET_GATES_TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
+    async fn side_record_statement_count(records: usize) -> usize {
+        use pqueue_engine::{
+            ClaimRef, CommitTransition, CommitTransitionEntry, CommitTransitionPort, FinalizeKind,
+            SideRecord,
+        };
+
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        backend
+            .push(
+                &shard,
+                vec![PushSpec::default()],
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let claimed = backend
+            .claim(ClaimRequest {
+                eligibility_time: None,
+                shard: shard.clone(),
+                worker_id: pqueue_core::WorkerId::new("worker").unwrap(),
+                max_items: 1,
+                lease_token: LeaseToken::new("lease").unwrap(),
+                lease_expires_at: UtcTimestamp::new(60, 0).unwrap(),
+                now: UtcTimestamp::new(0, 0).unwrap(),
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        let item = &claimed.items[0];
+        SIDE_RECORD_TRACE_COUNT.store(0, Ordering::Relaxed);
+        backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .trace(Some(count_side_record_statement));
+        backend
+            .commit_transition(
+                &shard,
+                CommitTransition {
+                    request_id: None,
+                    entries: vec![CommitTransitionEntry {
+                        claim_ref: ClaimRef {
+                            item_id: item.item_id,
+                            lease_token: item.lease_token.clone().unwrap(),
+                            lease_expires_at: item.lease_expires_at,
+                            item_version: item.item_version,
+                        },
+                        additional_claim_refs: Vec::new(),
+                        finalize: FinalizeKind::Complete,
+                        side_records: (0..records)
+                            .map(|ordinal| SideRecord {
+                                key: format!("side-{ordinal:04}").into_bytes(),
+                                payload: Bytes::from_static(b"payload"),
+                            })
+                            .collect(),
+                        lifecycle_items: Vec::new(),
+                        instance_fence: None,
+                    }],
+                },
+                UtcTimestamp::new(1, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        backend.inner.lock().unwrap().conn.trace(None);
+        SIDE_RECORD_TRACE_COUNT.load(Ordering::Relaxed)
+    }
+
     async fn grouped_claim_finalize_statement_count(groups: usize) -> (usize, usize) {
         use pqueue_engine::{FinalizeKind, FinalizeOutcome, FinalizePort};
 
@@ -3758,6 +3920,42 @@ mod hot_query_sql_tests {
         assert_eq!(
             one, 1,
             "counter recovery reads only durable queue high-waters"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_item_batch_read_uses_one_set_query_at_1_100_1000() {
+        assert_eq!(
+            (
+                live_items_statement_count(1).await,
+                live_items_statement_count(100).await,
+                live_items_statement_count(1_000).await,
+            ),
+            (1, 1, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_batch_write_uses_bounded_sql_chunks_at_1_100_1000() {
+        assert_eq!(
+            (
+                set_gates_statement_count(1).await,
+                set_gates_statement_count(100).await,
+                set_gates_statement_count(1_000).await,
+            ),
+            (1, 1, 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn side_record_batch_write_uses_bounded_sql_chunks_at_1_100_1000() {
+        assert_eq!(
+            (
+                side_record_statement_count(1).await,
+                side_record_statement_count(100).await,
+                side_record_statement_count(1_000).await,
+            ),
+            (1, 1, 3)
         );
     }
 
