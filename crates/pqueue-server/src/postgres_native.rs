@@ -394,6 +394,30 @@ impl<B: RespBackend> PushPort for PostgresWholeOperationAdapter<B> {
         })
     }
 
+    fn push_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = Vec<EngineResult<ItemId>>> + Send {
+        let count = items.len();
+        let shard = shard.clone();
+        let queue = shard.clone();
+        let inner = self.arc_for(&queue);
+        let dispatched = self.dispatch(queue, move || async move {
+            Ok(inner
+                .push_ordered_independent(&shard, items, now, expected_epoch)
+                .await)
+        });
+        async move {
+            match dispatched.await {
+                Ok(outcomes) => outcomes,
+                Err(error) => vec![Err(error); count],
+            }
+        }
+    }
+
     fn push_with_request_id(
         &self,
         shard: &QueueKey,
@@ -898,6 +922,124 @@ mod tests {
             gate_keys: Vec::new(),
             entity: None,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn production_wrapper_forwards_ten_1000_item_windows_to_segmented_group_commit() {
+        let projection_path = std::env::temp_dir().join(format!(
+            "pqueue-ordered-wrapper-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let inner = Arc::new(
+            crate::SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                Arc::new(InMemoryBlobStore::new()),
+                projection_path.to_str().unwrap(),
+                SegmentConfig::new(64 * 1024 * 1024, 20).unwrap(),
+            )
+            .unwrap(),
+        );
+        let flusher = inner.spawn_flusher();
+        let adapter = PostgresWholeOperationAdapter::from_arc(Arc::clone(&inner));
+        let mut def = definition("ordered-wrapper");
+        def.max_push_batch_size = 100;
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        adapter.create_queue(def).await.unwrap();
+        let now = UtcTimestamp::new(1_700_000_000, 0).unwrap();
+        for _ in 0..10 {
+            let outcomes = adapter
+                .push_ordered_independent(&shard, vec![push_spec(); 1_000], now, None)
+                .await;
+            assert!(outcomes.iter().all(Result::is_ok));
+        }
+        let counters = inner.segment_counters();
+        assert_eq!(counters.commands_committed, 10_000);
+        assert!(counters.max_batch_size() > 100);
+        assert_eq!(inner.metrics(&shard).await.unwrap().pending, 10_000);
+        flusher.abort();
+        drop(adapter);
+        drop(inner);
+        let _ = std::fs::remove_file(projection_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn actual_resp_service_stack_completes_a_10k_pipeline_through_group_commit() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let projection_path = std::env::temp_dir().join(format!(
+            "pqueue-resp-stack-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let inner = Arc::new(
+            crate::SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                Arc::new(InMemoryBlobStore::new()),
+                projection_path.to_str().unwrap(),
+                SegmentConfig::new(64 * 1024 * 1024, 20).unwrap(),
+            )
+            .unwrap(),
+        );
+        let flusher = inner.spawn_flusher();
+        let adapter = Arc::new(PostgresWholeOperationAdapter::from_arc(Arc::clone(&inner)));
+        let mut def = definition("resp-stack");
+        def.max_push_batch_size = 100;
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        adapter.create_queue(def).await.unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(pqueue_resp::serve(
+            listener,
+            Arc::clone(&adapter),
+            Arc::new(pqueue_resp::SystemClock),
+        ));
+        let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut pipeline = Vec::new();
+        for priority in 0..10_000 {
+            let priority = priority.to_string();
+            let args = [
+                b"XADD".as_slice(),
+                b"tenant:resp-stack".as_slice(),
+                b"*".as_slice(),
+                b"priority".as_slice(),
+                priority.as_bytes(),
+            ];
+            pipeline.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
+            for arg in args {
+                pipeline.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+                pipeline.extend_from_slice(arg);
+                pipeline.extend_from_slice(b"\r\n");
+            }
+        }
+        let started = std::time::Instant::now();
+        socket.write_all(&pipeline).await.unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        for _ in 0..10_000 {
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with('$'));
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.ends_with("\r\n"));
+        }
+        eprintln!("10k production RESP stack elapsed={:?}", started.elapsed());
+        let counters = inner.segment_counters();
+        assert_eq!(counters.commands_committed, 10_000);
+        assert!(counters.max_batch_size() > 100);
+        assert_eq!(inner.metrics(&shard).await.unwrap().pending, 10_000);
+        server.abort();
+        flusher.abort();
+        drop(reader);
+        drop(adapter);
+        drop(inner);
+        let _ = std::fs::remove_file(projection_path);
     }
 
     #[test]

@@ -2837,6 +2837,90 @@ impl SegmentedObjectLogInMemoryBackend {
             .map_err(|_| EngineError::Storage("segment commit responder dropped".into()))?
     }
 
+    async fn commit_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        envelopes: Vec<CommandEnvelope>,
+        epoch: u64,
+        now: UtcTimestamp,
+    ) -> Vec<EngineResult<()>> {
+        let count = envelopes.len();
+        let coord = self.coord_for(shard);
+        let mut outcomes = vec![None; count];
+        let mut receivers = Vec::with_capacity(count);
+        {
+            let mut state = coord.state.lock().await;
+            for (index, envelope) in envelopes.into_iter().enumerate() {
+                let (serialized, charged_bytes) = match prepare_serialized_commands_for_format(
+                    vec![envelope],
+                    self.byte_budget.config().global_limit(),
+                    self.writer_format,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error));
+                        continue;
+                    }
+                };
+                let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
+                if !state.pending.is_empty()
+                    && queue_bytes.saturating_add(charged_bytes) > self.queue_byte_limit
+                {
+                    outcomes[index] = Some(Err(EngineError::Backpressure {
+                        resource: "queue buffered bytes",
+                    }));
+                    continue;
+                }
+                let permit = match self
+                    .byte_budget
+                    .try_acquire(shard.tenant_id.clone(), charged_bytes)
+                    .map_err(map_byte_admission_error)
+                {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error));
+                        continue;
+                    }
+                };
+                let (tx, rx) = oneshot::channel();
+                match self
+                    .log
+                    .enqueue_serialized(shard, serialized, epoch, ts_to_ms(now))
+                {
+                    Ok((outcome, accepted)) => {
+                        state.pending.extend(accepted);
+                        state.permits.push(permit);
+                        state.waiters.push(tx);
+                        receivers.push((index, rx));
+                        if !outcome.committed.is_empty() {
+                            self.distribute(&mut state, outcome.committed);
+                        }
+                    }
+                    Err(error) => {
+                        Self::fail_all(&mut state, error.clone());
+                        outcomes[index] = Some(Err(error.clone()));
+                        for outcome in outcomes.iter_mut().skip(index + 1) {
+                            *outcome = Some(Err(error.clone()));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        for (index, receiver) in receivers {
+            outcomes[index] = Some(
+                receiver
+                    .await
+                    .map_err(|_| EngineError::Storage("segment commit responder dropped".into()))
+                    .and_then(|result| result),
+            );
+        }
+        outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("every ordered push has an outcome"))
+            .collect()
+    }
+
     async fn flush_loop(
         weak: std::sync::Weak<Self>,
         flush_interval: Duration,
@@ -3196,6 +3280,86 @@ impl PushPort for SegmentedObjectLogInMemoryBackend {
             );
             self.commit(shard, envelope, epoch, now, false).await?;
             Ok(ids)
+        }
+    }
+
+    fn push_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = Vec<EngineResult<ItemId>>> + Send {
+        async move {
+            let count = items.len();
+            if count > pqueue_engine::MAX_ORDERED_INDEPENDENT_PUSH_ITEMS {
+                return vec![
+                    Err(EngineError::Invalid(
+                        "ordered independent push exceeds bounded item limit",
+                    ));
+                    count
+                ];
+            }
+            let max_attempts = match self
+                .queues
+                .lock()
+                .expect("segmented queues poisoned")
+                .get(shard)
+                .map(|definition| definition.retry_policy.max_attempts)
+            {
+                Some(max_attempts) => max_attempts,
+                None => return vec![Err(EngineError::NotFound); count],
+            };
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented inmemory schemas poisoned")
+                .get(shard)
+                .cloned();
+            let epoch = expected_epoch.unwrap_or_else(|| self.cached_epoch(shard));
+            let mut outcomes = vec![None; count];
+            let mut accepted = Vec::with_capacity(count);
+            for (index, item) in items.into_iter().enumerate() {
+                if let Err(error) =
+                    validate_gate_push(self.supports_gates(), std::slice::from_ref(&item)).and_then(
+                        |()| validate_push_items(schema.as_ref(), std::slice::from_ref(&item)),
+                    )
+                {
+                    outcomes[index] = Some(Err(error));
+                    continue;
+                }
+                let counter_base = self.counters.reserve(shard, epoch, 1);
+                let (mut push_items, mut ids) =
+                    build_push_items(vec![item], epoch, self.node_id, counter_base, max_attempts);
+                let id = ids.pop().expect("one scalar push id");
+                let push_item = push_items.pop().expect("one scalar push item");
+                let envelope = self.next_envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![push_item],
+                    }),
+                    vec![id],
+                    now,
+                );
+                accepted.push((index, id, envelope));
+            }
+            let commit_results = self
+                .commit_ordered_independent(
+                    shard,
+                    accepted
+                        .iter()
+                        .map(|(_, _, envelope)| envelope.clone())
+                        .collect(),
+                    epoch,
+                    now,
+                )
+                .await;
+            for ((index, id, _), result) in accepted.into_iter().zip(commit_results) {
+                outcomes[index] = Some(result.map(|()| id));
+            }
+            outcomes
+                .into_iter()
+                .map(|outcome| outcome.expect("every ordered push has an outcome"))
+                .collect()
         }
     }
 
@@ -4187,6 +4351,41 @@ mod recovery_tests {
             backend.segment_counters().max_batch_size() > 100,
             "distinct scalar commands must share downstream segments"
         );
+        flusher.abort();
+    }
+
+    #[tokio::test]
+    async fn inmemory_projection_ordered_independent_push_also_groups_without_reordering() {
+        let tmp = TmpDir::new("ordered-independent-inmemory");
+        let mut def = queue_def("tenant", "ordered-inmemory");
+        def.max_push_batch_size = 100;
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let backend = Arc::new(
+            SegmentedObjectLogInMemoryBackend::open(
+                tmp.object_root(),
+                SegmentConfig::new(64 * 1024 * 1024, 20).unwrap(),
+            )
+            .unwrap(),
+        );
+        backend.create_queue(def).await.unwrap();
+        let flusher = backend.spawn_flusher();
+        let outcomes = backend
+            .push_ordered_independent(
+                &shard,
+                (0..1_000)
+                    .map(|index| spec(&format!("item-{index}")))
+                    .collect(),
+                ts(),
+                None,
+            )
+            .await;
+        let ids: Vec<_> = outcomes
+            .into_iter()
+            .collect::<EngineResult<Vec<_>>>()
+            .unwrap();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 1_000);
+        assert!(backend.segment_counters().max_batch_size() > 100);
         flusher.abort();
     }
 
