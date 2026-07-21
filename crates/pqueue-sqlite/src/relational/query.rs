@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, QueueId, TenantId,
+    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, Metadata, QueueId, TenantId,
     UtcTimestamp,
 };
 use pqueue_engine::{
@@ -82,61 +82,43 @@ pub(crate) fn filter_item_claim_candidates(
     if queue_paused(conn, shard)? {
         return Ok(Vec::new());
     }
-    const PAGE_SIZE: usize = 128;
     let (tenant, queue) = parts(shard);
-    let mut selected = Vec::new();
-    let mut offset = 0_i64;
-    loop {
-        let mut statement = st(conn.prepare(
-            "SELECT item_id,group_key,metadata FROM pqueue_items \
+    let required_group = compatibility.group_key.as_ref().map(GroupKey::as_str);
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let mut statement = st(conn.prepare(
+        "SELECT item_id FROM pqueue_items \
              WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
              AND cohort_size IS NULL AND (not_before IS NULL OR not_before<=?3) \
              AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
              JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
              AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
              AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
-             ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5",
-        ))?;
-        let rows = st(statement.query_map(
-            params![tenant, queue, ts_nanos(now), PAGE_SIZE as i64, offset],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        ))?;
-        let mut page_len = 0;
-        for row in rows {
-            page_len += 1;
-            let (id, group_key, metadata) = st(row)?;
-            if compatibility
-                .group_key
-                .as_ref()
-                .is_some_and(|required| group_key.as_deref() != Some(required.as_str()))
-            {
-                continue;
-            }
-            let metadata = metadata_from_json(metadata)?;
-            if compatibility
-                .metadata_equals
-                .iter()
-                .all(|(key, expected)| metadata.get(key) == Some(expected))
-            {
-                selected.push(
-                    ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))?,
-                );
-                if selected.len() == max {
-                    return Ok(selected);
-                }
-            }
-        }
-        if page_len < PAGE_SIZE {
-            return Ok(selected);
-        }
-        offset += PAGE_SIZE as i64;
+             AND (?5 IS NULL OR group_key=?5) \
+             AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+               WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+                 WHERE actual.key=wanted.key AND actual.value=wanted.value \
+                   AND actual.type=wanted.type)) \
+             ORDER BY priority_sort,created_seq LIMIT ?4",
+    ))?;
+    let rows = st(statement.query_map(
+        params![
+            tenant,
+            queue,
+            ts_nanos(now),
+            max as i64,
+            required_group,
+            metadata_filter
+        ],
+        |row| row.get::<_, String>(0),
+    ))?;
+    let mut selected = Vec::new();
+    for row in rows {
+        selected
+            .push(ItemId::new(st(row)?).map_err(|error| EngineError::Storage(error.to_string()))?);
     }
+    Ok(selected)
 }
 
 pub(crate) fn select_eligible_sql_after(
@@ -233,80 +215,6 @@ pub(crate) fn select_eligible_sql_after(
 /// with a current representative (`oldest_eligible_at IS NOT NULL`) are candidates; the live eligibility is
 /// re-read per group at claim time (the summary is the ordering hint; the items are the authority). Before
 /// group-aware claims call this, they refresh a bounded set of groups that became due by time alone.
-pub(crate) fn candidate_groups(conn: &Connection, shard: &QueueKey) -> EngineResult<Vec<GroupKey>> {
-    let (t, q) = parts(shard);
-    let mut stmt = st(conn.prepare(
-        "SELECT group_key FROM pqueue_group_summary \
-         WHERE tenant_id=?1 AND queue_id=?2 AND oldest_eligible_at IS NOT NULL \
-         ORDER BY rep_priority_sort, rep_created_at, rep_item_id",
-    ))?;
-    let mapped = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
-    let mut out = Vec::new();
-    for r in mapped {
-        out.push(GroupKey::new(st(r)?).map_err(|e| EngineError::Storage(e.to_string()))?);
-    }
-    Ok(out)
-}
-
-fn candidate_groups_for_claim(
-    conn: &Connection,
-    shard: &QueueKey,
-    now: UtcTimestamp,
-    compatibility: &ClaimCompatibility,
-) -> EngineResult<Vec<GroupKey>> {
-    if compatibility.metadata_equals.is_empty() {
-        return candidate_groups(conn, shard);
-    }
-    const PAGE_SIZE: i64 = 128;
-    let (tenant, queue) = parts(shard);
-    let mut groups = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut offset = 0_i64;
-    loop {
-        let mut statement = st(conn.prepare(
-            "SELECT group_key,metadata FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-             AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
-             AND group_key IS NOT NULL AND (not_before IS NULL OR not_before<=?3) \
-             AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
-             AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
-             ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5",
-        ))?;
-        let rows = st(statement.query_map(
-            params![tenant, queue, ts_nanos(now), PAGE_SIZE, offset],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ))?;
-        let mut page_len = 0_i64;
-        for row in rows {
-            page_len += 1;
-            let (group, metadata) = st(row)?;
-            let group =
-                GroupKey::new(group).map_err(|error| EngineError::Storage(error.to_string()))?;
-            if compatibility
-                .group_key
-                .as_ref()
-                .is_some_and(|required| required != &group)
-            {
-                continue;
-            }
-            let metadata = metadata_from_json(metadata)?;
-            if compatibility
-                .metadata_equals
-                .iter()
-                .all(|(key, expected)| metadata.get(key) == Some(expected))
-                && seen.insert(group.clone())
-            {
-                groups.push(group);
-            }
-        }
-        if page_len < PAGE_SIZE {
-            return Ok(groups);
-        }
-        offset += PAGE_SIZE;
-    }
-}
-
 /// Refresh a bounded set of groups that became eligible by time alone (`not_before <= now`) since their
 /// last mutation-time summary refresh. Runs only inside mutating group-aware claims; discovery stays
 /// read-only and may still under-report until a mutation/tick refreshes the row.
@@ -349,100 +257,6 @@ pub(crate) fn refresh_due_group_summaries(
 /// capped at `limit`.
 pub(crate) struct GroupEligibility {
     pub(crate) item_ids: Vec<ItemId>,
-    pub(crate) eligible_count: usize,
-}
-
-fn active_group_member_count(
-    conn: &Connection,
-    shard: &QueueKey,
-    group: &GroupKey,
-    cohort: bool,
-) -> EngineResult<usize> {
-    let (tenant, queue) = parts(shard);
-    let cohort_predicate = if cohort {
-        "cohort_size IS NOT NULL"
-    } else {
-        "cohort_size IS NULL"
-    };
-    let sql = format!(
-        "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-         AND superseded=0 AND {cohort_predicate} AND lifecycle_state NOT IN ('Complete','Failed')"
-    );
-    let count: i64 = st(
-        conn.query_row(&sql, params![tenant, queue, group.as_str()], |row| {
-            row.get(0)
-        }),
-    )?;
-    usize::try_from(count).map_err(|error| EngineError::Storage(error.to_string()))
-}
-
-fn group_has_active_lease(
-    conn: &Connection,
-    shard: &QueueKey,
-    group: &GroupKey,
-) -> EngineResult<bool> {
-    let (tenant, queue) = parts(shard);
-    let leased: i64 = st(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-         AND group_key=?3 AND superseded=0 AND cohort_size IS NULL AND lifecycle_state='Leased')",
-        params![tenant, queue, group.as_str()],
-        |row| row.get(0),
-    ))?;
-    Ok(leased != 0)
-}
-
-pub(crate) fn group_eligible_items(
-    conn: &Connection,
-    shard: &QueueKey,
-    group: &GroupKey,
-    now: UtcTimestamp,
-    limit: usize,
-    compatibility: &ClaimCompatibility,
-) -> EngineResult<GroupEligibility> {
-    let (t, q) = parts(shard);
-    const PAGE_SIZE: i64 = 128;
-    let mut out = Vec::new();
-    let mut eligible_count = 0_usize;
-    let mut offset = 0_i64;
-    loop {
-        let mut stmt = st(conn.prepare(
-            "SELECT item_id,metadata FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-         AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
-         AND (not_before IS NULL OR not_before<=?4) AND eligible_since IS NOT NULL \
-         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
-             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
-             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) \
-         ORDER BY priority_sort, created_seq LIMIT ?5 OFFSET ?6",
-        ))?;
-        let mapped = st(stmt.query_map(
-            params![t, q, group.as_str(), ts_nanos(now), PAGE_SIZE, offset],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ))?;
-        let mut page_len = 0_i64;
-        for r in mapped {
-            page_len += 1;
-            let (id, metadata) = st(r)?;
-            let metadata = metadata_from_json(metadata)?;
-            if compatibility
-                .metadata_equals
-                .iter()
-                .all(|(key, expected)| metadata.get(key) == Some(expected))
-            {
-                eligible_count += 1;
-                if out.len() < limit {
-                    out.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
-                }
-            }
-        }
-        if page_len < PAGE_SIZE {
-            return Ok(GroupEligibility {
-                item_ids: out,
-                eligible_count,
-            });
-        }
-        offset += PAGE_SIZE;
-    }
 }
 
 /// `group_batching` selection (API-001 whole-eligible-group, `max_groups=N`): accumulate the oldest-N
@@ -462,32 +276,83 @@ pub(crate) fn select_group_batching(
     if queue_paused(conn, shard)? {
         return Ok(Vec::new()); // a paused queue claims nothing (parity with item-level select_eligible)
     }
-    let mut acc = Vec::new();
-    let mut used = 0u32;
-    for group in candidate_groups_for_claim(conn, shard, now, compatibility)? {
-        if used >= max_groups {
-            break;
-        }
-        // Fetch max_items+1 to distinguish "group of exactly max_items" from "group larger than max_items".
-        let elig = group_eligible_items(conn, shard, &group, now, max_items + 1, compatibility)?;
-        if group_has_active_lease(conn, shard, &group)? {
-            continue;
-        }
-        if elig.item_ids.is_empty() {
-            continue; // discard a group with no live-eligible item
-        }
-        if elig.eligible_count > max_items {
-            // This single whole group alone exceeds the batch ceiling — a whole-group claim cannot deliver
-            // it. Roll back, lease nothing (TD-002 batch-too-large).
+    let (tenant, queue) = parts(shard);
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let mut statement = st(conn.prepare(
+        "WITH candidate_raw AS MATERIALIZED (SELECT s.group_key,e.priority_sort rep_priority_sort,\
+           e.created_at rep_created_at,e.item_id rep_item_id,e.created_seq,ROW_NUMBER() OVER \
+           (PARTITION BY s.group_key ORDER BY e.priority_sort,e.created_seq,e.item_id) rn \
+           FROM pqueue_group_summary s JOIN pqueue_items e ON e.tenant_id=?1 AND e.queue_id=?2 \
+             AND e.group_key=s.group_key WHERE s.tenant_id=?1 AND s.queue_id=?2 \
+           AND s.oldest_eligible_at IS NOT NULL AND e.lifecycle_state='Pending' AND e.superseded=0 \
+           AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
+           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id \
+             AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
+           AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
+             (SELECT 1 FROM json_each(e.metadata) actual WHERE actual.key=wanted.key \
+              AND actual.value=wanted.value AND actual.type=wanted.type)) \
+           AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=?1 \
+             AND leased.queue_id=?2 AND leased.group_key=s.group_key AND leased.superseded=0 \
+             AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased')), \
+         candidate AS MATERIALIZED (SELECT group_key,rep_priority_sort,rep_created_at,rep_item_id \
+           FROM candidate_raw WHERE rn=1 ORDER BY rep_priority_sort,created_seq,rep_item_id,group_key LIMIT ?4), \
+         eligible AS MATERIALIZED (SELECT c.group_key,c.rep_priority_sort,c.rep_created_at,\
+           c.rep_item_id,i.item_id,i.priority_sort,i.created_seq FROM candidate c \
+           JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 AND i.group_key=c.group_key \
+           WHERE i.lifecycle_state='Pending' AND i.superseded=0 AND i.cohort_size IS NULL \
+             AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+               WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+             AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
+               (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
+                AND actual.value=wanted.value AND actual.type=wanted.type)) \
+           ORDER BY c.rep_priority_sort,c.rep_created_at,c.rep_item_id,c.group_key,\
+             i.priority_sort,i.created_seq,i.item_id LIMIT ?6), \
+         grouped AS (SELECT group_key,rep_priority_sort,rep_created_at,rep_item_id,COUNT(*) item_count,\
+           json_group_array(item_id) item_ids FROM eligible GROUP BY group_key,rep_priority_sort,\
+           rep_created_at,rep_item_id) SELECT item_count,item_ids,SUM(item_count) OVER \
+           (ORDER BY rep_priority_sort,rep_created_at,rep_item_id,group_key) running_count \
+           FROM grouped ORDER BY rep_priority_sort,rep_created_at,rep_item_id,group_key",
+    ))?;
+    let rows = st(statement.query_map(
+        params![
+            tenant,
+            queue,
+            ts_nanos(now),
+            i64::from(max_groups),
+            metadata_filter,
+            max_items.saturating_add(1) as i64
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        },
+    ))?;
+    let mut selected = Vec::new();
+    for row in rows {
+        let (count, ids, running) = st(row)?;
+        if count as usize > max_items {
             return Err(EngineError::BatchTooLarge);
         }
-        if acc.len() + elig.item_ids.len() > max_items {
-            break; // adding this whole group would exceed the ceiling — stop, keep the whole groups that fit
+        if running as usize > max_items {
+            break;
         }
-        acc.extend(elig.item_ids);
-        used += 1;
+        let ids: Vec<String> =
+            serde_json::from_str(&ids).map_err(|error| EngineError::Storage(error.to_string()))?;
+        for id in ids {
+            selected
+                .push(ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))?);
+        }
     }
-    Ok(acc)
+    Ok(selected)
 }
 
 /// `same_group_key` selection (API-001): the server picks the single oldest eligible group and leases its
@@ -502,20 +367,52 @@ pub(crate) fn select_same_group(
     if queue_paused(conn, shard)? {
         return Ok(Vec::new());
     }
-    for group in candidate_groups_for_claim(conn, shard, now, compatibility)? {
-        if compatibility
-            .group_key
-            .as_ref()
-            .is_some_and(|required| required != &group)
-        {
-            continue;
-        }
-        let elig = group_eligible_items(conn, shard, &group, now, max_items, compatibility)?;
-        if !elig.item_ids.is_empty() {
-            return Ok(elig.item_ids);
-        }
+    let (tenant, queue) = parts(shard);
+    let required_group = compatibility.group_key.as_ref().map(GroupKey::as_str);
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let mut statement = st(conn.prepare(
+        "WITH candidate AS (SELECT s.group_key FROM pqueue_group_summary s WHERE s.tenant_id=?1 \
+         AND s.queue_id=?2 AND s.oldest_eligible_at IS NOT NULL AND (?5 IS NULL OR s.group_key=?5) \
+         AND EXISTS (SELECT 1 FROM pqueue_items e WHERE e.tenant_id=?1 AND e.queue_id=?2 \
+           AND e.group_key=s.group_key AND e.lifecycle_state='Pending' AND e.superseded=0 \
+           AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
+           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id \
+             AND ig.item_id=e.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+             WHERE NOT EXISTS (SELECT 1 FROM json_each(e.metadata) actual \
+               WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type))) \
+         ORDER BY s.rep_priority_sort,s.rep_created_at,s.rep_item_id,s.group_key LIMIT 1) \
+         SELECT i.item_id FROM candidate c JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 \
+         AND i.group_key=c.group_key WHERE i.lifecycle_state='Pending' AND i.superseded=0 \
+         AND i.cohort_size IS NULL AND (i.not_before IS NULL OR i.not_before<=?3) \
+         AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+           JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+           AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id \
+           AND ig.item_id=i.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+           WHERE NOT EXISTS (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
+             AND actual.value=wanted.value AND actual.type=wanted.type)) \
+         ORDER BY i.priority_sort,i.created_seq,i.item_id LIMIT ?4",
+    ))?;
+    let rows = st(statement.query_map(
+        params![
+            tenant,
+            queue,
+            ts_nanos(now),
+            max_items as i64,
+            required_group,
+            metadata_filter
+        ],
+        |row| row.get::<_, String>(0),
+    ))?;
+    let mut selected = Vec::new();
+    for row in rows {
+        selected
+            .push(ItemId::new(st(row)?).map_err(|error| EngineError::Storage(error.to_string()))?);
     }
-    Ok(Vec::new())
+    Ok(selected)
 }
 
 /// `whole_cohort` selection (API-001 G6, all-or-nothing): the oldest COMPLETE cohort whose members are ALL
@@ -540,53 +437,43 @@ pub(crate) fn select_whole_cohort(
         return Ok(None);
     }
     let (t, q) = parts(shard);
-    let cohorts: Vec<(String, String, i64)> = {
-        let mut stmt = st(conn.prepare(
-            "SELECT group_key, cohort_id, cohort_size FROM pqueue_cohorts \
-             WHERE tenant_id=?1 AND queue_id=?2 AND state='complete' ORDER BY cohort_created_at, group_key",
-        ))?;
-        let rows = st(stmt.query_map(params![t, q], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        }))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(st(r)?);
-        }
-        out
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let candidate: Option<(String, String, i64)> = st(conn.query_row(
+        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM pqueue_cohorts c \
+         WHERE c.tenant_id=?1 AND c.queue_id=?2 AND c.state='complete' \
+         AND (SELECT COUNT(*) FROM pqueue_items a WHERE a.tenant_id=?1 AND a.queue_id=?2 \
+           AND a.group_key=c.group_key AND a.superseded=0 AND a.cohort_size IS NOT NULL \
+           AND a.lifecycle_state NOT IN ('Complete','Failed'))=c.cohort_size \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_items i WHERE i.tenant_id=?1 AND i.queue_id=?2 \
+           AND i.group_key=c.group_key AND i.superseded=0 AND i.cohort_size IS NOT NULL \
+           AND i.lifecycle_state NOT IN ('Complete','Failed') AND NOT (i.lifecycle_state='Pending' \
+             AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+               WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+             AND NOT EXISTS (SELECT 1 FROM json_each(?4) wanted WHERE NOT EXISTS \
+               (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
+                AND actual.value=wanted.value AND actual.type=wanted.type)))) \
+         ORDER BY c.cohort_created_at,c.group_key LIMIT 1",
+        params![t,q,ts_nanos(now),metadata_filter],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional())?;
+    let Some((group, cohort_id, size)) = candidate else {
+        return Ok(None);
     };
-    for (gk, cohort_id, size) in cohorts {
-        let size = size as usize;
-        let group = GroupKey::new(gk).map_err(|e| EngineError::Storage(e.to_string()))?;
-        let members: i64 = st(conn.query_row(
-            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-             AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL \
-             AND lifecycle_state NOT IN ('Complete','Failed')",
-            params![t, q, group.as_str()],
-            |row| row.get(0),
-        ))?;
-        if members as usize != size {
-            continue; // incomplete cohort (not all declared members present)
-        }
-        // All members must be currently eligible (pending+due). Fetch size+1 to detect any extra.
-        let elig = cohort_eligible_items(conn, shard, &group, now, size + 1, compatibility)?;
-        if elig.eligible_count != size
-            || elig.eligible_count != active_group_member_count(conn, shard, &group, true)?
-        {
-            continue; // some member is leased / terminal / not-due — the cohort is not claimable now
-        }
-        if size > max_items {
-            return Err(EngineError::BatchTooLarge); // the selected complete cohort exceeds the ceiling
-        }
-        return Ok(Some(SelectedCohort {
-            cohort_id: CohortId::new(cohort_id).map_err(|e| EngineError::Storage(e.to_string()))?,
-            item_ids: elig.item_ids,
-        }));
+    let size = usize::try_from(size).map_err(|error| EngineError::Storage(error.to_string()))?;
+    if size > max_items {
+        return Err(EngineError::BatchTooLarge);
     }
-    Ok(None)
+    let group = GroupKey::new(group).map_err(|error| EngineError::Storage(error.to_string()))?;
+    let eligible = cohort_eligible_items(conn, shard, &group, now, size, compatibility)?;
+    Ok(Some(SelectedCohort {
+        cohort_id: CohortId::new(cohort_id)
+            .map_err(|error| EngineError::Storage(error.to_string()))?,
+        item_ids: eligible.item_ids,
+    }))
 }
 
 /// The live currently-eligible COHORT members of one group (`cohort_size IS NOT NULL`), in claim order,
@@ -600,49 +487,37 @@ pub(crate) fn cohort_eligible_items(
     compatibility: &ClaimCompatibility,
 ) -> EngineResult<GroupEligibility> {
     let (t, q) = parts(shard);
-    const PAGE_SIZE: i64 = 128;
-    let mut out = Vec::new();
-    let mut eligible_count = 0_usize;
-    let mut offset = 0_i64;
-    loop {
-        let mut stmt = st(conn.prepare(
-            "SELECT item_id,metadata FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let mut stmt = st(conn.prepare(
+            "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
          AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NOT NULL \
          AND (not_before IS NULL OR not_before<=?4) AND eligible_since IS NOT NULL \
          AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
              ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
              WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-             AND ig.item_id=pqueue_items.item_id) \
-         ORDER BY priority_sort, created_seq LIMIT ?5 OFFSET ?6",
+             AND ig.item_id=pqueue_items.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+             WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+               WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type)) \
+         ORDER BY priority_sort, created_seq LIMIT ?5",
         ))?;
-        let mapped = st(stmt.query_map(
-            params![t, q, group.as_str(), ts_nanos(now), PAGE_SIZE, offset],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ))?;
-        let mut page_len = 0_i64;
-        for r in mapped {
-            page_len += 1;
-            let (id, metadata) = st(r)?;
-            let metadata = metadata_from_json(metadata)?;
-            if compatibility
-                .metadata_equals
-                .iter()
-                .all(|(key, expected)| metadata.get(key) == Some(expected))
-            {
-                eligible_count += 1;
-                if out.len() < limit {
-                    out.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
-                }
-            }
-        }
-        if page_len < PAGE_SIZE {
-            return Ok(GroupEligibility {
-                item_ids: out,
-                eligible_count,
-            });
-        }
-        offset += PAGE_SIZE;
+    let mapped = st(stmt.query_map(
+        params![
+            t,
+            q,
+            group.as_str(),
+            ts_nanos(now),
+            limit as i64,
+            metadata_filter
+        ],
+        |row| row.get::<_, String>(0),
+    ))?;
+    let mut out = Vec::new();
+    for row in mapped {
+        out.push(ItemId::new(st(row)?).map_err(|error| EngineError::Storage(error.to_string()))?);
     }
+    Ok(GroupEligibility { item_ids: out })
 }
 
 /// Non-destructive eligible view (every pending non-superseded item in priority order; ignores

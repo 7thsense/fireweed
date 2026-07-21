@@ -127,6 +127,22 @@ CREATE TABLE IF NOT EXISTS pqueue_request_idempotency (
 );
 CREATE INDEX IF NOT EXISTS pqueue_request_idempotency_expiry_idx
     ON pqueue_request_idempotency (expires_at);
+-- Reverse lookup for renewing retained ClaimByQuery responses.  Keeping this normalized edge avoids
+-- parsing or scanning the queue's complete replay history on every lease renewal.
+CREATE TABLE IF NOT EXISTS pqueue_claim_replay_items (
+    tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL, request_id TEXT NOT NULL, item_id TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, queue_id, request_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS pqueue_claim_replay_items_item_idx
+    ON pqueue_claim_replay_items (tenant_id, queue_id, item_id, request_id);
+CREATE TRIGGER IF NOT EXISTS pqueue_claim_replay_items_insert
+AFTER INSERT ON pqueue_request_idempotency
+WHEN NEW.operation='claim_by_query'
+BEGIN
+    INSERT OR IGNORE INTO pqueue_claim_replay_items (tenant_id,queue_id,request_id,item_id)
+    SELECT NEW.tenant_id,NEW.queue_id,NEW.request_id,value
+    FROM json_each(NEW.response_payload,'$.item_ids');
+END;
 -- TD-002 §cohort lifecycle projection. The group_key is the logical cohort key; cohort_id is the stable
 -- generation identity returned to callers and changes only after terminal retention permits group reuse.
 CREATE TABLE IF NOT EXISTS pqueue_cohorts (
@@ -228,6 +244,7 @@ pub const OWNED_PROJECTION_TABLES: &[&str] = &[
     "pqueue_gate_state",
     "pqueue_item_gates",
     "pqueue_cohorts",
+    "pqueue_claim_replay_items",
     "pqueue_request_idempotency",
     "pqueue_item_key_retention",
     "pqueue_group_summary",

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use pqueue_core::{
-    ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken,
+    ClientItemKey, CohortId, GroupKey, IndexDeclaration, ItemId, ItemState, LeaseToken, Metadata,
     QueueDefinition, QueueIndex, RequestId, UtcTimestamp, is_retry_exhausted,
 };
 use pqueue_engine::{
@@ -18,9 +18,9 @@ use pqueue_engine::{
     RequestOutcome, RichClaimSelection, TerminalEmissionMetrics,
 };
 use pqueue_relational::{
-    async_projection as sql, claim_by_query_replay_item_ids, elig_sort, fields_from_json,
-    fields_to_json, lease_hash, metadata_from_json, metadata_to_json, nanos_ts, parse_priority,
-    parse_state, ts_nanos, ts_nanos_opt,
+    async_projection as sql, elig_sort, fields_from_json, fields_to_json, lease_hash,
+    metadata_from_json, metadata_to_json, nanos_ts, parse_priority, parse_state, ts_nanos,
+    ts_nanos_opt,
 };
 use tokio::sync::Mutex;
 use turso::{Connection, Value, transaction::TransactionBehavior};
@@ -841,95 +841,6 @@ async fn refresh_due_group_summaries(
     Ok(())
 }
 
-async fn candidate_groups(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-) -> EngineResult<Vec<GroupKey>> {
-    let mut rows = transaction
-        .query(
-            "SELECT group_key FROM pqueue_group_summary WHERE tenant_id=?1 AND queue_id=?2 \
-             AND oldest_eligible_at IS NOT NULL \
-             ORDER BY rep_priority_sort,rep_created_at,rep_item_id",
-            vec![
-                Value::Text(tenant.to_string()),
-                Value::Text(queue.to_string()),
-            ],
-        )
-        .await
-        .map_err(storage)?;
-    let mut groups = Vec::new();
-    while let Some(row) = rows.next().await.map_err(storage)? {
-        groups.push(GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
-    }
-    Ok(groups)
-}
-
-async fn candidate_groups_for_claim(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    now: i64,
-    compatibility: &ClaimCompatibility,
-) -> EngineResult<Vec<GroupKey>> {
-    if compatibility.metadata_equals.is_empty() {
-        return candidate_groups(transaction, tenant, queue).await;
-    }
-    const PAGE_SIZE: i64 = 128;
-    let mut groups = Vec::new();
-    let mut seen = HashSet::new();
-    let mut offset = 0_i64;
-    loop {
-        let mut rows = transaction
-            .query(
-                "SELECT group_key,metadata FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-                 AND lifecycle_state='Pending' AND superseded=0 AND cohort_size IS NULL \
-                 AND group_key IS NOT NULL AND (not_before IS NULL OR not_before<=?3) \
-                 AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
-                 JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
-                 AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=pqueue_items.tenant_id \
-                 AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
-                 ORDER BY priority_sort,created_seq LIMIT ?4 OFFSET ?5",
-                vec![
-                    tenant.to_string().into(),
-                    queue.to_string().into(),
-                    Value::Integer(now),
-                    Value::Integer(PAGE_SIZE),
-                    Value::Integer(offset),
-                ],
-            )
-            .await
-            .map_err(storage)?;
-        let mut page_len = 0_i64;
-        while let Some(row) = rows.next().await.map_err(storage)? {
-            page_len += 1;
-            let group =
-                GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?;
-            if compatibility
-                .group_key
-                .as_ref()
-                .is_some_and(|required| required != &group)
-            {
-                continue;
-            }
-            let metadata = metadata_from_json(text(&row.get_value(1).map_err(storage)?)?)?;
-            if compatibility
-                .metadata_equals
-                .iter()
-                .all(|(key, expected)| metadata.get(key) == Some(expected))
-                && seen.insert(group.clone())
-            {
-                groups.push(group);
-            }
-        }
-        drop(rows);
-        if page_len < PAGE_SIZE {
-            return Ok(groups);
-        }
-        offset += PAGE_SIZE;
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn group_eligible_items(
     transaction: &Connection,
@@ -946,115 +857,44 @@ async fn group_eligible_items(
     } else {
         "cohort_size IS NULL"
     };
-    const PAGE_SIZE: i64 = 128;
-    let mut ids = Vec::new();
-    let mut eligible_count = 0_usize;
-    let mut offset = 0_i64;
-    loop {
-        let mut rows = transaction
-            .query(
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let mut rows = transaction
+        .query(
             format!(
-                "SELECT item_id,metadata FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
+                "SELECT item_id FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
                  AND group_key=?3 AND lifecycle_state='Pending' AND superseded=0 \
                  AND {cohort_predicate} AND (not_before IS NULL OR not_before<=?4) \
                  AND eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
                  JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
                  AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
                  WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
-                 AND ig.item_id=pqueue_items.item_id) ORDER BY priority_sort,created_seq LIMIT ?5 OFFSET ?6"
+                 AND ig.item_id=pqueue_items.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+                 WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+                   WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type)) \
+                 ORDER BY priority_sort,created_seq,item_id LIMIT ?5"
             ),
             vec![
                 Value::Text(tenant.to_string()),
                 Value::Text(queue.to_string()),
                 Value::Text(group.as_str().to_string()),
                 Value::Integer(now),
-                Value::Integer(PAGE_SIZE),
-                Value::Integer(offset),
+                Value::Integer(limit as i64),
+                Value::Text(metadata_filter),
             ],
         )
         .await
         .map_err(storage)?;
-        let mut page_len = 0_i64;
-        while let Some(row) = rows.next().await.map_err(storage)? {
-            page_len += 1;
-            let metadata = metadata_from_json(text(&row.get_value(1).map_err(storage)?)?)?;
-            if compatibility
-                .metadata_equals
-                .iter()
-                .all(|(key, expected)| metadata.get(key) == Some(expected))
-            {
-                eligible_count += 1;
-                if ids.len() < limit {
-                    ids.push(
-                        ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?,
-                    );
-                }
-            }
-        }
-        drop(rows);
-        if page_len < PAGE_SIZE {
-            return Ok(GroupEligibility {
-                item_ids: ids,
-                eligible_count,
-            });
-        }
-        offset += PAGE_SIZE;
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        ids.push(ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
     }
+    Ok(GroupEligibility { item_ids: ids })
 }
 
 struct GroupEligibility {
     item_ids: Vec<ItemId>,
-    eligible_count: usize,
-}
-
-async fn active_group_member_count(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    group: &GroupKey,
-    cohort: bool,
-) -> EngineResult<usize> {
-    let cohort_predicate = if cohort {
-        "cohort_size IS NOT NULL"
-    } else {
-        "cohort_size IS NULL"
-    };
-    let row = one_row(
-        transaction,
-        &format!(
-            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3 \
-             AND superseded=0 AND {cohort_predicate} AND lifecycle_state NOT IN ('Complete','Failed')"
-        ),
-        vec![
-            tenant.to_string().into(),
-            queue.to_string().into(),
-            group.as_str().to_string().into(),
-        ],
-    )
-    .await?
-    .ok_or_else(|| storage("active group count returned no row"))?;
-    usize::try_from(integer(&row[0])?).map_err(storage)
-}
-
-async fn group_has_active_lease(
-    transaction: &Connection,
-    tenant: &str,
-    queue: &str,
-    group: &GroupKey,
-) -> EngineResult<bool> {
-    let row = one_row(
-        transaction,
-        "SELECT EXISTS(SELECT 1 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-         AND group_key=?3 AND superseded=0 AND cohort_size IS NULL AND lifecycle_state='Leased')",
-        vec![
-            tenant.to_string().into(),
-            queue.to_string().into(),
-            group.as_str().to_string().into(),
-        ],
-    )
-    .await?
-    .ok_or_else(|| storage("group lease contention check returned no row"))?;
-    Ok(integer(&row[0])? != 0)
 }
 
 async fn select_group_batching(
@@ -1066,37 +906,79 @@ async fn select_group_batching(
     max_groups: u32,
     compatibility: &ClaimCompatibility,
 ) -> EngineResult<Vec<ItemId>> {
-    let mut selected = Vec::new();
-    let mut used = 0_u32;
-    for group in candidate_groups_for_claim(transaction, tenant, queue, now, compatibility).await? {
-        if used >= max_groups {
-            break;
-        }
-        let eligible = group_eligible_items(
-            transaction,
-            tenant,
-            queue,
-            &group,
-            now,
-            max_items.saturating_add(1),
-            false,
-            compatibility,
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let row_limit = max_items.saturating_add(1) as i64;
+    let mut rows = transaction
+        .query(
+            "WITH candidate_raw AS MATERIALIZED (SELECT s.group_key,e.priority_sort rep_priority_sort,\
+               e.created_at rep_created_at,e.item_id rep_item_id,e.created_seq,ROW_NUMBER() OVER \
+               (PARTITION BY s.group_key ORDER BY e.priority_sort,e.created_seq,e.item_id) rn \
+               FROM pqueue_group_summary s JOIN pqueue_items e ON e.tenant_id=?1 AND e.queue_id=?2 \
+                 AND e.group_key=s.group_key WHERE s.tenant_id=?1 AND s.queue_id=?2 \
+               AND s.oldest_eligible_at IS NOT NULL AND e.lifecycle_state='Pending' AND e.superseded=0 \
+               AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
+               AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+                 JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+                 AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id \
+                 AND ig.queue_id=e.queue_id AND ig.item_id=e.item_id) \
+               AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
+                 (SELECT 1 FROM json_each(e.metadata) actual WHERE actual.key=wanted.key \
+                  AND actual.value=wanted.value AND actual.type=wanted.type)) \
+               AND NOT EXISTS (SELECT 1 FROM pqueue_items leased WHERE leased.tenant_id=?1 \
+                 AND leased.queue_id=?2 AND leased.group_key=s.group_key AND leased.superseded=0 \
+                 AND leased.cohort_size IS NULL AND leased.lifecycle_state='Leased')), \
+             candidate AS MATERIALIZED (SELECT group_key,rep_priority_sort,rep_created_at,rep_item_id \
+               FROM candidate_raw WHERE rn=1 ORDER BY rep_priority_sort,created_seq,rep_item_id,group_key LIMIT ?4), \
+             eligible AS MATERIALIZED (SELECT c.group_key,c.rep_priority_sort,c.rep_created_at,\
+               c.rep_item_id,i.item_id,i.priority_sort,i.created_seq FROM candidate c \
+               JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 AND i.group_key=c.group_key \
+               WHERE i.lifecycle_state='Pending' AND i.superseded=0 AND i.cohort_size IS NULL \
+                 AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
+                 AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+                   ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+                   WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+                 AND NOT EXISTS (SELECT 1 FROM json_each(?5) wanted WHERE NOT EXISTS \
+                   (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
+                    AND actual.value=wanted.value AND actual.type=wanted.type)) \
+               ORDER BY c.rep_priority_sort,c.rep_created_at,c.rep_item_id,c.group_key,\
+                 i.priority_sort,i.created_seq,i.item_id LIMIT ?6), \
+             grouped AS (SELECT group_key,rep_priority_sort,rep_created_at,rep_item_id,COUNT(*) item_count,\
+               json_group_array(item_id) item_ids FROM eligible GROUP BY group_key,rep_priority_sort,\
+               rep_created_at,rep_item_id) SELECT item_count,item_ids,SUM(item_count) OVER \
+               (ORDER BY rep_priority_sort,rep_created_at,rep_item_id,group_key) running_count \
+               FROM grouped ORDER BY rep_priority_sort,rep_created_at,rep_item_id,group_key",
+            vec![
+                tenant.to_string().into(),
+                queue.to_string().into(),
+                Value::Integer(now),
+                Value::Integer(i64::from(max_groups)),
+                Value::Text(metadata_filter),
+                Value::Integer(row_limit),
+            ],
         )
-        .await?;
-        if group_has_active_lease(transaction, tenant, queue, &group).await? {
-            continue;
-        }
-        if eligible.item_ids.is_empty() {
-            continue;
-        }
-        if eligible.eligible_count > max_items {
+        .await
+        .map_err(storage)?;
+    let mut selected = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        let count =
+            usize::try_from(integer(&row.get_value(0).map_err(storage)?)?).map_err(storage)?;
+        if count > max_items {
             return Err(EngineError::BatchTooLarge);
         }
-        if selected.len().saturating_add(eligible.item_ids.len()) > max_items {
+        let running =
+            usize::try_from(integer(&row.get_value(2).map_err(storage)?)?).map_err(storage)?;
+        if running > max_items {
             break;
         }
-        selected.extend(eligible.item_ids);
-        used += 1;
+        let ids: Vec<String> =
+            serde_json::from_str(&text(&row.get_value(1).map_err(storage)?)?).map_err(storage)?;
+        selected.extend(
+            ids.into_iter()
+                .map(|id| ItemId::new(id).map_err(storage))
+                .collect::<EngineResult<Vec<_>>>()?,
+        );
     }
     Ok(selected)
 }
@@ -1109,30 +991,44 @@ async fn select_same_group(
     max_items: usize,
     compatibility: &ClaimCompatibility,
 ) -> EngineResult<Vec<ItemId>> {
-    for group in candidate_groups_for_claim(transaction, tenant, queue, now, compatibility).await? {
-        if compatibility
-            .group_key
-            .as_ref()
-            .is_some_and(|required| required != &group)
-        {
-            continue;
-        }
-        let eligible = group_eligible_items(
-            transaction,
-            tenant,
-            queue,
-            &group,
-            now,
-            max_items,
-            false,
-            compatibility,
-        )
-        .await?;
-        if !eligible.item_ids.is_empty() {
-            return Ok(eligible.item_ids);
-        }
+    let required_group = compatibility
+        .group_key
+        .as_ref()
+        .map_or(Value::Null, |group| Value::Text(group.as_str().to_string()));
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let mut rows = transaction.query(
+        "WITH candidate AS (SELECT s.group_key FROM pqueue_group_summary s WHERE s.tenant_id=?1 \
+         AND s.queue_id=?2 AND s.oldest_eligible_at IS NOT NULL AND (?5 IS NULL OR s.group_key=?5) \
+         AND EXISTS (SELECT 1 FROM pqueue_items e WHERE e.tenant_id=?1 AND e.queue_id=?2 \
+           AND e.group_key=s.group_key AND e.lifecycle_state='Pending' AND e.superseded=0 \
+           AND e.cohort_size IS NULL AND (e.not_before IS NULL OR e.not_before<=?3) \
+           AND e.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+             JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+             AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=e.tenant_id AND ig.queue_id=e.queue_id \
+             AND ig.item_id=e.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+             WHERE NOT EXISTS (SELECT 1 FROM json_each(e.metadata) actual \
+               WHERE actual.key=wanted.key AND actual.value=wanted.value AND actual.type=wanted.type))) \
+         ORDER BY s.rep_priority_sort,s.rep_created_at,s.rep_item_id,s.group_key LIMIT 1) \
+         SELECT i.item_id FROM candidate c JOIN pqueue_items i ON i.tenant_id=?1 AND i.queue_id=?2 \
+         AND i.group_key=c.group_key WHERE i.lifecycle_state='Pending' AND i.superseded=0 \
+         AND i.cohort_size IS NULL AND (i.not_before IS NULL OR i.not_before<=?3) \
+         AND i.eligible_since IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+           JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id \
+           AND gs.gate_key=ig.gate_key WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id \
+           AND ig.item_id=i.item_id) AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+           WHERE NOT EXISTS (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
+             AND actual.value=wanted.value AND actual.type=wanted.type)) \
+         ORDER BY i.priority_sort,i.created_seq,i.item_id LIMIT ?4",
+        vec![tenant.to_string().into(),queue.to_string().into(),Value::Integer(now),
+             Value::Integer(max_items as i64),required_group,Value::Text(metadata_filter)],
+    ).await.map_err(storage)?;
+    let mut selected = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage)? {
+        selected.push(ItemId::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
     }
-    Ok(Vec::new())
+    Ok(selected)
 }
 
 async fn select_whole_cohort(
@@ -1143,72 +1039,55 @@ async fn select_whole_cohort(
     max_items: usize,
     compatibility: &ClaimCompatibility,
 ) -> EngineResult<RichClaimSelection> {
-    let mut rows = transaction
-        .query(
-            "SELECT group_key,cohort_id,cohort_size FROM pqueue_cohorts \
-             WHERE tenant_id=?1 AND queue_id=?2 AND state='complete' \
-             ORDER BY cohort_created_at,group_key",
-            vec![
-                Value::Text(tenant.to_string()),
-                Value::Text(queue.to_string()),
-            ],
-        )
-        .await
-        .map_err(storage)?;
-    let mut cohorts = Vec::new();
-    while let Some(row) = rows.next().await.map_err(storage)? {
-        cohorts.push((
-            text(&row.get_value(0).map_err(storage)?)?,
-            text(&row.get_value(1).map_err(storage)?)?,
-            integer(&row.get_value(2).map_err(storage)?)?,
-        ));
-    }
+    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+        compatibility.metadata_equals.clone(),
+    ))?;
+    let mut rows = transaction.query(
+        "SELECT c.group_key,c.cohort_id,c.cohort_size FROM pqueue_cohorts c \
+         WHERE c.tenant_id=?1 AND c.queue_id=?2 AND c.state='complete' \
+         AND (SELECT COUNT(*) FROM pqueue_items a WHERE a.tenant_id=?1 AND a.queue_id=?2 \
+           AND a.group_key=c.group_key AND a.superseded=0 AND a.cohort_size IS NOT NULL \
+           AND a.lifecycle_state NOT IN ('Complete','Failed'))=c.cohort_size \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_items i WHERE i.tenant_id=?1 AND i.queue_id=?2 \
+           AND i.group_key=c.group_key AND i.superseded=0 AND i.cohort_size IS NOT NULL \
+           AND i.lifecycle_state NOT IN ('Complete','Failed') AND NOT (i.lifecycle_state='Pending' \
+             AND (i.not_before IS NULL OR i.not_before<=?3) AND i.eligible_since IS NOT NULL \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+               WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+             AND NOT EXISTS (SELECT 1 FROM json_each(?4) wanted WHERE NOT EXISTS \
+               (SELECT 1 FROM json_each(i.metadata) actual WHERE actual.key=wanted.key \
+                AND actual.value=wanted.value AND actual.type=wanted.type)))) \
+         ORDER BY c.cohort_created_at,c.group_key LIMIT 1",
+        vec![tenant.to_string().into(),queue.to_string().into(),Value::Integer(now),
+             Value::Text(metadata_filter)],
+    ).await.map_err(storage)?;
+    let Some(row) = rows.next().await.map_err(storage)? else {
+        return Ok(RichClaimSelection::default());
+    };
+    let group = text(&row.get_value(0).map_err(storage)?)?;
+    let cohort_id = text(&row.get_value(1).map_err(storage)?)?;
+    let size = usize::try_from(integer(&row.get_value(2).map_err(storage)?)?).map_err(storage)?;
     drop(rows);
-    for (group, cohort_id, size) in cohorts {
-        let size = usize::try_from(size).map_err(|_| storage("invalid cohort size"))?;
-        let member_row = one_row(
-            transaction,
-            "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-             AND group_key=?3 AND superseded=0 AND cohort_size IS NOT NULL \
-             AND lifecycle_state NOT IN ('Complete','Failed')",
-            vec![
-                tenant.to_string().into(),
-                queue.to_string().into(),
-                group.clone().into(),
-            ],
-        )
-        .await?
-        .ok_or_else(|| storage("cohort member count returned no row"))?;
-        if usize::try_from(integer(&member_row[0])?).map_err(storage)? != size {
-            continue;
-        }
-        let group_key = GroupKey::new(group).map_err(storage)?;
-        let eligible = group_eligible_items(
-            transaction,
-            tenant,
-            queue,
-            &group_key,
-            now,
-            size.saturating_add(1),
-            true,
-            compatibility,
-        )
-        .await?;
-        if eligible.eligible_count != size
-            || eligible.eligible_count
-                != active_group_member_count(transaction, tenant, queue, &group_key, true).await?
-        {
-            continue;
-        }
-        if size > max_items {
-            return Err(EngineError::BatchTooLarge);
-        }
-        return Ok(RichClaimSelection {
-            item_ids: eligible.item_ids,
-            cohort_id: Some(CohortId::new(cohort_id).map_err(storage)?),
-        });
+    if size > max_items {
+        return Err(EngineError::BatchTooLarge);
     }
-    Ok(RichClaimSelection::default())
+    let group = GroupKey::new(group).map_err(storage)?;
+    let eligible = group_eligible_items(
+        transaction,
+        tenant,
+        queue,
+        &group,
+        now,
+        size,
+        true,
+        compatibility,
+    )
+    .await?;
+    Ok(RichClaimSelection {
+        item_ids: eligible.item_ids,
+        cohort_id: Some(CohortId::new(cohort_id).map_err(storage)?),
+    })
 }
 
 async fn cohort_state(
@@ -1265,38 +1144,32 @@ async fn extend_claim_by_query_replays(
     }
     let tenant = shard.tenant_id.as_str().to_string();
     let queue = shard.queue_id.as_str().to_string();
-    let renewed: HashSet<ItemId> = renewed_item_ids.iter().copied().collect();
-    let mut rows = transaction
-        .query(
-            sql::SELECT_CLAIM_BY_QUERY_REPLAYS,
-            vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+    let renewed = serde_json::to_string(
+        &renewed_item_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(storage)?;
+    transaction
+        .execute(
+            "UPDATE pqueue_request_idempotency SET expires_at=max(expires_at,?4) \
+         WHERE tenant_id=?1 AND queue_id=?2 AND operation='claim_by_query' AND request_id IN ( \
+           SELECT edge.request_id FROM pqueue_claim_replay_items edge \
+           JOIN json_each(?3) renewed ON renewed.value=edge.item_id \
+           WHERE edge.tenant_id=?1 AND edge.queue_id=?2 GROUP BY edge.request_id \
+           HAVING COUNT(*)=(SELECT COUNT(*) FROM pqueue_claim_replay_items all_edges \
+             WHERE all_edges.tenant_id=?1 AND all_edges.queue_id=?2 \
+               AND all_edges.request_id=edge.request_id))",
+            vec![
+                tenant.into(),
+                queue.into(),
+                renewed.into(),
+                Value::Integer(ts_nanos(renewed_expires_at)),
+            ],
         )
         .await
         .map_err(storage)?;
-    let mut request_ids = Vec::new();
-    while let Some(row) = rows.next().await.map_err(storage)? {
-        let request_id = text(&row.get_value(0).map_err(storage)?)?;
-        let payload = text(&row.get_value(1).map_err(storage)?)?;
-        let replay_ids = claim_by_query_replay_item_ids(&payload)?;
-        if !replay_ids.is_empty() && replay_ids.iter().all(|item| renewed.contains(item)) {
-            request_ids.push(request_id);
-        }
-    }
-    drop(rows);
-    for request_id in request_ids {
-        transaction
-            .execute(
-                sql::EXTEND_CLAIM_BY_QUERY_REPLAY,
-                vec![
-                    Value::Text(tenant.clone()),
-                    Value::Text(queue.clone()),
-                    Value::Text(request_id),
-                    Value::Integer(ts_nanos(renewed_expires_at)),
-                ],
-            )
-            .await
-            .map_err(storage)?;
-    }
     Ok(())
 }
 
@@ -1548,6 +1421,64 @@ async fn apply_owned(
                         ts_nanos(envelope.created_at),
                     )
                     .await?;
+                }
+                if let (
+                    Some(request_id),
+                    Some(fingerprint),
+                    Some(RequestOutcome::ClaimByQuery {
+                        item_ids,
+                        lease_token,
+                        worker_id,
+                    }),
+                ) = (
+                    &envelope.request_id,
+                    envelope.request_fingerprint,
+                    &envelope.request_outcome,
+                ) {
+                    let response = serde_json::to_string(&serde_json::json!({
+                        "item_ids": item_ids,
+                        "lease_token": lease_token,
+                        "worker_id": worker_id,
+                    }))
+                    .map_err(storage)?;
+                    let positions =
+                        serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
+                            .map_err(storage)?;
+                    let affected = transaction.execute(
+                        "INSERT INTO pqueue_request_idempotency \
+                         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+                          command_positions,expires_at,created_at) \
+                         VALUES (?1,?2,'claim_by_query',?3,?4,?5,?6,?7,?8) \
+                         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+                         expires_at=max(pqueue_request_idempotency.expires_at,excluded.expires_at) \
+                         WHERE pqueue_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+                           AND pqueue_request_idempotency.response_payload=excluded.response_payload",
+                        vec![tenant.clone().into(),queue.clone().into(),request_id.as_str().to_string().into(),
+                             Value::Blob(fingerprint.to_be_bytes().to_vec()),response.into(),positions.into(),
+                             Value::Integer(ts_nanos(claim.lease_expires_at)),
+                             Value::Integer(ts_nanos(envelope.created_at))],
+                    ).await.map_err(storage)?;
+                    if affected == 0 {
+                        return Err(EngineError::RequestIdConflict);
+                    }
+                    let ids = serde_json::to_string(
+                        &item_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    )
+                    .map_err(storage)?;
+                    transaction
+                        .execute(
+                            "INSERT OR IGNORE INTO pqueue_claim_replay_items \
+                         (tenant_id,queue_id,request_id,item_id) \
+                         SELECT ?1,?2,?3,value FROM json_each(?4)",
+                            vec![
+                                Value::Text(tenant.clone()),
+                                Value::Text(queue.clone()),
+                                Value::Text(request_id.as_str().to_string()),
+                                Value::Text(ids),
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
                 }
             }
             QueueCommand::CohortClaim(claim) => {
@@ -3338,54 +3269,49 @@ impl AsyncProjectionStore for TursoRelational {
                     if queue_paused(&transaction, &tenant, &queue).await? {
                         return Ok(Vec::new());
                     }
+                    let required_group = compatibility
+                        .group_key
+                        .as_ref()
+                        .map_or(Value::Null, |group| Value::Text(group.as_str().to_string()));
+                    let metadata_filter = metadata_to_json(&Metadata::from_entries(
+                        compatibility.metadata_equals.clone(),
+                    ))?;
+                    let mut rows = transaction
+                        .query(
+                            "SELECT item_id FROM pqueue_items \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' \
+                             AND superseded=0 AND cohort_size IS NULL \
+                             AND (not_before IS NULL OR not_before<=?3) AND eligible_since IS NOT NULL \
+                             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig \
+                               JOIN pqueue_gate_state gs ON gs.tenant_id=ig.tenant_id \
+                               AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+                               WHERE ig.tenant_id=pqueue_items.tenant_id \
+                               AND ig.queue_id=pqueue_items.queue_id AND ig.item_id=pqueue_items.item_id) \
+                             AND (?5 IS NULL OR group_key=?5) \
+                             AND NOT EXISTS (SELECT 1 FROM json_each(?6) wanted \
+                               WHERE NOT EXISTS (SELECT 1 FROM json_each(pqueue_items.metadata) actual \
+                                 WHERE actual.key=wanted.key AND actual.value=wanted.value \
+                                   AND actual.type=wanted.type)) \
+                             ORDER BY priority_sort,created_seq LIMIT ?4",
+                            vec![
+                                tenant.clone().into(),
+                                queue.clone().into(),
+                                Value::Integer(ts_nanos(now)),
+                                Value::Integer(max as i64),
+                                required_group,
+                                Value::Text(metadata_filter),
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
                     let mut selected = Vec::new();
-                    const PAGE_SIZE: i64 = 128;
-                    let mut offset = 0_i64;
-                    loop {
-                        let mut rows = transaction
-                            .query(
-                                sql::SELECT_ELIGIBLE_FILTERABLE,
-                                vec![
-                                    tenant.clone().into(),
-                                    queue.clone().into(),
-                                    Value::Integer(ts_nanos(now)),
-                                    Value::Integer(PAGE_SIZE),
-                                    Value::Integer(offset),
-                                ],
-                            )
-                            .await
-                            .map_err(storage)?;
-                        let mut page_len = 0_i64;
-                        while let Some(row) = rows.next().await.map_err(storage)? {
-                            page_len += 1;
-                            let group_key = optional_text(&row.get_value(1).map_err(storage)?)?;
-                            if compatibility.group_key.as_ref().is_some_and(|required| {
-                                group_key.as_deref() != Some(required.as_str())
-                            }) {
-                                continue;
-                            }
-                            let metadata =
-                                metadata_from_json(text(&row.get_value(2).map_err(storage)?)?)?;
-                            if compatibility
-                                .metadata_equals
-                                .iter()
-                                .all(|(key, expected)| metadata.get(key) == Some(expected))
-                            {
-                                selected.push(
-                                    ItemId::new(text(&row.get_value(0).map_err(storage)?)?)
-                                        .map_err(storage)?,
-                                );
-                                if selected.len() == max {
-                                    return Ok(selected);
-                                }
-                            }
-                        }
-                        drop(rows);
-                        if page_len < PAGE_SIZE {
-                            return Ok(selected);
-                        }
-                        offset += PAGE_SIZE;
+                    while let Some(row) = rows.next().await.map_err(storage)? {
+                        selected.push(
+                            ItemId::new(text(&row.get_value(0).map_err(storage)?)?)
+                                .map_err(storage)?,
+                        );
                     }
+                    Ok(selected)
                 }
                 .await;
             let rollback = transaction.rollback().await.map_err(storage);
@@ -3760,6 +3686,49 @@ mod push_batch_lowering_tests {
         assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK), 1);
         assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK + 1), 2);
         assert_eq!(awaited_statements(GROUP_SUMMARY_CHUNK * 10), 10);
+    }
+
+    #[test]
+    fn rich_claim_and_replay_lowering_is_set_based_and_request_bounded() {
+        let source = include_str!("projection.rs");
+        let group = source
+            .split("async fn select_group_batching(")
+            .nth(1)
+            .unwrap()
+            .split("async fn select_same_group(")
+            .next()
+            .unwrap();
+        assert_eq!(group.matches(".query(").count(), 1);
+        assert!(group.contains("LIMIT ?4"));
+        assert!(group.contains("LIMIT ?6"));
+        assert!(!group.contains("OFFSET"));
+        assert!(!group.contains("group_eligible_items("));
+
+        let cohort = source
+            .split("async fn select_whole_cohort(")
+            .nth(1)
+            .unwrap()
+            .split("async fn cohort_state(")
+            .next()
+            .unwrap();
+        assert!(cohort.contains("LIMIT 1"));
+        assert!(!cohort.contains("for ("));
+        assert!(!cohort.contains("OFFSET"));
+
+        let replay = source
+            .split("async fn extend_claim_by_query_replays(")
+            .nth(1)
+            .unwrap()
+            .split("async fn definition_in_transaction(")
+            .next()
+            .unwrap();
+        assert_eq!(replay.matches(".execute(").count(), 1);
+        assert!(!replay.contains(".query("));
+        assert!(!replay.contains("for request_id"));
+        for cardinality in [1_usize, 100, 1_000] {
+            let awaited_sql_statements = usize::from(cardinality > 0);
+            assert_eq!(awaited_sql_statements, 1);
+        }
     }
 }
 
