@@ -29,6 +29,7 @@ struct WorkerPool {
 
 struct WorkerSenders {
     data: Vec<mpsc::SyncSender<Job>>,
+    #[cfg(any(feature = "postgres", test))]
     coordination: mpsc::SyncSender<Job>,
 }
 
@@ -112,28 +113,32 @@ impl WorkerPool {
             data_senders.push(sender);
             workers.push(worker);
         }
-        let (coordination_sender, coordination_receiver) =
-            mpsc::sync_channel::<Job>(pending_per_worker);
-        let coordination_worker = match std::thread::Builder::new()
-            .name("pqueue-library-coordination".into())
-            .spawn(move || {
-                while let Ok(job) = coordination_receiver.recv() {
-                    job();
+        #[cfg(any(feature = "postgres", test))]
+        let coordination_sender = {
+            let (sender, receiver) = mpsc::sync_channel::<Job>(pending_per_worker);
+            let coordination_worker = match std::thread::Builder::new()
+                .name("pqueue-library-coordination".into())
+                .spawn(move || {
+                    while let Ok(job) = receiver.recv() {
+                        job();
+                    }
+                }) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    drop(data_senders);
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                    return Err(EngineError::Storage(error.to_string()));
                 }
-            }) {
-            Ok(worker) => worker,
-            Err(error) => {
-                drop(data_senders);
-                for worker in workers {
-                    let _ = worker.join();
-                }
-                return Err(EngineError::Storage(error.to_string()));
-            }
+            };
+            workers.push(coordination_worker);
+            sender
         };
-        workers.push(coordination_worker);
         Ok(Self {
             senders: Mutex::new(Some(WorkerSenders {
                 data: data_senders,
+                #[cfg(any(feature = "postgres", test))]
                 coordination: coordination_sender,
             })),
             _workers: Mutex::new(Some(workers)),
@@ -159,6 +164,7 @@ impl WorkerPool {
         Self::submit_to(sender, operation)
     }
 
+    #[cfg(any(feature = "postgres", test))]
     fn submit_coordination<T, F>(
         &self,
         operation: F,
