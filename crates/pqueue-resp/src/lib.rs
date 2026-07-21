@@ -92,14 +92,33 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
     let limit = MAX_RUNTIME_TASKS.load(Ordering::SeqCst);
-    let guard = try_acquire_runtime_task_locked()
-        .unwrap_or_else(|| panic!("runtime task allocation would exceed governed limit {limit}"));
+    let guard = {
+        let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
+        try_acquire_runtime_task_locked()
+    }
+    .unwrap_or_else(|| panic!("runtime task allocation would exceed governed limit {limit}"));
     tokio::spawn(async move {
         let _guard = guard;
         future.await
     })
+}
+
+/// Try to spawn opportunistic application work without panicking when the node-wide task budget is full.
+/// Capacity is reserved under the same lock as mandatory spawns and released by the task-owned RAII guard.
+pub fn try_spawn_governed<F>(future: F) -> Option<tokio::task::JoinHandle<F::Output>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let guard = {
+        let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
+        try_acquire_runtime_task_locked()
+    }?;
+    Some(tokio::spawn(async move {
+        let _guard = guard;
+        future.await
+    }))
 }
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -1613,5 +1632,35 @@ mod tests {
         assert_eq!(err_text(&EngineError::StaleLease), "ERR pqueue stale_lease");
         assert_eq!(err_text(&EngineError::Superseded), "ERR pqueue superseded");
         assert_eq!(err_text(&EngineError::NotFound), "ERR no such queue");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn governed_task_cap_is_non_poisoning_and_retries_after_capacity_returns() {
+        assert_eq!(LIVE_RUNTIME_TASKS.load(Ordering::SeqCst), 0);
+        let prior_limit = MAX_RUNTIME_TASKS.swap(1, Ordering::SeqCst);
+        let prior_max = MAX_OBSERVED_TASKS.swap(0, Ordering::SeqCst);
+
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        let first = spawn_governed(async move {
+            let _ = wait.await;
+        });
+        assert_eq!(runtime_task_resource_counts(), (1, 1, 1));
+        assert!(try_spawn_governed(async {}).is_none());
+
+        let mandatory = std::panic::catch_unwind(|| spawn_governed(async {}));
+        assert!(mandatory.is_err(), "mandatory admission still fails closed");
+        assert!(
+            TASK_SPAWN_LOCK.lock().is_ok(),
+            "capacity panic must happen after releasing the admission lock"
+        );
+
+        release.send(()).unwrap();
+        first.await.unwrap();
+        let retry = try_spawn_governed(async { 7 }).expect("capacity is reusable after completion");
+        assert_eq!(retry.await.unwrap(), 7);
+        assert_eq!(LIVE_RUNTIME_TASKS.load(Ordering::SeqCst), 0);
+
+        MAX_RUNTIME_TASKS.store(prior_limit, Ordering::SeqCst);
+        MAX_OBSERVED_TASKS.store(prior_max, Ordering::SeqCst);
     }
 }

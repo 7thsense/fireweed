@@ -2,7 +2,7 @@
 // the deliberate codebase pattern, not convertible to bare `async fn` without changing the trait shape.
 #![allow(clippy::manual_async_fn)]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -210,6 +210,7 @@ struct RecoveryMaintenanceTask {
 struct RecoveryMaintenanceDispatcher {
     executor: BoundedBlockingExecutor,
     tasks: Mutex<Vec<RecoveryMaintenanceTask>>,
+    deferred: Mutex<VecDeque<QueueKey>>,
     dispatch_gate: tokio::sync::Mutex<()>,
 }
 
@@ -218,6 +219,7 @@ impl RecoveryMaintenanceDispatcher {
         Ok(Self {
             executor: BoundedBlockingExecutor::new(RECOVERY_MAINTENANCE_BLOCKING_CONCURRENCY)?,
             tasks: Mutex::new(Vec::with_capacity(RECOVERY_MAINTENANCE_TASK_LIMIT)),
+            deferred: Mutex::new(VecDeque::new()),
             dispatch_gate: tokio::sync::Mutex::new(()),
         })
     }
@@ -264,30 +266,51 @@ impl RecoveryMaintenanceDispatcher {
             }
         }
 
-        let (available, in_flight) = {
+        let (available, mut in_flight) = {
             let tasks = self
                 .tasks
                 .lock()
                 .expect("recovery maintenance tasks poisoned");
             (
                 RECOVERY_MAINTENANCE_TASK_LIMIT - tasks.len(),
-                tasks.iter().map(|task| task.shard.clone()).collect(),
+                tasks
+                    .iter()
+                    .map(|task| task.shard.clone())
+                    .collect::<HashSet<_>>(),
             )
         };
-        let shards = select_shards(available, &in_flight);
+        let mut shards = Vec::with_capacity(available);
+        {
+            let mut deferred = self
+                .deferred
+                .lock()
+                .expect("deferred recovery maintenance tasks poisoned");
+            while shards.len() < available {
+                let Some(shard) = deferred.pop_front() else {
+                    break;
+                };
+                if in_flight.insert(shard.clone()) {
+                    shards.push(shard);
+                }
+            }
+        }
+        if shards.len() < available {
+            shards.extend(select_shards(available - shards.len(), &in_flight));
+        }
 
         {
             let mut tasks = self
                 .tasks
                 .lock()
                 .expect("recovery maintenance tasks poisoned");
-            for shard in shards {
+            let mut shards = shards.into_iter();
+            while let Some(shard) = shards.next() {
                 debug_assert!(tasks.len() < RECOVERY_MAINTENANCE_TASK_LIMIT);
                 debug_assert!(!tasks.iter().any(|task| task.shard == shard));
                 let task_log = Arc::clone(&log);
                 let executor = self.executor.clone();
                 let task_shard = shard.clone();
-                let handle = pqueue_resp::spawn_governed(async move {
+                let Some(handle) = pqueue_resp::try_spawn_governed(async move {
                     let operation_shard = task_shard.clone();
                     let result = executor
                         .execute(move || {
@@ -311,7 +334,15 @@ impl RecoveryMaintenanceDispatcher {
                         );
                     }
                     result
-                });
+                }) else {
+                    let mut deferred = self
+                        .deferred
+                        .lock()
+                        .expect("deferred recovery maintenance tasks poisoned");
+                    deferred.push_back(shard);
+                    deferred.extend(shards);
+                    break;
+                };
                 tasks.push(RecoveryMaintenanceTask { shard, handle });
             }
         }

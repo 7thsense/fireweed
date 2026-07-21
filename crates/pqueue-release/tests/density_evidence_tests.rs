@@ -33,13 +33,13 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
     assert!(!SERVICE_MAIN.contains("metrics.num_alive_tasks()"));
     assert!(SERVICE_MAIN.contains("runtime_task_resource_counts()"));
     let recovery_maintenance = OBJECT_LOG_SQLITE_ADAPTER
-        .split("for shard in shards {")
+        .split("while let Some(shard) = shards.next()")
         .nth(1)
         .expect("recovery maintenance dispatch exists")
         .split("match first_error")
         .next()
         .expect("recovery maintenance dispatch ends");
-    assert!(recovery_maintenance.contains("pqueue_resp::spawn_governed"));
+    assert!(recovery_maintenance.contains("pqueue_resp::try_spawn_governed"));
     assert!(!recovery_maintenance.contains("tokio::spawn"));
     assert!(SERVICE_MAIN.contains("set_max_runtime_tasks(64)"));
     let dispatch = POSTGRES_WHOLE_OPERATION_ADAPTER
