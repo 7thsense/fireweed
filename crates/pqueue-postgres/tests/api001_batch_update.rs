@@ -65,7 +65,7 @@ fn qdef(max_batch: usize) -> pqueue_core::QueueDefinition {
     definition.max_push_batch_size = max_batch as u64;
     definition.max_claim_batch_size = max_batch as u64;
     definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
-    definition.eligibility_policy.max_gate_keys_per_item = Some(16);
+    definition.eligibility_policy.max_gate_keys_per_item = Some(2);
     definition
 }
 
@@ -168,7 +168,7 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
         let shard = pqueue_conformance::shard();
         backend.create_queue(qdef(100)).await.unwrap();
         let ids = backend
-            .push(&shard, pushes(6), pqueue_conformance::ts(0), None)
+            .push(&shard, pushes(10), pqueue_conformance::ts(0), None)
             .await
             .unwrap();
 
@@ -228,6 +228,38 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
                     BatchUpdateItemRef::ItemId(ItemId::from_u64(u64::MAX)),
                     "missing",
                 ),
+                update(
+                    BatchUpdateItemRef::Both {
+                        item_id: ids[6],
+                        client_item_key: key(7),
+                    },
+                    "mismatched-dual-ref",
+                ),
+                BatchUpdateEntry {
+                    fields: BatchUpdateValue::Replace(BTreeMap::from([(
+                        "payload".into(),
+                        Bytes::from_static(b"reserved"),
+                    )])),
+                    ..update(BatchUpdateItemRef::ItemId(ids[6]), "reserved-field")
+                },
+                BatchUpdateEntry {
+                    priority: BatchUpdateValue::Replace(PriorityValue::Timestamp(
+                        pqueue_conformance::ts(99),
+                    )),
+                    ..update(BatchUpdateItemRef::ItemId(ids[7]), "wrong-priority-kind")
+                },
+                BatchUpdateEntry {
+                    gate_keys: BatchUpdateValue::Replace(vec!["not a gate key".into()]),
+                    ..update(BatchUpdateItemRef::ItemId(ids[8]), "malformed-gate")
+                },
+                BatchUpdateEntry {
+                    gate_keys: BatchUpdateValue::Replace(vec![
+                        "gate-a".into(),
+                        "gate-b".into(),
+                        "gate-c".into(),
+                    ]),
+                    ..update(BatchUpdateItemRef::ItemId(ids[9]), "too-many-gates")
+                },
             ],
         };
         let response = backend
@@ -256,6 +288,11 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
                 BatchUpdateOutcome::Conflict,
                 BatchUpdateOutcome::Terminal,
                 BatchUpdateOutcome::NotFound,
+                BatchUpdateOutcome::Invalid,
+                BatchUpdateOutcome::Invalid,
+                BatchUpdateOutcome::Invalid,
+                BatchUpdateOutcome::Invalid,
+                BatchUpdateOutcome::Invalid,
             ]
         );
         let replay = backend
@@ -279,6 +316,15 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
         assert_eq!(view.not_before, Some(pqueue_conformance::ts(50)));
         assert_eq!(view.payload, Some(Bytes::from_static(b"payload-v2")));
         assert_eq!(view.fields, fields("by-id"));
+        for view in backend
+            .live_items(&shard, &[key(6), key(7), key(8), key(9)])
+            .await
+            .unwrap()
+        {
+            let view = view.expect("invalid entry leaves its pending item live");
+            assert_eq!(view.item_version, 1);
+            assert_eq!(view.fields, fields(Bytes::from_static(b"before")));
+        }
         let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
         client
             .batch_execute(&format!("SET search_path TO {schema}"))
@@ -293,6 +339,59 @@ fn batch_update_preserves_order_and_idempotency_across_mixed_outcomes() {
             .unwrap();
         assert!(row.get::<_, String>(0).contains("updated"));
         assert_eq!(row.get::<_, Vec<String>>(1), vec!["gate-a", "gate-b"]);
+    });
+}
+
+#[test]
+fn disabled_gate_update_is_invalid_without_aborting_valid_sibling() {
+    let Some(url) = pg_url("disabled_gate_update_is_invalid_without_aborting_valid_sibling") else {
+        return;
+    };
+    let schema = fresh_schema();
+    futures::executor::block_on(async {
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        let shard = pqueue_conformance::shard();
+        backend
+            .create_queue(pqueue_conformance::qdef())
+            .await
+            .unwrap();
+        let ids = backend
+            .push(&shard, pushes(2), pqueue_conformance::ts(0), None)
+            .await
+            .unwrap();
+        let response = backend
+            .batch_update(
+                &shard,
+                BatchUpdateRequest {
+                    request_id: RequestId::new("disabled-gate-mixed").unwrap(),
+                    updates: vec![
+                        update(BatchUpdateItemRef::ItemId(ids[0]), "valid-sibling"),
+                        BatchUpdateEntry {
+                            gate_keys: BatchUpdateValue::Replace(vec!["disabled".into()]),
+                            ..update(BatchUpdateItemRef::ItemId(ids[1]), "invalid-gate")
+                        },
+                    ],
+                },
+                pqueue_conformance::ts(1),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.results,
+            vec![
+                BatchUpdateOutcome::Updated {
+                    item_id: ids[0],
+                    client_item_key: key(0),
+                    item_version: 2,
+                },
+                BatchUpdateOutcome::Invalid,
+            ]
+        );
+        let views = backend.live_items(&shard, &[key(0), key(1)]).await.unwrap();
+        assert_eq!(views[0].as_ref().unwrap().fields, fields("valid-sibling"));
+        assert_eq!(views[1].as_ref().unwrap().fields, fields("before"));
+        assert_eq!(views[1].as_ref().unwrap().item_version, 1);
     });
 }
 

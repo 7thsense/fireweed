@@ -7369,10 +7369,17 @@ impl BatchUpdatePort for PostgresRelationalBackend {
                     BatchUpdateItemRef::Both {
                         item_id,
                         client_item_key,
-                    } => by_key
-                        .get(client_item_key.as_str())
-                        .filter(|resolved| *resolved == &item_id.to_string())
-                        .cloned(),
+                    } => {
+                        let id = item_id.to_string();
+                        match (by_id.get(&id), by_key.get(client_item_key.as_str())) {
+                            (Some(_), Some(resolved)) if resolved == &id => Some(id),
+                            (Some(_), Some(_)) => {
+                                outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
+                                continue;
+                            }
+                            _ => None,
+                        }
+                    }
                 };
                 let Some(resolved_id) = resolved_id else {
                     outcomes[outcome_index] = BatchUpdateOutcome::NotFound;
@@ -7408,7 +7415,7 @@ impl BatchUpdatePort for PostgresRelationalBackend {
                         let reserved_probe =
                             fields.keys().cloned().map(|name| (name, None)).collect();
                         if validate_api001_reserved_write_fields(&reserved_probe).is_err() {
-                            outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                            outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
                             continue;
                         }
                         Some(fields)
@@ -7442,7 +7449,7 @@ impl BatchUpdatePort for PostgresRelationalBackend {
                         .max_gate_keys_per_item
                         .is_some_and(|max| gate_keys.len() as u64 > max);
                     if malformed || disabled || over_cap {
-                        outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                        outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
                         continue;
                     }
                 }
@@ -7467,7 +7474,7 @@ impl BatchUpdatePort for PostgresRelationalBackend {
                             ) | (pqueue_core::PriorityModelKind::Text, PriorityValue::Text(_))
                         );
                         if !type_matches {
-                            outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                            outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
                             continue;
                         }
                         (

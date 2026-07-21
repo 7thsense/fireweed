@@ -1164,6 +1164,9 @@ pub enum BatchUpdateOutcome {
         client_item_key: ClientItemKey,
         item_version: u64,
     },
+    /// The target resolved, but this entry violates API-001 shape or queue-policy validation. Invalid
+    /// entries do not mutate or prevent valid siblings in the same best-effort batch from committing.
+    Invalid,
     Conflict,
     NotFound,
     Terminal,

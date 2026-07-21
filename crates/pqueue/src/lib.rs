@@ -2433,8 +2433,9 @@ impl<B: LibBackend> Pqueue<B> {
     /// [`EngineError::RequestIdConflict`].
     ///
     /// Each [`BatchUpdateValue::Keep`] leaves the stored value unchanged; `Replace` performs full
-    /// replacement. Leased entries return [`BatchUpdateOutcome::Conflict`], terminal entries return
-    /// `Terminal`, and successful entries bump `item_version` while preserving `eligible_since`.
+    /// replacement. Entry-local validation failures return [`BatchUpdateOutcome::Invalid`] without
+    /// aborting valid siblings, leased entries return `Conflict`, terminal entries return `Terminal`, and
+    /// successful entries bump `item_version` while preserving `eligible_since`.
     pub async fn batch_update(
         &self,
         queue: &QueueKey,
@@ -2445,13 +2446,6 @@ impl<B: LibBackend> Pqueue<B> {
     {
         if request.updates.is_empty() {
             return Err(EngineError::Invalid("empty batch update"));
-        }
-        for update in &request.updates {
-            if let BatchUpdateValue::Replace(fields) = &update.fields {
-                let field_ops: BTreeMap<String, Option<Bytes>> =
-                    fields.keys().cloned().map(|name| (name, None)).collect();
-                validate_api001_reserved_write_fields(&field_ops)?;
-            }
         }
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
