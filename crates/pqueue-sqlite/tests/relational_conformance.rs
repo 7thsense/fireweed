@@ -165,9 +165,10 @@ async fn sqlite_relational_log_replay_branch_read_as_of() {
         .await
         .unwrap();
 
+    let query_shard = shard.clone();
     let branched: Vec<pqueue_engine::ItemView> = backend
-        .read_as_of(&shard, branch_point, |projection| {
-            projection.peek(&shard, 10)
+        .read_as_of(&shard, branch_point, move |projection| {
+            projection.peek(&query_shard, 10)
         })
         .await
         .unwrap();
