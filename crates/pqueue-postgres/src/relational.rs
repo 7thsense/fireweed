@@ -2919,21 +2919,24 @@ fn apply_command_sql(
             // BQ-14d (TD-002 §gate): set/clear queue gate-key block state. A blocked gate key makes every
             // item carrying it ineligible (enforced by the eligibility anti-join). This is exact-on-read:
             // toggling a gate flips eligibility on the next claim with no per-item rewrite.
-            if c.blocked {
-                for gate_key in &c.gate_keys {
-                    let gk_str = gate_key.as_str().to_string();
+            let gate_keys = c
+                .gate_keys
+                .iter()
+                .map(|gate_key| gate_key.as_str().to_string())
+                .collect::<Vec<_>>();
+            if !gate_keys.is_empty() {
+                if c.blocked {
                     st(tx.execute(
-                        "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) VALUES ($1,$2,$3) \
+                        "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) \
+                         SELECT $1,$2,gate_key FROM UNNEST($3::text[]) AS incoming(gate_key) \
                          ON CONFLICT (tenant_id,queue_id,gate_key) DO NOTHING",
-                        &[&t, &q, &gk_str],
+                        &[&t, &q, &gate_keys],
                     ))?;
-                }
-            } else {
-                for gate_key in &c.gate_keys {
-                    let gk_str = gate_key.as_str().to_string();
+                } else {
                     st(tx.execute(
-                        "DELETE FROM pqueue_gate_state WHERE tenant_id=$1 AND queue_id=$2 AND gate_key=$3",
-                        &[&t, &q, &gk_str],
+                        "DELETE FROM pqueue_gate_state \
+                         WHERE tenant_id=$1 AND queue_id=$2 AND gate_key = ANY($3)",
+                        &[&t, &q, &gate_keys],
                     ))?;
                 }
             }
@@ -2945,12 +2948,28 @@ fn apply_command_sql(
         // (insert-or-overwrite by key), mirroring `pqueue-sqlite`'s arm. `CommitTransitionPort` itself is not
         // yet wired on this backend (a separate bead) — this arm only makes the storage ready for it.
         QueueCommand::WriteSideRecords(c) => {
-            for rec in &c.records {
+            if !c.records.is_empty() {
+                let keys = c
+                    .records
+                    .iter()
+                    .map(|record| record.key.clone())
+                    .collect::<Vec<_>>();
+                let payloads = c
+                    .records
+                    .iter()
+                    .map(|record| record.payload.to_vec())
+                    .collect::<Vec<_>>();
                 st(tx.execute(
                     "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
-                     VALUES ($1,$2,$3,$4) \
+                     SELECT $1,$2,batch.key,batch.payload \
+                     FROM ( \
+                       SELECT DISTINCT ON (key) key,payload \
+                       FROM UNNEST($3::bytea[],$4::bytea[]) WITH ORDINALITY \
+                         AS incoming(key,payload,ordinality) \
+                       ORDER BY key,ordinality DESC \
+                     ) AS batch \
                      ON CONFLICT(tenant_id,queue_id,key) DO UPDATE SET payload=EXCLUDED.payload",
-                    &[&t, &q, &rec.key, &rec.payload.as_ref()],
+                    &[&t, &q, &keys, &payloads],
                 ))?;
             }
             Ok(())
@@ -3721,44 +3740,54 @@ fn live_items_sql(
     shard: &QueueKey,
     keys: &[ClientItemKey],
 ) -> EngineResult<Vec<Option<LiveItemView>>> {
-    let (t, q) = parts(shard);
-    let mut out = Vec::with_capacity(keys.len());
-    for key in keys {
-        let row = st(client.query_opt(
-            "SELECT item_id, item_version, lifecycle_state, priority, group_key, not_before, \
-             retry_count, payload, fields FROM pqueue_items \
-             WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=$3 \
-               AND superseded=false AND lifecycle_state IN ('Pending','Leased')",
-            &[&t, &q, &key.as_str()],
-        ))?;
-        out.push(match row {
-            Some(row) => {
-                let id: String = row.get(0);
-                let state: String = row.get(2);
-                let group: Option<String> = row.get(4);
-                let not_before: Option<i64> = row.get(5);
-                let payload: Option<Vec<u8>> = row.get(7);
-                let fields: String = row.get(8);
-                Some(LiveItemView {
-                    item_id: ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?,
-                    client_item_key: key.clone(),
-                    item_version: row.get::<_, i64>(1) as u64,
-                    lifecycle_state: parse_state(&state)?,
-                    priority: parse_priority(row.get(3))?,
-                    group_key: group
-                        .map(GroupKey::new)
-                        .transpose()
-                        .map_err(|e| EngineError::Storage(e.to_string()))?,
-                    not_before: not_before.map(nanos_ts),
-                    attempt_count: row.get::<_, i64>(6) as u32,
-                    payload: payload.map(Bytes::from),
-                    fields: fields_from_json(fields)?,
-                })
-            }
-            None => None,
-        });
+    if keys.is_empty() {
+        return Ok(Vec::new());
     }
-    Ok(out)
+    let (t, q) = parts(shard);
+    let key_strings = keys
+        .iter()
+        .map(|key| key.as_str().to_string())
+        .collect::<Vec<_>>();
+    let rows = st(client.query(
+        "SELECT client_item_key, item_id, item_version, lifecycle_state, priority, group_key, not_before, \
+             retry_count, payload, fields FROM pqueue_items \
+             WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key = ANY($3) \
+               AND superseded=false AND lifecycle_state IN ('Pending','Leased')",
+        &[&t, &q, &key_strings],
+    ))?;
+    let mut by_key = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let key: String = row.get(0);
+        let id: String = row.get(1);
+        let state: String = row.get(3);
+        let group: Option<String> = row.get(5);
+        let not_before: Option<i64> = row.get(6);
+        let payload: Option<Vec<u8>> = row.get(8);
+        let fields: String = row.get(9);
+        by_key.insert(
+            key.clone(),
+            LiveItemView {
+                item_id: ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?,
+                client_item_key: ClientItemKey::new(key)
+                    .map_err(|e| EngineError::Storage(e.to_string()))?,
+                item_version: row.get::<_, i64>(2) as u64,
+                lifecycle_state: parse_state(&state)?,
+                priority: parse_priority(row.get(4))?,
+                group_key: group
+                    .map(GroupKey::new)
+                    .transpose()
+                    .map_err(|e| EngineError::Storage(e.to_string()))?,
+                not_before: not_before.map(nanos_ts),
+                attempt_count: row.get::<_, i64>(7) as u32,
+                payload: payload.map(Bytes::from),
+                fields: fields_from_json(fields)?,
+            },
+        );
+    }
+    Ok(keys
+        .iter()
+        .map(|key| by_key.get(key.as_str()).cloned())
+        .collect())
 }
 
 fn metrics_sql(client: &mut Client, shard: &QueueKey) -> EngineResult<QueueMetrics> {
@@ -6767,21 +6796,29 @@ impl PostgresRelational {
         let mut g = self.lock();
         let (tenant, queue) = parts(shard);
         let now_nanos = ts_nanos(now);
+        let ids = targets
+            .iter()
+            .map(|target| target.item_id.to_string())
+            .collect::<Vec<_>>();
+        let rows = st(g.client.query(
+            "SELECT item_id,lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash \
+             FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
+            &[&tenant, &queue, &ids],
+        ))?;
+        let rows = rows
+            .into_iter()
+            .map(|row| (row.get::<_, String>(0), row))
+            .collect::<HashMap<_, _>>();
         for target in targets {
-            let row = st(g.client.query_opt(
-                "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash \
-                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
-                &[&tenant, &queue, &target.item_id.to_string()],
-            ))?;
-            let Some(row) = row else {
+            let Some(row) = rows.get(&target.item_id.to_string()) else {
                 return Err(EngineError::NotFound);
             };
-            let state = parse_state(&row.get::<_, String>(0))?;
-            let fenced: bool = row.get(1);
-            let superseded: bool = row.get(2);
-            let cohort_size: Option<i64> = row.get(3);
-            let lease_expires_at: Option<i64> = row.get(4);
-            let stored_hash: Option<Vec<u8>> = row.get(5);
+            let state = parse_state(&row.get::<_, String>(1))?;
+            let fenced: bool = row.get(2);
+            let superseded: bool = row.get(3);
+            let cohort_size: Option<i64> = row.get(4);
+            let lease_expires_at: Option<i64> = row.get(5);
+            let stored_hash: Option<Vec<u8>> = row.get(6);
             if fenced {
                 return Err(EngineError::StaleLease);
             }
@@ -6813,16 +6850,15 @@ impl PostgresRelational {
         force: bool,
     ) -> EngineResult<Vec<ItemId>> {
         let mut g = self.lock();
-        let (tenant, queue) = parts(shard);
+        let flags = item_flags_map(&mut g.client, shard, ids)?;
         let mut present = Vec::new();
+        let mut seen = HashSet::with_capacity(ids.len());
         for id in ids {
-            if present.contains(id) {
+            if !seen.insert(*id) {
                 continue;
             }
-            let row=st(g.client.query_opt("SELECT lifecycle_state FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3", &[&tenant,&queue,&id.to_string()]))?;
-            if let Some(row) = row {
-                let state = parse_state(&row.get::<_, String>(0))?;
-                pqueue_engine::validate_purge_force(state == ItemState::Leased, force)?;
+            if let Some((state, _, _, _)) = flags.get(&id.to_string()) {
+                pqueue_engine::validate_purge_force(*state == ItemState::Leased, force)?;
                 present.push(*id);
             }
         }
@@ -6942,45 +6978,53 @@ impl PostgresRelational {
         let mut tx = st(g.client.transaction())?;
         st(tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))?;
         let result = (|| {
+            let ids = targets
+                .iter()
+                .map(|target| target.item_id.to_string())
+                .collect::<Vec<_>>();
+            let rows = st(tx.query(
+                "SELECT item_id,lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts \
+                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3) FOR SHARE",
+                &[&tenant, &queue, &ids],
+            ))?;
+            let rows = rows
+                .into_iter()
+                .map(|row| (row.get::<_, String>(0), row))
+                .collect::<HashMap<_, _>>();
             let mut attempts = Vec::with_capacity(targets.len());
             for target in targets {
-                let row = st(tx.query_opt(
-                    "SELECT lifecycle_state,fenced,superseded,cohort_size,lease_expires_at,lease_token_hash,item_version,retry_count,max_attempts \
-                     FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 FOR SHARE",
-                    &[&tenant, &queue, &target.item_id.to_string()],
-                ))?;
-                let Some(row) = row else {
+                let Some(row) = rows.get(&target.item_id.to_string()) else {
                     return Err(EngineError::NotFound);
                 };
-                let state = parse_state(&row.get::<_, String>(0))?;
-                if row.get::<_, bool>(1) {
+                let state = parse_state(&row.get::<_, String>(1))?;
+                if row.get::<_, bool>(2) {
                     return Err(EngineError::StaleLease);
                 }
                 if state.is_terminal() {
                     return Err(EngineError::Terminal);
                 }
-                if row.get::<_, bool>(2) {
+                if row.get::<_, bool>(3) {
                     return Err(EngineError::Superseded);
                 }
-                if row.get::<_, Option<i64>>(3).is_some() {
+                if row.get::<_, Option<i64>>(4).is_some() {
                     return Err(EngineError::Invalid("cohort member requires cohort lease"));
                 }
                 if state != ItemState::Leased {
                     return Err(EngineError::Invalid("item is not leased"));
                 }
-                let expires: Option<i64> = row.get(4);
-                let hash: Option<Vec<u8>> = row.get(5);
+                let expires: Option<i64> = row.get(5);
+                let hash: Option<Vec<u8>> = row.get(6);
                 if hash.as_deref() != Some(lease_hash(&target.lease_token).as_slice())
                     || expires.is_none_or(|value| value < now_nanos)
                 {
                     return Err(EngineError::StaleLease);
                 }
-                let version: i64 = row.get(6);
+                let version: i64 = row.get(7);
                 if version < 0 || version as u64 != target.item_version {
                     return Err(EngineError::Conflict);
                 }
-                let retry_count: i64 = row.get(7);
-                let max_attempts: i64 = row.get(8);
+                let retry_count: i64 = row.get(8);
+                let max_attempts: i64 = row.get(9);
                 attempts.push(pqueue_engine::FinalizeLeaseMember {
                     item_id: target.item_id,
                     attempt_count: u32::try_from(retry_count).map_err(|_| {
@@ -7976,6 +8020,81 @@ mod sql_shape_tests {
                 && ddl.contains("(item_id::numeric)")
                 && ddl.contains("WHERE lifecycle_state='Leased'")
         }));
+    }
+
+    #[test]
+    fn vector_commands_and_live_item_reads_do_not_scale_statement_count_with_records() {
+        let source = include_str!("relational.rs");
+        let set_gates = source
+            .split("QueueCommand::SetGates(c) =>")
+            .nth(1)
+            .unwrap()
+            .split("QueueCommand::WriteSideRecords(c) =>")
+            .next()
+            .unwrap();
+        assert!(set_gates.contains("FROM UNNEST($3::text[])"));
+        assert!(set_gates.contains("gate_key = ANY($3)"));
+        assert!(!set_gates.contains("for gate_key"));
+
+        let side_records = source
+            .split("QueueCommand::WriteSideRecords(c) =>")
+            .nth(1)
+            .unwrap()
+            .split("QueueCommand::AdvanceInstanceFence(c) =>")
+            .next()
+            .unwrap();
+        assert!(side_records.contains("FROM UNNEST($3::bytea[],$4::bytea[]) WITH ORDINALITY"));
+        assert!(side_records.contains("DISTINCT ON (key)"));
+        assert_eq!(side_records.matches("tx.execute(").count(), 1);
+        assert!(!side_records.contains("for rec"));
+
+        let live_items = source
+            .split("fn live_items_sql(")
+            .nth(1)
+            .unwrap()
+            .split("fn metrics_sql(")
+            .next()
+            .unwrap();
+        assert!(live_items.contains("client_item_key = ANY($3)"));
+        assert_eq!(live_items.matches("client.query(").count(), 1);
+        assert!(!live_items.contains("query_opt"));
+
+        let statement_count = |_records: usize| 1;
+        for records in [1, 100, 1_000] {
+            assert_eq!(statement_count(records), 1);
+        }
+
+        let renew = source
+            .split("pub(crate) fn async_renew_targets_validate(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn async_purge_items_validate(")
+            .next()
+            .unwrap();
+        assert!(renew.contains("item_id = ANY($3)"));
+        assert_eq!(renew.matches("g.client.query(").count(), 1);
+        assert!(!renew.contains("query_opt"));
+
+        let purge = source
+            .split("pub(crate) fn async_purge_items_validate(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn async_cohort_lease_validate(")
+            .next()
+            .unwrap();
+        assert!(purge.contains("item_flags_map"));
+        assert!(!purge.contains("query_opt"));
+
+        let finalize = source
+            .split("pub(crate) fn async_finalize_targets_validate(")
+            .nth(1)
+            .unwrap()
+            .split("pub(crate) fn async_push_idempotency(")
+            .next()
+            .unwrap();
+        assert!(finalize.contains("item_id = ANY($3) FOR SHARE"));
+        assert_eq!(finalize.matches("tx.query(").count(), 1);
+        assert!(!finalize.contains("query_opt"));
     }
 
     #[test]
