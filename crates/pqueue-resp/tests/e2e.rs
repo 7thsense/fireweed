@@ -4,7 +4,7 @@
 //! (plan section 3 drain-and-reconcile, validating Invariant 1 through the stock command surface).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use pqueue_core::{
@@ -22,6 +22,7 @@ use pqueue_memory::{ComposedMemoryBackend, ManualClock, composed_memory_backend}
 use pqueue_resp::{RespBackend, SystemClock, serve};
 use redis::Value;
 use redis::streams::StreamReadReply;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Boot the RESP front over a real ephemeral TCP port with a fresh memory backend + created queue, and
 /// return an off-the-shelf async Redis connection plus the backend handle (for operator-side setup).
@@ -508,14 +509,65 @@ fn ts_millis(ts: UtcTimestamp) -> i64 {
     ts.seconds * 1_000 + i64::from(ts.nanoseconds / 1_000_000)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn thousand_prebuffered_xadds_reach_backend_as_one_bounded_batch() {
+    let backend = Arc::new(LyingClaimedViewBackend::new(composed_memory_backend()));
+    backend.inner.create_queue(qdef()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Connect and fill the kernel receive queue before accept. This exercises the real socket reader while
+    // making the entire bounded pipeline available to its single 1 MiB incremental read window.
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut pipeline = Vec::new();
+    for priority in 0..1_000 {
+        let priority = priority.to_string();
+        let args = [
+            b"XADD".as_slice(),
+            b"t1:q1".as_slice(),
+            b"*".as_slice(),
+            b"priority".as_slice(),
+            priority.as_bytes(),
+            b"payload".as_slice(),
+            b"body".as_slice(),
+        ];
+        pipeline.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
+        for arg in args {
+            pipeline.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+            pipeline.extend_from_slice(arg);
+            pipeline.extend_from_slice(b"\r\n");
+        }
+    }
+    socket.write_all(&pipeline).await.unwrap();
+    let server = tokio::spawn(serve(listener, backend.clone(), Arc::new(SystemClock)));
+
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    for _ in 0..1_000 {
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.starts_with('$'));
+        line.clear();
+        reader.read_line(&mut line).await.unwrap();
+        assert!(line.ends_with("\r\n"));
+    }
+    assert_eq!(
+        backend.push_batch_sizes.lock().unwrap().as_slice(),
+        &[1_000]
+    );
+    server.abort();
+}
+
 struct LyingClaimedViewBackend {
     inner: Arc<pqueue_memory::ComposedMemoryBackend>,
+    push_batch_sizes: Mutex<Vec<usize>>,
 }
 
 impl LyingClaimedViewBackend {
     fn new(inner: pqueue_memory::ComposedMemoryBackend) -> Self {
         Self {
             inner: Arc::new(inner),
+            push_batch_sizes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -528,6 +580,7 @@ impl pqueue_engine::PushPort for LyingClaimedViewBackend {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = pqueue_engine::EngineResult<Vec<ItemId>>> + Send {
+        self.push_batch_sizes.lock().unwrap().push(items.len());
         self.inner.push(shard, items, now, expected_epoch)
     }
 

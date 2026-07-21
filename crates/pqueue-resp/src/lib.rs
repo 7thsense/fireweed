@@ -319,6 +319,13 @@ async fn read_command<R: AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Opt
     let count: usize = header[1..]
         .parse()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad array len"))?;
+    if count > PIPELINE_XADD_ARG_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "RESP array exceeds argument limit",
+        ));
+    }
+    let mut command_bytes = header.len() + 2;
     let mut args = Vec::with_capacity(count);
     for _ in 0..count {
         let mut bulk_header = String::new();
@@ -335,12 +342,154 @@ async fn read_command<R: AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Opt
         let len: usize = bulk_header[1..]
             .parse()
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad bulk len"))?;
-        let mut buf = vec![0u8; len + 2];
+        let frame_bytes = bulk_header
+            .len()
+            .checked_add(2)
+            .and_then(|bytes| bytes.checked_add(len))
+            .and_then(|bytes| bytes.checked_add(2))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "bulk frame length overflow",
+                )
+            })?;
+        command_bytes = command_bytes.checked_add(frame_bytes).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "command length overflow")
+        })?;
+        if len > PIPELINE_XADD_BYTE_LIMIT || command_bytes > PIPELINE_XADD_BYTE_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RESP command exceeds pipeline byte limit",
+            ));
+        }
+        let allocation = len.checked_add(2).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "bulk allocation overflow")
+        })?;
+        let mut buf = vec![0u8; allocation];
         r.read_exact(&mut buf).await?;
         buf.truncate(len);
         args.push(buf);
     }
     Ok(Some(args))
+}
+
+const PIPELINE_XADD_COMMAND_LIMIT: usize = 1_000;
+const PIPELINE_XADD_BYTE_LIMIT: usize = 1024 * 1024;
+const PIPELINE_XADD_ARG_LIMIT: usize = 65_536;
+
+/// Parse one complete command already buffered by Tokio without awaiting or consuming a partial frame.
+/// The connection loop uses this only for pipeline lookahead, so shutdown never cancels a partially-consuming
+/// `read_command` future and a fragmented next command remains intact for the normal reader path.
+fn parse_buffered_command(buf: &[u8]) -> std::io::Result<Option<(Vec<Vec<u8>>, usize)>> {
+    fn line(buf: &[u8], start: usize) -> Option<(&[u8], usize)> {
+        let end = buf[start..].windows(2).position(|pair| pair == b"\r\n")? + start;
+        Some((&buf[start..end], end + 2))
+    }
+
+    let Some((header, mut cursor)) = line(buf, 0) else {
+        return Ok(None);
+    };
+    let Some(count) = header
+        .strip_prefix(b"*")
+        .and_then(|raw| std::str::from_utf8(raw).ok())
+        .and_then(|raw| raw.parse::<usize>().ok())
+    else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "expected RESP array",
+        ));
+    };
+    if count > PIPELINE_XADD_ARG_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "RESP array exceeds argument limit",
+        ));
+    }
+    let mut args = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some((bulk, next)) = line(buf, cursor) else {
+            return Ok(None);
+        };
+        let Some(len) = bulk
+            .strip_prefix(b"$")
+            .and_then(|raw| std::str::from_utf8(raw).ok())
+            .and_then(|raw| raw.parse::<usize>().ok())
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expected bulk string",
+            ));
+        };
+        if len > PIPELINE_XADD_BYTE_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "RESP bulk string exceeds pipeline byte limit",
+            ));
+        }
+        let Some(end) = next.checked_add(len) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bulk length overflow",
+            ));
+        };
+        let Some(frame_end) = end.checked_add(2) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bulk frame length overflow",
+            ));
+        };
+        if frame_end > buf.len() {
+            return Ok(None);
+        }
+        if &buf[end..end + 2] != b"\r\n" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bulk string missing terminator",
+            ));
+        }
+        args.push(buf[next..end].to_vec());
+        cursor = end + 2;
+    }
+    Ok(Some((args, cursor)))
+}
+
+fn encoded_command_len(args: &[Vec<u8>]) -> usize {
+    1 + args.len().to_string().len()
+        + 2
+        + args
+            .iter()
+            .map(|arg| 1 + arg.len().to_string().len() + 2 + arg.len() + 2)
+            .sum::<usize>()
+}
+
+/// Select complete, compatible XADD frames from the bytes Tokio has already buffered. A semantic,
+/// malformed, or partial boundary is left untouched for the ordinary command path, which preserves
+/// its normal ordered reply and makes cancellation safe.
+fn buffered_xadd_window(
+    buf: &[u8],
+    shard: &QueueKey,
+    max_commands: usize,
+    max_bytes: usize,
+) -> (Vec<Vec<Vec<u8>>>, usize) {
+    let mut commands = Vec::new();
+    let mut consumed = 0;
+    while commands.len() < max_commands && consumed < max_bytes {
+        let Ok(Some((args, frame_bytes))) = parse_buffered_command(&buf[consumed..]) else {
+            break;
+        };
+        if frame_bytes > max_bytes - consumed {
+            break;
+        }
+        let Ok(parsed) = parse_xadd(&args) else {
+            break;
+        };
+        if !arg_eq(&args[0], "XADD") || parsed.shard != *shard || parsed.client_item_key.is_some() {
+            break;
+        }
+        consumed += frame_bytes;
+        commands.push(args);
+    }
+    (commands, consumed)
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +612,7 @@ async fn handle_conn<B: RespBackend, H: RespHooks>(
     cancel: CancellationToken,
 ) -> std::io::Result<()> {
     let (rd, mut wr) = stream.into_split();
-    let mut reader = BufReader::new(rd);
+    let mut reader = BufReader::with_capacity(PIPELINE_XADD_BYTE_LIMIT, rd);
     loop {
         // Graceful drain: on shutdown, stop waiting for the NEXT command and close the connection. A
         // command already being read/dispatched below is allowed to finish (we only branch here while
@@ -479,9 +628,30 @@ async fn handle_conn<B: RespBackend, H: RespHooks>(
         if args.is_empty() {
             continue;
         }
-        let reply = dispatch(&backend, &hooks, &state, &args).await;
+        let mut commands = vec![args];
+        let first = parse_xadd(&commands[0])
+            .ok()
+            .filter(|parsed| arg_eq(&commands[0][0], "XADD") && parsed.client_item_key.is_none());
+        if let Some(parsed) = &first {
+            let first_bytes = encoded_command_len(&commands[0]);
+            let (extra, consumed) = buffered_xadd_window(
+                reader.buffer(),
+                &parsed.shard,
+                PIPELINE_XADD_COMMAND_LIMIT - 1,
+                PIPELINE_XADD_BYTE_LIMIT.saturating_sub(first_bytes),
+            );
+            reader.consume(consumed);
+            commands.extend(extra);
+        }
+        let replies = if first.is_some() {
+            dispatch_simple_xadd_batch(&backend, &hooks, &state, &commands).await
+        } else {
+            vec![dispatch(&backend, &hooks, &state, &commands[0]).await]
+        };
         let mut buf = Vec::new();
-        encode(&reply, &mut buf);
+        for reply in replies {
+            encode(&reply, &mut buf);
+        }
         wr.write_all(&buf).await?;
         wr.flush().await?;
     }
@@ -490,6 +660,108 @@ async fn handle_conn<B: RespBackend, H: RespHooks>(
 
 fn arg_eq(a: &[u8], s: &str) -> bool {
     a.eq_ignore_ascii_case(s.as_bytes())
+}
+
+async fn push_xadd_batch<B: PushPort>(
+    backend: &B,
+    shard: &QueueKey,
+    specs: Vec<PushSpec>,
+    now: UtcTimestamp,
+    expected_epoch: Option<u64>,
+) -> Vec<Resp> {
+    let count = specs.len();
+    match backend.push(shard, specs, now, expected_epoch).await {
+        Ok(ids) if ids.len() == count => ids
+            .into_iter()
+            .map(|id| Resp::Bulk(id.to_string().into_bytes()))
+            .collect(),
+        Ok(_) => vec![Resp::Error("ERR invalid backend push response".into()); count],
+        Err(error) => vec![err_reply(&error); count],
+    }
+}
+
+async fn xadd_admission<H: RespHooks>(
+    hooks: &H,
+    args: &[Vec<u8>],
+    shard: &QueueKey,
+    now: UtcTimestamp,
+) -> Result<Option<u64>, Resp> {
+    let routing_key = routing_key_for("XADD", args).expect("parsed XADD has routing key");
+    match hooks
+        .route_command("XADD", args, routing_key, now, false)
+        .await
+    {
+        Ok(RouteDecision::Serve) => {}
+        Ok(RouteDecision::Moved { slot, endpoint }) => {
+            return Err(Resp::Error(format!("MOVED {slot} {endpoint}")));
+        }
+        Ok(RouteDecision::NoPerm) => return Err(Resp::Error("NOPERM unauthorized".into())),
+        Ok(RouteDecision::Unavailable) => {
+            return Err(Resp::Error("ERR pqueue unavailable".into()));
+        }
+        Err(error) => return Err(err_reply(&error)),
+    }
+    hooks
+        .expected_epoch_for_write(shard, now, false)
+        .await
+        .map_err(|error| err_reply(&error))
+}
+
+async fn dispatch_simple_xadd_batch<B: RespBackend, H: RespHooks>(
+    backend: &Arc<B>,
+    hooks: &Arc<H>,
+    state: &Arc<ServerState>,
+    commands: &[Vec<Vec<u8>>],
+) -> Vec<Resp> {
+    let parsed: Vec<_> = commands
+        .iter()
+        .map(|args| parse_xadd(args).expect("buffered XADD window contains parsed commands"))
+        .collect();
+    let shard = parsed[0].shard.clone();
+    let now = state.now();
+    let mut replies = Vec::with_capacity(commands.len());
+    let mut pending_specs = Vec::new();
+    let mut pending_epoch = None;
+    for (args, parsed) in commands.iter().zip(parsed) {
+        let admission = xadd_admission(hooks.as_ref(), args, &shard, now).await;
+        let epoch = match admission {
+            Ok(epoch) => epoch,
+            Err(reply) => {
+                if let Some(epoch) = pending_epoch.take() {
+                    replies.extend(
+                        push_xadd_batch(
+                            backend.as_ref(),
+                            &shard,
+                            std::mem::take(&mut pending_specs),
+                            now,
+                            epoch,
+                        )
+                        .await,
+                    );
+                }
+                replies.push(reply);
+                continue;
+            }
+        };
+        if pending_epoch.is_some_and(|pending| pending != epoch) {
+            replies.extend(
+                push_xadd_batch(
+                    backend.as_ref(),
+                    &shard,
+                    std::mem::take(&mut pending_specs),
+                    now,
+                    pending_epoch.take().unwrap(),
+                )
+                .await,
+            );
+        }
+        pending_epoch = Some(epoch);
+        pending_specs.push(parsed.spec);
+    }
+    if let Some(epoch) = pending_epoch {
+        replies.extend(push_xadd_batch(backend.as_ref(), &shard, pending_specs, now, epoch).await);
+    }
+    replies
 }
 
 async fn dispatch<B: RespBackend, H: RespHooks>(
@@ -579,30 +851,27 @@ fn cluster_cmd(state: &Arc<ServerState>, args: &[Vec<u8>]) -> Resp {
 }
 
 /// `XADD key <*|id> field value [field value ...]` - insert one item (container-object fields).
-async fn xadd<B: RespBackend, H: RespHooks>(
-    backend: &Arc<B>,
-    hooks: &Arc<H>,
-    state: &Arc<ServerState>,
-    args: &[Vec<u8>],
-) -> Resp {
+struct ParsedXadd {
+    shard: QueueKey,
+    client_item_key: Option<ClientItemKey>,
+    spec: PushSpec,
+}
+
+fn parse_xadd(args: &[Vec<u8>]) -> Result<ParsedXadd, Resp> {
     if args.len() < 5 {
-        return Resp::Error("ERR wrong number of arguments for 'xadd'".into());
+        return Err(Resp::Error(
+            "ERR wrong number of arguments for 'xadd'".into(),
+        ));
     }
-    let shard = match parse_shard(&args[1]) {
-        Ok(s) => s,
-        Err(e) => return err_reply(&e),
-    };
-    let now = state.now();
-    let expected_epoch = match hooks.expected_epoch_for_write(&shard, now, false).await {
-        Ok(epoch) => epoch,
-        Err(e) => return err_reply(&e),
-    };
+    let shard = parse_shard(&args[1]).map_err(|e| err_reply(&e))?;
     if !(args.len() - 3).is_multiple_of(2) {
-        return Resp::Error("ERR wrong number of field/value arguments for 'xadd'".into());
+        return Err(Resp::Error(
+            "ERR wrong number of field/value arguments for 'xadd'".into(),
+        ));
     }
     // Reserved container fields (TD-006 section 2). Field/value pairs start at index 3.
     let mut priority: Option<PriorityValue> = None;
-    let mut client_item_key: Option<String> = None;
+    let mut client_item_key = None;
     let mut group_key: Option<GroupKey> = None;
     let mut not_before: Option<UtcTimestamp> = None;
     let mut payload: Option<bytes::Bytes> = None;
@@ -617,65 +886,92 @@ async fn xadd<B: RespBackend, H: RespHooks>(
         } else if arg_eq(&pair[0], "client_item_key")
             && let Ok(s) = std::str::from_utf8(&pair[1])
         {
-            client_item_key = Some(s.to_string());
+            client_item_key = Some(
+                ClientItemKey::new(s)
+                    .map_err(|_| Resp::Error("ERR invalid client_item_key".into()))?,
+            );
         } else if arg_eq(&pair[0], "group_key")
             && let Ok(s) = std::str::from_utf8(&pair[1])
         {
-            let Ok(group) = GroupKey::new(s) else {
-                return Resp::Error("ERR invalid group_key".into());
-            };
-            group_key = Some(group);
+            group_key =
+                Some(GroupKey::new(s).map_err(|_| Resp::Error("ERR invalid group_key".into()))?);
         } else if arg_eq(&pair[0], "not_before")
             && let Ok(s) = std::str::from_utf8(&pair[1])
         {
-            let Ok(ms) = s.parse::<i64>() else {
-                return Resp::Error("ERR invalid not_before".into());
-            };
-            let Ok(ts) = ms_ts(ms) else {
-                return Resp::Error("ERR invalid not_before".into());
-            };
-            not_before = Some(ts);
+            let ms = s
+                .parse::<i64>()
+                .map_err(|_| Resp::Error("ERR invalid not_before".into()))?;
+            not_before = Some(ms_ts(ms).map_err(|_| Resp::Error("ERR invalid not_before".into()))?);
         } else if arg_eq(&pair[0], "payload") {
             payload = Some(bytes::Bytes::copy_from_slice(&pair[1]));
         } else if arg_eq(&pair[0], "metadata") {
-            let Ok(raw) = std::str::from_utf8(&pair[1]) else {
-                return Resp::Error("ERR metadata must be utf-8 JSON".into());
-            };
-            let entries = match serde_json::from_str::<BTreeMap<String, MetadataValue>>(raw) {
-                Ok(entries) => entries,
-                Err(_) => return Resp::Error("ERR invalid metadata".into()),
-            };
+            let raw = std::str::from_utf8(&pair[1])
+                .map_err(|_| Resp::Error("ERR metadata must be utf-8 JSON".into()))?;
+            let entries = serde_json::from_str::<BTreeMap<String, MetadataValue>>(raw)
+                .map_err(|_| Resp::Error("ERR invalid metadata".into()))?;
             metadata = Metadata::from_entries(entries);
         } else {
-            let Ok(field) = std::str::from_utf8(&pair[0]) else {
-                return Resp::Error("ERR field names must be utf-8".into());
-            };
+            let field = std::str::from_utf8(&pair[0])
+                .map_err(|_| Resp::Error("ERR field names must be utf-8".into()))?;
             if pqueue_engine::is_api001_reserved_write_field(field) {
-                return Resp::Error(format!("ERR field '{field}' is reserved"));
+                return Err(Resp::Error(format!("ERR field '{field}' is reserved")));
             }
             fields.insert(field.to_string(), bytes::Bytes::copy_from_slice(&pair[1]));
         }
     }
+    Ok(ParsedXadd {
+        shard,
+        client_item_key,
+        spec: PushSpec {
+            client_item_key: None,
+            priority,
+            not_before,
+            group_key,
+            payload,
+            fields,
+            metadata,
+            cohort_size: None,
+            gate_keys: Vec::new(),
+            entity: None,
+        },
+    })
+}
+
+async fn xadd<B: RespBackend, H: RespHooks>(
+    backend: &Arc<B>,
+    hooks: &Arc<H>,
+    state: &Arc<ServerState>,
+    args: &[Vec<u8>],
+) -> Resp {
+    let ParsedXadd {
+        shard,
+        client_item_key,
+        spec,
+    } = match parse_xadd(args) {
+        Ok(parsed) => parsed,
+        Err(reply) => return reply,
+    };
+    let now = state.now();
+    let expected_epoch = match hooks.expected_epoch_for_write(&shard, now, false).await {
+        Ok(epoch) => epoch,
+        Err(e) => return err_reply(&e),
+    };
     // The BACKEND assigns the item id in both paths (restart-safe, collision-free across servers — the
     // RESP front never mints ids itself). `client_item_key` is the upsert key (TD-006 §2, Invariant 2):
     // with a key, a second XADD REPLACES the pending item (via UpsertPort); absent a key, each XADD is a
     // unique append (via PushPort). Remaining reserved fields (group_key/not_before/payload) DEFERRED.
     match client_item_key {
-        Some(k) => {
-            let key = match ClientItemKey::new(k) {
-                Ok(k) => k,
-                Err(_) => return Resp::Error("ERR invalid client_item_key".into()),
-            };
+        Some(key) => {
             match backend
                 .replace_if_pending(
                     &shard,
                     &key,
-                    priority,
-                    group_key,
-                    not_before,
-                    payload,
-                    fields,
-                    metadata,
+                    spec.priority,
+                    spec.group_key,
+                    spec.not_before,
+                    spec.payload,
+                    spec.fields,
+                    spec.metadata,
                     None,
                     now,
                     expected_epoch,
@@ -690,24 +986,10 @@ async fn xadd<B: RespBackend, H: RespHooks>(
                 Err(e) => err_reply(&e),
             }
         }
-        None => {
-            let spec = PushSpec {
-                client_item_key: None,
-                priority,
-                not_before,
-                group_key,
-                payload,
-                fields,
-                metadata,
-                cohort_size: None, // RESP XADD has no cohort declaration (library-only, plan §3)
-                gate_keys: Vec::new(), // RESP XADD carries no gate keys (library-only)
-                entity: None, // RESP XADD is schema-less (typed entities are library-only, ADR-011)
-            };
-            match backend.push(&shard, vec![spec], now, expected_epoch).await {
-                Ok(ids) => Resp::Bulk(ids[0].to_string().into_bytes()),
-                Err(e) => err_reply(&e),
-            }
-        }
+        None => match backend.push(&shard, vec![spec], now, expected_epoch).await {
+            Ok(ids) => Resp::Bulk(ids[0].to_string().into_bytes()),
+            Err(e) => err_reply(&e),
+        },
     }
 }
 
@@ -1617,6 +1899,92 @@ fn err_reply(e: &EngineError) -> Resp {
 mod tests {
     use super::*;
 
+    fn command(args: &[&[u8]]) -> Vec<Vec<u8>> {
+        args.iter().map(|arg| arg.to_vec()).collect()
+    }
+
+    fn encode_command(args: &[Vec<u8>]) -> Vec<u8> {
+        let mut encoded = format!("*{}\r\n", args.len()).into_bytes();
+        for arg in args {
+            encoded.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+            encoded.extend_from_slice(arg);
+            encoded.extend_from_slice(b"\r\n");
+        }
+        encoded
+    }
+
+    fn plain_xadd(queue: &'static [u8], n: usize) -> Vec<Vec<u8>> {
+        command(&[
+            b"XADD",
+            queue,
+            b"*",
+            b"priority",
+            n.to_string().leak().as_bytes(),
+            b"payload",
+            b"body",
+            b"custom",
+            b"value",
+        ])
+    }
+
+    #[derive(Default)]
+    struct SpyPush {
+        calls: Mutex<Vec<usize>>,
+    }
+
+    struct ChangingAdmission {
+        routes: Mutex<std::collections::VecDeque<RouteDecision>>,
+        epochs: Mutex<std::collections::VecDeque<Option<u64>>>,
+    }
+
+    impl RespHooks for ChangingAdmission {
+        async fn route_command(
+            &self,
+            _name: &str,
+            _args: &[Vec<u8>],
+            _routing_key: &[u8],
+            _now: UtcTimestamp,
+            _is_new_claim: bool,
+        ) -> EngineResult<RouteDecision> {
+            Ok(self.routes.lock().unwrap().pop_front().unwrap())
+        }
+
+        async fn expected_epoch_for_write(
+            &self,
+            _shard: &QueueKey,
+            _now: UtcTimestamp,
+            _is_new_claim: bool,
+        ) -> EngineResult<Option<u64>> {
+            Ok(self.epochs.lock().unwrap().pop_front().unwrap())
+        }
+    }
+
+    impl PushPort for SpyPush {
+        async fn push(
+            &self,
+            _shard: &QueueKey,
+            items: Vec<PushSpec>,
+            _now: UtcTimestamp,
+            _expected_epoch: Option<u64>,
+        ) -> EngineResult<Vec<ItemId>> {
+            self.calls.lock().unwrap().push(items.len());
+            Ok((1..=items.len())
+                .map(|n| ItemId::from_u64(n as u64))
+                .collect())
+        }
+
+        async fn push_with_request_id(
+            &self,
+            _shard: &QueueKey,
+            _request_id: pqueue_core::RequestId,
+            _items: Vec<PushSpec>,
+            _now: UtcTimestamp,
+            _expected_epoch: Option<u64>,
+        ) -> EngineResult<Vec<ItemId>> {
+            unreachable!("RESP XADD does not carry request_id")
+        }
+    }
+
     fn err_text(e: &EngineError) -> String {
         match err_reply(e) {
             Resp::Error(s) => s,
@@ -1632,6 +2000,116 @@ mod tests {
         assert_eq!(err_text(&EngineError::StaleLease), "ERR pqueue stale_lease");
         assert_eq!(err_text(&EngineError::Superseded), "ERR pqueue superseded");
         assert_eq!(err_text(&EngineError::NotFound), "ERR no such queue");
+    }
+
+    #[test]
+    fn buffered_xadd_window_is_bounded_and_preserves_boundaries() {
+        let shard = parse_shard(b"tenant:q").unwrap();
+        let compatible = plain_xadd(b"tenant:q", 1);
+        let other_queue = plain_xadd(b"tenant:other", 2);
+        let upsert = command(&[b"XADD", b"tenant:q", b"*", b"client_item_key", b"key"]);
+        let non_xadd = command(&[b"PING"]);
+
+        for boundary in [&other_queue, &upsert, &non_xadd] {
+            let first = encode_command(&compatible);
+            let mut bytes = first.clone();
+            bytes.extend_from_slice(&encode_command(boundary));
+            let (commands, consumed) = buffered_xadd_window(&bytes, &shard, 100, usize::MAX);
+            assert_eq!(commands, vec![compatible.clone()]);
+            assert_eq!(consumed, first.len(), "boundary must remain unconsumed");
+        }
+
+        let full = encode_command(&compatible);
+        let partial = &full[..full.len() - 1];
+        let (commands, consumed) = buffered_xadd_window(partial, &shard, 100, usize::MAX);
+        assert!(commands.is_empty());
+        assert_eq!(consumed, 0, "partial frame must remain unconsumed");
+
+        let mut two = full.clone();
+        two.extend_from_slice(&full);
+        let (commands, consumed) = buffered_xadd_window(&two, &shard, 100, full.len());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            consumed,
+            full.len(),
+            "raw RESP framing counts toward the byte cap"
+        );
+        let (commands, _) = buffered_xadd_window(&two, &shard, 1, usize::MAX);
+        assert_eq!(commands.len(), 1, "command count bounds the window");
+    }
+
+    #[tokio::test]
+    async fn both_command_parsers_reject_unbounded_array_and_bulk_allocations() {
+        let excessive_count = format!("*{}\r\n", PIPELINE_XADD_ARG_LIMIT + 1).into_bytes();
+        assert!(parse_buffered_command(&excessive_count).is_err());
+        let mut reader = BufReader::new(excessive_count.as_slice());
+        assert!(read_command(&mut reader).await.is_err());
+
+        let excessive_bulk = format!("*1\r\n${}\r\n", PIPELINE_XADD_BYTE_LIMIT + 1).into_bytes();
+        assert!(parse_buffered_command(&excessive_bulk).is_err());
+        let mut reader = BufReader::new(excessive_bulk.as_slice());
+        assert!(read_command(&mut reader).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn every_buffered_xadd_gets_its_own_route_and_epoch_admission() {
+        let shard = parse_shard(b"tenant:q").unwrap();
+        let args = plain_xadd(b"tenant:q", 1);
+        let now = UtcTimestamp::new(1, 0).unwrap();
+        let hooks = ChangingAdmission {
+            routes: Mutex::new(
+                [
+                    RouteDecision::Serve,
+                    RouteDecision::Serve,
+                    RouteDecision::Unavailable,
+                ]
+                .into(),
+            ),
+            epochs: Mutex::new([Some(7), Some(8)].into()),
+        };
+        assert_eq!(
+            xadd_admission(&hooks, &args, &shard, now).await,
+            Ok(Some(7))
+        );
+        assert_eq!(
+            xadd_admission(&hooks, &args, &shard, now).await,
+            Ok(Some(8))
+        );
+        assert_eq!(
+            xadd_admission(&hooks, &args, &shard, now).await,
+            Err(Resp::Error("ERR pqueue unavailable".into()))
+        );
+        assert!(hooks.epochs.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compatible_xadd_windows_use_one_downstream_batch_for_1_100_and_1000() {
+        let shard = parse_shard(b"tenant:q").unwrap();
+        let now = UtcTimestamp::new(1, 0).unwrap();
+        for count in [1, 100, 1_000] {
+            let commands: Vec<_> = (0..count).map(|n| plain_xadd(b"tenant:q", n)).collect();
+            let bytes: Vec<_> = commands
+                .iter()
+                .flat_map(|args| encode_command(args))
+                .collect();
+            let (parsed, consumed) =
+                buffered_xadd_window(&bytes, &shard, count, PIPELINE_XADD_BYTE_LIMIT);
+            assert_eq!(parsed.len(), count);
+            assert_eq!(consumed, bytes.len());
+            let specs = parsed
+                .iter()
+                .map(|args| parse_xadd(args).unwrap().spec)
+                .collect();
+            let spy = SpyPush::default();
+            let replies = push_xadd_batch(&spy, &shard, specs, now, Some(7)).await;
+            assert_eq!(spy.calls.lock().unwrap().as_slice(), &[count]);
+            assert_eq!(replies.len(), count);
+            assert_eq!(replies[0], Resp::Bulk(b"1".to_vec()));
+            assert_eq!(
+                replies[count - 1],
+                Resp::Bulk(count.to_string().into_bytes())
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
