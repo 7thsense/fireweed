@@ -2483,7 +2483,20 @@ async fn finalize_dispositions_match_sqlite_for_terminal_retry_release_and_rearm
             kind: FinalizeKind::Complete,
             not_before: None,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let mut stale_targets = targets.clone();
+    stale_targets[0].item_version = stale_targets[0].item_version.saturating_add(1);
+    assert_eq!(
+        AsyncProjectionStore::finalize_validate(
+            &turso,
+            shard.clone(),
+            stale_targets,
+            timestamp(30),
+            3,
+        )
+        .await,
+        Err(pqueue_engine::EngineError::Conflict)
+    );
     assert_eq!(
         AsyncProjectionStore::finalize_validate(&turso, shard.clone(), targets, timestamp(30), 3,)
             .await
