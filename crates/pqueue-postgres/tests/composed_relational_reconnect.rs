@@ -12,13 +12,15 @@
 //! If `PQUEUE_PG_TEST_URL` is ABSENT, every scenario prints a LOUD skip — a green run is then VISIBLY
 //! partial, never a hidden pass. Compiling this file already proves the composition satisfies the bound.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use pqueue_conformance::{claim_req, qdef, shard, ts};
 use pqueue_core::{ItemId, PriorityValue};
 use pqueue_engine::{
-    ClaimPort, CommandPosition, ControlPlaneStore, ProjectionRead, ProjectionStore, PushPort,
-    PushSpec,
+    ClaimPort, CommandPosition, ControlPlaneStore, HistoricalProjectionRead, ProjectionRead,
+    PushPort, PushSpec,
 };
-use pqueue_postgres::composed_postgres_relational_in_schema;
+use pqueue_postgres::PostgresRelationalBackend;
 
 macro_rules! pg_reconnect {
     ($($name:ident),+ $(,)?) => {
@@ -29,13 +31,15 @@ macro_rules! pg_reconnect {
                     Ok(url) => {
                         // Process-unique + scenario-stable: the two opens within this scenario share the
                         // schema; a fresh process gets a brand-new (empty) schema, so no manual cleanup.
+                        let mut hasher = DefaultHasher::new();
+                        stringify!($name).hash(&mut hasher);
                         let schema = format!(
-                            "pq_crel_recon_{}_{}",
+                            "pq_crel_recon_{}_{:016x}",
                             std::process::id(),
-                            stringify!($name)
+                            hasher.finish()
                         );
                         futures::executor::block_on(pqueue_conformance::scenarios::$name(move || {
-                            composed_postgres_relational_in_schema(&url, &schema)
+                            PostgresRelationalBackend::connect_in_schema(&url, &schema)
                                 .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
                         }));
                     }
@@ -70,9 +74,9 @@ fn push(priority: i64) -> PushSpec {
     }
 }
 
-fn open(url: &str, schema: &str) -> pqueue_postgres::ComposedPostgresRelationalBackend {
-    composed_postgres_relational_in_schema(url, schema)
-        .expect("open composed postgres-relational db")
+fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
+    PostgresRelationalBackend::connect_in_schema(url, schema)
+        .expect("open unified postgres-relational db")
 }
 
 #[test]
@@ -99,16 +103,16 @@ fn composed_relational_recover_replays_tail() {
         let claimed = futures::executor::block_on(backend.claim(claim_req(1, 500, 2))).unwrap();
         assert_eq!(claimed.items.len(), 1);
         assert_eq!(
-            backend.with_projection(|projection| projection.recovery_high_water(&shard()).unwrap()),
-            Some(CommandPosition::new(shard(), 0, 2)),
+            futures::executor::block_on(backend.current_position(&shard())).unwrap(),
+            CommandPosition::new(shard(), 0, 3),
             "the composed reopen cursor should reflect the persisted applied high-water"
         );
     }
 
     let reopened = open(&url, &schema);
     assert_eq!(
-        reopened.with_projection(|projection| projection.recovery_high_water(&shard()).unwrap()),
-        Some(CommandPosition::new(shard(), 0, 2)),
+        futures::executor::block_on(reopened.current_position(&shard())).unwrap(),
+        CommandPosition::new(shard(), 0, 3),
         "recovery must resume from the durable relational cursor rather than genesis"
     );
     let metrics = futures::executor::block_on(reopened.metrics(&shard())).unwrap();

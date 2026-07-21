@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pqueue_postgres::composed_postgres_relational_in_schema;
+use pqueue_postgres::PostgresRelationalBackend;
 
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -41,7 +41,7 @@ macro_rules! pg_composed {
                     Ok(url) => {
                         futures::executor::block_on(pqueue_conformance::scenarios::$name(move || {
                             let schema = fresh_schema();
-                            composed_postgres_relational_in_schema(&url, &schema)
+                            PostgresRelationalBackend::connect_in_schema(&url, &schema)
                                 .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
                         }));
                     }
@@ -104,7 +104,7 @@ fn claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported() {
                 pqueue_conformance::claimed_item_shape_includes_payload_fields_and_gate_keys_if_supported(
                     move || {
                         let schema = fresh_schema();
-                        composed_postgres_relational_in_schema(&url, &schema)
+                        PostgresRelationalBackend::connect_in_schema(&url, &schema)
                             .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
                     },
                 ),

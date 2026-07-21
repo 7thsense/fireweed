@@ -171,8 +171,7 @@ async fn postgres_sqlite_combo_runs_under_tokio() {
     drop_schema(&url, &schema).await;
 }
 
-/// Composed postgres-log + postgres-projection backend (two independent postgres connections — one per
-/// axis, non-colliding table sets), driven end to end under a real Tokio runtime.
+/// Unified atomic postgres/postgres backend through the production fixed-pool selector.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn postgres_postgres_combo_runs_under_tokio() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
@@ -181,21 +180,16 @@ async fn postgres_postgres_combo_runs_under_tokio() {
         );
         return;
     };
-    let log_schema = format!("pq_pgpg_log_{}", std::process::id());
-    let projection_schema = format!("pq_pgpg_proj_{}", std::process::id());
-    let log_url = url_with_schema(&url, &log_schema);
-    let projection_url = url_with_schema(&url, &projection_schema);
-    create_schema(&url, &log_schema).await;
-    create_schema(&url, &projection_schema).await;
+    let schema = format!("pq_pgpg_atomic_{}", std::process::id());
+    let atomic_url = url_with_schema(&url, &schema);
+    create_schema(&url, &schema).await;
 
     let backend = BackendSpec {
         log: LogSpec::Postgres {
-            url: log_url,
+            url: atomic_url.clone(),
             credentials: None,
         },
-        projection: ProjectionSpec::Postgres {
-            url: projection_url,
-        },
+        projection: ProjectionSpec::Postgres { url: atomic_url },
         control_plane: ControlPlaneSpec::InProcess,
     };
     let server = start(Config::new(
@@ -211,6 +205,5 @@ async fn postgres_postgres_combo_runs_under_tokio() {
     push_claim_finalize_over_resp(server.addr()).await;
 
     server.shutdown_and_drain(Duration::from_secs(5)).await;
-    drop_schema(&url, &log_schema).await;
-    drop_schema(&url, &projection_schema).await;
+    drop_schema(&url, &schema).await;
 }

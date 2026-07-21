@@ -15,9 +15,7 @@ use pqueue_engine::{
     CommitTransitionPort, ControlPlaneStore, EngineError, FinalizeKind, HistoricalProjectionRead,
     HotProjectionQueryPort, RecoveryReadPort, SideRecord,
 };
-use pqueue_postgres::{
-    PostgresBackend, PostgresRelationalBackend, composed_postgres_relational_in_schema,
-};
+use pqueue_postgres::{PostgresBackend, PostgresRelationalBackend};
 
 fn fresh_schema() -> String {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -184,7 +182,7 @@ fn read_as_of_unavailable_relational() {
     .unwrap_err();
     assert_eq!(err, EngineError::Unavailable);
 
-    let composed = composed_postgres_relational_in_schema(&url, &fresh_schema())
+    let composed = PostgresRelationalBackend::connect_in_schema(&url, &fresh_schema())
         .expect("compose postgres-relational (is PQUEUE_PG_TEST_URL a live DB?)");
     let err = futures::executor::block_on(composed.read_as_of(
         &shard,

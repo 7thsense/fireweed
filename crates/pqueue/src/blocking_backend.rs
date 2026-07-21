@@ -419,6 +419,20 @@ impl<B: super::LibBackend + 'static> UpdateFieldsPort for BlockingLibBackend<B> 
         })
     }
 }
+impl<B: super::LibBackend + BatchUpdatePort + 'static> BatchUpdatePort for BlockingLibBackend<B> {
+    fn batch_update(
+        &self,
+        shard: &QueueKey,
+        request: BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl Future<Output = EngineResult<BatchUpdateResponse>> + Send {
+        let q = shard.clone();
+        self.dispatch(q.clone(), move |i| async move {
+            i.batch_update(&q, request, now, expected_epoch).await
+        })
+    }
+}
 impl<B: super::LibBackend + 'static> FinalizePort for BlockingLibBackend<B> {
     fn finalize(
         &self,

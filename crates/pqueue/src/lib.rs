@@ -28,13 +28,13 @@ use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
 use pqueue_core::WorkerId;
 use pqueue_engine::{
-    Backend, ClaimPort, ClaimRequest, CommandPosition, CommitEntryOutcome, CommitTransition,
-    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
-    FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort, IndexQueryPort, LeaseState,
-    OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort, acquire_and_fence,
-    validate_api001_reserved_write_fields,
+    Backend, BatchUpdatePort, ClaimPort, ClaimRequest, CommandPosition, CommitEntryOutcome,
+    CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
+    DiscoveryPort, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort,
+    IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
+    PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort,
+    RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
+    acquire_and_fence, validate_api001_reserved_write_fields,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,11 +58,12 @@ pub use pqueue_core::{
     SortDirection, TenantId, TimeBucket, TimestampError, TypedValue, UtcTimestamp,
 };
 pub use pqueue_engine::{
-    ActiveScope, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem, Clock, CommitCapabilities,
-    CommitEntryStatus, CommitRecovery, ControlPlaneConfig, CreateQueueOutcome,
-    DiscoveryGranularity, EngineError, EngineResult, EntryRecovery, FinalizeKind, GroupBatching,
-    IndexHit, InstanceFence, ItemView, LiveItemView, PayloadUpdate, QueueKey, QueueMetrics,
-    ScheduleUpdate, SideRecord, UpsertOutcome,
+    ActiveScope, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest,
+    BatchUpdateResponse, BatchUpdateValue, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem,
+    Clock, CommitCapabilities, CommitEntryStatus, CommitRecovery, ControlPlaneConfig,
+    CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult, EntryRecovery,
+    FinalizeKind, GroupBatching, IndexHit, InstanceFence, ItemView, LiveItemView, PayloadUpdate,
+    QueueKey, QueueMetrics, ScheduleUpdate, SideRecord, UpsertOutcome,
 };
 
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
@@ -2423,6 +2424,33 @@ impl<B: LibBackend> Pqueue<B> {
             )
             .await;
         self.note(queue, r)
+    }
+
+    /// Replace mutable fields on one or more pending, non-leased items using the full API-001
+    /// `BatchUpdate` contract. The backend executes the request as one batch and returns one outcome
+    /// per entry in request order. `request_id` makes response-loss retries converge on the original
+    /// committed results; reusing it with a different body returns
+    /// [`EngineError::RequestIdConflict`].
+    ///
+    /// Each [`BatchUpdateValue::Keep`] leaves the stored value unchanged; `Replace` performs full
+    /// replacement. Entry-local validation failures return [`BatchUpdateOutcome::Invalid`] without
+    /// aborting valid siblings, leased entries return `Conflict`, terminal entries return `Terminal`, and
+    /// successful entries bump `item_version` while preserving `eligible_since`.
+    pub async fn batch_update(
+        &self,
+        queue: &QueueKey,
+        request: BatchUpdateRequest,
+    ) -> EngineResult<BatchUpdateResponse>
+    where
+        B: BatchUpdatePort,
+    {
+        if request.updates.is_empty() {
+            return Err(EngineError::Invalid("empty batch update"));
+        }
+        let epoch = self.session_epoch(queue).await?;
+        let now = self.clock.now();
+        let result = self.backend.batch_update(queue, request, now, epoch).await;
+        self.note(queue, result)
     }
 
     /// Reschedule a **live** item's `priority` and/or `not_before` after push (BQ pqueue-7a96f929) — the

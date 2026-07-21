@@ -90,6 +90,7 @@ pub use credential::{
     DatabricksCredentialProvider, RefreshingCredentialProvider, databricks_fetcher_with_runner,
     parse_databricks_credential_response,
 };
+#[allow(deprecated)]
 pub use relational::{
     ComposedPostgresRelationalBackend, MetricsMigrationProgress, PostgresRelational,
     PostgresRelationalBackend, composed_postgres_relational_in_schema,
@@ -1172,6 +1173,10 @@ impl UpdateFieldsPort for PostgresBackend {
                 set_priority: Default::default(),
                 set_not_before: Default::default(),
                 set_entity_document: entity,
+                set_fields: None,
+                set_metadata: None,
+                set_gate_keys: None,
+                api001_batch: false,
             });
             let env = g.make_envelope(cmd, vec![item_id], now);
             g.commit_locked(shard, env, expected_epoch)?;

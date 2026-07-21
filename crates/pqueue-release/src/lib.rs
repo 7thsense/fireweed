@@ -141,7 +141,7 @@ pub mod single_deployment {
                 .and_then(serde_json::Value::as_str)
                 != Some("per-item accepted and claimed timestamp intervals")
         {
-            errors.push("the release workload must explicitly declare a positive queue progress bound, and all 10000000 accepted identities and discovery ages must satisfy it; fixed timing buckets remain capacity observations only".into());
+            errors.push("the release workload must explicitly declare the persisted queue progress_bound_ms product-liveness contract, and all 10000000 accepted identities and discovery ages must satisfy it; host throughput, percentiles, and fixed timing buckets remain capacity observations and are not release gates".into());
         }
         errors
     }
@@ -333,9 +333,11 @@ pub mod single_deployment {
             .values
             .get("topology")
             .and_then(serde_json::Value::as_str)
-            != Some("single-process+single-postgres+two-production-connections")
+            != Some("single-process+single-postgres+fixed-2-member-affinity-pool")
         {
-            errors.push("topology must declare two independent production connections".into());
+            errors.push(
+                "topology must declare the fixed two-member queue-affinity production pool".into(),
+            );
         }
         errors
     }
@@ -507,6 +509,18 @@ pub mod single_deployment {
             errors.push("measured payload histogram, 64-group counts, priority counts, and operation mix must reconcile to 10M".into());
         }
         if id == "E0" {
+            if !true_value(row, "one_instance_production_wrapper")
+                || u64_value(row, "production_pool_size") != Some(2)
+                || u64_value(row, "production_pool_connections_observed") != Some(2)
+                || u64_value(row, "hot_queue_pool_partition")
+                    == u64_value(row, "canary_queue_pool_partition")
+                || !true_value(row, "canary_observed_hot_pg_sleep")
+                || !true_value(row, "canary_exact_outcomes")
+                || !true_value(row, "canary_completed_before_hot")
+                || !true_value(row, "canary_causal_progress")
+            {
+                errors.push("E0 must come from one PostgresWholeOperationAdapter with exactly two production connections and an affinity-routed canary that causally releases the sleeping hot member before hot completion".into());
+            }
             if u64_value(row, "accepted_items") != Some(10_000_000)
                 || u64_value(row, "claimed_items") != Some(10_000_000)
                 || u64_value(row, "finalized_items") != Some(10_000_000)
@@ -576,9 +590,9 @@ pub mod single_deployment {
                     .get("update_item_calls")
                     .copied()
                     .is_none_or(|count| count == 0 || Some(count) > accepted)
-                || !true_value(row, "post10m_concurrent_probe")
-                || !true_value(row, "post10m_overlap_observed")
-                || u64_value(row, "post10m_max_in_flight_observed").is_none_or(|value| value < 2)
+                || !true_value(row, "post10m_affinity_serialization_probe")
+                || !true_value(row, "post10m_caller_interval_overlap_observed")
+                || u64_value(row, "post10m_caller_in_flight_observed").is_none_or(|value| value < 2)
                 || u64_value(row, "post10m_active_pending_before") != Some(1_000)
             {
                 errors.push(
