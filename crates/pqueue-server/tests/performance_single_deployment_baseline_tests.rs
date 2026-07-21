@@ -14,8 +14,8 @@
 //!
 //! WHAT THIS MEASURES (when a DB is present): on ONE postgres deployment, one queue —
 //!   - E0: exact concurrent push/claim/finalize progress to a 10M retained-terminal checkpoint.
-//!   - E1: production-facade push/update-window/claim/finalize at batch sizes 1/100(/1000) with the
-//!     retained resident set present. Rates and percentiles are capacity observations, never host gates.
+//!   - E1: production-facade push/API-001 BatchUpdate/claim/finalize at batch sizes 1/100(/1000),
+//!     with the retained resident set present. Each update window is one downstream batch operation.
 //!
 //! TWO LANES (honest perf-environment gating):
 //!   - SMOKE (default, any DB): MEASURES + reports + emits SMOKE-tier ledger rows (recorded + gate-visible,
@@ -24,6 +24,10 @@
 //!   - PERF (`PQUEUE_PERF_ENV=1`, a provisioned instance): emits RELEASE-tier rows only when exact outcomes,
 //!     the explicitly declared and persisted progress bound, declared topology, full shape, and bounded resources
 //!     are all measured and met.
+//!
+//! The configured queue `progress_bound_ms` is a product-liveness contract evaluated per accepted identity,
+//! not a benchmark-derived throughput/latency threshold. Host-dependent rates, percentiles, and fixed latency
+//! buckets remain observations and never determine the release result.
 //!
 //! A row's `exit_status` is always 0 (the measurement run completed; the strict verifier requires it) and so
 //! carries NO pass/fail signal — pass/fail lives in `measurements.bars_met` and `evidence_tier`.
@@ -35,15 +39,18 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use pqueue::{NewItem, PayloadUpdate, Pqueue, SystemClock};
+use pqueue::{
+    BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateValue,
+    NewItem, Pqueue, SystemClock,
+};
 use pqueue_core::{
     ClientItemKey, EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
-    RecurrencePolicy, RetryPolicy, TenantId,
+    RecurrencePolicy, RequestId, RetryPolicy, TenantId,
 };
 use pqueue_engine::{ControlPlaneStore, DiscoveryGranularity, EngineError, QueueKey};
 use pqueue_postgres::{PostgresConnectConfig, PostgresRelationalBackend};
@@ -53,6 +60,9 @@ const CONFIGURED_MAX_BATCH_SIZE: u64 = 1_000;
 const CONFIGURED_CONCURRENCY: u64 = 2;
 const SMOKE_PROGRESS_BOUND_MS: u64 = 60_000;
 const GROUP_CARDINALITY: u64 = 64;
+
+type AcceptanceCompletion = Arc<(Mutex<Option<Instant>>, Condvar)>;
+type PendingAcceptances = HashMap<u32, (Instant, AcceptanceCompletion)>;
 
 #[derive(Clone, Copy)]
 struct RunCaps {
@@ -677,6 +687,32 @@ fn representative_item(sequence: u64, sentinel: bool) -> NewItem {
     }
 }
 
+fn representative_batch_update(ids: &[ItemId], request_sequence: u64) -> BatchUpdateRequest {
+    BatchUpdateRequest {
+        request_id: RequestId::new(format!("e1-update-{request_sequence}"))
+            .expect("valid update request id"),
+        updates: ids
+            .iter()
+            .enumerate()
+            .map(|(offset, item_id)| {
+                let mut fields = BTreeMap::new();
+                fields.insert("shape".into(), Bytes::from_static(b"hot_record_v2"));
+                fields.insert("update_offset".into(), Bytes::from(offset.to_string()));
+                BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(*item_id),
+                    expected_item_version: Some(1),
+                    priority: BatchUpdateValue::Replace(PriorityValue::Int64(offset as i64)),
+                    not_before: BatchUpdateValue::Replace(None),
+                    payload: BatchUpdateValue::Replace(Some(Bytes::from_static(b"updated"))),
+                    metadata: BatchUpdateValue::Replace(Default::default()),
+                    gate_keys: BatchUpdateValue::Replace(Vec::new()),
+                    fields: BatchUpdateValue::Replace(fields),
+                }
+            })
+            .collect(),
+    }
+}
+
 async fn push_batch<B: pqueue::LibBackend>(
     pq: &Pqueue<B>,
     shard: &QueueKey,
@@ -788,7 +824,7 @@ fn single_deployment_evidence_row(
     values.insert("bars_met".into(), serde_json::json!(passed));
     pqueue_release::LedgerRow {
         suite: "performance_single_deployment_baseline_tests".into(),
-        command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests".into(),
+        command: "PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E0E1_PROGRESS_BOUND_MS=<declared> PQUEUE_PG_TEST_URL=… cargo test -p pqueue-server --features postgres --test performance_single_deployment_baseline_tests".into(),
         backend_profile: "postgres_native".into(),
         scale: if full_shape { "release".into() } else { "baseline".into() },
         seed: 0,
@@ -961,6 +997,16 @@ fn performance_single_deployment_baseline_tests() {
         let consumer_pq = Arc::clone(&pq);
 
         let hot_pool_partition = pqueue_engine::queue_worker_partition(&shard, 2);
+        let (preflight_queue_id, preflight_shard) = (0..100)
+            .map(|index| format!("hot-preflight-{index}"))
+            .map(|queue_id| {
+                let key = sk("e0e1", &queue_id);
+                (queue_id, key)
+            })
+            .find(|(_, key)| {
+                pqueue_engine::queue_worker_partition(key, 2) == hot_pool_partition
+            })
+            .expect("a distinct preflight queue maps to the hot production-pool member");
         let (canary_queue_id, canary_shard, canary_pool_partition) = (0..100)
             .map(|index| format!("canary-{index}"))
             .map(|queue_id| {
@@ -973,12 +1019,17 @@ fn performance_single_deployment_baseline_tests() {
         pq.create_queue(big_qdef("e0e1", &canary_queue_id, progress_bound_ms))
             .await
             .unwrap();
+        pq.create_queue(big_qdef("e0e1", &preflight_queue_id, progress_bound_ms))
+            .await
+            .unwrap();
 
-        // The first hot insert cannot finish until the affinity-routed canary reaches the other pool
-        // member and removes this row. This makes canary progress causal, not a host-speed comparison.
+        // One preflight insert on the hot queue's pool member cannot finish until the affinity-routed canary
+        // reaches the other member and removes this row. This is a causal topology proof, not a speed gate.
+        // It runs on a separate queue so the governed hot queue's identity/count evidence starts untouched.
         let gate_url = observer_url.clone();
         let gate_schema = schema.clone();
         let gate_canary = canary_queue_id.clone();
+        let gate_preflight = preflight_queue_id.clone();
         std::thread::spawn(move || {
             let mut gate_admin = postgres::Client::connect(&gate_url, postgres::NoTls)
                 .expect("connect causal-gate observer");
@@ -986,15 +1037,15 @@ fn performance_single_deployment_baseline_tests() {
                 .batch_execute(&format!(
                 "SET search_path TO {schema};
                  CREATE TABLE e0_pool_hold(queue_id TEXT PRIMARY KEY);
-                 INSERT INTO e0_pool_hold(queue_id) VALUES('hot');
+                 INSERT INTO e0_pool_hold(queue_id) VALUES('{gate_preflight}');
                  CREATE FUNCTION e0_pool_causal_gate() RETURNS trigger LANGUAGE plpgsql AS $$
                  BEGIN
-                   IF NEW.queue_id = 'hot' THEN
-                     WHILE EXISTS (SELECT 1 FROM e0_pool_hold WHERE queue_id = 'hot') LOOP
+                   IF NEW.queue_id = '{gate_preflight}' THEN
+                     WHILE EXISTS (SELECT 1 FROM e0_pool_hold WHERE queue_id = '{gate_preflight}') LOOP
                        PERFORM pg_sleep(0.01);
                      END LOOP;
                    ELSIF NEW.queue_id = '{gate_canary}' THEN
-                     DELETE FROM e0_pool_hold WHERE queue_id = 'hot';
+                     DELETE FROM e0_pool_hold WHERE queue_id = '{gate_preflight}';
                    END IF;
                    RETURN NEW;
                  END $$;
@@ -1007,16 +1058,107 @@ fn performance_single_deployment_baseline_tests() {
         .join()
         .expect("causal-gate setup thread");
 
+        let canary_causal_progress = std::thread::scope(|scope| {
+            let hot = scope.spawn({
+                let pq = Arc::clone(&pq);
+                let preflight_shard = preflight_shard.clone();
+                let runtime = Arc::clone(&runtime);
+                move || {
+                    let _runtime = runtime.enter();
+                    let ops = OperationProbe::default();
+                    futures::executor::block_on(push_batch(
+                        &pq,
+                        &preflight_shard,
+                        resident + 20_000,
+                        1,
+                        &ops,
+                    ))
+                }
+            });
+            let canary = scope.spawn({
+                let pq = Arc::clone(&pq);
+                let canary_shard = canary_shard.clone();
+                let observer_url = observer_url.clone();
+                let application_name = application_name.clone();
+                let runtime = Arc::clone(&runtime);
+                move || {
+                    let _runtime = runtime.enter();
+                    let mut observer = postgres::Client::connect(&observer_url, postgres::NoTls)
+                        .expect("connect canary causal observer");
+                    loop {
+                        let sleeping: bool = observer
+                            .query_one(
+                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name LIKE $1 AND wait_event='PgSleep')",
+                                &[&format!("{application_name}%")],
+                            )
+                            .expect("observe hot production pool member")
+                            .get(0);
+                        if sleeping {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    let ops = OperationProbe::default();
+                    let ids = futures::executor::block_on(push_batch(
+                        &pq,
+                        &canary_shard,
+                        resident + 10_000,
+                        1,
+                        &ops,
+                    ));
+                    let claimed = futures::executor::block_on(claim(&pq, &canary_shard, 1, &ops));
+                    futures::executor::block_on(finalize(
+                        &pq,
+                        &canary_shard,
+                        &claimed,
+                        &ops,
+                    ));
+                    ids == claimed && ids.len() == 1
+                }
+            });
+            let hot_ids = hot.join().unwrap();
+            let canary_ok = canary.join().unwrap();
+            let ops = OperationProbe::default();
+            let hot_claimed = futures::executor::block_on(claim(&pq, &preflight_shard, 1, &ops));
+            futures::executor::block_on(finalize(
+                &pq,
+                &preflight_shard,
+                &hot_claimed,
+                &ops,
+            ));
+            canary_ok && hot_ids == hot_claimed && hot_ids.len() == 1
+        });
+        assert!(canary_causal_progress, "causal fixed-pool preflight failed");
+
+        let cleanup_url = observer_url.clone();
+        let cleanup_schema = schema.clone();
+        std::thread::spawn(move || {
+            let mut admin = postgres::Client::connect(&cleanup_url, postgres::NoTls)
+                .expect("connect causal-gate cleanup observer");
+            admin
+                .batch_execute(&format!(
+                    "SET search_path TO {cleanup_schema};
+                     DROP TRIGGER e0_pool_causal_gate ON pqueue_items;
+                     DROP FUNCTION e0_pool_causal_gate();
+                     DROP TABLE e0_pool_hold;"
+                ))
+                .expect("remove causal preflight objects before measured workload");
+        })
+        .join()
+        .expect("causal-gate cleanup thread");
+
         // E0: one fixed two-member production pool. Stable affinity serializes the hot queue on one member;
-        // the causally gated canary proves an unrelated queue progresses on the other member under load.
-        let pending = Arc::new(Mutex::new(HashMap::<ItemId, (Instant, Instant)>::new()));
+        // the completed causal preflight proved the other member independently progresses. No row trigger
+        // remains on this measured workload.
+        let e0_started = Instant::now();
+        let pending = Arc::new(Mutex::new(PendingAcceptances::new()));
         let pending_peak = Arc::new(AtomicU64::new(0));
         let producer_done = Arc::new(AtomicBool::new(false));
         let consumer_done = Arc::new(AtomicBool::new(false));
-        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
         let (signal_tx, signal_rx) = std::sync::mpsc::sync_channel::<()>(2);
 
-        let (producer_result, consumer_result, canary_causal_progress, mut resources) =
+        let (producer_result, consumer_result, mut resources) =
             std::thread::scope(|scope| {
                 let producer = scope.spawn({
                     let pq = Arc::clone(&pq);
@@ -1048,6 +1190,24 @@ fn performance_single_deployment_baseline_tests() {
                         while result.accepted < resident {
                             let n = (resident - result.accepted).min(load_batch);
                             let accept_started = Instant::now();
+                            // Register the deterministic per-queue counters before the durable push can
+                            // become claim-visible. The completion condvar closes the commit/return window
+                            // without a host-speed deadline or spin loop.
+                            let completion = Arc::new((Mutex::new(None), Condvar::new()));
+                            {
+                                let mut map = pending.lock().unwrap();
+                                for counter in result.accepted..result.accepted + n {
+                                    assert!(
+                                        map.insert(
+                                            counter as u32,
+                                            (accept_started, Arc::clone(&completion)),
+                                        )
+                                        .is_none(),
+                                        "acceptance counter registered exactly once"
+                                    );
+                                }
+                                pending_peak.fetch_max(map.len() as u64, Ordering::SeqCst);
+                            }
                             let ids = futures::executor::block_on(push_batch(
                                 &pq,
                                 &shard,
@@ -1059,11 +1219,9 @@ fn performance_single_deployment_baseline_tests() {
                             result.push_operation_ns +=
                                 accept_completed.duration_since(accept_started).as_nanos() as u64;
                             {
-                                let mut map = pending.lock().unwrap();
-                                for id in &ids {
-                                    map.insert(*id, (accept_started, accept_completed));
-                                }
-                                pending_peak.fetch_max(map.len() as u64, Ordering::SeqCst);
+                                let (completed, ready) = &*completion;
+                                *completed.lock().unwrap() = Some(accept_completed);
+                                ready.notify_all();
                             }
                             for offset in 0..n {
                                 let sequence = result.accepted + offset;
@@ -1157,6 +1315,23 @@ fn performance_single_deployment_baseline_tests() {
                     let mut next_scope_sample = 0;
                     loop {
                         let _ = signal_rx.try_recv();
+                        // A counter is registered before its push becomes visible. Wait on the producer's
+                        // commit-completion signal (with no host-time deadline) before discovery/claim can
+                        // consume the first visible batch. This preserves overlap after admission while
+                        // making the identity interval handoff deterministic.
+                        let acceptance_ready = pending
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .next()
+                            .map(|(_, completion)| Arc::clone(completion));
+                        if let Some(completion) = acceptance_ready {
+                            let (completed, ready) = &*completion;
+                            let mut completed = completed.lock().unwrap();
+                            while completed.is_none() {
+                                completed = ready.wait(completed).unwrap();
+                            }
+                        }
                         if result.claimed >= next_scope_sample
                             && !pending.lock().unwrap().is_empty()
                         {
@@ -1169,7 +1344,11 @@ fn performance_single_deployment_baseline_tests() {
                             result.oldest_eligible_age_samples_ms.extend(
                                 scopes.iter().map(|scope| scope.oldest_eligible_age_ms),
                             );
-                            next_scope_sample += sample_stride;
+                            // A pre-registered acceptance may not have reached its durable commit yet.
+                            // Advance the sampling watermark only after discovery observes eligible work.
+                            if !scopes.is_empty() {
+                                next_scope_sample += sample_stride;
+                            }
                         }
                         let claim_started = Instant::now();
                         let ids = futures::executor::block_on(claim(
@@ -1192,24 +1371,26 @@ fn performance_single_deployment_baseline_tests() {
                             claim_completed.duration_since(claim_started).as_nanos() as u64;
                         result.claim_batches += 1;
                         for id in &ids {
-                            let identity_deadline = Instant::now()
-                                + std::time::Duration::from_millis(progress_bound_ms);
-                            let accepted = loop {
-                                if let Some(interval) = pending.lock().unwrap().remove(id) {
-                                    break interval;
+                            let counter = (id.as_u64() & u32::MAX as u64) as u32;
+                            let (accept_started, completion) = pending
+                                .lock()
+                                .unwrap()
+                                .remove(&counter)
+                                .expect("claimed identity has a pre-registered acceptance counter");
+                            let accept_completed = {
+                                let (completed, ready) = &*completion;
+                                let mut completed = completed.lock().unwrap();
+                                while completed.is_none() {
+                                    completed = ready.wait(completed).unwrap();
                                 }
-                                assert!(
-                                    Instant::now() < identity_deadline,
-                                    "claimed phantom or duplicate identity {id} without a matching accepted interval"
-                                );
-                                std::thread::yield_now();
+                                completed.expect("producer published acceptance completion")
                             };
                             let lower = claim_started
-                                .checked_duration_since(accepted.1)
+                                .checked_duration_since(accept_completed)
                                 .unwrap_or_default()
                                 .as_millis() as u64;
                             let upper = claim_completed
-                                .checked_duration_since(accepted.0)
+                                .checked_duration_since(accept_started)
                                 .unwrap_or_default()
                                 .as_millis() as u64;
                             result.progress_identity_sample_count += 1;
@@ -1234,7 +1415,7 @@ fn performance_single_deployment_baseline_tests() {
                                 .progress_latency_upper_buckets
                                 .entry(bucket.into())
                                 .or_default() += 1;
-                            let counter = (id.as_u64() & u32::MAX as u64) as usize;
+                            let counter = counter as usize;
                             let prefix = id.as_u64() >> 32;
                             if result.identity_prefix.replace(prefix).is_some_and(|seen| seen != prefix) {
                                 result.duplicate_claims += 1;
@@ -1286,60 +1467,6 @@ fn performance_single_deployment_baseline_tests() {
                 }
             });
 
-                let canary = scope.spawn({
-                let pq = Arc::clone(&pq);
-                let canary_shard = canary_shard.clone();
-                let producer_done = Arc::clone(&producer_done);
-                let barrier = Arc::clone(&barrier);
-                let observer_url = observer_url.clone();
-                let application_name = application_name.clone();
-                let runtime = Arc::clone(&runtime);
-                move || {
-                    let _runtime = runtime.enter();
-                    barrier.wait();
-                    let mut observer = postgres::Client::connect(&observer_url, postgres::NoTls)
-                        .expect("connect canary causal observer");
-                    let observed_hot_sleep = loop {
-                        let sleeping: bool = observer
-                            .query_one(
-                                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name LIKE $1 AND wait_event='PgSleep')",
-                                &[&format!("{application_name}%")],
-                            )
-                            .expect("observe hot production pool member")
-                            .get(0);
-                        if sleeping {
-                            break true;
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    };
-                    assert!(observed_hot_sleep, "hot queue never reached causal pg_sleep gate");
-                    let canary_ops = OperationProbe::default();
-                    let ids = futures::executor::block_on(push_batch(
-                        &pq,
-                        &canary_shard,
-                        resident + 10_000,
-                        1,
-                        &canary_ops,
-                    ));
-                    let claimed = futures::executor::block_on(claim(
-                        &pq,
-                        &canary_shard,
-                        1,
-                        &canary_ops,
-                    ));
-                    futures::executor::block_on(finalize(
-                        &pq,
-                        &canary_shard,
-                        &claimed,
-                        &canary_ops,
-                    ));
-                    observed_hot_sleep
-                        && ids == claimed
-                        && ids.len() == 1
-                        && !producer_done.load(Ordering::SeqCst)
-                }
-            });
-
                 let sampler = scope.spawn({
                     let consumer_done = Arc::clone(&consumer_done);
                     let observer_url = observer_url.clone();
@@ -1356,7 +1483,6 @@ fn performance_single_deployment_baseline_tests() {
                 (
                     producer.join().unwrap(),
                     consumer.join().unwrap(),
-                    canary.join().unwrap(),
                     sampler.join().unwrap(),
                 )
             });
@@ -1402,8 +1528,10 @@ fn performance_single_deployment_baseline_tests() {
         assert_eq!(producer_result.duplicate_ids, 0);
         assert_eq!(producer_result.seen_ids, consumer_result.seen_ids);
         assert!(pending.lock().unwrap().is_empty());
+        let e0_elapsed = e0_started.elapsed();
 
         // E1 representative control/load/control probes against the retained ten-million-row state.
+        let e1_started = Instant::now();
         let base_cycles: usize = std::env::var("PQUEUE_E1_CYCLES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -1416,10 +1544,11 @@ fn performance_single_deployment_baseline_tests() {
         let mut probe_finalized = 0u64;
         let mut probe_push_batches = 0u64;
         let mut probe_update_item_calls = 0u64;
+        let mut probe_update_batches = 0u64;
         let mut probe_claim_batches = 0u64;
         let mut probe_finalize_batches = 0u64;
         let mut actual_push_sizes = BTreeSet::new();
-        let mut actual_update_window_sizes = BTreeSet::new();
+        let mut actual_update_sizes = BTreeSet::new();
         let mut actual_claim_sizes = BTreeSet::new();
         let mut actual_finalize_sizes = BTreeSet::new();
         let mut probe_accepted_ids = BTreeSet::new();
@@ -1434,14 +1563,22 @@ fn performance_single_deployment_baseline_tests() {
         probe_push_batches += 1;
         probe_accepted += 1_000;
         probe_accepted_ids.extend(control_seed.iter().copied());
-        for id in &control_seed {
-            let mut ops = BTreeMap::new();
-            ops.insert("probe".into(), Some(Bytes::from_static(b"updated")));
-            pq.update_fields(&shard, *id, ops, PayloadUpdate::Keep, None, None)
-                .await
-                .expect("post-10M update_fields");
-            probe_update_item_calls += 1;
-        }
+        let update_started = Instant::now();
+        let update_response = pq
+            .batch_update(&shard, representative_batch_update(&control_seed, next_id))
+            .await
+            .expect("post-10M API-001 BatchUpdate");
+        assert_eq!(update_response.results.len(), control_seed.len());
+        assert!(update_response.results.iter().all(|result| matches!(
+            result,
+            BatchUpdateOutcome::Updated { item_version: 2, .. }
+        )));
+        lat.entry("update_window_b1000_ms".into())
+            .or_default()
+            .push(ms(update_started));
+        probe_update_item_calls += update_response.results.len() as u64;
+        probe_update_batches += 1;
+        actual_update_sizes.insert(update_response.results.len() as u64);
         let active_pending_before = pq.metrics(&shard).await.unwrap().pending;
         let control_barrier = Arc::new(std::sync::Barrier::new(2));
         let control_operations = Arc::new(OperationProbe::default());
@@ -1520,7 +1657,6 @@ fn performance_single_deployment_baseline_tests() {
         let post10m_caller_interval_overlap_observed =
             write_started < claim_completed && claim_started < write_completed;
         actual_push_sizes.insert(1_000);
-        actual_update_window_sizes.insert(1_000);
         actual_claim_sizes.insert(1_000);
         actual_finalize_sizes.insert(1_000);
 
@@ -1544,18 +1680,21 @@ fn performance_single_deployment_baseline_tests() {
                 actual_push_sizes.insert(pushed_ids.len() as u64);
 
                 let t = Instant::now();
-                for id in &pushed_ids {
-                    let mut ops = BTreeMap::new();
-                    ops.insert("probe".into(), Some(Bytes::from_static(b"updated")));
-                    pq.update_fields(&shard, *id, ops, PayloadUpdate::Keep, None, None)
-                        .await
-                        .expect("facade update_fields");
-                    probe_update_item_calls += 1;
-                }
+                let response = pq
+                    .batch_update(&shard, representative_batch_update(&pushed_ids, next_id))
+                    .await
+                    .expect("facade API-001 BatchUpdate");
+                assert_eq!(response.results.len(), pushed_ids.len());
+                assert!(response.results.iter().all(|result| matches!(
+                    result,
+                    BatchUpdateOutcome::Updated { item_version: 2, .. }
+                )));
+                probe_update_item_calls += response.results.len() as u64;
+                probe_update_batches += 1;
+                actual_update_sizes.insert(response.results.len() as u64);
                 lat.entry(format!("update_window_b{bsz}_ms"))
                     .or_default()
                     .push(ms(t));
-                actual_update_window_sizes.insert(pushed_ids.len() as u64);
 
                 let t = Instant::now();
                 let ids = claim(&pq, &shard, bsz as usize, &operations).await;
@@ -1609,6 +1748,7 @@ fn performance_single_deployment_baseline_tests() {
             Err(EngineError::BatchTooLarge)
         );
         let post_probe = pq.metrics(&shard).await.unwrap();
+        let e1_elapsed = e1_started.elapsed();
         let probe_identity_exact = probe_accepted_ids.len() as u64 == probe_accepted
             && probe_accepted_ids == probe_claimed_ids
             && probe_claimed_ids == probe_finalized_ids;
@@ -1742,11 +1882,7 @@ fn performance_single_deployment_baseline_tests() {
             && post_probe.complete == resident + probe_finalized
             && post_probe.failed == 0
             && actual_push_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
-            && actual_update_window_sizes
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
-                == [1, 100, 1000]
+            && actual_update_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
             && actual_claim_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
             && actual_finalize_sizes.iter().copied().collect::<Vec<_>>() == [1, 100, 1000]
             && oversize_push_rejected
@@ -1756,6 +1892,8 @@ fn performance_single_deployment_baseline_tests() {
         println!(
             "\nTP-002 E0/E1 postgres_native single-deployment baseline (resident={resident}, perf_env={perf_env}):"
         );
+        println!("  E0 exact-work phase          : {:.3}s", e0_elapsed.as_secs_f64());
+        println!("  E1 batch probe phase         : {:.3}s", e1_elapsed.as_secs_f64());
         println!("  producer ingest capacity     : {producer_ingest_completion_per_s:.0} items/s");
         println!(
             "  claimant/finalize capacity   : {claimant_finalize_completion_per_s:.0} items/s"
@@ -1983,7 +2121,7 @@ fn performance_single_deployment_baseline_tests() {
                 full_shape,
                 e0_pass,
                 env_note.clone(),
-                "E0: exact accepted, claimed, and finalized outcomes; monotonic configured-bound progress; bounded shared resources; timings are capacity observations only",
+                "E0: exact accepted, claimed, and finalized outcomes; the persisted queue progress_bound_ms product-liveness contract; bounded shared resources; host throughput, percentiles, and fixed latency buckets are observations only",
                 e0_vals,
             ),
         );
@@ -2084,7 +2222,7 @@ fn performance_single_deployment_baseline_tests() {
         );
         e1_vals.insert(
             "update_window_sizes".into(),
-            serde_json::json!(actual_update_window_sizes),
+            serde_json::json!(actual_update_sizes),
         );
         e1_vals.insert(
             "claim_batch_sizes".into(),
@@ -2168,6 +2306,7 @@ fn performance_single_deployment_baseline_tests() {
                 "push_items": probe_accepted,
                 "push_batches": probe_push_batches,
                 "update_item_calls": probe_update_item_calls,
+                "update_batches": probe_update_batches,
                 "claim_items": probe_claimed,
                 "claim_batches": probe_claim_batches,
                 "finalize_items": probe_finalized,
@@ -2260,7 +2399,7 @@ fn performance_single_deployment_baseline_tests() {
                 full_shape,
                 e1_pass,
                 env_note,
-                "E1: exact batch outcomes, monotonic progress, and bounded resources at the full resident shape; latency percentiles are capacity observations only",
+                "E1: exact batch outcomes, the persisted queue progress_bound_ms product-liveness contract, and bounded resources at the full resident shape; host throughput, percentiles, and fixed latency buckets are observations only",
                 e1_vals,
             ),
         );

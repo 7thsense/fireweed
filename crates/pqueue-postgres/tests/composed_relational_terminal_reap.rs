@@ -6,7 +6,7 @@ use pqueue_engine::{
     ClaimCompatibility, ClaimPort, ClaimRequest, ControlPlaneStore, FinalizeKind, FinalizeOutcome,
     FinalizePort, ProjectionRead, PushPort, PushSpec, ReclaimDriver,
 };
-use pqueue_postgres::composed_postgres_relational_in_schema;
+use pqueue_postgres::PostgresRelationalBackend;
 
 fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()
@@ -37,9 +37,9 @@ fn fresh_schema(tag: &str) -> String {
     format!("pq_rel_term_{}_{}", std::process::id(), tag)
 }
 
-fn open(url: &str, schema: &str) -> pqueue_postgres::ComposedPostgresRelationalBackend {
-    composed_postgres_relational_in_schema(url, schema)
-        .expect("open composed postgres-relational db")
+fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
+    PostgresRelationalBackend::connect_in_schema(url, schema)
+        .expect("open unified postgres-relational db")
 }
 
 #[test]

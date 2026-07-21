@@ -141,7 +141,7 @@ pub mod single_deployment {
                 .and_then(serde_json::Value::as_str)
                 != Some("per-item accepted and claimed timestamp intervals")
         {
-            errors.push("the release workload must explicitly declare a positive queue progress bound, and all 10000000 accepted identities and discovery ages must satisfy it; fixed timing buckets remain capacity observations only".into());
+            errors.push("the release workload must explicitly declare the persisted queue progress_bound_ms product-liveness contract, and all 10000000 accepted identities and discovery ages must satisfy it; host throughput, percentiles, and fixed timing buckets remain capacity observations and are not release gates".into());
         }
         errors
     }

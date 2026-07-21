@@ -371,6 +371,20 @@ pub struct UpdateFieldsCommand {
     /// log-replay compatible with pre-ADR-011 commands (absent field → `None`).
     #[serde(default)]
     pub set_entity_document: Option<serde_json::Value>,
+    /// API-001 `BatchUpdate` uses full replacement for the hot field map. `None` preserves the legacy
+    /// FAC-1 delta behavior; `Some` replaces the complete map before any (normally empty) `field_ops`.
+    #[serde(default)]
+    pub set_fields: Option<BTreeMap<String, Bytes>>,
+    /// API-001 full metadata replacement. Kept on the durable command so projection rebuild is exact.
+    #[serde(default)]
+    pub set_metadata: Option<Metadata>,
+    /// API-001 full gate-membership replacement. `Some(vec![])` clears all memberships.
+    #[serde(default)]
+    pub set_gate_keys: Option<Vec<String>>,
+    /// Selects API-001 BatchUpdate semantics (pending-only validation and preserved `eligible_since`) from
+    /// the older FAC-1/reschedule command behavior while retaining one replay-compatible command variant.
+    #[serde(default)]
+    pub api001_batch: bool,
 }
 
 /// A field-reschedule disposition under [`UpdateFieldsCommand`] (BQ pqueue-7a96f929): leave the value as-is,
@@ -1021,6 +1035,11 @@ pub enum RequestOutcome {
     Push {
         item_ids: Vec<ItemId>,
     },
+    /// Serialized ordered API-001 BatchUpdate result vector. The payload is deliberately opaque to the
+    /// command model; the owning backend decodes it into its public outcome type during idempotent replay.
+    BatchUpdate {
+        response_payload: String,
+    },
     /// Durable replay payload for API-004 ClaimByQuery. The clear lease token is part of the response and
     /// must be returned unchanged on same-body request-id replay while the recorded leases remain active.
     ClaimByQuery {
@@ -1173,6 +1192,10 @@ mod serde_tests {
                 set_priority: ScheduleUpdate::Keep,
                 set_not_before: ScheduleUpdate::Keep,
                 set_entity_document: None,
+                set_fields: None,
+                set_metadata: None,
+                set_gate_keys: None,
+                api001_batch: false,
             }),
             QueueCommand::LeaseExpired(LeaseExpiredCommand {
                 item_ids: vec![iid("a")],
@@ -1551,6 +1574,10 @@ mod serde_tests {
                     set_priority: ScheduleUpdate::Keep,
                     set_not_before: ScheduleUpdate::Keep,
                     set_entity_document: None,
+                    set_fields: None,
+                    set_metadata: None,
+                    set_gate_keys: None,
+                    api001_batch: false,
                 }),
                 vec![ExpectedRecord {
                     item_id: Some(iid("a")),

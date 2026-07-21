@@ -8,11 +8,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::executor::block_on;
 use postgres::{Client, NoTls};
 use pqueue::{
-    EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
-    EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
-    EngineError, NewItem, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueKey, RangeScanRequest,
-    RecurrencePolicy, RequestId, RetryPolicy, TenantId,
+    Bytes, ClaimRef, CommitEntry, CommitRequest, EligibilityPolicy, EmbeddedDurabilityConfig,
+    EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryPolicy,
+    EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig, EngineError, EntryOutcome,
+    FinalizeKind, InstanceFence, NewItem, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueKey,
+    RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SideRecord, TenantId,
 };
 use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
@@ -292,6 +293,79 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     assert_eq!(object_count(&root), objects_before_delete);
     drop(reopened);
 
+    drop_schema(&url, &schema);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// ADR-017 classifies an object log plus an independent Postgres projection as
+/// SeparateReplayCommit/EventualApply. US-009 may promote rich transition commits only after that profile
+/// has an authoritative transition protocol; keeping the complete proof ignored makes the missing behavior
+/// explicit without falsely advertising an atomic append+apply boundary in this release.
+#[test]
+#[ignore = "US-009 promotion proof: ADR-017 SeparateReplayCommit has no authoritative rich-transition boundary yet"]
+fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
+    let url = std::env::var("PQUEUE_PG_TEST_URL")
+        .expect("US-009 promotion proof requires PQUEUE_PG_TEST_URL");
+    let (root, schema) = unique_fixture("us009_objectlog_postgres_commit");
+    let durability = config(&root, &schema, &url);
+    let clock = Arc::new(ManualClock::at(1_000));
+    let pq = pqueue::open_embedded(durability.clone(), clock.clone()).unwrap();
+    let key = queue();
+    block_on(pq.create_queue(definition())).unwrap();
+    assert_eq!(pq.commit_capabilities(&key).unwrap(), Default::default());
+
+    block_on(pq.push(&key, item(10))).unwrap();
+    let claim = block_on(pq.claim(&key, 1, 30_000)).unwrap().remove(0);
+    let claim_ref = ClaimRef {
+        item_id: claim.item_id,
+        lease_token: claim.lease_token.clone().expect("claim token"),
+        lease_expires_at: claim.lease_expires_at,
+        item_version: claim.item_version,
+    };
+    let request_id = RequestId::new("us009-objectlog-postgres-transition").unwrap();
+    let transition = || CommitRequest {
+        request_id: Some(request_id.clone()),
+        entries: vec![CommitEntry {
+            claim_ref: claim_ref.clone(),
+            finalize: FinalizeKind::Complete,
+            side_records: vec![SideRecord {
+                key: b"state/run-1".to_vec(),
+                payload: Bytes::copy_from_slice(b"audit-bytes"),
+            }],
+            lifecycle_items: vec![item(30)],
+            instance_fence: Some(InstanceFence {
+                instance_key: b"wf-1".to_vec(),
+                expected: 0,
+                next: 1,
+            }),
+        }],
+    };
+    let outcomes = block_on(pq.commit(&key, transition())).unwrap();
+    let lifecycle_id = match outcomes.as_slice() {
+        [EntryOutcome::Committed { lifecycle_item_ids }] => lifecycle_item_ids[0],
+        other => panic!("expected committed rich transition, got {other:?}"),
+    };
+    assert_eq!(
+        block_on(pq.side_record(&key, b"state/run-1"))
+            .unwrap()
+            .as_deref(),
+        Some(b"audit-bytes".as_slice())
+    );
+
+    block_on(pq.delete_projection()).unwrap();
+    block_on(pq.rehydrate_projection()).unwrap();
+    assert_eq!(block_on(pq.commit(&key, transition())).unwrap(), outcomes);
+    let recovery = block_on(pq.explain_commit(&key, request_id))
+        .unwrap()
+        .expect("rich transition survives projection rebuild");
+    assert_eq!(recovery.entries[0].consumed_input_id, claim.item_id);
+    assert_eq!(recovery.entries[0].lifecycle_item_ids, vec![lifecycle_id]);
+    assert_eq!(
+        recovery.entries[0].side_record_keys,
+        vec![b"state/run-1".to_vec()]
+    );
+
+    drop(pq);
     drop_schema(&url, &schema);
     let _ = fs::remove_dir_all(root);
 }

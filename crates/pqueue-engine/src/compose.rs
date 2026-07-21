@@ -2857,6 +2857,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     // A `Push` command never carries a `CommitTransition` outcome; fall back to the
                     // envelope's minted ids (same as the `None` legacy-push path).
                     Some(RequestOutcome::ClaimByQuery { .. })
+                    | Some(RequestOutcome::BatchUpdate { .. })
                     | Some(RequestOutcome::CommitTransition { .. })
                     | None => env.item_ids.clone(),
                 },
@@ -4544,6 +4545,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
                     set_priority: Default::default(),
                     set_not_before: Default::default(),
                     set_entity_document: entity,
+                    set_fields: None,
+                    set_metadata: None,
+                    set_gate_keys: None,
+                    api001_batch: false,
                 }),
                 vec![item_id],
                 now,
@@ -5193,6 +5198,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
                     set_priority,
                     set_not_before,
                     set_entity_document: None,
+                    set_fields: None,
+                    set_metadata: None,
+                    set_gate_keys: None,
+                    api001_batch: false,
                 }),
                 vec![item_id],
                 now,

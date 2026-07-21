@@ -4884,6 +4884,10 @@ mod tests {
                 set_priority: ScheduleUpdate::Keep,
                 set_not_before: ScheduleUpdate::Set(Some(ts(5_000))),
                 set_entity_document: None,
+                set_fields: None,
+                set_metadata: None,
+                set_gate_keys: None,
+                api001_batch: false,
             })),
             None,
         )

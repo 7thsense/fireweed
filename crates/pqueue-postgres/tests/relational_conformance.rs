@@ -25,7 +25,7 @@ use pqueue_engine::{
     ClaimPort, CommandPosition, ControlPlaneStore, EngineError, HistoricalProjectionRead,
     ProjectionRead, PushPort, RecoveryReadPort,
 };
-use pqueue_postgres::{PostgresRelationalBackend, composed_postgres_relational_in_schema};
+use pqueue_postgres::PostgresRelationalBackend;
 use serde_json::json;
 
 fn fresh_schema() -> String {
@@ -343,7 +343,7 @@ fn postgres_relational_recovery_high_water() {
         Ok(url) => {
             let schema = fresh_schema();
             futures::executor::block_on(async {
-                let backend = composed_postgres_relational_in_schema(&url, &schema)
+                let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema)
                     .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
                 backend
                     .create_queue(pqueue_conformance::qdef())
@@ -376,7 +376,7 @@ fn postgres_relational_recovery_high_water() {
                 );
             });
 
-            let reopened = composed_postgres_relational_in_schema(&url, &schema)
+            let reopened = PostgresRelationalBackend::connect_in_schema(&url, &schema)
                 .expect("reconnect postgres (is PQUEUE_PG_TEST_URL a live DB?)");
             assert_eq!(
                 futures::executor::block_on(

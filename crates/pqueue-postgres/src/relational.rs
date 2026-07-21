@@ -60,25 +60,26 @@ use pqueue_core::{
     is_retry_exhausted, priority_sort,
 };
 use pqueue_engine::{
-    ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
-    ClaimRequest, ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand,
-    CohortFinalizeCommand, CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand,
-    CohortRenewLeasePort, CommandChecksum, CommandEnvelope, CommandId, CommandPosition,
-    CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitOutcomeEntry, CommitRecovery,
-    CommitRejection, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
-    ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
-    DurableIntegrityStage, EngineError, EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision, IndexHit,
-    IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate,
-    PendingPage, PendingSummary, ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand,
-    PushFingerprint, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
-    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestOutcome,
-    ScheduleUpdate, SetGatesCommand, SetGatesPort, TerminalEmissionMetrics, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
-    build_push_items, compile_entity_schema, project_scopes, validate_api001_reserved_write_fields,
-    validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
-    validate_purge_force,
+    ActiveScope, AdvanceInstanceFenceCommand, Backend, BatchUpdateItemRef, BatchUpdateOutcome,
+    BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, ClaimCommand,
+    ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit, Claimed, ClaimedItem,
+    CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand, CohortFinalizePort,
+    CohortLeaseTarget, CohortRenewLeaseCommand, CohortRenewLeasePort, CommandChecksum,
+    CommandEnvelope, CommandId, CommandPosition, CommitCapabilities, CommitEntryOutcome,
+    CommitEntryStatus, CommitOutcomeEntry, CommitRecovery, CommitRejection, CommitTransition,
+    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome,
+    DiscoveryGranularity, DiscoveryPort, DurabilityClass, DurableIntegrityStage, EngineError,
+    EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+    HistoricalProjectionRead, IdempotencyDecision, IndexHit, IndexQueryPort, ItemView,
+    LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary,
+    ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushFingerprint, PushItem, PushPort,
+    PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
+    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand,
+    RenewLeasePort, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand,
+    SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema,
+    project_scopes, validate_api001_reserved_write_fields, validate_claim_compatibility,
+    validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use pqueue_engine::{
     AsOfProjectionStore, CommandPage, LogLineageIdentity, LogRead, LogStore, ProjectionSnapshot,
@@ -97,8 +98,38 @@ struct PushSqlProbe {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BatchUpdateSqlProbe {
+    target_selects: u64,
+    command_batch_inserts: u64,
+    projection_updates: u64,
+}
+
+#[cfg(test)]
 thread_local! {
     static PUSH_SQL_PROBES: RefCell<HashMap<QueueKey, PushSqlProbe>> = RefCell::new(HashMap::new());
+    static BATCH_UPDATE_SQL_PROBES: RefCell<HashMap<QueueKey, BatchUpdateSqlProbe>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+fn reset_batch_update_sql_probe(shard: &QueueKey) {
+    BATCH_UPDATE_SQL_PROBES.with(|probes| {
+        probes
+            .borrow_mut()
+            .insert(shard.clone(), BatchUpdateSqlProbe::default());
+    });
+}
+
+#[cfg(test)]
+fn update_batch_update_sql_probe(shard: &QueueKey, update: impl FnOnce(&mut BatchUpdateSqlProbe)) {
+    BATCH_UPDATE_SQL_PROBES.with(|probes| {
+        update(probes.borrow_mut().entry(shard.clone()).or_default());
+    });
+}
+
+#[cfg(test)]
+fn batch_update_sql_probe(shard: &QueueKey) -> BatchUpdateSqlProbe {
+    BATCH_UPDATE_SQL_PROBES.with(|probes| probes.borrow().get(shard).copied().unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -725,7 +756,7 @@ const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
 /// Concurrent claimers lock disjoint candidate sets — no process Mutex, no select-then-lease TOCTOU.
 /// Authored as a constant so its shape is unit-asserted without a live DB (`sql_shape_tests`).
 pub(crate) const CLAIM_CTE: &str = "\
-WITH candidates AS ( \
+WITH candidates AS MATERIALIZED ( \
     SELECT item_id FROM pqueue_items \
     WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NULL \
       AND (not_before IS NULL OR not_before<=$3) AND eligible_since IS NOT NULL \
@@ -883,6 +914,87 @@ fn record_request_idempotency(
 // ---------------------------------------------------------------------------
 
 const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
+const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
+
+fn check_batch_update_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    now_n: i64,
+) -> EngineResult<Option<String>> {
+    let (t, q) = parts(shard);
+    let prior = st(tx.query_opt(
+        "SELECT request_fingerprint,response_payload,expires_at \
+         FROM pqueue_request_idempotency \
+         WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+        &[
+            &t,
+            &q,
+            &IDEMPOTENCY_OPERATION_BATCH_UPDATE,
+            &request_id.as_str(),
+        ],
+    ))?;
+    let Some(row) = prior else { return Ok(None) };
+    let prior_fingerprint: Vec<u8> = row.get(0);
+    let response_payload: String = row.get(1);
+    let expires_at: i64 = row.get(2);
+    if expires_at <= now_n {
+        st(tx.execute(
+            "DELETE FROM pqueue_request_idempotency \
+             WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+            &[
+                &t,
+                &q,
+                &IDEMPOTENCY_OPERATION_BATCH_UPDATE,
+                &request_id.as_str(),
+            ],
+        ))?;
+        return Ok(None);
+    }
+    if prior_fingerprint != fingerprint {
+        return Err(EngineError::RequestIdConflict);
+    }
+    Ok(Some(response_payload))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_batch_update_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    response_payload: &str,
+    now: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (t, q) = parts(shard);
+    let affected = st(tx.execute(
+        "INSERT INTO pqueue_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
+         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+           request_fingerprint=EXCLUDED.request_fingerprint,response_payload=EXCLUDED.response_payload, \
+           expires_at=EXCLUDED.expires_at,created_at=EXCLUDED.created_at \
+         WHERE pqueue_request_idempotency.expires_at<=EXCLUDED.created_at OR \
+           (pqueue_request_idempotency.request_fingerprint=EXCLUDED.request_fingerprint AND \
+            pqueue_request_idempotency.response_payload=EXCLUDED.response_payload)",
+        &[
+            &t,
+            &q,
+            &IDEMPOTENCY_OPERATION_BATCH_UPDATE,
+            &request_id.as_str(),
+            &fingerprint,
+            &response_payload,
+            &expires_at,
+            &ts_nanos(now),
+        ],
+    ))?;
+    if affected == 0 {
+        return Err(EngineError::RequestIdConflict);
+    }
+    Ok(())
+}
 
 fn commit_request_fingerprint(entries: &[CommitTransitionEntry]) -> EngineResult<Vec<u8>> {
     let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
@@ -2742,7 +2854,7 @@ fn apply_command_sql(
             // UpdateFieldsPort, so a missing/ineligible row here is a no-op (commit has no rollback).
             let item_id = c.item_id.to_string();
             let row = st(tx.query_opt(
-                "SELECT fields,lifecycle_state,priority,priority_sort,not_before,eligible_since,payload \
+                "SELECT fields,lifecycle_state,priority,priority_sort,not_before,eligible_since,payload,metadata \
                  FROM pqueue_items \
                  WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
@@ -2756,6 +2868,10 @@ fn apply_command_sql(
             let mut not_before: Option<i64> = row.get(4);
             let mut eligible_since: i64 = row.get(5);
             let mut payload: Option<Vec<u8>> = row.get(6);
+            let mut metadata_json: String = row.get(7);
+            if let Some(replacement) = &c.set_fields {
+                fields = replacement.clone();
+            }
             for (k, op) in &c.field_ops {
                 match op {
                     Some(v) => {
@@ -2769,6 +2885,9 @@ fn apply_command_sql(
             let fields_json = fields_to_json(&fields)?;
             if let PayloadUpdate::Set(next) = &c.payload {
                 payload = next.as_ref().map(|bytes| bytes.to_vec());
+            }
+            if let Some(metadata) = &c.set_metadata {
+                metadata_json = metadata_to_json(metadata)?;
             }
             let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
                 || matches!(c.set_not_before, ScheduleUpdate::Set(_));
@@ -2787,16 +2906,33 @@ fn apply_command_sql(
             }
             if let ScheduleUpdate::Set(next) = &c.set_not_before {
                 not_before = (*next).map(ts_nanos);
-                eligible_since = not_before.unwrap_or(now_n).max(now_n);
+                if !c.api001_batch {
+                    eligible_since = not_before.unwrap_or(now_n).max(now_n);
+                }
             }
             st(tx.execute(
-                "UPDATE pqueue_items SET fields=$4,payload=$5,priority=$6, \
-                 priority_sort=$7,not_before=$8,eligible_since=$9,item_version=item_version+1, \
-                 updated_at=$10,last_command_sequence=$11 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+                "UPDATE pqueue_items SET fields=$4,payload=$5,metadata=$6,priority=$7, \
+                 priority_sort=$8,not_before=$9,eligible_since=$10,item_version=item_version+1, \
+                 updated_at=$11,last_command_sequence=$12 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
                  AND lifecycle_state IN ('Pending','Leased') AND superseded=false AND fenced=false",
-                &[&t,&q,&item_id,&fields_json,&payload,&priority_json,
+                &[&t,&q,&item_id,&fields_json,&payload,&metadata_json,&priority_json,
                   &priority_sort_key,&not_before,&eligible_since,&now_n,&seqi],
             ))?;
+            if let Some(gate_keys) = &c.set_gate_keys {
+                st(tx.execute(
+                    "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                    &[&t, &q, &item_id],
+                ))?;
+                if !gate_keys.is_empty() {
+                    let item_ids = vec![item_id.clone(); gate_keys.len()];
+                    st(tx.execute(
+                        "INSERT INTO pqueue_item_gates(tenant_id,queue_id,item_id,gate_key) \
+                         SELECT $1,$2,* FROM UNNEST($3::text[],$4::text[]) \
+                         ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
+                        &[&t, &q, &item_ids, gate_keys],
+                    ))?;
+                }
+            }
             // ADR-011: if a new entity document was supplied, re-index this item. Delete the
             // old rows first so the unique slot is freed before the conflict check fires.
             if let Some(ref doc) = c.set_entity_document {
@@ -4868,6 +5004,17 @@ impl PostgresRelationalBackend {
                             envelope.created_at,
                             expires_at,
                         )?,
+                        RequestOutcome::BatchUpdate { response_payload } => {
+                            record_batch_update_idempotency(
+                                &mut tx,
+                                shard,
+                                request_id,
+                                &fingerprint,
+                                response_payload,
+                                envelope.created_at,
+                                expires_at,
+                            )?;
+                        }
                         RequestOutcome::CommitTransition { entries } => {
                             let recovery = entries
                                 .iter()
@@ -5535,7 +5682,9 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                 "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES($1,$2,0,0)",
                 &[&t, &q],
             ))?;
-            let empty_snapshot_digest = Sha256::digest([]).to_vec();
+            // Rebuild verifies every baseline through the canonical count/sum/sum summary, including the
+            // empty genesis snapshot. An empty relation set therefore hashes "0:0:0", not zero bytes.
+            let empty_snapshot_digest = Sha256::digest(b"0:0:0").to_vec();
             st(tx.execute(
                 "INSERT INTO pqueue_command_baselines \
                    (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
@@ -7061,6 +7210,10 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
                     set_priority: Default::default(),
                     set_not_before: Default::default(),
                     set_entity_document: entity,
+                    set_fields: None,
+                    set_metadata: None,
+                    set_gate_keys: None,
+                    api001_batch: false,
                 }),
                 now,
                 expected_epoch,
@@ -7073,6 +7226,532 @@ impl UpdateFieldsPort for PostgresRelationalBackend {
             ))?
             .get(0);
             Ok(new_version as u64)
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl BatchUpdatePort for PostgresRelationalBackend {
+    fn batch_update(
+        &self,
+        shard: &QueueKey,
+        request: BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<BatchUpdateResponse>> + Send {
+        let result = (|| {
+            if request.updates.is_empty() {
+                return Err(EngineError::Invalid("empty batch update"));
+            }
+            if request.updates.len() > 1_000 {
+                return Err(EngineError::BatchTooLarge);
+            }
+            let fingerprint = Sha256::digest(
+                serde_json::to_vec(&request)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+            )
+            .get(..8)
+            .expect("sha256 is at least eight bytes")
+            .to_vec();
+            let request_id = request.request_id.clone();
+            let (t, q) = parts(shard);
+            let now_n = ts_nanos(now);
+            let mut g = self.inner.lock().expect("poisoned");
+            let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let expires_at = request_expires_at(&g.queues, shard, now)?;
+            let mut tx = st(g.client.transaction())?;
+            let epoch: i64 = st(tx.query_one(
+                "SELECT assignment_epoch FROM relational_cursor \
+                 WHERE tenant=$1 AND queue=$2 FOR UPDATE",
+                &[&t, &q],
+            ))?
+            .get(0);
+            if expected_epoch.is_some_and(|expected| expected != epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
+            if let Some(payload) =
+                check_batch_update_idempotency(&mut tx, shard, &request_id, &fingerprint, now_n)?
+            {
+                let response = serde_json::from_str(&payload)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                return Ok(response);
+            }
+
+            let mut requested_ids = Vec::new();
+            let mut requested_keys = Vec::new();
+            for update in &request.updates {
+                match &update.item_ref {
+                    BatchUpdateItemRef::ItemId(item_id) => requested_ids.push(item_id.to_string()),
+                    BatchUpdateItemRef::ClientItemKey(key) => {
+                        requested_keys.push(key.as_str().to_string());
+                    }
+                    BatchUpdateItemRef::Both {
+                        item_id,
+                        client_item_key,
+                    } => {
+                        requested_ids.push(item_id.to_string());
+                        requested_keys.push(client_item_key.as_str().to_string());
+                    }
+                }
+            }
+
+            #[derive(Clone)]
+            struct CurrentItem {
+                item_id: String,
+                client_item_key: String,
+                state: ItemState,
+                superseded: bool,
+                fenced: bool,
+                version: u64,
+                priority_json: Option<String>,
+                priority_sort: Vec<u8>,
+                not_before: Option<i64>,
+                payload: Option<Vec<u8>>,
+                fields_json: String,
+                metadata_json: String,
+                group_key: Option<String>,
+            }
+            #[cfg(test)]
+            update_batch_update_sql_probe(shard, |probe| probe.target_selects += 1);
+            let rows = st(tx.query(
+                "SELECT item_id,client_item_key,lifecycle_state,superseded,fenced,item_version, \
+                        priority,priority_sort,not_before,payload,fields,metadata,group_key \
+                 FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+                   AND (item_id=ANY($3) OR client_item_key=ANY($4)) FOR UPDATE",
+                &[&t, &q, &requested_ids, &requested_keys],
+            ))?;
+            let mut by_id = HashMap::with_capacity(rows.len());
+            let mut by_key = HashMap::with_capacity(rows.len());
+            for row in rows {
+                let current = CurrentItem {
+                    item_id: row.get(0),
+                    client_item_key: row.get(1),
+                    state: parse_state(&row.get::<_, String>(2))?,
+                    superseded: row.get(3),
+                    fenced: row.get(4),
+                    version: row.get::<_, i64>(5) as u64,
+                    priority_json: row.get(6),
+                    priority_sort: row.get(7),
+                    not_before: row.get(8),
+                    payload: row.get(9),
+                    fields_json: row.get(10),
+                    metadata_json: row.get(11),
+                    group_key: row.get(12),
+                };
+                by_key.insert(current.client_item_key.clone(), current.item_id.clone());
+                by_id.insert(current.item_id.clone(), current);
+            }
+
+            struct ValidUpdate {
+                outcome_index: usize,
+                item_id: ItemId,
+                item_id_string: String,
+                client_item_key: ClientItemKey,
+                previous_version: u64,
+                fields_json: String,
+                payload: Option<Vec<u8>>,
+                metadata_json: String,
+                priority_json: Option<String>,
+                priority_sort: Vec<u8>,
+                not_before: Option<i64>,
+                replacement_gate_keys: Option<Vec<String>>,
+                group_key: Option<String>,
+                command: QueueCommand,
+            }
+
+            let mut outcomes = vec![BatchUpdateOutcome::Conflict; request.updates.len()];
+            let mut valid = Vec::with_capacity(request.updates.len());
+            let mut seen = HashSet::with_capacity(request.updates.len());
+            for (outcome_index, update) in request.updates.into_iter().enumerate() {
+                let resolved_id = match &update.item_ref {
+                    BatchUpdateItemRef::ItemId(item_id) => Some(item_id.to_string()),
+                    BatchUpdateItemRef::ClientItemKey(key) => by_key.get(key.as_str()).cloned(),
+                    BatchUpdateItemRef::Both {
+                        item_id,
+                        client_item_key,
+                    } => by_key
+                        .get(client_item_key.as_str())
+                        .filter(|resolved| *resolved == &item_id.to_string())
+                        .cloned(),
+                };
+                let Some(resolved_id) = resolved_id else {
+                    outcomes[outcome_index] = BatchUpdateOutcome::NotFound;
+                    continue;
+                };
+                let Some(current) = by_id.get(&resolved_id) else {
+                    outcomes[outcome_index] = BatchUpdateOutcome::NotFound;
+                    continue;
+                };
+                if !seen.insert(resolved_id.clone()) {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                    continue;
+                }
+                if current.state.is_terminal() {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Terminal;
+                    continue;
+                }
+                if current.state != ItemState::Pending || current.superseded || current.fenced {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                    continue;
+                }
+                if update
+                    .expected_item_version
+                    .is_some_and(|expected| expected != current.version)
+                {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                    continue;
+                }
+
+                let set_fields = match update.fields {
+                    BatchUpdateValue::Keep => None,
+                    BatchUpdateValue::Replace(fields) => {
+                        let reserved_probe =
+                            fields.keys().cloned().map(|name| (name, None)).collect();
+                        if validate_api001_reserved_write_fields(&reserved_probe).is_err() {
+                            outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                            continue;
+                        }
+                        Some(fields)
+                    }
+                };
+                let set_metadata = match update.metadata {
+                    BatchUpdateValue::Keep => None,
+                    BatchUpdateValue::Replace(metadata) => Some(metadata),
+                };
+                let mut set_gate_keys = match update.gate_keys {
+                    BatchUpdateValue::Keep => None,
+                    BatchUpdateValue::Replace(mut gate_keys) => {
+                        gate_keys.sort();
+                        gate_keys.dedup();
+                        Some(gate_keys)
+                    }
+                };
+                if let Some(gate_keys) = &set_gate_keys {
+                    let malformed = gate_keys.iter().any(|key| {
+                        key.is_empty()
+                            || key.len() > 256
+                            || !key
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+                    });
+                    let disabled = definition.eligibility_policy.gate_keys
+                        != pqueue_core::GateKeyPolicy::Dynamic
+                        && !gate_keys.is_empty();
+                    let over_cap = definition
+                        .eligibility_policy
+                        .max_gate_keys_per_item
+                        .is_some_and(|max| gate_keys.len() as u64 > max);
+                    if malformed || disabled || over_cap {
+                        outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                        continue;
+                    }
+                }
+                let (priority_json, priority_sort, set_priority) = match update.priority {
+                    BatchUpdateValue::Keep => (
+                        current.priority_json.clone(),
+                        current.priority_sort.clone(),
+                        ScheduleUpdate::Keep,
+                    ),
+                    BatchUpdateValue::Replace(priority) => {
+                        let type_matches = matches!(
+                            (&definition.priority_model.kind, &priority),
+                            (
+                                pqueue_core::PriorityModelKind::Timestamp,
+                                PriorityValue::Timestamp(_)
+                            ) | (
+                                pqueue_core::PriorityModelKind::Int64,
+                                PriorityValue::Int64(_)
+                            ) | (
+                                pqueue_core::PriorityModelKind::Decimal,
+                                PriorityValue::Decimal(_)
+                            ) | (pqueue_core::PriorityModelKind::Text, PriorityValue::Text(_))
+                        );
+                        if !type_matches {
+                            outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+                            continue;
+                        }
+                        (
+                            Some(to_json(&priority)?),
+                            elig_sort(&Some(priority.clone()), &definition.priority_model),
+                            ScheduleUpdate::Set(Some(priority)),
+                        )
+                    }
+                };
+                let (not_before, set_not_before) = match update.not_before {
+                    BatchUpdateValue::Keep => (current.not_before, ScheduleUpdate::Keep),
+                    BatchUpdateValue::Replace(value) => {
+                        (value.map(ts_nanos), ScheduleUpdate::Set(value))
+                    }
+                };
+                let (payload, set_payload) = match update.payload {
+                    BatchUpdateValue::Keep => (current.payload.clone(), PayloadUpdate::Keep),
+                    BatchUpdateValue::Replace(value) => (
+                        value.as_ref().map(|bytes| bytes.to_vec()),
+                        PayloadUpdate::Set(value),
+                    ),
+                };
+                let fields_json = match &set_fields {
+                    Some(fields) => fields_to_json(fields)?,
+                    None => current.fields_json.clone(),
+                };
+                let metadata_json = match &set_metadata {
+                    Some(metadata) => metadata_to_json(metadata)?,
+                    None => current.metadata_json.clone(),
+                };
+                let item_id = ItemId::new(resolved_id.clone())
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                let client_item_key = ClientItemKey::new(current.client_item_key.clone())
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                let command = QueueCommand::UpdateFields(UpdateFieldsCommand {
+                    item_id,
+                    field_ops: BTreeMap::new(),
+                    payload: set_payload,
+                    set_priority,
+                    set_not_before,
+                    set_entity_document: None,
+                    set_fields,
+                    set_metadata,
+                    set_gate_keys: set_gate_keys.take(),
+                    api001_batch: true,
+                });
+                let replacement_gate_keys = match &command {
+                    QueueCommand::UpdateFields(command) => command.set_gate_keys.clone(),
+                    _ => unreachable!(),
+                };
+                valid.push(ValidUpdate {
+                    outcome_index,
+                    item_id,
+                    item_id_string: resolved_id,
+                    client_item_key,
+                    previous_version: current.version,
+                    fields_json,
+                    payload,
+                    metadata_json,
+                    priority_json,
+                    priority_sort,
+                    not_before,
+                    replacement_gate_keys,
+                    group_key: current.group_key.clone(),
+                    command,
+                });
+            }
+
+            let base_sequence = if valid.is_empty() {
+                None
+            } else {
+                Some(alloc_seq_range(&mut tx, &t, &q, valid.len())?)
+            };
+            if let Some(base_sequence) = base_sequence {
+                let positions: Vec<_> = valid
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, _)| {
+                        CommandPosition::new(
+                            shard.clone(),
+                            epoch as u64,
+                            base_sequence + offset as u64,
+                        )
+                    })
+                    .collect();
+                let mut envelopes: Vec<_> = valid
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, update)| {
+                        direct_command_envelope(
+                            shard,
+                            update.command.clone(),
+                            now,
+                            epoch as u64,
+                            base_sequence + offset as u64,
+                        )
+                    })
+                    .collect();
+
+                let item_ids: Vec<_> = valid
+                    .iter()
+                    .map(|update| update.item_id_string.clone())
+                    .collect();
+                let expected_versions: Vec<_> = valid
+                    .iter()
+                    .map(|update| update.previous_version as i64)
+                    .collect();
+                let fields_json: Vec<_> = valid
+                    .iter()
+                    .map(|update| update.fields_json.clone())
+                    .collect();
+                let payloads: Vec<_> = valid.iter().map(|update| update.payload.clone()).collect();
+                let metadata_json: Vec<_> = valid
+                    .iter()
+                    .map(|update| update.metadata_json.clone())
+                    .collect();
+                let priorities: Vec<_> = valid
+                    .iter()
+                    .map(|update| update.priority_json.clone())
+                    .collect();
+                let priority_sorts: Vec<_> = valid
+                    .iter()
+                    .map(|update| update.priority_sort.clone())
+                    .collect();
+                let not_before: Vec<_> = valid.iter().map(|update| update.not_before).collect();
+                let sequences: Vec<_> = valid
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, _)| (base_sequence + offset as u64) as i64)
+                    .collect();
+                #[cfg(test)]
+                update_batch_update_sql_probe(shard, |probe| probe.projection_updates += 1);
+                let changed = st(tx.execute(
+                    "UPDATE pqueue_items AS item SET fields=batch.fields,payload=batch.payload, \
+                       metadata=batch.metadata,priority=batch.priority,priority_sort=batch.priority_sort, \
+                       not_before=batch.not_before,item_version=item.item_version+1,updated_at=$11, \
+                       last_command_sequence=batch.sequence \
+                     FROM UNNEST($3::text[],$4::bigint[],$5::text[],$6::bytea[],$7::text[], \
+                                 $8::text[],$9::bytea[],$10::bigint[],$12::bigint[]) \
+                       AS batch(item_id,expected_version,fields,payload,metadata,priority,priority_sort, \
+                                not_before,sequence) \
+                     WHERE item.tenant_id=$1 AND item.queue_id=$2 AND item.item_id=batch.item_id \
+                       AND item.item_version=batch.expected_version AND item.lifecycle_state='Pending' \
+                       AND item.lease_token_hash IS NULL AND item.superseded=false AND item.fenced=false",
+                    &[
+                        &t,
+                        &q,
+                        &item_ids,
+                        &expected_versions,
+                        &fields_json,
+                        &payloads,
+                        &metadata_json,
+                        &priorities,
+                        &priority_sorts,
+                        &not_before,
+                        &now_n,
+                        &sequences,
+                    ],
+                ))?;
+                if changed != valid.len() as u64 {
+                    return Err(EngineError::Conflict);
+                }
+
+                let gate_item_ids: Vec<_> = valid
+                    .iter()
+                    .filter(|update| update.replacement_gate_keys.is_some())
+                    .map(|update| update.item_id_string.clone())
+                    .collect();
+                if !gate_item_ids.is_empty() {
+                    st(tx.execute(
+                        "DELETE FROM pqueue_item_gates \
+                         WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+                        &[&t, &q, &gate_item_ids],
+                    ))?;
+                    let mut pair_items = Vec::new();
+                    let mut pair_keys = Vec::new();
+                    for update in &valid {
+                        if let Some(keys) = &update.replacement_gate_keys {
+                            for key in keys {
+                                pair_items.push(update.item_id_string.clone());
+                                pair_keys.push(key.clone());
+                            }
+                        }
+                    }
+                    if !pair_items.is_empty() {
+                        st(tx.execute(
+                            "INSERT INTO pqueue_item_gates(tenant_id,queue_id,item_id,gate_key) \
+                             SELECT $1,$2,* FROM UNNEST($3::text[],$4::text[]) \
+                             ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
+                            &[&t, &q, &pair_items, &pair_keys],
+                        ))?;
+                    }
+                }
+                let affected_groups: Vec<GroupKey> = valid
+                    .iter()
+                    .filter_map(|update| update.group_key.as_deref())
+                    .map(|group| {
+                        GroupKey::new(group.to_string())
+                            .map_err(|error| EngineError::Storage(error.to_string()))
+                    })
+                    .collect::<EngineResult<_>>()?;
+                refresh_group_summaries(&mut tx, shard, &affected_groups, now)?;
+
+                for update in &valid {
+                    outcomes[update.outcome_index] = BatchUpdateOutcome::Updated {
+                        item_id: update.item_id,
+                        client_item_key: update.client_item_key.clone(),
+                        item_version: update.previous_version + 1,
+                    };
+                }
+                let response = BatchUpdateResponse {
+                    request_id: request_id.clone(),
+                    results: outcomes,
+                };
+                let response_payload = serde_json::to_string(&response)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                if let Some(first) = envelopes.first_mut() {
+                    first.request_id = Some(request_id.clone());
+                    first.request_fingerprint = fingerprint
+                        .get(..8)
+                        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                        .map(u64::from_be_bytes);
+                    first.request_outcome = Some(RequestOutcome::BatchUpdate {
+                        response_payload: response_payload.clone(),
+                    });
+                }
+                #[cfg(test)]
+                update_batch_update_sql_probe(shard, |probe| probe.command_batch_inserts += 1);
+                persist_command_envelopes(&mut tx, &positions, &envelopes)?;
+                record_batch_update_idempotency(
+                    &mut tx,
+                    shard,
+                    &request_id,
+                    &fingerprint,
+                    &response_payload,
+                    now,
+                    expires_at,
+                )?;
+                st(tx.commit())?;
+                Ok(response)
+            } else {
+                let response = BatchUpdateResponse {
+                    request_id: request_id.clone(),
+                    results: outcomes,
+                };
+                let response_payload = serde_json::to_string(&response)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?;
+                // An all-rejected best-effort batch still has a replayable response. Persist an empty
+                // non-work side-record command as the durable request marker; apply is a true no-op, but
+                // snapshot-tail rebuild can reconstruct the idempotency row from its envelope metadata.
+                let marker_sequence = alloc_seq(&mut tx, &t, &q)?;
+                let position = CommandPosition::new(shard.clone(), epoch as u64, marker_sequence);
+                let mut marker = direct_command_envelope(
+                    shard,
+                    QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
+                    now,
+                    epoch as u64,
+                    marker_sequence,
+                );
+                marker.request_id = Some(request_id.clone());
+                marker.request_fingerprint = fingerprint
+                    .get(..8)
+                    .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                    .map(u64::from_be_bytes);
+                marker.request_outcome = Some(RequestOutcome::BatchUpdate {
+                    response_payload: response_payload.clone(),
+                });
+                persist_command_envelopes(
+                    &mut tx,
+                    std::slice::from_ref(&position),
+                    std::slice::from_ref(&marker),
+                )?;
+                record_batch_update_idempotency(
+                    &mut tx,
+                    shard,
+                    &request_id,
+                    &fingerprint,
+                    &response_payload,
+                    now,
+                    expires_at,
+                )?;
+                st(tx.commit())?;
+                Ok(response)
+            }
         })();
         std::future::ready(result)
     }
@@ -8851,9 +9530,18 @@ impl AsOfProjectionStore for PostgresRelational {
 
 /// Retired legacy alias retained for source compatibility. `PostgresRelational` is projection-only; the
 /// selectable unified atomic implementation is [`PostgresRelationalBackend`].
+#[deprecated(
+    since = "0.19.5",
+    note = "use PostgresRelationalBackend; PostgresRelational is projection-only and must not be composed with itself"
+)]
 pub type ComposedPostgresRelationalBackend = PostgresRelationalBackend;
 
 /// The former same-value log/projection composition was not atomic and is no longer selectable.
+#[deprecated(
+    since = "0.19.5",
+    note = "use PostgresRelationalBackend::connect_in_schema for the unified atomic backend"
+)]
+#[allow(deprecated)]
 pub fn composed_postgres_relational_in_schema(
     url: &str,
     schema: &str,
@@ -8875,6 +9563,11 @@ mod sql_shape_tests {
             "the postgres claim MUST take a real row lock, not rely on a Mutex"
         );
         assert!(CLAIM_CTE.contains("ORDER BY priority_sort, created_seq"));
+        assert!(
+            CLAIM_CTE.contains("candidates AS MATERIALIZED"),
+            "the bounded candidate set must be evaluated once before UPDATE; inlining makes LIMIT 1 \
+             claims repeatedly scan the resident relation"
+        );
         assert!(
             CLAIM_CTE.contains("FROM updated ORDER BY claim_priority_sort, claim_created_seq"),
             "UPDATE RETURNING order is unspecified; claim responses MUST restore queue order"
@@ -9808,6 +10501,10 @@ mod gated_group_summary_tests {
                         set_priority: ScheduleUpdate::Set(Some(PriorityValue::Int64(30))),
                         set_not_before: ScheduleUpdate::Keep,
                         set_entity_document: None,
+                        set_fields: None,
+                        set_metadata: None,
+                        set_gate_keys: None,
+                        api001_batch: false,
                     }),
                     ts(1),
                     None,
@@ -9823,6 +10520,10 @@ mod gated_group_summary_tests {
                         set_priority: ScheduleUpdate::Keep,
                         set_not_before: ScheduleUpdate::Set(Some(ts(100))),
                         set_entity_document: None,
+                        set_fields: None,
+                        set_metadata: None,
+                        set_gate_keys: None,
+                        api001_batch: false,
                     }),
                     ts(2),
                     None,
@@ -9849,6 +10550,10 @@ mod gated_group_summary_tests {
                         set_priority: ScheduleUpdate::Keep,
                         set_not_before: ScheduleUpdate::Set(Some(ts(1))),
                         set_entity_document: None,
+                        set_fields: None,
+                        set_metadata: None,
+                        set_gate_keys: None,
+                        api001_batch: false,
                     }),
                     ts(3),
                     None,
@@ -12107,5 +12812,172 @@ mod command_log_recovery_tests {
         .unwrap()
         .get(0);
         assert!(!exists);
+    }
+
+    fn update_request(request: &str, ids: &[ItemId]) -> BatchUpdateRequest {
+        BatchUpdateRequest {
+            request_id: RequestId::new(request).unwrap(),
+            updates: ids
+                .iter()
+                .map(|item_id| pqueue_engine::BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(*item_id),
+                    expected_item_version: Some(1),
+                    priority: BatchUpdateValue::Replace(PriorityValue::Int64(7)),
+                    not_before: BatchUpdateValue::Replace(None),
+                    payload: BatchUpdateValue::Replace(Some(Bytes::from_static(b"updated"))),
+                    metadata: BatchUpdateValue::Replace(Metadata::default()),
+                    gate_keys: BatchUpdateValue::Replace(Vec::new()),
+                    fields: BatchUpdateValue::Replace(BTreeMap::from([(
+                        "updated".into(),
+                        Bytes::from_static(b"true"),
+                    )])),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn batch_update_1000_uses_one_target_select_command_insert_and_projection_update() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("batch_update_1000");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        let mut definition = pqueue_conformance::qdef();
+        definition.max_push_batch_size = 1_000;
+        definition.max_claim_batch_size = 1_000;
+        block_on(backend.create_queue(definition)).unwrap();
+        let items = (0..1_000)
+            .map(|index| PushSpec {
+                client_item_key: Some(ClientItemKey::new(format!("batch-update-{index}")).unwrap()),
+                priority: Some(PriorityValue::Int64(index)),
+                ..PushSpec::default()
+            })
+            .collect();
+        let ids = block_on(backend.push(&shard, items, pqueue_conformance::ts(1), None)).unwrap();
+        reset_batch_update_sql_probe(&shard);
+        let response = block_on(backend.batch_update(
+            &shard,
+            update_request("batch-update-1000", &ids),
+            pqueue_conformance::ts(2),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(response.results.len(), 1_000);
+        assert!(response.results.iter().all(|result| matches!(
+            result,
+            BatchUpdateOutcome::Updated {
+                item_version: 2,
+                ..
+            }
+        )));
+        assert_eq!(
+            batch_update_sql_probe(&shard),
+            BatchUpdateSqlProbe {
+                target_selects: 1,
+                command_batch_inserts: 1,
+                projection_updates: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn all_rejected_batch_update_marker_rebuilds_idempotent_response() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES BATCH UPDATE TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("batch_update_marker");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(pqueue_conformance::qdef())).unwrap();
+        let request = update_request("all-rejected", &[ItemId::from_u64(u64::MAX - 1)]);
+        let original = block_on(backend.batch_update(
+            &shard,
+            request.clone(),
+            pqueue_conformance::ts(2),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(original.results, vec![BatchUpdateOutcome::NotFound]);
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            let envelope: Vec<u8> = inner
+                .client
+                .query_one(
+                    "SELECT envelope FROM pqueue_commands WHERE tenant=$1 AND queue=$2 ORDER BY seq DESC LIMIT 1",
+                    &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
+                )
+                .unwrap()
+                .get(0);
+            let envelope: CommandEnvelope = serde_json::from_slice(&envelope).unwrap();
+            assert!(matches!(
+                envelope.command,
+                QueueCommand::WriteSideRecords(WriteSideRecordsCommand { ref records }) if records.is_empty()
+            ));
+            assert!(matches!(
+                envelope.request_outcome,
+                Some(RequestOutcome::BatchUpdate { .. })
+            ));
+            inner
+                .client
+                .execute(
+                    "DELETE FROM pqueue_request_idempotency WHERE tenant_id=$1 AND queue_id=$2",
+                    &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
+                )
+                .unwrap();
+        }
+        backend.rebuild_from_command_baseline(&shard).unwrap();
+        let replayed = block_on(backend.batch_update(
+            &shard,
+            request.clone(),
+            pqueue_conformance::ts(3),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(replayed, original);
+        let mut changed = request;
+        changed.updates[0].expected_item_version = None;
+        assert!(matches!(
+            block_on(backend.batch_update(&shard, changed, pqueue_conformance::ts(3), None,)),
+            Err(EngineError::RequestIdConflict)
+        ));
+    }
+
+    #[test]
+    fn empty_genesis_baseline_rebuilds_before_any_data_command() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("empty_genesis_rebuild");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(pqueue_conformance::qdef())).unwrap();
+        backend.rebuild_from_command_baseline(&shard).unwrap();
+        assert_eq!(block_on(backend.metrics(&shard)).unwrap().pending, 0);
+    }
+
+    #[test]
+    fn batch_update_source_has_no_scalar_backend_loop() {
+        let source = include_str!("relational.rs");
+        let implementation = source
+            .split("impl BatchUpdatePort for PostgresRelationalBackend")
+            .nth(1)
+            .unwrap()
+            .split("impl ReclaimPort for PostgresRelationalBackend")
+            .next()
+            .unwrap();
+        assert!(implementation.contains("FROM UNNEST"));
+        assert!(implementation.contains("alloc_seq_range"));
+        assert_eq!(
+            implementation.matches("persist_command_envelopes").count(),
+            2
+        );
+        assert!(!implementation.contains(".update_fields("));
+        assert!(!implementation.contains("commit_command("));
+        assert!(!implementation.contains("apply_command_sql("));
     }
 }

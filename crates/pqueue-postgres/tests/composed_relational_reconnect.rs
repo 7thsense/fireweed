@@ -20,7 +20,7 @@ use pqueue_engine::{
     ClaimPort, CommandPosition, ControlPlaneStore, HistoricalProjectionRead, ProjectionRead,
     PushPort, PushSpec,
 };
-use pqueue_postgres::composed_postgres_relational_in_schema;
+use pqueue_postgres::PostgresRelationalBackend;
 
 macro_rules! pg_reconnect {
     ($($name:ident),+ $(,)?) => {
@@ -39,7 +39,7 @@ macro_rules! pg_reconnect {
                             hasher.finish()
                         );
                         futures::executor::block_on(pqueue_conformance::scenarios::$name(move || {
-                            composed_postgres_relational_in_schema(&url, &schema)
+                            PostgresRelationalBackend::connect_in_schema(&url, &schema)
                                 .expect("connect postgres (is PQUEUE_PG_TEST_URL a live DB?)")
                         }));
                     }
@@ -74,9 +74,9 @@ fn push(priority: i64) -> PushSpec {
     }
 }
 
-fn open(url: &str, schema: &str) -> pqueue_postgres::ComposedPostgresRelationalBackend {
-    composed_postgres_relational_in_schema(url, schema)
-        .expect("open composed postgres-relational db")
+fn open(url: &str, schema: &str) -> PostgresRelationalBackend {
+    PostgresRelationalBackend::connect_in_schema(url, schema)
+        .expect("open unified postgres-relational db")
 }
 
 #[test]

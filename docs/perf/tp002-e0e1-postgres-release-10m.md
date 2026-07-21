@@ -3,8 +3,10 @@
 **Bead:** `pqueue-9b2a374e` (external/provisioned half of `pqueue-d3371502`).
 **Date:** 2026-06-28.
 **Commit:** `425bb406852c82bf389359201bea786c0e2896c1`.
-**Suite:** `crates/pqueue-postgres/tests/performance_single_deployment_baseline_tests.rs`
+**Suite:** `crates/pqueue-server/tests/performance_single_deployment_baseline_tests.rs`
 (`PostgresRelationalBackend`, TD-002 `postgres_native`).
+The current E1 workload sends API-001 `BatchUpdate` windows of 1, 100, and 1000 items through one
+set-oriented PostgreSQL transaction per window; it does not emulate batching with scalar update calls.
 **Historical result:** this run predates the current explicit progress-bound and
 persisted-definition evidence fields. Its rates and percentiles remain useful
 capacity observations, but fresh evidence from the current harness is required
@@ -16,7 +18,7 @@ for release authority. Wall-clock **36m12s**.
 PQUEUE_PERF_ENV=1 PQUEUE_E1_RESIDENT=10000000 PQUEUE_E1_FULL=1 \
   PQUEUE_E0E1_PROGRESS_BOUND_MS=<positive-workload-declaration> \
   PQUEUE_PG_TEST_URL=postgres://postgres:pq@<instance>:5432/postgres \
-  cargo test -p pqueue-postgres --test performance_single_deployment_baseline_tests --release -- --nocapture
+  cargo test -p pqueue-server --features postgres --test performance_single_deployment_baseline_tests --release -- --nocapture
 ```
 
 ## Provisioned instance (local-equivalent sizing)
