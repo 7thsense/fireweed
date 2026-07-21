@@ -1172,6 +1172,18 @@ pub mod e2 {
     /// `object_log_inmemory_projection` remains a comparator profile in the plan,
     /// but it is not a release authority for the headline E2 matrix.
     pub const RELEASE_BACKEND_PROFILE: &str = "object_log_sqlite_projection";
+    pub const CANONICAL_SWEEPS: [u64; 3] = [1, 2, 3];
+    pub const CANONICAL_ITEMS_PER_QUEUE: u64 = 12_000;
+    pub const CANONICAL_CONNS_PER_QUEUE: u64 = 8;
+    pub const CANONICAL_PIPE_SIZE: u64 = 1_000;
+    pub const CANONICAL_BATCH_SIZE: u64 = 1_000;
+    pub const CANONICAL_QUEUES_PER_OWNER: u64 = 1;
+    pub const CANONICAL_SEGMENT_MAX_LATENCY_MS: u64 = 1;
+    pub const CANONICAL_SEGMENT_TARGET_BYTES: u64 = 262_144;
+    pub const CANONICAL_WORKER_THREADS_PER_NODE: u64 = 2;
+    pub const CANONICAL_SERVER_CPU_LIMIT: &str = "1300m";
+    pub const CANONICAL_SERVER_CPU_REQUEST: &str = "1000m";
+    pub const CANONICAL_LOADGEN_CPU_LIMIT: &str = "2000m";
 
     /// Product capacity target retained in evidence for comparison only; never a host-independent gate.
     pub const FLOOR_ITEMS_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -1218,6 +1230,8 @@ pub mod e2 {
         pub loadgen_cpu_limit: String,
         pub cores: usize,
         pub kind_node_image: String,
+        pub pipe_size: usize,
+        pub batch_size: usize,
         pub sweep: u64,
     }
 
@@ -1282,6 +1296,9 @@ pub mod e2 {
         if row.measurements.tp002_evidence_ids.as_slice() != ["E2"] {
             errors.push("E2 scale row must carry exactly E2".into());
         }
+        if row.seed != 0 {
+            errors.push("E2 scale row seed must be the canonical value 0".into());
+        }
         for key in ["bars_met", "portable_gate", "wall_clock_capacity_only"] {
             if bool_value(key) != Some(true) {
                 errors.push(format!("{key} must be true"));
@@ -1318,6 +1335,125 @@ pub mod e2 {
         if queues == 0 || u64_value("one_owner_per_queue_confirmations") != Some(expected) {
             errors.push("one-owner-per-queue confirmation count is not exact".into());
         }
+        for (key, expected) in [
+            ("queues_per_owner", CANONICAL_QUEUES_PER_OWNER),
+            ("items_per_queue", CANONICAL_ITEMS_PER_QUEUE),
+            ("conns_per_queue", CANONICAL_CONNS_PER_QUEUE),
+            ("pipe_size", CANONICAL_PIPE_SIZE),
+            ("batch_size", CANONICAL_BATCH_SIZE),
+            ("segment_max_latency_ms", CANONICAL_SEGMENT_MAX_LATENCY_MS),
+            ("segment_target_bytes", CANONICAL_SEGMENT_TARGET_BYTES),
+            ("worker_threads_per_node", CANONICAL_WORKER_THREADS_PER_NODE),
+        ] {
+            if u64_value(key) != Some(expected) {
+                errors.push(format!("{key} must equal canonical value {expected}"));
+            }
+        }
+        for (key, expected) in [
+            ("server_cpu_limit", CANONICAL_SERVER_CPU_LIMIT),
+            ("server_cpu_request", CANONICAL_SERVER_CPU_REQUEST),
+            ("loadgen_cpu_limit", CANONICAL_LOADGEN_CPU_LIMIT),
+        ] {
+            if values.get(key).and_then(serde_json::Value::as_str) != Some(expected) {
+                errors.push(format!("{key} must equal canonical value {expected}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Validate the complete governed cross-owner authority. The canonical producer performs three
+    /// independently measured sweeps in one invocation; accepting a single favorable row would discard
+    /// two thirds of that governed run.
+    pub fn validate_release_rows(rows: &[LedgerRow], revision: &str) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if rows.len() != CANONICAL_SWEEPS.len() {
+            errors.push(format!(
+                "E2 scale authority must contain exactly {} rows, found {}",
+                CANONICAL_SWEEPS.len(),
+                rows.len()
+            ));
+        }
+
+        let stable_fields = [
+            "source_revision",
+            "segment_max_latency_ms",
+            "segment_target_bytes",
+            "worker_threads_per_node",
+            "server_cpu_limit",
+            "server_cpu_request",
+            "loadgen_cpu_limit",
+            "cores",
+            "kind_node_image",
+            "queues_per_owner",
+            "items_per_queue",
+            "conns_per_queue",
+            "pipe_size",
+            "batch_size",
+        ];
+        let baseline = rows.first();
+        let mut sweeps = std::collections::BTreeSet::new();
+        for (index, row) in rows.iter().enumerate() {
+            if let Err(row_errors) = validate_release_row(row, revision) {
+                errors.extend(
+                    row_errors
+                        .into_iter()
+                        .map(|error| format!("row {}: {error}", index + 1)),
+                );
+            }
+            match row
+                .measurements
+                .values
+                .get("sweep")
+                .and_then(serde_json::Value::as_u64)
+            {
+                Some(sweep) if CANONICAL_SWEEPS.contains(&sweep) => {
+                    if !sweeps.insert(sweep) {
+                        errors.push(format!("row {} duplicates sweep {sweep}", index + 1));
+                    }
+                }
+                Some(sweep) => errors.push(format!(
+                    "row {} has non-canonical sweep {sweep}; expected one each of {:?}",
+                    index + 1,
+                    CANONICAL_SWEEPS
+                )),
+                None => errors.push(format!("row {} is missing numeric sweep", index + 1)),
+            }
+
+            if let Some(first) = baseline {
+                if row.suite != first.suite
+                    || row.command != first.command
+                    || row.backend_profile != first.backend_profile
+                    || row.seed != first.seed
+                    || row.environment != first.environment
+                    || row.pass_bar != first.pass_bar
+                {
+                    errors.push(format!(
+                        "row {} changes stable producer topology or identity fields",
+                        index + 1
+                    ));
+                }
+                for field in stable_fields {
+                    if row.measurements.values.get(field) != first.measurements.values.get(field) {
+                        errors.push(format!(
+                            "row {} changes stable producer field {field}",
+                            index + 1
+                        ));
+                    }
+                }
+            }
+        }
+        let expected = CANONICAL_SWEEPS.into_iter().collect();
+        if sweeps != expected {
+            errors.push(format!(
+                "E2 scale authority must contain unique sweeps {:?}, found {:?}",
+                CANONICAL_SWEEPS, sweeps
+            ));
+        }
+
         if errors.is_empty() {
             Ok(())
         } else {
@@ -1493,6 +1629,11 @@ pub mod e2 {
             (
                 "conns_per_queue".to_string(),
                 serde_json::json!(at(8).conns_per_queue),
+            ),
+            ("pipe_size".to_string(), serde_json::json!(tuning.pipe_size)),
+            (
+                "batch_size".to_string(),
+                serde_json::json!(tuning.batch_size),
             ),
             (
                 "segment_max_latency_ms".to_string(),

@@ -10,16 +10,20 @@ fn main() {
     }
     let body =
         std::fs::read_to_string(Path::new(&path)).unwrap_or_else(|e| fail(vec![e.to_string()]));
-    let mut lines = body.lines().filter(|line| !line.trim().is_empty());
-    let row = lines
-        .next()
-        .and_then(|line| serde_json::from_str(line).ok())
-        .unwrap_or_else(|| fail(vec!["expected one valid ledger row".into()]));
-    if lines.next().is_some() {
-        fail(vec!["expected exactly one ledger row".into()]);
-    }
-    match pqueue_release::e2::validate_release_row(&row, &revision) {
-        Ok(()) => println!("portable E2 cross-owner evidence valid for {revision}"),
+    let rows = body
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .enumerate()
+        .map(|(index, line)| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                fail(vec![format!("row {} is malformed: {error}", index + 1)])
+            })
+        })
+        .collect::<Vec<_>>();
+    match pqueue_release::e2::validate_release_rows(&rows, &revision) {
+        Ok(()) => println!(
+            "portable E2 cross-owner evidence valid for {revision} (three canonical sweeps)"
+        ),
         Err(errors) => fail(errors),
     }
 }

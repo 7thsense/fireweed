@@ -605,6 +605,8 @@ fn e2_tuning() -> pqueue_release::e2::E2Tuning {
         loadgen_cpu_limit: "2000m".into(),
         cores: 12,
         kind_node_image: "kindest/node:v1.36.1".into(),
+        pipe_size: 1_000,
+        batch_size: 1_000,
         sweep: 1,
     }
 }

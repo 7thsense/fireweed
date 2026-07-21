@@ -87,7 +87,9 @@ row must carry, not a lucky run at the floor edge.
 
 Release-tier rows (one per sweep), `backend_profile="object_log_sqlite_projection"`,
 `scale="release"`, `evidence_tier="release"`, `measurements.tp002_evidence_ids=["E2"]`:
-`docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl`. Each row is strict-validated by `pqueue_release`
+`docs/perf/evidence/tp002-e2-multinode-kind-release.jsonl`. The governed authority is exactly three rows,
+one each for unique sweeps 1, 2, and 3. Every row is strict-validated by `pqueue_release`, and the verifier
+rejects missing, duplicate, extra, mixed-revision, or mixed-configuration sweeps. Validation also happens
 at emit time (the generator's `emit-row` refuses to write a release row unless every bar holds).
 
 ```sh
