@@ -50,6 +50,7 @@ impl OwnedBlockingExecutor {
     /// queue's data-plane worker. This keeps both on the shared bounded pool
     /// while allowing the sequence to synchronously await queue-affine backend
     /// fencing without recursively submitting to its own worker.
+    #[cfg(any(feature = "postgres", test))]
     pub(crate) fn run_for_control_plane_queue<T, F>(
         &self,
         queue: &QueueKey,

@@ -1373,12 +1373,14 @@ trait OwnedControlPlaneRuntime: Send + Sync {
     ) -> EngineResult<Vec<pqueue_engine::LeaseRenewalOutcome>>;
 }
 
+#[cfg(any(feature = "postgres", test))]
 struct BlockingControlPlaneRuntime<B: LibBackend + 'static> {
     backend: Arc<B>,
     control_plane: Arc<dyn QueueControlPlane>,
     executor: blocking_backend::OwnedBlockingExecutor,
 }
 
+#[cfg(any(feature = "postgres", test))]
 impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneRuntime<B> {
     fn establish(
         &self,
@@ -1558,6 +1560,7 @@ impl<B: LibBackend> Pqueue<B> {
         }
     }
 
+    #[cfg(any(feature = "postgres", test))]
     fn with_owned_control_plane_executor(
         backend: Arc<B>,
         clock: Arc<dyn Clock>,
