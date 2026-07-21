@@ -838,10 +838,12 @@ impl ProjectionRead for SqliteProjectionStore {
                 &g.live_tokens,
                 &g.live_tokens_by_consumer,
                 shard,
-                start,
-                end,
-                consumer,
-                limit,
+                crate::relational::query::PendingRange {
+                    start,
+                    end,
+                    consumer,
+                    limit,
+                },
             )
         };
         std::future::ready(result)
@@ -1224,10 +1226,12 @@ impl ProjectionStore for SqliteProjectionStore {
             &g.live_tokens,
             &g.live_tokens_by_consumer,
             shard,
-            start,
-            end,
-            consumer,
-            limit,
+            crate::relational::query::PendingRange {
+                start,
+                end,
+                consumer,
+                limit,
+            },
         )
     }
 

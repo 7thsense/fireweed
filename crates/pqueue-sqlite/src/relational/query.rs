@@ -921,29 +921,33 @@ pub(crate) fn pending_page_sql(
     Ok(PendingPage { entries, next })
 }
 
+pub(crate) struct PendingRange<'a> {
+    pub(crate) start: Option<ItemId>,
+    pub(crate) end: Option<ItemId>,
+    pub(crate) consumer: Option<&'a LeaseToken>,
+    pub(crate) limit: usize,
+}
+
 pub(crate) fn pending_range_sql(
     conn: &Connection,
     live_tokens: &HashMap<QueueKey, BTreeMap<ItemId, LeaseToken>>,
     by_consumer: &HashMap<QueueKey, HashMap<LeaseToken, BTreeSet<ItemId>>>,
     shard: &QueueKey,
-    start: Option<ItemId>,
-    end: Option<ItemId>,
-    consumer: Option<&LeaseToken>,
-    limit: usize,
+    query: PendingRange<'_>,
 ) -> EngineResult<Vec<LeaseView>> {
     use std::ops::Bound::{Included, Unbounded};
     let bounds = (
-        start.map_or(Unbounded, Included),
-        end.map_or(Unbounded, Included),
+        query.start.map_or(Unbounded, Included),
+        query.end.map_or(Unbounded, Included),
     );
-    let ids: Vec<_> = if let Some(consumer) = consumer {
+    let ids: Vec<_> = if let Some(consumer) = query.consumer {
         by_consumer
             .get(shard)
             .and_then(|consumers| consumers.get(consumer))
             .into_iter()
             .flat_map(|ids| ids.range(bounds))
             .copied()
-            .take(limit)
+            .take(query.limit)
             .collect()
     } else {
         live_tokens
@@ -951,7 +955,7 @@ pub(crate) fn pending_range_sql(
             .into_iter()
             .flat_map(|tokens| tokens.range(bounds))
             .map(|(id, _)| *id)
-            .take(limit)
+            .take(query.limit)
             .collect()
     };
     pending_by_ids_sql(conn, live_tokens, shard, &ids)
