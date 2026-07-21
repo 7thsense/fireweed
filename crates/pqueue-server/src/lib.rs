@@ -2734,8 +2734,15 @@ fn spawn_hybrid_flusher(
     let interval_ms = backend.group_commit_flush_interval_ms();
     let weak = Arc::downgrade(backend);
     pqueue_resp::spawn_governed(async move {
-        let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
-        let mut deferred_tick = tokio::time::interval(Duration::from_millis(250));
+        let group_interval = Duration::from_millis(interval_ms);
+        let deferred_interval = Duration::from_millis(250);
+        // `tokio::time::interval` fires immediately. That eager tick both defeats the configured
+        // co-buffering window and can enqueue a blocking job that retains the last backend Arc while the
+        // blocking pool is busy. Start each cadence at its first real deadline instead.
+        let now = tokio::time::Instant::now();
+        let mut tick = tokio::time::interval_at(now + group_interval, group_interval);
+        let mut deferred_tick =
+            tokio::time::interval_at(now + deferred_interval, deferred_interval);
         let mut dbg_last = std::time::Instant::now();
         loop {
             enum FlushKind {
@@ -2746,14 +2753,19 @@ fn spawn_hybrid_flusher(
                 _ = tick.tick() => FlushKind::GroupCommit,
                 _ = deferred_tick.tick() => FlushKind::DeferredProjection,
             };
-            let Some(backend) = weak.upgrade() else {
+            if weak.strong_count() == 0 {
                 break;
-            };
+            }
             let emit_debug = debug_segments && dbg_last.elapsed() >= Duration::from_secs(1);
             if emit_debug {
                 dbg_last = std::time::Instant::now();
             }
+            // Keep only a Weak reference while this job waits for blocking-pool admission. If server
+            // shutdown drops the production owners under load, a queued maintenance job must not prolong
+            // the backend or its resident byte permits.
+            let job_backend = weak.clone();
             let join = tokio::task::spawn_blocking(move || {
+                let backend = job_backend.upgrade()?;
                 let result = match kind {
                     FlushKind::GroupCommit => {
                         let now_ms = match std::time::SystemTime::now()
@@ -2781,11 +2793,14 @@ fn spawn_hybrid_flusher(
                         admission,
                     );
                 }
-                result
+                Some(result)
             });
             match join.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => eprintln!("[objectlog/hybrid] maintenance flush failed: {e}"),
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(e))) => {
+                    eprintln!("[objectlog/hybrid] maintenance flush failed: {e}")
+                }
+                Ok(None) => break,
                 Err(e) => eprintln!("[objectlog/hybrid] maintenance task failed: {e}"),
             }
         }
@@ -3446,6 +3461,11 @@ mod byte_admission_wiring_tests {
         assert!(budget.stats().charged_bytes > 0);
         push.abort();
         let _ = push.await;
+        assert_eq!(
+            Arc::strong_count(&backend),
+            1,
+            "the flusher must hold only Weak ownership between maintenance deadlines"
+        );
         let weak = Arc::downgrade(&backend);
         drop(backend);
         tokio::time::timeout(Duration::from_secs(1), flusher)
