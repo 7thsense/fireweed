@@ -23,10 +23,10 @@ use pqueue_core::{
 use pqueue_core::{ClientItemKey, ItemId, ItemState, LeaseToken, QueueDefinition, UtcTimestamp};
 use pqueue_engine::{
     AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    EngineError, EngineResult, FinalizeOutcome, InProcessLogStore, InProcessProjectionStore,
-    IndexHit, ItemView, LeaseView, LiveItemView, LogStore, PendingPage, PendingSummary,
-    ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey, QueueMetrics,
-    SnapshotRef, TerminalEmissionMetrics,
+    EngineError, EngineResult, ExpiredLeaseCursor, ExpiredLeasePage, FinalizeOutcome,
+    InProcessLogStore, InProcessProjectionStore, IndexHit, ItemView, LeaseView, LiveItemView,
+    LogStore, PendingPage, PendingSummary, ProjectionSnapshot, ProjectionStore, PushItem,
+    QueueCounters, QueueKey, QueueMetrics, SnapshotRef, TerminalEmissionMetrics,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -297,6 +297,71 @@ impl ProjectionStore for InMemoryProjection {
                 (!ids.is_empty()).then(|| (shard.clone(), ids))
             })
             .collect()
+    }
+
+    fn expired_leases_page(
+        &self,
+        now: UtcTimestamp,
+        cursor: Option<&ExpiredLeaseCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<ExpiredLeasePage> {
+        if limit == 0 {
+            return Err(EngineError::Invalid(
+                "expired lease page limit must be nonzero",
+            ));
+        }
+        let after = cursor.map(ExpiredLeaseCursor::row_parts).transpose()?;
+        let mut rows = Vec::<(QueueKey, ItemId)>::with_capacity(limit.saturating_add(1));
+        for (queue, projection) in &self.projections {
+            if worker_partition.is_some_and(|(index, partitions)| {
+                pqueue_engine::queue_worker_partition(queue, partitions) != index
+            }) {
+                continue;
+            }
+            let after_id = if let Some((_, tenant, queue_id, item_id)) = after.as_ref() {
+                match (queue.tenant_id.as_str(), queue.queue_id.as_str())
+                    .cmp(&(tenant.as_str(), queue_id.as_str()))
+                {
+                    std::cmp::Ordering::Less => continue,
+                    std::cmp::Ordering::Equal => Some(
+                        ItemId::new(item_id)
+                            .map_err(|error| EngineError::Storage(error.to_string()))?,
+                    ),
+                    std::cmp::Ordering::Greater => None,
+                }
+            } else {
+                None
+            };
+            rows.extend(
+                projection
+                    .expired_leases_after(now, after_id, limit.saturating_add(1))
+                    .into_iter()
+                    .map(|item| (queue.clone(), item)),
+            );
+            rows.sort_unstable_by(|(left_queue, left_item), (right_queue, right_item)| {
+                (&left_queue.tenant_id, &left_queue.queue_id, left_item).cmp(&(
+                    &right_queue.tenant_id,
+                    &right_queue.queue_id,
+                    right_item,
+                ))
+            });
+            rows.truncate(limit.saturating_add(1));
+        }
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next = has_more.then(|| {
+            let (queue, item) = rows.last().expect("nonzero bounded page");
+            ExpiredLeaseCursor::from_row(0, queue, item)
+        });
+        let mut leases = Vec::<(QueueKey, Vec<ItemId>)>::new();
+        for (queue, item) in rows {
+            match leases.last_mut() {
+                Some((last, ids)) if *last == queue => ids.push(item),
+                _ => leases.push((queue, vec![item])),
+            }
+        }
+        Ok(ExpiredLeasePage { leases, next })
     }
 
     fn finalize_validate(

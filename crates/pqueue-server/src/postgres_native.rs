@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use bytes::Bytes;
+use futures::StreamExt;
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, PriorityValue, QueueDefinition, QueueId,
     RequestId, TenantId, UtcTimestamp,
@@ -556,12 +557,19 @@ impl<B: RespBackend> ReclaimDriver for PostgresWholeOperationAdapter<B> {
         let inners = self.arcs();
         async move {
             let mut aggregate = TickReport::default();
-            for (index, inner) in inners.into_iter().enumerate() {
-                let report = self
-                    .dispatch(global_operation_key(index), move || async move {
+            // Drive the already-fixed backend/connection pool concurrently. `buffer_unordered` polls
+            // futures in this task (it does not create a task per queue), while `dispatch` retains the
+            // executor's hard running/outstanding caps and each backend advances exactly one bounded page.
+            let reports = futures::stream::iter(inners.into_iter().enumerate())
+                .map(|(index, inner)| {
+                    self.dispatch(global_operation_key(index), move || async move {
                         inner.tick(now).await
                     })
-                    .await?;
+                })
+                .buffer_unordered(DEFAULT_BLOCKING_OPERATIONS);
+            futures::pin_mut!(reports);
+            while let Some(report) = reports.next().await {
+                let report = report?;
                 aggregate.leases_reclaimed += report.leases_reclaimed;
                 aggregate.cohorts_expired += report.cohorts_expired;
                 aggregate.items_promoted += report.items_promoted;
@@ -890,6 +898,21 @@ mod tests {
             gate_keys: Vec::new(),
             entity: None,
         }
+    }
+
+    #[test]
+    fn pooled_reclaim_uses_fixed_cap_concurrency_without_per_queue_tasks() {
+        let source = include_str!("postgres_native.rs");
+        let tick = source
+            .split("impl<B: RespBackend> ReclaimDriver")
+            .nth(1)
+            .unwrap()
+            .split("impl<B: RespBackend> ControlPlaneStore")
+            .next()
+            .unwrap();
+        assert!(tick.contains("buffer_unordered(DEFAULT_BLOCKING_OPERATIONS)"));
+        assert!(!tick.contains("tokio::spawn"));
+        assert!(!tick.contains("for (index, inner)"));
     }
 
     struct BlockingApplyHook {

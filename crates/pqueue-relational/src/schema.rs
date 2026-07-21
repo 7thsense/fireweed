@@ -57,6 +57,9 @@ CREATE INDEX IF NOT EXISTS pqueue_items_group_due_idx
 CREATE INDEX IF NOT EXISTS pqueue_items_expired_lease_idx
     ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)
     WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = 0 AND superseded = 0;
+CREATE INDEX IF NOT EXISTS pqueue_items_global_expired_lease_idx
+    ON pqueue_items (lease_expires_at, tenant_id, queue_id, item_id)
+    WHERE lifecycle_state = 'Leased';
 CREATE TABLE IF NOT EXISTS relational_cursor (
     tenant TEXT NOT NULL, queue TEXT NOT NULL,
     next_seq INTEGER NOT NULL,        -- command-position sequence (last_command_sequence source)

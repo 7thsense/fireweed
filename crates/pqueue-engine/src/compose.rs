@@ -240,8 +240,14 @@ pub fn definition_page_from_sorted_rows(
                         && definition.queue_id.as_str() > queue.as_str())
             })
         })
-        .take(limit.saturating_add(1))
         .collect::<Vec<_>>();
+    // Relational projection adapters currently keep their recovered definitions in a HashMap.  The
+    // iterator order is therefore deliberately unspecified: establish the same global key order as the
+    // durable SQL catalog before applying limit+1, otherwise a keyset cursor can skip or duplicate queues.
+    rows.sort_unstable_by(|left, right| {
+        (&left.tenant_id, &left.queue_id).cmp(&(&right.tenant_id, &right.queue_id))
+    });
+    rows.truncate(limit.saturating_add(1));
     let has_more = rows.len() > limit;
     rows.truncate(limit);
     Ok(definition_page_from_storage_rows(
@@ -249,6 +255,39 @@ pub fn definition_page_from_sorted_rows(
         has_more,
         worker_partition,
     ))
+}
+
+/// Opaque keyset cursor for one bounded global expired-lease sweep page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpiredLeaseCursor {
+    storage_key: String,
+}
+
+impl ExpiredLeaseCursor {
+    pub fn from_row(lease_expires_at_nanos: i64, queue: &QueueKey, item_id: &ItemId) -> Self {
+        Self {
+            storage_key: serde_json::to_string(&(
+                lease_expires_at_nanos,
+                queue.tenant_id.as_str(),
+                queue.queue_id.as_str(),
+                item_id.to_string(),
+            ))
+            .expect("expired lease cursor serializes"),
+        }
+    }
+
+    pub fn row_parts(&self) -> EngineResult<(i64, String, String, String)> {
+        serde_json::from_str(&self.storage_key)
+            .map_err(|error| EngineError::Storage(format!("invalid expired lease cursor: {error}")))
+    }
+}
+
+/// One raw-storage-bounded expired-lease page. A partition may legitimately receive an empty page with a
+/// continuation cursor when the raw page belongs entirely to other workers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpiredLeasePage {
+    pub leases: Vec<(QueueKey, Vec<ItemId>)>,
+    pub next: Option<ExpiredLeaseCursor>,
 }
 
 /// Bounded fallback for in-process adapters. Durable adapters override the page method with storage-level
@@ -997,6 +1036,65 @@ pub trait ProjectionStore: Send {
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>>;
     /// Every shard's expired leases at `now` (the global `tick` sweep). Shards with none are omitted.
     fn all_expired_leases(&self, now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)>;
+    /// One bounded keyset page for the global reclaim driver. Durable relational implementations override
+    /// this with storage-level pagination; this fallback is for bounded in-process projections.
+    fn expired_leases_page(
+        &self,
+        now: UtcTimestamp,
+        cursor: Option<&ExpiredLeaseCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<ExpiredLeasePage> {
+        if limit == 0 {
+            return Err(EngineError::Invalid(
+                "expired lease page limit must be nonzero",
+            ));
+        }
+        let after = cursor.map(ExpiredLeaseCursor::row_parts).transpose()?;
+        let mut rows = self
+            .all_expired_leases(now)
+            .into_iter()
+            .flat_map(|(queue, ids)| ids.into_iter().map(move |id| (queue.clone(), id)))
+            .collect::<Vec<_>>();
+        rows.sort_unstable_by(|(left_queue, left_id), (right_queue, right_id)| {
+            (&left_queue.tenant_id, &left_queue.queue_id, left_id).cmp(&(
+                &right_queue.tenant_id,
+                &right_queue.queue_id,
+                right_id,
+            ))
+        });
+        let mut raw = rows
+            .into_iter()
+            .filter(|(queue, id)| {
+                after.as_ref().is_none_or(|(_, tenant, queue_id, item_id)| {
+                    (
+                        queue.tenant_id.as_str(),
+                        queue.queue_id.as_str(),
+                        id.to_string(),
+                    ) > (tenant.as_str(), queue_id.as_str(), item_id.clone())
+                })
+            })
+            .take(limit.saturating_add(1))
+            .collect::<Vec<_>>();
+        let has_more = raw.len() > limit;
+        raw.truncate(limit);
+        let next = has_more.then(|| {
+            let (queue, id) = raw.last().expect("nonzero bounded page");
+            ExpiredLeaseCursor::from_row(0, queue, id)
+        });
+        let mut leases = Vec::<(QueueKey, Vec<ItemId>)>::new();
+        for (queue, id) in raw.into_iter().filter(|(queue, _)| {
+            worker_partition.is_none_or(|(index, partitions)| {
+                queue_worker_partition(queue, partitions) == index
+            })
+        }) {
+            match leases.last_mut() {
+                Some((last, ids)) if *last == queue => ids.push(id),
+                _ => leases.push((queue, vec![id])),
+            }
+        }
+        Ok(ExpiredLeasePage { leases, next })
+    }
 
     // -- rich (non-item) claim selection + relational-class capabilities (BQ-14) ---------------------
     //
@@ -1453,6 +1551,7 @@ struct Inner<L, P> {
     /// its partition concurrently with the other fixed workers.
     maintenance_catalog_projection: bool,
     maintenance_definition_cursor: Option<DefinitionCursor>,
+    expired_lease_cursor: Option<ExpiredLeaseCursor>,
     byte_budget: Option<BufferedByteBudget>,
     queue_byte_limit: Option<usize>,
 }
@@ -1582,6 +1681,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 trim_completed_through: HashMap::new(),
                 maintenance_catalog_projection: true,
                 maintenance_definition_cursor: None,
+                expired_lease_cursor: None,
                 byte_budget: None,
                 queue_byte_limit: None,
             }),
@@ -4521,7 +4621,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                         Self::gc_force_seal(&mut g, &shard, ts_to_ms(now))?;
                     }
                 }
-                let expired = g.projection.all_expired_leases(now);
+                let expired_page = g.projection.expired_leases_page(
+                    now,
+                    g.expired_lease_cursor.as_ref(),
+                    DEFINITION_PAGE_LIMIT,
+                    self.worker_partition,
+                )?;
                 let mut projection_catalog = g.maintenance_catalog_projection;
                 let catalog_cursor = g.maintenance_definition_cursor.clone();
                 let mut definition_page = if projection_catalog {
@@ -4568,10 +4673,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     }
                 }
                 let mut report = TickReport::default();
-                for (shard, ids) in expired
-                    .into_iter()
-                    .filter(|(shard, _)| self.owns_worker_queue(shard))
-                {
+                for (shard, ids) in expired_page.leases {
                     let env = Self::make_envelope(
                         &mut g,
                         self.node_id,
@@ -4588,6 +4690,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     }
                     report.leases_reclaimed += ids.len() as u64;
                 }
+                g.expired_lease_cursor = expired_page.next;
                 (definition_page, report)
             };
 
@@ -6701,6 +6804,38 @@ mod ordered_tests {
         assert_eq!(second.definitions, vec![owned]);
         assert!(second.next.is_none());
         assert_eq!(log.catalog_page_calls.load(AtomicOrdering::Relaxed), 2);
+    }
+
+    #[test]
+    fn hash_map_definition_rows_form_globally_sorted_exactly_once_pages() {
+        let mut expected = Vec::new();
+        let mut shuffled = Vec::new();
+        for index in 0..(DEFINITION_PAGE_LIMIT * 3 + 17) {
+            let mut definition = qdef();
+            definition.queue_id = QueueId::new(format!("queue-{index:05}")).unwrap();
+            expected.push(definition.clone());
+            shuffled.push(definition);
+        }
+        // A deterministic non-key order models HashMap values without making the proof depend on a
+        // particular randomized hasher seed.
+        shuffled.reverse();
+        shuffled.rotate_left(113);
+
+        let mut cursor = None;
+        let mut observed = Vec::new();
+        loop {
+            let page = definition_page_from_sorted_rows(
+                shuffled.clone(),
+                cursor.as_ref(),
+                DEFINITION_PAGE_LIMIT,
+                None,
+            )
+            .unwrap();
+            observed.extend(page.definitions);
+            let Some(next) = page.next else { break };
+            cursor = Some(next);
+        }
+        assert_eq!(observed, expected);
     }
 
     fn ts(seconds: i64) -> UtcTimestamp {

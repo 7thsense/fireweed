@@ -1075,6 +1075,20 @@ impl ProjectionStore for HybridProjectionStore {
         self.memory.all_expired_leases(now)
     }
 
+    fn expired_leases_page(
+        &self,
+        now: UtcTimestamp,
+        cursor: Option<&pqueue_engine::ExpiredLeaseCursor>,
+        limit: usize,
+        worker_partition: Option<(usize, usize)>,
+    ) -> EngineResult<pqueue_engine::ExpiredLeasePage> {
+        if self.poisoned.is_some() {
+            return Ok(pqueue_engine::ExpiredLeasePage::default());
+        }
+        self.memory
+            .expired_leases_page(now, cursor, limit, worker_partition)
+    }
+
     fn finalize_validate(
         &self,
         shard: &QueueKey,

@@ -1446,6 +1446,100 @@ pub(crate) fn all_expired_leases_sql(
     Ok(by_queue)
 }
 
+/// One raw-row-bounded keyset page for the composed background reclaim driver. Partition filtering occurs
+/// after the bounded SQL page, while `next` follows the last raw row, so foreign-only pages make honest
+/// bounded progress without skipping rows owned by another fixed worker.
+pub(crate) fn expired_leases_page_sql(
+    conn: &Connection,
+    now: UtcTimestamp,
+    cursor: Option<&pqueue_engine::ExpiredLeaseCursor>,
+    limit: usize,
+    worker_partition: Option<(usize, usize)>,
+) -> EngineResult<pqueue_engine::ExpiredLeasePage> {
+    if limit == 0 {
+        return Err(EngineError::Invalid(
+            "expired lease page limit must be nonzero",
+        ));
+    }
+    let (has_cursor, after_expiry, after_tenant, after_queue, after_item) = match cursor {
+        Some(cursor) => {
+            let (expiry, tenant, queue, item) = cursor.row_parts()?;
+            (1_i64, expiry, tenant, queue, item)
+        }
+        None => (0_i64, 0_i64, String::new(), String::new(), String::new()),
+    };
+    let mut statement = st(conn.prepare(
+        "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items \
+         WHERE lifecycle_state='Leased' AND lease_expires_at IS NOT NULL \
+         AND lease_expires_at<?1 AND (?2=0 OR \
+           lease_expires_at>?3 OR \
+           (lease_expires_at=?3 AND tenant_id>?4) OR \
+           (lease_expires_at=?3 AND tenant_id=?4 AND queue_id>?5) OR \
+           (lease_expires_at=?3 AND tenant_id=?4 AND queue_id=?5 AND item_id>?6)) \
+         ORDER BY lease_expires_at,tenant_id,queue_id,item_id LIMIT ?7",
+    ))?;
+    let row_limit = i64::try_from(limit.saturating_add(1))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let mapped = st(statement.query_map(
+        params![
+            ts_nanos(now),
+            has_cursor,
+            after_expiry,
+            after_tenant,
+            after_queue,
+            after_item,
+            row_limit
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        },
+    ))?;
+    let mut rows = Vec::with_capacity(limit.saturating_add(1));
+    for row in mapped {
+        rows.push(st(row)?);
+    }
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next = if has_more {
+        let (expiry, tenant, queue, item) = rows.last().expect("nonzero bounded page");
+        let queue = QueueKey::new(
+            TenantId::new(tenant.clone())
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            QueueId::new(queue.clone()).map_err(|error| EngineError::Storage(error.to_string()))?,
+        );
+        let item =
+            ItemId::new(item.clone()).map_err(|error| EngineError::Storage(error.to_string()))?;
+        Some(pqueue_engine::ExpiredLeaseCursor::from_row(
+            *expiry, &queue, &item,
+        ))
+    } else {
+        None
+    };
+    let mut leases = Vec::<(QueueKey, Vec<ItemId>)>::new();
+    for (_, tenant, queue, item) in rows {
+        let queue = QueueKey::new(
+            TenantId::new(tenant).map_err(|error| EngineError::Storage(error.to_string()))?,
+            QueueId::new(queue).map_err(|error| EngineError::Storage(error.to_string()))?,
+        );
+        if worker_partition.is_some_and(|(index, partitions)| {
+            pqueue_engine::queue_worker_partition(&queue, partitions) != index
+        }) {
+            continue;
+        }
+        let item = ItemId::new(item).map_err(|error| EngineError::Storage(error.to_string()))?;
+        match leases.last_mut() {
+            Some((last, ids)) if *last == queue => ids.push(item),
+            _ => leases.push((queue, vec![item])),
+        }
+    }
+    Ok(pqueue_engine::ExpiredLeasePage { leases, next })
+}
+
 /// In-place field/payload update pre-commit validation, with the exact error precedence the monolith's
 /// `UpdateFieldsPort` enforces: absent → `NotFound`, fenced → `StaleLease`, terminal → `Terminal`,
 /// superseded → `Superseded`, version mismatch → `Conflict`. Mutates nothing.
@@ -1514,4 +1608,100 @@ pub(crate) fn side_record_sql(
         )
         .optional())?;
     Ok(payload.map(Bytes::from))
+}
+
+#[cfg(test)]
+mod reclaim_page_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static RECLAIM_SELECTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_reclaim_select(statement: &str) {
+        if statement.starts_with(
+            "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items",
+        ) {
+            RECLAIM_SELECTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn expired_lease_pages_are_bounded_and_progress_past_foreign_first_pages() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pqueue_items (
+                lease_expires_at INTEGER,
+                tenant_id TEXT NOT NULL,
+                queue_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let tenant = TenantId::new("tenant").unwrap();
+        let target_worker = 1;
+        let width = 2;
+        let mut foreign = 0usize;
+        let mut owned = 0usize;
+        let mut suffix = 0usize;
+        while foreign < 300 || owned < 300 {
+            let queue_id = QueueId::new(format!("queue-{suffix:06}")).unwrap();
+            suffix += 1;
+            let queue = QueueKey::new(tenant.clone(), queue_id.clone());
+            let is_owned = pqueue_engine::queue_worker_partition(&queue, width) == target_worker;
+            if (is_owned && owned == 300) || (!is_owned && foreign == 300) {
+                continue;
+            }
+            let (expiry, item) = if is_owned {
+                owned += 1;
+                (2_i64, ItemId::from_u64(10_000 + owned as u64))
+            } else {
+                foreign += 1;
+                (1_i64, ItemId::from_u64(foreign as u64))
+            };
+            conn.execute(
+                "INSERT INTO pqueue_items VALUES (?1,?2,?3,?4,'Leased')",
+                params![expiry, tenant.as_str(), queue_id.as_str(), item.to_string()],
+            )
+            .unwrap();
+        }
+
+        let mut cursor = None;
+        let mut observed = Vec::new();
+        let mut pages = 0usize;
+        RECLAIM_SELECTS.store(0, Ordering::Relaxed);
+        conn.trace(Some(count_reclaim_select));
+        loop {
+            let page = expired_leases_page_sql(
+                &conn,
+                UtcTimestamp::new(3, 0).unwrap(),
+                cursor.as_ref(),
+                128,
+                Some((target_worker, width)),
+            )
+            .unwrap();
+            pages += 1;
+            if pages <= 2 {
+                assert!(page.leases.is_empty(), "the first 256 raw rows are foreign");
+            }
+            observed.extend(page.leases.into_iter().flat_map(|(_, ids)| ids));
+            let Some(next) = page.next else { break };
+            cursor = Some(next);
+        }
+        conn.trace(None);
+        observed.sort_unstable();
+        let expected = (1..=300)
+            .map(|index| ItemId::from_u64(10_000 + index))
+            .collect::<Vec<_>>();
+        assert_eq!(observed, expected);
+        assert_eq!(pages, 5, "600 raw rows at 128 rows/page");
+        assert_eq!(
+            RECLAIM_SELECTS.load(Ordering::Relaxed),
+            pages,
+            "one bounded SELECT per worker page"
+        );
+        assert!(
+            pqueue_relational::RELATIONAL_SCHEMA.contains("pqueue_items_global_expired_lease_idx")
+        );
+    }
 }
