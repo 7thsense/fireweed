@@ -550,6 +550,9 @@ pub struct PushSpec {
 /// Push can never leave the log ahead of the projection (divergence-safe) and ids are unique across
 /// handles + restart. The library facade's `push` routes here rather than reaching for the raw commit seam.
 #[doc(hidden)]
+pub const MAX_ORDERED_INDEPENDENT_PUSH_ITEMS: usize = 1_000;
+
+#[doc(hidden)]
 pub trait PushPort: Send + Sync {
     /// `expected_epoch`: the owner's cached acquire-time fence epoch (ADR-009 / TD-003). `Some(e)` fences the
     /// append at commit (a superseded owner → `EpochFenced`, nothing appended); `None` is the degenerate
@@ -561,6 +564,47 @@ pub trait PushPort: Send + Sync {
         now: UtcTimestamp,
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send;
+
+    /// Execute a bounded input sequence as distinct one-item transactions while preserving input order in
+    /// the queue's serializable mutation history. Each result is independent: rejecting one item has no
+    /// effect on accepted siblings. The default is deliberately sequential for backend-independent
+    /// correctness; group-commit backends may override by enqueueing distinct commands in order before
+    /// awaiting their durability barriers.
+    fn push_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = Vec<EngineResult<ItemId>>> + Send {
+        async move {
+            if items.len() > MAX_ORDERED_INDEPENDENT_PUSH_ITEMS {
+                return vec![
+                    Err(EngineError::Invalid(
+                        "ordered independent push exceeds bounded item limit",
+                    ));
+                    items.len()
+                ];
+            }
+            let mut outcomes = Vec::with_capacity(items.len());
+            for item in items {
+                outcomes.push(
+                    self.push(shard, vec![item], now, expected_epoch)
+                        .await
+                        .and_then(|ids| {
+                            if ids.len() == 1 {
+                                Ok(ids[0])
+                            } else {
+                                Err(EngineError::Storage(
+                                    "scalar push returned a non-scalar result".into(),
+                                ))
+                            }
+                        }),
+                );
+            }
+            outcomes
+        }
+    }
 
     /// Same append operation, but carrying API-001's envelope-level `request_id`. This is part of the
     /// external pqueue contract, so every `PushPort` implementation must provide retained replay/conflict

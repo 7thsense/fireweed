@@ -91,13 +91,14 @@ fn density_inventory_reuses_one_connection_for_all_queues() {
 
 #[test]
 fn density_resp_xadd_pipeline_uses_bounded_downstream_batches() {
-    assert!(RESP_SERVER.contains("PIPELINE_XADD_COMMAND_LIMIT: usize = 1_000"));
+    assert!(RESP_SERVER.contains(
+        "PIPELINE_XADD_COMMAND_LIMIT: usize = pqueue_engine::MAX_ORDERED_INDEPENDENT_PUSH_ITEMS"
+    ));
     assert!(RESP_SERVER.contains("PIPELINE_XADD_BYTE_LIMIT: usize = 1024 * 1024"));
     assert!(RESP_SERVER.contains("BufReader::with_capacity(PIPELINE_XADD_BYTE_LIMIT"));
     assert!(RESP_SERVER.contains("fn buffered_xadd_window("));
-    assert!(RESP_SERVER.contains("async fn push_xadds_concurrently<B: PushPort>("));
-    assert!(RESP_SERVER.contains("PIPELINE_XADD_CONCURRENCY: usize = 64"));
-    assert!(RESP_SERVER.contains(".push(shard, vec![spec], now, expected_epoch)"));
+    assert!(RESP_SERVER.contains("async fn push_xadds_ordered_independent<B: PushPort>("));
+    assert!(RESP_SERVER.contains(".push_ordered_independent(shard, specs, now, expected_epoch)"));
     assert!(RESP_SERVER.contains("async fn xadd_admission<H: RespHooks>("));
 }
 

@@ -129,14 +129,14 @@ pub use port::{
     CommitRecovery, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
     ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery, FinalizePort,
     HistoricalProjectionRead, HotProjectionQueryPort, IdGen, IndexHit, IndexQueryPort,
-    InstanceFence, ItemView, LeaseView, LiveItemView, LogRead, MaintenanceStopReason,
-    MaintenanceSummary, PendingPage, PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort,
-    PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe, ReschedulePort, SetGatesPort,
-    SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, generate_query_lease_token, is_api001_reserved_write_field,
-    validate_api001_reserved_write_fields, validate_distinct_commit_claims,
-    validate_instance_fence,
+    InstanceFence, ItemView, LeaseView, LiveItemView, LogRead, MAX_ORDERED_INDEPENDENT_PUSH_ITEMS,
+    MaintenanceStopReason, MaintenanceSummary, PendingPage, PendingSummary, ProjectionRead,
+    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe,
+    ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    is_api001_reserved_write_field, validate_api001_reserved_write_fields,
+    validate_distinct_commit_claims, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};

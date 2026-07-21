@@ -2742,7 +2742,6 @@ name = "pqueue-resp"
 version = "0.19.5"
 dependencies = [
  "bytes",
- "futures-util",
  "pqueue-core",
  "pqueue-engine",
  "pqueue-memory",

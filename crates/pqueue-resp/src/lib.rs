@@ -13,7 +13,6 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use futures_util::{StreamExt, stream::FuturesUnordered};
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, MetadataValue, PriorityValue, QueueId,
     TenantId, UtcTimestamp, WorkerId,
@@ -382,10 +381,9 @@ async fn read_command<R: AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Opt
     Ok(Some(args))
 }
 
-const PIPELINE_XADD_COMMAND_LIMIT: usize = 1_000;
+const PIPELINE_XADD_COMMAND_LIMIT: usize = pqueue_engine::MAX_ORDERED_INDEPENDENT_PUSH_ITEMS;
 const PIPELINE_XADD_BYTE_LIMIT: usize = 1024 * 1024;
 const PIPELINE_XADD_ARG_LIMIT: usize = 65_536;
-const PIPELINE_XADD_CONCURRENCY: usize = 64;
 
 /// Parse one complete command already buffered by Tokio without awaiting or consuming a partial frame.
 /// The connection loop uses this only for pipeline lookahead, so shutdown never cancels a partially-consuming
@@ -672,48 +670,21 @@ fn arg_eq(a: &[u8], s: &str) -> bool {
     a.eq_ignore_ascii_case(s.as_bytes())
 }
 
-async fn push_xadds_concurrently<B: PushPort>(
+async fn push_xadds_ordered_independent<B: PushPort>(
     backend: &B,
     shard: &QueueKey,
     specs: Vec<PushSpec>,
     now: UtcTimestamp,
     expected_epoch: Option<u64>,
 ) -> Vec<Resp> {
-    async fn one<B: PushPort>(
-        backend: &B,
-        shard: &QueueKey,
-        index: usize,
-        spec: PushSpec,
-        now: UtcTimestamp,
-        expected_epoch: Option<u64>,
-    ) -> (usize, Resp) {
-        let reply = match backend.push(shard, vec![spec], now, expected_epoch).await {
-            Ok(ids) if ids.len() == 1 => Resp::Bulk(ids[0].to_string().into_bytes()),
-            Ok(_) => Resp::Error("ERR invalid backend push response".into()),
-            Err(error) => err_reply(&error),
-        };
-        (index, reply)
-    }
-
-    let count = specs.len();
-    let mut specs = specs.into_iter().enumerate();
-    let mut pending = FuturesUnordered::new();
-    let mut replies = vec![None; count];
-    for _ in 0..PIPELINE_XADD_CONCURRENCY {
-        let Some((index, spec)) = specs.next() else {
-            break;
-        };
-        pending.push(one(backend, shard, index, spec, now, expected_epoch));
-    }
-    while let Some((index, reply)) = pending.next().await {
-        replies[index] = Some(reply);
-        if let Some((index, spec)) = specs.next() {
-            pending.push(one(backend, shard, index, spec, now, expected_epoch));
-        }
-    }
-    replies
+    backend
+        .push_ordered_independent(shard, specs, now, expected_epoch)
+        .await
         .into_iter()
-        .map(|reply| reply.expect("every XADD future completed"))
+        .map(|outcome| match outcome {
+            Ok(id) => Resp::Bulk(id.to_string().into_bytes()),
+            Err(error) => err_reply(&error),
+        })
         .collect()
 }
 
@@ -771,7 +742,7 @@ async fn dispatch_simple_xadd_batch_at<B: PushPort, H: RespHooks>(
     // One queue admission is shared by the contiguous pipeline, but each RESP command retains its own
     // scalar transaction and reply. Every backend commit checks the cached epoch, so a handoff fences
     // the not-yet-committed commands without rolling back successful independent siblings.
-    push_xadds_concurrently(
+    push_xadds_ordered_independent(
         backend,
         &shard,
         parsed.into_iter().map(|parsed| parsed.spec).collect(),
@@ -2103,10 +2074,15 @@ mod tests {
             assert_eq!(hooks.epochs.load(Ordering::SeqCst), 1);
             assert_eq!(spy.calls.lock().unwrap().len(), count);
             assert!(spy.calls.lock().unwrap().iter().all(|size| *size == 1));
-            if count > 1 {
-                assert!(spy.max_active.load(Ordering::SeqCst) > 1);
-            }
+            assert_eq!(spy.max_active.load(Ordering::SeqCst), 1);
             assert_eq!(replies.len(), count);
+            for (index, reply) in replies.iter().enumerate() {
+                assert_eq!(
+                    reply,
+                    &Resp::Bulk((index + 1).to_string().into_bytes()),
+                    "default port method preserves request/ID order"
+                );
+            }
         }
 
         let commands: Vec<_> = (0..100).map(|n| plain_xadd(b"tenant:q", n)).collect();
@@ -2146,7 +2122,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compatible_xadd_windows_use_bounded_concurrent_scalar_pushes_for_1_100_and_1000() {
+    async fn compatible_xadd_windows_use_ordered_independent_pushes_for_1_100_and_1000() {
         let shard = parse_shard(b"tenant:q").unwrap();
         let now = UtcTimestamp::new(1, 0).unwrap();
         for count in [1, 100, 1_000] {
@@ -2164,11 +2140,13 @@ mod tests {
                 .map(|args| parse_xadd(args).unwrap().spec)
                 .collect();
             let spy = SpyPush::default();
-            let replies = push_xadds_concurrently(&spy, &shard, specs, now, Some(7)).await;
+            let replies = push_xadds_ordered_independent(&spy, &shard, specs, now, Some(7)).await;
             assert_eq!(spy.calls.lock().unwrap().len(), count);
             assert!(spy.calls.lock().unwrap().iter().all(|size| *size == 1));
             assert_eq!(replies.len(), count);
-            assert!(replies.iter().all(|reply| matches!(reply, Resp::Bulk(_))));
+            for (index, reply) in replies.iter().enumerate() {
+                assert_eq!(reply, &Resp::Bulk((index + 1).to_string().into_bytes()));
+            }
         }
     }
 

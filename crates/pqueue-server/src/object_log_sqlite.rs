@@ -1578,6 +1578,93 @@ impl SegmentedObjectLogSqliteBackend {
             .map_err(|_| EngineError::Storage("segment commit responder dropped".into()))?
     }
 
+    /// Enqueue distinct one-item commands under one coordinator lock in caller order, then await their
+    /// durability/apply barriers after releasing the lock. This preserves per-item outcomes and queue
+    /// history order while allowing the segment substrate to group the commands into fewer seals.
+    async fn commit_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        envelopes: Vec<CommandEnvelope>,
+        epoch: u64,
+        now: UtcTimestamp,
+    ) -> Vec<EngineResult<()>> {
+        let count = envelopes.len();
+        let coord = self.coord_for(shard);
+        let mut outcomes = vec![None; count];
+        let mut receivers = Vec::with_capacity(count);
+        {
+            let mut state = coord.state.lock().await;
+            for (index, envelope) in envelopes.into_iter().enumerate() {
+                let (serialized, charged_bytes) = match prepare_serialized_commands_for_format(
+                    vec![envelope],
+                    self.byte_budget.config().global_limit(),
+                    self.writer_format,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error));
+                        continue;
+                    }
+                };
+                let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
+                if !state.pending.is_empty()
+                    && queue_bytes.saturating_add(charged_bytes) > self.queue_byte_limit
+                {
+                    outcomes[index] = Some(Err(EngineError::Backpressure {
+                        resource: "queue buffered bytes",
+                    }));
+                    continue;
+                }
+                let permit = match self
+                    .byte_budget
+                    .try_acquire(shard.tenant_id.clone(), charged_bytes)
+                    .map_err(map_byte_admission_error)
+                {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        outcomes[index] = Some(Err(error));
+                        continue;
+                    }
+                };
+                let (tx, rx) = oneshot::channel();
+                match self
+                    .log
+                    .enqueue_serialized(shard, serialized, epoch, ts_to_ms(now))
+                {
+                    Ok((outcome, accepted)) => {
+                        state.pending.extend(accepted);
+                        state.permits.push(permit);
+                        state.waiters.push(tx);
+                        receivers.push((index, rx));
+                        if !outcome.committed.is_empty() {
+                            self.distribute(&mut state, outcome.committed);
+                        }
+                    }
+                    Err(error) => {
+                        Self::fail_all(&mut state, error.clone());
+                        outcomes[index] = Some(Err(error.clone()));
+                        for outcome in outcomes.iter_mut().skip(index + 1) {
+                            *outcome = Some(Err(error.clone()));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        for (index, receiver) in receivers {
+            outcomes[index] = Some(
+                receiver
+                    .await
+                    .map_err(|_| EngineError::Storage("segment commit responder dropped".into()))
+                    .and_then(|result| result),
+            );
+        }
+        outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("every ordered push has an outcome"))
+            .collect()
+    }
+
     async fn flush_loop(
         weak: std::sync::Weak<Self>,
         flush_interval: Duration,
@@ -1941,6 +2028,86 @@ impl PushPort for SegmentedObjectLogSqliteBackend {
             // Group-commit (no force): co-buffer with concurrent pushes; ack after the seal+apply.
             self.commit(shard, envelope, epoch, now, false).await?;
             Ok(ids)
+        }
+    }
+
+    fn push_ordered_independent(
+        &self,
+        shard: &QueueKey,
+        items: Vec<PushSpec>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = Vec<EngineResult<ItemId>>> + Send {
+        async move {
+            let count = items.len();
+            if count > pqueue_engine::MAX_ORDERED_INDEPENDENT_PUSH_ITEMS {
+                return vec![
+                    Err(EngineError::Invalid(
+                        "ordered independent push exceeds bounded item limit",
+                    ));
+                    count
+                ];
+            }
+            let max_attempts = match self
+                .queues
+                .lock()
+                .expect("segmented queues poisoned")
+                .get(shard)
+                .map(|definition| definition.retry_policy.max_attempts)
+            {
+                Some(max_attempts) => max_attempts,
+                None => return vec![Err(EngineError::NotFound); count],
+            };
+            let schema = self
+                .schemas
+                .lock()
+                .expect("segmented schemas poisoned")
+                .get(shard)
+                .cloned();
+            let epoch = expected_epoch.unwrap_or_else(|| self.cached_epoch(shard));
+            let mut outcomes = vec![None; count];
+            let mut accepted = Vec::with_capacity(count);
+            for (index, item) in items.into_iter().enumerate() {
+                if let Err(error) =
+                    validate_gate_push(self.supports_gates(), std::slice::from_ref(&item)).and_then(
+                        |()| validate_push_items(schema.as_ref(), std::slice::from_ref(&item)),
+                    )
+                {
+                    outcomes[index] = Some(Err(error));
+                    continue;
+                }
+                let counter_base = self.counters.reserve(shard, epoch, 1);
+                let (mut push_items, mut ids) =
+                    build_push_items(vec![item], epoch, self.node_id, counter_base, max_attempts);
+                let id = ids.pop().expect("one scalar push id");
+                let push_item = push_items.pop().expect("one scalar push item");
+                let envelope = self.next_envelope(
+                    QueueCommand::Push(PushCommand {
+                        items: vec![push_item],
+                    }),
+                    vec![id],
+                    now,
+                );
+                accepted.push((index, id, envelope));
+            }
+            let commit_results = self
+                .commit_ordered_independent(
+                    shard,
+                    accepted
+                        .iter()
+                        .map(|(_, _, envelope)| envelope.clone())
+                        .collect(),
+                    epoch,
+                    now,
+                )
+                .await;
+            for ((index, id, _), result) in accepted.into_iter().zip(commit_results) {
+                outcomes[index] = Some(result.map(|()| id));
+            }
+            outcomes
+                .into_iter()
+                .map(|outcome| outcome.expect("every ordered push has an outcome"))
+                .collect()
         }
     }
 
@@ -3953,6 +4120,74 @@ mod recovery_tests {
 
     fn test_budget(bytes: usize) -> BufferedByteBudget {
         BufferedByteBudget::new(BufferedByteBudgetConfig::new(bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn ordered_independent_push_groups_1000_commands_without_reordering_or_failure_coupling()
+    {
+        let tmp = TmpDir::new("ordered-independent-push");
+        let mut def = typed_queue_def("tenant", "ordered");
+        def.max_push_batch_size = 100;
+        let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+        let backend = Arc::new(
+            SegmentedObjectLogSqliteBackend::open(
+                tmp.object_root(),
+                &tmp.projection(),
+                SegmentConfig::new(64 * 1024 * 1024, 20).unwrap(),
+            )
+            .unwrap(),
+        );
+        backend.create_queue(def).await.unwrap();
+        let flusher = backend.spawn_flusher();
+        let items = (0..1_000)
+            .map(|index| {
+                if index == 500 {
+                    typed_invalid_spec("rejected")
+                } else {
+                    typed_valid_spec(&format!("item-{index}"))
+                }
+            })
+            .collect();
+        let outcomes = backend
+            .push_ordered_independent(&shard, items, ts(), None)
+            .await;
+        assert_eq!(outcomes.len(), 1_000);
+        assert!(matches!(
+            outcomes[500],
+            Err(EngineError::EntitySchemaViolation(_))
+        ));
+        let ids: Vec<_> = outcomes.into_iter().filter_map(Result::ok).collect();
+        assert_eq!(ids.len(), 999);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(backend.metrics(&shard).await.unwrap().pending, 999);
+        let claimed = backend
+            .claim(ClaimRequest {
+                shard: shard.clone(),
+                worker_id: pqueue_core::WorkerId::new("ordered-worker").unwrap(),
+                max_items: 999,
+                lease_token: LeaseToken::new("ordered-lease").unwrap(),
+                lease_expires_at: UtcTimestamp::new(ts().seconds + 60, 0).unwrap(),
+                now: ts(),
+                eligibility_time: None,
+                compatibility: ClaimCompatibility::default(),
+                expected_epoch: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            claimed
+                .items
+                .iter()
+                .map(|item| item.item_id)
+                .collect::<Vec<_>>(),
+            ids,
+            "equal-priority claim order must match caller/wire result order"
+        );
+        assert!(
+            backend.segment_counters().max_batch_size() > 100,
+            "distinct scalar commands must share downstream segments"
+        );
+        flusher.abort();
     }
 
     #[tokio::test]

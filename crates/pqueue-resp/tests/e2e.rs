@@ -510,7 +510,7 @@ fn ts_millis(ts: UtcTimestamp) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn thousand_prebuffered_xadds_reach_backend_as_bounded_concurrent_scalar_pushes() {
+async fn thousand_prebuffered_xadds_preserve_ordered_independent_scalar_semantics() {
     let backend = Arc::new(LyingClaimedViewBackend::new(composed_memory_backend()));
     backend.inner.create_queue(qdef()).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
