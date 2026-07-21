@@ -981,13 +981,15 @@ pub(crate) fn insert_typed_index_rows(
 
 const TYPED_INDEX_CHECK_CHUNK: usize = 299;
 const TYPED_INDEX_INSERT_CHUNK: usize = 190;
+type TypedIndexKey = (String, Vec<u8>);
+type TypedIndexBatchItem = (String, Vec<TypedIndexKey>);
 
 fn check_typed_unique_conflicts_batch(
     tx: &Transaction<'_>,
     t: &str,
     q: &str,
     typed_indexes: &[QueueIndex],
-    items: &[(String, Vec<(String, Vec<u8>)>)],
+    items: &[TypedIndexBatchItem],
 ) -> EngineResult<()> {
     let unique_names: std::collections::HashSet<&str> = typed_indexes
         .iter()
@@ -1038,7 +1040,7 @@ fn insert_typed_index_rows_batch(
     tx: &Transaction<'_>,
     t: &str,
     q: &str,
-    items: &[(String, Vec<(String, Vec<u8>)>)],
+    items: &[TypedIndexBatchItem],
 ) -> EngineResult<()> {
     let rows: Vec<_> = items
         .iter()
