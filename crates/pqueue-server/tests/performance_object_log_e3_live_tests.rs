@@ -157,10 +157,10 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     );
     let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
     let shard = shard();
-    let push = |suffix: &str| {
+    let push = |id: &str, suffix: &str| {
         vec![envelope(
             QueueCommand::Push(PushCommand {
-                items: vec![item(suffix, &format!("e3-pg-{suffix}"), 0)],
+                items: vec![item(id, &format!("e3-pg-{suffix}"), 0)],
             }),
             vec![],
         )]
@@ -169,21 +169,21 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     let owner_a = SegmentedObjectLog::open(adapter_a, cfg);
     owner_a.create_queue(&conformance_qdef()).unwrap();
     assert_eq!(owner_a.fence_epoch(&shard, 0, 1).unwrap(), 0);
-    owner_a.enqueue(&shard, &push("a"), 0, 2).unwrap();
+    owner_a.enqueue(&shard, &push("1", "a"), 0, 2).unwrap();
     owner_a.seal(&shard, 0, 3).unwrap();
 
     let adapter_b = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_b));
     let owner_b = SegmentedObjectLog::open(adapter_b.clone(), cfg);
     owner_b.create_queue(&conformance_qdef()).unwrap();
     assert_eq!(owner_b.acquire_epoch(&shard, 4).unwrap(), 1);
-    owner_b.enqueue(&shard, &push("b"), 1, 5).unwrap();
+    owner_b.enqueue(&shard, &push("2", "b"), 1, 5).unwrap();
     objects
         .fail_next_manifest_mirror
         .store(true, Ordering::SeqCst);
     owner_b.seal(&shard, 1, 6).unwrap();
     assert!(!objects.fail_next_manifest_mirror.load(Ordering::SeqCst));
     assert_eq!(adapter_b.pending_manifest_mirrors(), 1);
-    owner_a.enqueue(&shard, &push("stale"), 0, 7).unwrap();
+    owner_a.enqueue(&shard, &push("3", "stale"), 0, 7).unwrap();
     assert_eq!(owner_a.seal(&shard, 0, 8), Err(EngineError::EpochFenced));
     assert_eq!(owner_b.read_all(&shard).unwrap().len(), 2);
 
