@@ -35,22 +35,6 @@ pub(crate) struct OwnedBlockingExecutor {
 }
 
 impl OwnedBlockingExecutor {
-    pub(crate) fn new() -> EngineResult<Self> {
-        Ok(Self {
-            pool: Arc::new(WorkerPool::new(
-                DEFAULT_WORKERS,
-                DEFAULT_PENDING_PER_WORKER,
-            )?),
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_bounds(workers: usize, pending: usize) -> EngineResult<Self> {
-        Ok(Self {
-            pool: Arc::new(WorkerPool::new(workers, pending)?),
-        })
-    }
-
     pub(crate) fn run<T, F>(
         &self,
         operation: F,
@@ -62,9 +46,11 @@ impl OwnedBlockingExecutor {
         self.pool.submit(0, operation)
     }
 
-    /// Run an operation on this executor's queue-affine, bounded owned worker
-    /// set.
-    pub(crate) fn run_for_queue<T, F>(
+    /// Run a complete control-plane sequence on the worker adjacent to the
+    /// queue's data-plane worker. This keeps both on the shared bounded pool
+    /// while allowing the sequence to synchronously await queue-affine backend
+    /// fencing without recursively submitting to its own worker.
+    pub(crate) fn run_for_control_plane_queue<T, F>(
         &self,
         queue: &QueueKey,
         operation: F,
@@ -73,8 +59,9 @@ impl OwnedBlockingExecutor {
         T: Send + 'static,
         F: FnOnce() -> EngineResult<T> + Send + 'static,
     {
-        let worker = queue_worker_partition(queue, self.pool.worker_count());
-        self.pool.submit(worker, operation)
+        let workers = self.pool.worker_count();
+        let data_worker = queue_worker_partition(queue, workers);
+        self.pool.submit((data_worker + 1) % workers, operation)
     }
 }
 

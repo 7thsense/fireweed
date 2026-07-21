@@ -1391,7 +1391,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
         let executor = self.executor.clone();
         Box::pin(async move {
             executor
-                .run_for_queue(&queue.clone(), move || {
+                .run_for_control_plane_queue(&queue.clone(), move || {
                     control_plane.register_owner(&owner, now)?;
                     let resolution = control_plane.resolve_queue_owner(&queue, now)?;
                     if resolution
@@ -1425,7 +1425,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
         let executor = self.executor.clone();
         Box::pin(async move {
             executor
-                .run_for_queue(&queue.clone(), move || {
+                .run_for_control_plane_queue(&queue.clone(), move || {
                     control_plane.resolve_queue_owner(&queue, now)
                 })
                 .await
@@ -2898,7 +2898,7 @@ pub fn open_postgres_coordinated(
         pqueue_postgres::PostgresControlPlane::connect(url, control_plane_config)?,
     );
     let backend = Arc::new(blocking_backend::BlockingLibBackend::new(backend)?);
-    let control_plane_executor = blocking_backend::OwnedBlockingExecutor::new()?;
+    let control_plane_executor = backend.executor();
     Ok(Pqueue::with_owned_control_plane_executor(
         backend,
         clock,
@@ -2915,6 +2915,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll};
+    use std::time::{Duration, Instant};
 
     use pqueue_core::{
         ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField, OwnerId,
@@ -2934,7 +2935,7 @@ mod tests {
     async fn owned_control_plane_boundary_builds_a_working_coordinated_owner() -> EngineResult<()> {
         let raw = Arc::new(pqueue_memory::composed_memory_backend());
         let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
-        let executor = crate::blocking_backend::OwnedBlockingExecutor::with_bounds(1, 2)?;
+        let executor = bounded.executor();
         let control_plane = Arc::new(InMemoryControlPlane::default());
         let pq = Pqueue::with_owned_control_plane_executor(
             bounded,
@@ -2959,8 +2960,8 @@ mod tests {
 
     #[cfg(feature = "memory")]
     #[tokio::test(flavor = "current_thread")]
-    async fn cancelled_session_waiter_does_not_cancel_accepted_ownership_work() -> EngineResult<()>
-    {
+    async fn dropping_final_coordinated_handle_never_joins_blocked_control_plane_worker()
+    -> EngineResult<()> {
         let raw = Arc::new(pqueue_memory::composed_memory_backend());
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -2969,15 +2970,18 @@ mod tests {
             .await?;
 
         let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
-        let executor = crate::blocking_backend::OwnedBlockingExecutor::with_bounds(1, 2)?;
+        let executor = bounded.executor();
         let blocker_executor = executor.clone();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let mut blocker = Box::pin(blocker_executor.run(move || {
-            started_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            Ok(())
-        }));
+        let mut blocker = Box::pin(blocker_executor.run_for_control_plane_queue(
+            &queue,
+            move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            },
+        ));
         let waker = futures::task::noop_waker();
         let mut context = Context::from_waker(&waker);
         assert!(matches!(blocker.as_mut().poll(&mut context), Poll::Pending));
@@ -2996,15 +3000,30 @@ mod tests {
         assert!(matches!(session.as_mut().poll(&mut context), Poll::Pending));
         drop(session);
 
-        release_tx.send(()).unwrap();
-        blocker.await?;
-        drop(blocker_executor);
-        drop(pq); // closes and joins the runtime, including the accepted acquisition
-
-        assert_eq!(
-            control_plane.lease(&queue)?.active_owner_id.as_ref(),
-            Some(&owner)
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            release_tx.send(()).unwrap();
+        });
+        let drop_started = Instant::now();
+        drop(pq);
+        assert!(
+            drop_started.elapsed() < Duration::from_millis(100),
+            "final coordinated-handle drop joined a blocked durable-I/O worker"
         );
+
+        blocker.await?;
+        releaser.join().unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if control_plane.lease(&queue)?.active_owner_id.as_ref() == Some(&owner) {
+                    return Ok::<_, crate::EngineError>(());
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted ownership work did not complete after waiter/handle drop")?;
         Ok(())
     }
 
