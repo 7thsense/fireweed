@@ -196,20 +196,22 @@ pub(crate) fn check_claim_by_query_idempotency(
         return Ok(Some(replay));
     }
     let token_hash = lease_hash(&replay.lease_token);
-    for item_id in &replay.item_ids {
-        let active: Option<i64> = st(tx
-            .query_row(
-                "SELECT lease_expires_at FROM pqueue_items \
-                 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
-                 AND lifecycle_state='Leased' AND superseded=0 AND fenced=0 \
-                 AND lease_token_hash=?4",
-                params![t, q, item_id.to_string(), token_hash],
-                |row| row.get(0),
-            )
-            .optional())?;
-        if active.is_none_or(|expires_at| expires_at <= ts_nanos(now)) {
-            return Err(EngineError::RequestExpired);
-        }
+    let item_ids = item_ids_to_json(&replay.item_ids)?;
+    let (active_count, earliest_expiry): (i64, Option<i64>) = st(tx.query_row(
+        "SELECT COUNT(*), MIN(i.lease_expires_at) \
+         FROM json_each(?3) AS requested \
+         JOIN pqueue_items AS i \
+           ON i.tenant_id=?1 AND i.queue_id=?2 \
+          AND i.item_id=CAST(requested.value AS TEXT) \
+          AND i.lifecycle_state='Leased' AND i.superseded=0 AND i.fenced=0 \
+          AND i.lease_token_hash=?4",
+        params![t, q, item_ids, token_hash],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ))?;
+    if active_count != i64::try_from(replay.item_ids.len()).map_err(|_| EngineError::Conflict)?
+        || earliest_expiry.is_none_or(|expires_at| expires_at <= ts_nanos(now))
+    {
+        return Err(EngineError::RequestExpired);
     }
     Ok(Some(replay))
 }
@@ -974,12 +976,94 @@ pub(crate) fn insert_typed_index_rows(
     item_id: &str,
     keys: &[(String, Vec<u8>)],
 ) -> EngineResult<()> {
-    for (name, key) in keys {
+    insert_typed_index_rows_batch(tx, t, q, &[(item_id.to_string(), keys.to_vec())])
+}
+
+const TYPED_INDEX_CHECK_CHUNK: usize = 299;
+const TYPED_INDEX_INSERT_CHUNK: usize = 190;
+
+fn check_typed_unique_conflicts_batch(
+    tx: &Transaction<'_>,
+    t: &str,
+    q: &str,
+    typed_indexes: &[QueueIndex],
+    items: &[(String, Vec<(String, Vec<u8>)>)],
+) -> EngineResult<()> {
+    let unique_names: std::collections::HashSet<&str> = typed_indexes
+        .iter()
+        .filter(|index| index_is_unique(index))
+        .map(|index| index.name.as_str())
+        .collect();
+    let rows: Vec<_> = items
+        .iter()
+        .flat_map(|(item_id, keys)| {
+            keys.iter()
+                .filter(|(name, _)| unique_names.contains(name.as_str()))
+                .map(move |(name, key)| (item_id, name, key))
+        })
+        .collect();
+    for chunk in rows.chunks(TYPED_INDEX_CHECK_CHUNK) {
+        let values = vec!["(?,?,?)"; chunk.len()].join(",");
+        let mut parameters = Vec::with_capacity(chunk.len() * 3 + 2);
+        for (item_id, name, key) in chunk {
+            parameters.extend([
+                Value::Text((*item_id).clone()),
+                Value::Text((*name).clone()),
+                Value::Blob((*key).clone()),
+            ]);
+        }
+        parameters.extend([Value::Text(t.to_string()), Value::Text(q.to_string())]);
+        let conflict: Option<i64> = st(tx
+            .query_row(
+                &format!(
+                    "WITH incoming(item_id,index_name,index_key) AS (VALUES {values}) \
+                     SELECT 1 FROM pqueue_item_index existing JOIN incoming \
+                       ON existing.index_name=incoming.index_name \
+                      AND existing.index_key=incoming.index_key \
+                      AND existing.item_id!=incoming.item_id \
+                     WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1"
+                ),
+                params_from_iter(parameters.iter()),
+                |row| row.get(0),
+            )
+            .optional())?;
+        if conflict.is_some() {
+            return Err(EngineError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+fn insert_typed_index_rows_batch(
+    tx: &Transaction<'_>,
+    t: &str,
+    q: &str,
+    items: &[(String, Vec<(String, Vec<u8>)>)],
+) -> EngineResult<()> {
+    let rows: Vec<_> = items
+        .iter()
+        .flat_map(|(item_id, keys)| keys.iter().map(move |(name, key)| (item_id, name, key)))
+        .collect();
+    for chunk in rows.chunks(TYPED_INDEX_INSERT_CHUNK) {
+        let values = vec!["(?,?,?,?,?)"; chunk.len()].join(",");
+        let mut parameters = Vec::with_capacity(chunk.len() * 5);
+        for (item_id, name, key) in chunk {
+            parameters.extend([
+                Value::Text(t.to_string()),
+                Value::Text(q.to_string()),
+                Value::Text((*name).clone()),
+                Value::Blob((*key).clone()),
+                Value::Text((*item_id).clone()),
+            ]);
+        }
         st(tx.execute(
-            "INSERT INTO pqueue_item_index \
-             (tenant_id, queue_id, index_name, index_key, item_id) VALUES (?1,?2,?3,?4,?5) \
-             ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET index_key=excluded.index_key",
-            params![t, q, name, key.as_slice(), item_id],
+            &format!(
+                "INSERT INTO pqueue_item_index \
+                 (tenant_id,queue_id,index_name,index_key,item_id) VALUES {values} \
+                 ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
+                 index_key=excluded.index_key"
+            ),
+            params_from_iter(parameters.iter()),
         ))?;
     }
     Ok(())
@@ -1025,8 +1109,6 @@ pub(crate) fn maintain_typed_indexes_on_insert(
     let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
         let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
-        // DB-level unique check (no exclusion: new items have no prior rows).
-        check_typed_unique_conflicts(tx, t, q, typed_indexes, &keys, None)?;
         // Within-batch: detect two items in the same push sharing a unique key.
         for (name, key) in &keys {
             if typed_indexes
@@ -1048,9 +1130,8 @@ pub(crate) fn maintain_typed_indexes_on_insert(
         }
         item_keys.push((item.item_id.to_string(), keys));
     }
-    for (item_id, keys) in &item_keys {
-        insert_typed_index_rows(tx, t, q, item_id, keys)?;
-    }
+    check_typed_unique_conflicts_batch(tx, t, q, typed_indexes, &item_keys)?;
+    insert_typed_index_rows_batch(tx, t, q, &item_keys)?;
     Ok(())
 }
 
@@ -1077,10 +1158,9 @@ pub(crate) fn validate_typed_unique_push(
     let tx = st(conn.unchecked_transaction())?;
     let mut batch_unique: std::collections::HashMap<(String, Vec<u8>), String> =
         std::collections::HashMap::new();
+    let mut item_keys: TypedIndexRows = Vec::with_capacity(items.len());
     for item in items {
         let keys = typed_index_keys_for_entity(typed_indexes, item.entity_document.as_ref())?;
-        // (b) DB-level unique check (no exclusion: pushed items are new and hold no prior rows).
-        check_typed_unique_conflicts(&tx, &t, &q, typed_indexes, &keys, None)?;
         // (a) Within-batch: two items in the SAME candidate batch (possibly from different commit entries)
         // sharing a unique key collide — this is the cross-entry duplicate apply enforces only at insert time.
         for (name, key) in &keys {
@@ -1101,7 +1181,9 @@ pub(crate) fn validate_typed_unique_push(
                 }
             }
         }
+        item_keys.push((item.item_id.to_string(), keys));
     }
+    check_typed_unique_conflicts_batch(&tx, &t, &q, typed_indexes, &item_keys)?;
     Ok(())
 }
 
