@@ -380,10 +380,12 @@ async fn group_cap_counts_existing_and_incoming_cohort_members() {
         &group,
         "three@cap.test",
     );
-    assert!(matches!(
-        AsyncProjectionStore::validate_push(&turso, shard, vec![third], timestamp(2)).await,
-        Err(pqueue_engine::EngineError::Conflict)
-    ));
+    let result =
+        AsyncProjectionStore::validate_push(&turso, shard, vec![third], timestamp(2)).await;
+    assert!(
+        matches!(result, Err(pqueue_engine::EngineError::Conflict)),
+        "unexpected group-cap validation result: {result:?}"
+    );
 }
 use pqueue_relational::OWNED_PROJECTION_TABLES;
 use pqueue_sqlite::{AsyncSqliteProjectionStore, SqliteProjectionStore, SqliteRelational};

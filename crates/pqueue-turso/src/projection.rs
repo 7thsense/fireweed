@@ -218,10 +218,37 @@ const PUSH_INDEX_CHUNK: usize = 180; // 180 * 5 binds = 900
 const UNIQUE_CHECK_CHUNK: usize = 448; // 2 common + 448 * 2 binds = 898
 const GROUP_SUMMARY_CHUNK: usize = 897; // tenant + queue + now + 897 group binds = 900
 const VALIDATION_ITEM_CHUNK: usize = 897; // tenant + queue + 897 item-id binds = 899
+const PUSH_IDENTITY_CHECK_CHUNK: usize = 448; // tenant + queue + now + 448 * 2 inputs = 899
+const GROUP_COUNT_CHUNK: usize = 898; // tenant + queue + 898 group binds = 900
+const COHORT_READ_CHUNK: usize = 898; // tenant + queue + 898 group binds = 900
+const COHORT_GENERATION_WRITE_CHUNK: usize = 90; // 90 * 10 row binds = 900
+const COHORT_ACTIVE_WRITE_CHUNK: usize = 224; // tenant + queue + 224 * 4 updates = 898
+const SCHEDULE_UPDATE_CHUNK: usize = 299; // tenant + queue + 299 * 3 updates = 899
+const GATE_BLOCK_WRITE_CHUNK: usize = 300; // 300 * 3 row binds = 900
+const GATE_UNBLOCK_WRITE_CHUNK: usize = 898; // tenant + queue + 898 gate binds = 900
+const SIDE_RECORD_WRITE_CHUNK: usize = 225; // 225 * 4 row binds = 900
+const KEY_RETENTION_WRITE_CHUNK: usize = 180; // 180 * 5 row binds = 900
+const CURSOR_UPDATE_CHUNK: usize = 225; // 225 * 4 row binds = 900
 
 fn values_rows(rows: usize, columns: usize) -> String {
     let row = format!("({})", vec!["?"; columns].join(","));
     vec![row; rows].join(",")
+}
+
+fn numbered_values_rows(rows: usize, columns: usize, first_bind: usize) -> String {
+    (0..rows)
+        .map(|row| {
+            let offset = first_bind + row * columns;
+            format!(
+                "({})",
+                (0..columns)
+                    .map(|column| format!("?{}", offset + column))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 async fn validation_rows_by_item(
@@ -420,25 +447,37 @@ async fn check_typed_unique_conflicts(
     indexes: &[QueueIndex],
     keys: &[(String, Vec<u8>)],
 ) -> EngineResult<()> {
-    for (name, key) in keys {
-        let unique = indexes
-            .iter()
-            .find(|index| index.name == *name)
-            .is_some_and(index_is_unique);
-        if unique
-            && one_row(
-                transaction,
-                "SELECT item_id FROM pqueue_item_index WHERE tenant_id=?1 AND queue_id=?2 \
-                 AND index_name=?3 AND index_key=?4 LIMIT 1",
-                vec![
-                    tenant.to_string().into(),
-                    queue.to_string().into(),
-                    name.clone().into(),
-                    Value::Blob(key.clone()),
-                ],
-            )
-            .await?
-            .is_some()
+    let unique = keys
+        .iter()
+        .filter(|(name, _)| {
+            indexes
+                .iter()
+                .find(|index| index.name == *name)
+                .is_some_and(index_is_unique)
+        })
+        .collect::<Vec<_>>();
+    for chunk in unique.chunks(UNIQUE_CHECK_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 2 + 2);
+        for (name, key) in chunk {
+            params.extend([Value::Text(name.clone()), Value::Blob(key.clone())]);
+        }
+        params.extend([
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ]);
+        if one_row(
+            transaction,
+            &format!(
+                "WITH incoming(index_name,index_key) AS (VALUES {}) \
+                 SELECT 1 FROM pqueue_item_index existing JOIN incoming \
+                 ON existing.index_name=incoming.index_name AND existing.index_key=incoming.index_key \
+                 WHERE existing.tenant_id=? AND existing.queue_id=? LIMIT 1",
+                values_rows(chunk.len(), 2)
+            ),
+            params,
+        )
+        .await?
+        .is_some()
         {
             return Err(EngineError::Conflict);
         }
@@ -453,20 +492,27 @@ async fn insert_typed_index_rows(
     item_id: &str,
     keys: &[(String, Vec<u8>)],
 ) -> EngineResult<()> {
-    for (name, key) in keys {
+    for chunk in keys.chunks(PUSH_INDEX_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 5);
+        for (name, key) in chunk {
+            params.extend([
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Text(name.clone()),
+                Value::Blob(key.clone()),
+                Value::Text(item_id.to_string()),
+            ]);
+        }
         transaction
             .execute(
-                "INSERT INTO pqueue_item_index \
-                 (tenant_id,queue_id,index_name,index_key,item_id) VALUES(?1,?2,?3,?4,?5) \
-                 ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
-                 index_key=excluded.index_key",
-                vec![
-                    tenant.to_string().into(),
-                    queue.to_string().into(),
-                    name.clone().into(),
-                    Value::Blob(key.clone()),
-                    item_id.to_string().into(),
-                ],
+                format!(
+                    "INSERT INTO pqueue_item_index \
+                     (tenant_id,queue_id,index_name,index_key,item_id) VALUES {} \
+                     ON CONFLICT(tenant_id,queue_id,index_name,item_id) DO UPDATE SET \
+                     index_key=excluded.index_key",
+                    values_rows(chunk.len(), 5)
+                ),
+                params,
             )
             .await
             .map_err(storage)?;
@@ -482,11 +528,12 @@ async fn delete_typed_index_rows(
 ) -> EngineResult<()> {
     execute_for_items(
         transaction,
-        sql::delete_item_indexes(ids.len()),
+        sql::delete_item_indexes,
         vec![tenant.to_string().into(), queue.to_string().into()],
         ids,
     )
     .await
+    .map(|_| ())
 }
 
 async fn replace_typed_indexes_for_entity(
@@ -598,114 +645,173 @@ async fn upsert_cohorts(
     items: &[PushItem],
     now: i64,
 ) -> EngineResult<()> {
-    let mut cohorts: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    let mut cohort_order = Vec::new();
+    let mut cohorts: HashMap<String, (i64, i64)> = HashMap::new();
     for item in items {
         if let (Some(group), Some(size)) = (&item.group_key, item.cohort_size) {
             let size = i64::try_from(size).map_err(|_| EngineError::Conflict)?;
-            let entry = cohorts
-                .entry(group.as_str().to_string())
-                .or_insert((size, 0));
+            let group = group.as_str().to_string();
+            let entry = cohorts.entry(group.clone()).or_insert_with(|| {
+                cohort_order.push(group);
+                (size, 0)
+            });
             if entry.0 != size {
                 return Err(EngineError::Conflict);
             }
             entry.1 += 1;
         }
     }
-    for (group, (size, added)) in cohorts {
-        let existing = one_row(
-            transaction,
-            "SELECT cohort_size,member_count,state,retention_until FROM pqueue_cohorts \
-             WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
-            vec![
-                tenant.to_string().into(),
-                queue.to_string().into(),
-                group.clone().into(),
-            ],
-        )
-        .await?;
-        match existing {
-            None => {
-                if added > size {
-                    return Err(EngineError::Conflict);
+    let mut generation_rows = Vec::new();
+    let mut active_rows = Vec::new();
+    for groups in cohort_order.chunks(COHORT_READ_CHUNK) {
+        let placeholders = (0..groups.len())
+            .map(|offset| format!("?{}", offset + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = vec![tenant.to_string().into(), queue.to_string().into()];
+        params.extend(groups.iter().cloned().map(Value::Text));
+        let mut rows = transaction
+            .query(
+                format!(
+                    "SELECT group_key,cohort_size,member_count,state,retention_until \
+                     FROM pqueue_cohorts WHERE tenant_id=?1 AND queue_id=?2 \
+                     AND group_key IN ({placeholders})"
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+        let mut existing = HashMap::with_capacity(groups.len());
+        while let Some(row) = rows.next().await.map_err(storage)? {
+            existing.insert(
+                row.get::<String>(0).map_err(storage)?,
+                (
+                    row.get::<i64>(1).map_err(storage)?,
+                    row.get::<i64>(2).map_err(storage)?,
+                    row.get::<String>(3).map_err(storage)?,
+                    optional_integer(&row.get_value(4).map_err(storage)?)?,
+                ),
+            );
+        }
+        for group in groups {
+            let (size, added) = cohorts[group];
+            match existing.get(group) {
+                None => {
+                    if added > size {
+                        return Err(EngineError::Conflict);
+                    }
+                    let state = if added >= size { "complete" } else { "forming" };
+                    generation_rows.push((
+                        group.clone(),
+                        cohort_id_for(group, now),
+                        size,
+                        added,
+                        state,
+                    ));
                 }
-                let state = if added >= size { "complete" } else { "forming" };
-                transaction
-                    .execute(
-                        "INSERT INTO pqueue_cohorts \
-                         (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
-                          cohort_created_at,first_eligible_at,created_at) \
-                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?8)",
-                        vec![
-                            tenant.to_string().into(),
-                            queue.to_string().into(),
-                            group.clone().into(),
-                            cohort_id_for(&group, now).into(),
-                            Value::Integer(size),
-                            Value::Integer(added),
-                            state.into(),
-                            Value::Integer(now),
-                            if state == "complete" {
-                                Value::Integer(now)
-                            } else {
-                                Value::Null
-                            },
-                        ],
-                    )
-                    .await
-                    .map_err(storage)?;
-            }
-            Some(row) => {
-                let old_size = integer(&row[0])?;
-                let old_count = integer(&row[1])?;
-                let old_state = text(&row[2])?;
-                let retention = optional_integer(&row[3])?;
-                if old_state == "terminal" {
+                Some((old_size, old_count, old_state, retention)) if old_state == "terminal" => {
                     if retention.is_some_and(|until| until > now) || added > size {
                         return Err(EngineError::Conflict);
                     }
                     let state = if added >= size { "complete" } else { "forming" };
-                    transaction.execute(
-                        "UPDATE pqueue_cohorts SET cohort_id=?4,cohort_size=?5,member_count=?6,\
-                         state=?7,cohort_created_at=?8,first_eligible_at=?9,expire_command_pos=NULL,\
-                         cohort_lease_token_hash=NULL,retention_until=NULL,created_at=?8 \
-                         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
-                        vec![tenant.to_string().into(), queue.to_string().into(), group.clone().into(),
-                             cohort_id_for(&group, now).into(), Value::Integer(size), Value::Integer(added),
-                             state.into(), Value::Integer(now),
-                             if state == "complete" { Value::Integer(now) } else { Value::Null }],
-                    ).await.map_err(storage)?;
-                } else {
-                    if old_size != size || old_count.saturating_add(added) > old_size {
+                    generation_rows.push((
+                        group.clone(),
+                        cohort_id_for(group, now),
+                        size,
+                        added,
+                        state,
+                    ));
+                }
+                Some((old_size, old_count, old_state, _)) => {
+                    if *old_size != size || old_count.saturating_add(added) > *old_size {
                         return Err(EngineError::Conflict);
                     }
                     let count = old_count + added;
                     let state = if old_state == "leased" {
                         "leased"
-                    } else if count >= old_size {
+                    } else if count >= *old_size {
                         "complete"
                     } else {
                         "forming"
                     };
-                    transaction
-                        .execute(
-                            "UPDATE pqueue_cohorts SET member_count=?4,state=?5,\
-                         first_eligible_at=CASE WHEN ?5='complete' AND first_eligible_at IS NULL \
-                         THEN ?6 ELSE first_eligible_at END \
-                         WHERE tenant_id=?1 AND queue_id=?2 AND group_key=?3",
-                            vec![
-                                tenant.to_string().into(),
-                                queue.to_string().into(),
-                                group.into(),
-                                Value::Integer(count),
-                                state.into(),
-                                Value::Integer(now),
-                            ],
-                        )
-                        .await
-                        .map_err(storage)?;
+                    active_rows.push((group.clone(), count, state));
                 }
             }
         }
+    }
+
+    for chunk in generation_rows.chunks(COHORT_GENERATION_WRITE_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 10);
+        for (group, cohort_id, size, count, state) in chunk {
+            params.extend([
+                Value::Text(tenant.to_string()),
+                Value::Text(queue.to_string()),
+                Value::Text(group.clone()),
+                Value::Text(cohort_id.clone()),
+                Value::Integer(*size),
+                Value::Integer(*count),
+                Value::Text((*state).to_string()),
+                Value::Integer(now),
+                if *state == "complete" {
+                    Value::Integer(now)
+                } else {
+                    Value::Null
+                },
+                Value::Integer(now),
+            ]);
+        }
+        transaction
+            .execute(
+                format!(
+                    "INSERT INTO pqueue_cohorts \
+                     (tenant_id,queue_id,group_key,cohort_id,cohort_size,member_count,state,\
+                      cohort_created_at,first_eligible_at,created_at) VALUES {} \
+                     ON CONFLICT(tenant_id,queue_id,group_key) DO UPDATE SET \
+                      cohort_id=excluded.cohort_id,cohort_size=excluded.cohort_size,\
+                      member_count=excluded.member_count,state=excluded.state,\
+                      cohort_created_at=excluded.cohort_created_at,\
+                      first_eligible_at=excluded.first_eligible_at,expire_command_pos=NULL,\
+                      cohort_lease_token_hash=NULL,retention_until=NULL,created_at=excluded.created_at",
+                    values_rows(chunk.len(), 10)
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+    }
+    for chunk in active_rows.chunks(COHORT_ACTIVE_WRITE_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 4 + 2);
+        for (group, count, state) in chunk {
+            params.extend([
+                Value::Text(group.clone()),
+                Value::Integer(*count),
+                Value::Text((*state).to_string()),
+                if *state == "complete" {
+                    Value::Integer(now)
+                } else {
+                    Value::Null
+                },
+            ]);
+        }
+        params.extend([
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ]);
+        transaction
+            .execute(
+                format!(
+                    "WITH updates(group_key,member_count,state,completed_at) AS (VALUES {}) \
+                     UPDATE pqueue_cohorts AS c SET member_count=u.member_count,state=u.state,\
+                      first_eligible_at=CASE WHEN u.state='complete' AND c.first_eligible_at IS NULL \
+                      THEN u.completed_at ELSE c.first_eligible_at END \
+                     FROM updates AS u WHERE c.group_key=u.group_key \
+                      AND c.tenant_id=? AND c.queue_id=?",
+                    values_rows(chunk.len(), 4)
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
     }
     Ok(())
 }
@@ -757,27 +863,31 @@ async fn groups_for_items(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut params = vec![
-        Value::Text(tenant.to_string()),
-        Value::Text(queue.to_string()),
-    ];
-    append_item_ids(&mut params, ids);
-    let mut rows = transaction
-        .query(
-            format!(
-                "SELECT DISTINCT group_key FROM pqueue_items WHERE tenant_id=? AND queue_id=? \
-                 AND group_key IS NOT NULL AND item_id IN ({})",
-                vec!["?"; ids.len()].join(",")
-            ),
-            params,
-        )
-        .await
-        .map_err(storage)?;
-    let mut groups = Vec::new();
-    while let Some(row) = rows.next().await.map_err(storage)? {
-        groups.push(GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?);
+    let mut groups = HashSet::new();
+    for chunk in ids.chunks(VALIDATION_ITEM_CHUNK) {
+        let mut params = vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ];
+        append_item_ids(&mut params, chunk);
+        let mut rows = transaction
+            .query(
+                format!(
+                    "SELECT DISTINCT group_key FROM pqueue_items WHERE tenant_id=? AND queue_id=? \
+                     AND group_key IS NOT NULL AND item_id IN ({})",
+                    vec!["?"; chunk.len()].join(",")
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+        while let Some(row) = rows.next().await.map_err(storage)? {
+            groups.insert(
+                GroupKey::new(text(&row.get_value(0).map_err(storage)?)?).map_err(storage)?,
+            );
+        }
     }
-    Ok(groups)
+    Ok(groups.into_iter().collect())
 }
 
 async fn refresh_group_summaries(
@@ -1156,18 +1266,97 @@ fn append_item_ids(params: &mut Vec<Value>, ids: &[ItemId]) {
     params.extend(ids.iter().map(|item| Value::Text(item.to_string())));
 }
 
-async fn execute_for_items(
+async fn execute_for_items<F>(
     transaction: &Connection,
-    query: String,
-    mut params: Vec<Value>,
+    query_for: F,
+    params: Vec<Value>,
     ids: &[ItemId],
-) -> EngineResult<()> {
-    if ids.is_empty() {
-        return Ok(());
+) -> EngineResult<u64>
+where
+    F: Fn(usize) -> String,
+{
+    let chunk_size = 900_usize
+        .checked_sub(params.len())
+        .filter(|size| *size > 0)
+        .ok_or_else(|| storage("item statement has no bind capacity"))?;
+    let mut changed = 0_u64;
+    for chunk in ids.chunks(chunk_size) {
+        let mut chunk_params = params.clone();
+        append_item_ids(&mut chunk_params, chunk);
+        changed = changed.saturating_add(
+            transaction
+                .execute(query_for(chunk.len()), chunk_params)
+                .await
+                .map_err(storage)?,
+        );
     }
-    append_item_ids(&mut params, ids);
-    transaction.execute(&query, params).await.map_err(storage)?;
+    Ok(changed)
+}
+
+async fn update_item_schedules(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    schedules: &[(ItemId, Option<i64>, i64)],
+) -> EngineResult<()> {
+    for chunk in schedules.chunks(SCHEDULE_UPDATE_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 3 + 2);
+        for (item_id, not_before, eligible_since) in chunk {
+            params.extend([
+                Value::Text(item_id.to_string()),
+                not_before.map_or(Value::Null, Value::Integer),
+                Value::Integer(*eligible_since),
+            ]);
+        }
+        params.extend([
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ]);
+        transaction
+            .execute(
+                format!(
+                    "WITH schedules(item_id,not_before,eligible_since) AS (VALUES {}) \
+                     UPDATE pqueue_items AS i SET not_before=s.not_before,\
+                      eligible_since=s.eligible_since FROM schedules AS s \
+                     WHERE i.item_id=s.item_id AND i.tenant_id=? AND i.queue_id=?",
+                    values_rows(chunk.len(), 3)
+                ),
+                params,
+            )
+            .await
+            .map_err(storage)?;
+    }
     Ok(())
+}
+
+async fn retry_info_by_item(
+    transaction: &Connection,
+    tenant: &str,
+    queue: &str,
+    ids: &[ItemId],
+) -> EngineResult<HashMap<ItemId, (i64, i64)>> {
+    let mut info = HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(GROUP_COUNT_CHUNK) {
+        let mut params = vec![
+            Value::Text(tenant.to_string()),
+            Value::Text(queue.to_string()),
+        ];
+        append_item_ids(&mut params, chunk);
+        let mut rows = transaction
+            .query(&sql::select_retry_info(chunk.len()), params)
+            .await
+            .map_err(storage)?;
+        while let Some(row) = rows.next().await.map_err(storage)? {
+            info.insert(
+                ItemId::new(row.get::<String>(0).map_err(storage)?).map_err(storage)?,
+                (
+                    row.get::<i64>(1).map_err(storage)?,
+                    row.get::<i64>(2).map_err(storage)?,
+                ),
+            );
+        }
+    }
+    Ok(info)
 }
 
 async fn extend_claim_by_query_replays(
@@ -1425,7 +1614,7 @@ async fn apply_owned(
                 if !claim.item_ids.is_empty() {
                     let groups =
                         groups_for_items(&transaction, &tenant, &queue, &claim.item_ids).await?;
-                    let mut params = vec![
+                    let params = vec![
                         Value::Blob(lease_hash(&claim.lease_token)),
                         Value::Integer(ts_nanos(claim.lease_expires_at)),
                         claim.worker_id.as_ref().map_or(Value::Null, |worker| {
@@ -1436,11 +1625,9 @@ async fn apply_owned(
                         Value::Text(tenant.clone()),
                         Value::Text(queue.clone()),
                     ];
-                    append_item_ids(&mut params, &claim.item_ids);
-                    let changed = transaction
-                        .execute(sql::claim_items(claim.item_ids.len()), params)
-                        .await
-                        .map_err(storage)?;
+                    let changed =
+                        execute_for_items(&transaction, sql::claim_items, params, &claim.item_ids)
+                            .await?;
                     let expected = u64::try_from(claim.item_ids.len())
                         .map_err(|_| storage("claim item count exceeds u64"))?;
                     if changed != expected {
@@ -1533,7 +1720,7 @@ async fn apply_owned(
                 {
                     return Err(EngineError::Conflict);
                 }
-                let mut params = vec![
+                let params = vec![
                     Value::Blob(lease_hash(&claim.lease_token)),
                     Value::Integer(ts_nanos(claim.lease_expires_at)),
                     Value::Integer(ts_nanos(envelope.created_at)),
@@ -1541,14 +1728,13 @@ async fn apply_owned(
                     Value::Text(tenant.clone()),
                     Value::Text(queue.clone()),
                 ];
-                append_item_ids(&mut params, &claim.item_ids);
-                let changed = transaction
-                    .execute(
-                        &sql::claim_items(claim.item_ids.len()).replace("worker_id=?,", ""),
-                        params,
-                    )
-                    .await
-                    .map_err(storage)?;
+                let changed = execute_for_items(
+                    &transaction,
+                    |count| sql::claim_items(count).replace("worker_id=?,", ""),
+                    params,
+                    &claim.item_ids,
+                )
+                .await?;
                 if changed != u64::try_from(claim.item_ids.len()).map_err(storage)? {
                     return Err(storage("cohort claim changed an unexpected row count"));
                 }
@@ -1583,7 +1769,7 @@ async fn apply_owned(
             QueueCommand::RenewLease(renew) => {
                 execute_for_items(
                     &transaction,
-                    sql::renew_lease(renew.item_ids.len()),
+                    sql::renew_lease,
                     vec![
                         Value::Integer(ts_nanos(renew.lease_expires_at)),
                         Value::Integer(ts_nanos(envelope.created_at)),
@@ -1612,18 +1798,15 @@ async fn apply_owned(
                 if ids.is_empty() {
                     return Err(EngineError::NotFound);
                 }
-                let mut params = vec![
+                let params = vec![
                     Value::Integer(ts_nanos(renew.lease_expires_at)),
                     Value::Integer(ts_nanos(envelope.created_at)),
                     Value::Integer(incoming),
                     Value::Text(tenant.clone()),
                     Value::Text(queue.clone()),
                 ];
-                append_item_ids(&mut params, &ids);
-                let changed = transaction
-                    .execute(&sql::renew_lease(ids.len()), params)
-                    .await
-                    .map_err(storage)?;
+                let changed =
+                    execute_for_items(&transaction, sql::renew_lease, params, &ids).await?;
                 if changed != u64::try_from(ids.len()).map_err(storage)? {
                     return Err(storage("cohort renewal changed an unexpected row count"));
                 }
@@ -1631,7 +1814,7 @@ async fn apply_owned(
             QueueCommand::ReassignLease(reassign) => {
                 execute_for_items(
                     &transaction,
-                    sql::reassign_lease(reassign.item_ids.len()),
+                    sql::reassign_lease,
                     vec![
                         Value::Blob(lease_hash(&reassign.lease_token)),
                         Value::Integer(ts_nanos(reassign.lease_expires_at)),
@@ -1661,31 +1844,14 @@ async fn apply_owned(
                     .filter(|outcome| matches!(outcome.kind, FinalizeKind::Retry))
                     .map(|outcome| outcome.item_id)
                     .collect();
-                let mut retry_info = HashMap::new();
-                if !retry_ids.is_empty() {
-                    let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
-                    append_item_ids(&mut params, &retry_ids);
-                    let mut rows = transaction
-                        .query(&sql::select_retry_info(retry_ids.len()), params)
-                        .await
-                        .map_err(storage)?;
-                    while let Some(row) = rows.next().await.map_err(storage)? {
-                        retry_info.insert(
-                            text(&row.get_value(0).map_err(storage)?)?,
-                            (
-                                integer(&row.get_value(1).map_err(storage)?)?,
-                                integer(&row.get_value(2).map_err(storage)?)?,
-                            ),
-                        );
-                    }
-                }
+                let retry_info =
+                    retry_info_by_item(&transaction, &tenant, &queue, &retry_ids).await?;
 
                 let mut complete = Vec::new();
                 let mut failed = Vec::new();
                 let mut pending = Vec::new();
                 let mut rearmed = Vec::new();
-                let mut backoff: HashMap<i64, Vec<ItemId>> = HashMap::new();
-                let mut rearm_schedule: HashMap<(Option<i64>, i64), Vec<ItemId>> = HashMap::new();
+                let mut schedules = Vec::new();
                 let now = ts_nanos(envelope.created_at);
                 for outcome in &finalize.outcomes {
                     let state = match outcome.kind {
@@ -1693,7 +1859,7 @@ async fn apply_owned(
                         FinalizeKind::Fail => ItemState::Failed,
                         FinalizeKind::Retry => {
                             let (attempts, max_attempts) = retry_info
-                                .get(&outcome.item_id.to_string())
+                                .get(&outcome.item_id)
                                 .copied()
                                 .ok_or(EngineError::NotFound)?;
                             if is_retry_exhausted(
@@ -1713,10 +1879,11 @@ async fn apply_owned(
                         (ItemState::Pending, FinalizeKind::Rearm) => {
                             rearmed.push(outcome.item_id);
                             let not_before = outcome.not_before.map(ts_nanos);
-                            rearm_schedule
-                                .entry((not_before, not_before.unwrap_or(now).max(now)))
-                                .or_default()
-                                .push(outcome.item_id);
+                            schedules.push((
+                                outcome.item_id,
+                                not_before,
+                                not_before.unwrap_or(now).max(now),
+                            ));
                         }
                         (ItemState::Pending, _) => pending.push(outcome.item_id),
                         (ItemState::Leased, _) => unreachable!("finalize never targets leased"),
@@ -1725,10 +1892,8 @@ async fn apply_owned(
                         && state == ItemState::Pending
                         && let Some(not_before) = outcome.not_before
                     {
-                        backoff
-                            .entry(ts_nanos(not_before))
-                            .or_default()
-                            .push(outcome.item_id);
+                        let not_before = ts_nanos(not_before);
+                        schedules.push((outcome.item_id, Some(not_before), not_before));
                     }
                     token_ops.push(TokenOp::Clear(position.queue.clone(), outcome.item_id));
                 }
@@ -1742,7 +1907,7 @@ async fn apply_owned(
                 ] {
                     execute_for_items(
                         &transaction,
-                        sql::finalize_items(ids.len()),
+                        sql::finalize_items,
                         vec![
                             Value::Text(state.to_string()),
                             Value::Integer(i64::from(reset)),
@@ -1757,34 +1922,7 @@ async fn apply_owned(
                     )
                     .await?;
                 }
-                for (not_before, ids) in backoff {
-                    execute_for_items(
-                        &transaction,
-                        sql::finalize_backoff(ids.len()),
-                        vec![
-                            Value::Integer(not_before),
-                            Value::Integer(not_before),
-                            Value::Text(tenant.clone()),
-                            Value::Text(queue.clone()),
-                        ],
-                        &ids,
-                    )
-                    .await?;
-                }
-                for ((not_before, eligible_since), ids) in rearm_schedule {
-                    execute_for_items(
-                        &transaction,
-                        sql::finalize_backoff(ids.len()),
-                        vec![
-                            not_before.map_or(Value::Null, Value::Integer),
-                            Value::Integer(eligible_since),
-                            Value::Text(tenant.clone()),
-                            Value::Text(queue.clone()),
-                        ],
-                        &ids,
-                    )
-                    .await?;
-                }
+                update_item_schedules(&transaction, &tenant, &queue, &schedules).await?;
                 refresh_group_summaries(&transaction, &tenant, &queue, &groups, now).await?;
             }
             QueueCommand::CohortFinalize(finalize) => {
@@ -1805,31 +1943,18 @@ async fn apply_owned(
                 let mut failed = Vec::new();
                 let mut pending = Vec::new();
                 let effective_kind = if matches!(finalize.kind, FinalizeKind::Retry) {
-                    let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
-                    append_item_ids(&mut params, &ids);
-                    let mut rows = transaction
-                        .query(&sql::select_retry_info(ids.len()), params)
-                        .await
-                        .map_err(storage)?;
-                    let mut seen = 0usize;
-                    while let Some(row) = rows.next().await.map_err(storage)? {
-                        seen += 1;
-                        let item = ItemId::new(text(&row.get_value(0).map_err(storage)?)?)
-                            .map_err(storage)?;
-                        let attempts = nonnegative_u32(
-                            integer(&row.get_value(1).map_err(storage)?)?,
-                            "retry_count",
-                        )?;
-                        let max_attempts = nonnegative_u32(
-                            integer(&row.get_value(2).map_err(storage)?)?,
-                            "max_attempts",
-                        )?;
+                    let retry_info =
+                        retry_info_by_item(&transaction, &tenant, &queue, &ids).await?;
+                    for item in &ids {
+                        let (attempts, max_attempts) =
+                            retry_info.get(item).copied().ok_or_else(|| {
+                                storage("cohort finalize could not read every member")
+                            })?;
+                        let attempts = nonnegative_u32(attempts, "retry_count")?;
+                        let max_attempts = nonnegative_u32(max_attempts, "max_attempts")?;
                         if is_retry_exhausted(attempts, max_attempts) {
-                            failed.push(item);
+                            failed.push(*item);
                         }
-                    }
-                    if seen != ids.len() {
-                        return Err(storage("cohort finalize could not read every member"));
                     }
                     if failed.is_empty() {
                         pending.clone_from(&ids);
@@ -1860,7 +1985,7 @@ async fn apply_owned(
                     if members.is_empty() {
                         continue;
                     }
-                    let mut params = vec![
+                    let params = vec![
                         Value::Text(state.to_string()),
                         Value::Integer(0),
                         terminal_at.map_or(Value::Null, Value::Integer),
@@ -1870,11 +1995,9 @@ async fn apply_owned(
                         Value::Text(tenant.clone()),
                         Value::Text(queue.clone()),
                     ];
-                    append_item_ids(&mut params, members);
-                    let changed = transaction
-                        .execute(&sql::finalize_items(members.len()), params)
-                        .await
-                        .map_err(storage)?;
+                    let changed =
+                        execute_for_items(&transaction, sql::finalize_items, params, members)
+                            .await?;
                     if changed != u64::try_from(members.len()).map_err(storage)? {
                         return Err(storage("cohort finalize changed an unexpected row count"));
                     }
@@ -1885,7 +2008,7 @@ async fn apply_owned(
                 {
                     execute_for_items(
                         &transaction,
-                        sql::finalize_backoff(pending.len()),
+                        sql::finalize_backoff,
                         vec![
                             Value::Integer(ts_nanos(not_before)),
                             Value::Integer(ts_nanos(not_before)),
@@ -2126,20 +2249,13 @@ async fn apply_owned(
                     )
                     .await
                     .map_err(storage)?;
-                for gate in &item.gate_keys {
-                    transaction
-                        .execute(
-                            sql::INSERT_ITEM_GATE,
-                            vec![
-                                Value::Text(tenant.clone()),
-                                Value::Text(queue.clone()),
-                                Value::Text(item.item_id.to_string()),
-                                Value::Text(gate.as_str().to_string()),
-                            ],
-                        )
-                        .await
-                        .map_err(storage)?;
-                }
+                insert_push_gates_batched(
+                    &transaction,
+                    &tenant,
+                    &queue,
+                    std::slice::from_ref(item),
+                )
+                .await?;
                 maintain_typed_indexes_on_insert(
                     &transaction,
                     &tenant,
@@ -2154,7 +2270,7 @@ async fn apply_owned(
                     groups_for_items(&transaction, &tenant, &queue, &expired.item_ids).await?;
                 execute_for_items(
                     &transaction,
-                    sql::lease_expired(expired.item_ids.len()),
+                    sql::lease_expired,
                     vec![
                         Value::Integer(ts_nanos(envelope.created_at)),
                         Value::Integer(incoming),
@@ -2220,7 +2336,7 @@ async fn apply_owned(
                 let now = ts_nanos(envelope.created_at);
                 let epoch = i64::try_from(position.backend_epoch)
                     .map_err(|_| storage("backend epoch exceeds relational integer range"))?;
-                let mut params = vec![
+                let params = vec![
                     Value::Integer(now),
                     Value::Integer(epoch),
                     Value::Integer(now),
@@ -2228,20 +2344,21 @@ async fn apply_owned(
                     Value::Text(tenant.clone()),
                     Value::Text(queue.clone()),
                 ];
-                append_item_ids(&mut params, &ids);
-                let changed = transaction
-                    .execute(
-                        &format!(
+                let changed = execute_for_items(
+                    &transaction,
+                    |count| {
+                        format!(
                             "UPDATE pqueue_items SET lifecycle_state='Failed',\
                              item_version=item_version+1,terminal_at=?,terminal_command_epoch=?,\
                              updated_at=?,last_command_sequence=? WHERE tenant_id=? AND queue_id=? \
                              AND item_id IN ({})",
-                            vec!["?"; ids.len()].join(",")
-                        ),
-                        params,
-                    )
-                    .await
-                    .map_err(storage)?;
+                            vec!["?"; count].join(",")
+                        )
+                    },
+                    params,
+                    &ids,
+                )
+                .await?;
                 if changed != u64::try_from(ids.len()).map_err(storage)? {
                     return Err(storage("cohort expiry changed an unexpected row count"));
                 }
@@ -2280,7 +2397,7 @@ async fn apply_owned(
             QueueCommand::FenceLease(fence) => {
                 execute_for_items(
                     &transaction,
-                    sql::fence_lease(fence.item_ids.len(), true),
+                    |count| sql::fence_lease(count, true),
                     vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
                     &fence.item_ids,
                 )
@@ -2289,7 +2406,7 @@ async fn apply_owned(
             QueueCommand::UnfenceLease(unfence) => {
                 execute_for_items(
                     &transaction,
-                    sql::fence_lease(unfence.item_ids.len(), false),
+                    |count| sql::fence_lease(count, false),
                     vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
                     &unfence.item_ids,
                 )
@@ -2318,37 +2435,72 @@ async fn apply_owned(
                     .map_err(storage)?;
             }
             QueueCommand::SetGates(gates) => {
-                for gate in &gates.gate_keys {
-                    transaction
-                        .execute(
-                            if gates.blocked {
-                                sql::SET_GATE_BLOCKED
-                            } else {
-                                sql::SET_GATE_UNBLOCKED
-                            },
-                            vec![
+                let chunk_size = if gates.blocked {
+                    GATE_BLOCK_WRITE_CHUNK
+                } else {
+                    GATE_UNBLOCK_WRITE_CHUNK
+                };
+                for chunk in gates.gate_keys.chunks(chunk_size) {
+                    let (statement, params) = if gates.blocked {
+                        let mut params = Vec::with_capacity(chunk.len() * 3);
+                        for gate in chunk {
+                            params.extend([
                                 Value::Text(tenant.clone()),
                                 Value::Text(queue.clone()),
                                 Value::Text(gate.as_str().to_string()),
-                            ],
+                            ]);
+                        }
+                        (
+                            format!(
+                                "INSERT INTO pqueue_gate_state (tenant_id,queue_id,gate_key) \
+                                 VALUES {} ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING",
+                                values_rows(chunk.len(), 3)
+                            ),
+                            params,
                         )
+                    } else {
+                        let mut params =
+                            vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+                        params.extend(
+                            chunk
+                                .iter()
+                                .map(|gate| Value::Text(gate.as_str().to_string())),
+                        );
+                        (
+                            format!(
+                                "DELETE FROM pqueue_gate_state WHERE tenant_id=? AND queue_id=? \
+                                 AND gate_key IN ({})",
+                                vec!["?"; chunk.len()].join(",")
+                            ),
+                            params,
+                        )
+                    };
+                    transaction
+                        .execute(statement, params)
                         .await
                         .map_err(storage)?;
                 }
             }
             QueueCommand::WriteSideRecords(command) => {
-                for record in &command.records {
+                for chunk in command.records.chunks(SIDE_RECORD_WRITE_CHUNK) {
+                    let mut params = Vec::with_capacity(chunk.len() * 4);
+                    for record in chunk {
+                        params.extend([
+                            Value::Text(tenant.clone()),
+                            Value::Text(queue.clone()),
+                            Value::Blob(record.key.clone()),
+                            Value::Blob(record.payload.to_vec()),
+                        ]);
+                    }
                     transaction
                         .execute(
-                            "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
-                             VALUES (?1,?2,?3,?4) ON CONFLICT(tenant_id,queue_id,key) \
-                             DO UPDATE SET payload=excluded.payload",
-                            vec![
-                                Value::Text(tenant.clone()),
-                                Value::Text(queue.clone()),
-                                Value::Blob(record.key.clone()),
-                                Value::Blob(record.payload.to_vec()),
-                            ],
+                            format!(
+                                "INSERT INTO pqueue_side_records (tenant_id,queue_id,key,payload) \
+                                 VALUES {} ON CONFLICT(tenant_id,queue_id,key) \
+                                 DO UPDATE SET payload=excluded.payload",
+                                values_rows(chunk.len(), 4)
+                            ),
+                            params,
                         )
                         .await
                         .map_err(storage)?;
@@ -2376,61 +2528,73 @@ async fn apply_owned(
                         groups_for_items(&transaction, &tenant, &queue, &purge.item_ids).await?;
                     let definition =
                         definition_in_transaction(&transaction, &position.queue).await?;
-                    let mut params = vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
-                    append_item_ids(&mut params, &purge.item_ids);
-                    let mut rows = transaction
-                        .query(&sql::select_purge_items(purge.item_ids.len()), params)
-                        .await
-                        .map_err(storage)?;
                     let mut retention = Vec::new();
-                    while let Some(row) = rows.next().await.map_err(storage)? {
-                        // Validate the persisted state while retaining the key for every successful
-                        // API-001 removal, including pending and force-purged leased items.
-                        let _state = parse_state(&text(&row.get_value(2).map_err(storage)?)?)?;
-                        if definition.client_item_key_retention_ms > 0 {
-                            retention.push((
-                                text(&row.get_value(1).map_err(storage)?)?,
-                                text(&row.get_value(0).map_err(storage)?)?,
-                            ));
+                    for chunk in purge.item_ids.chunks(VALIDATION_ITEM_CHUNK) {
+                        let mut params =
+                            vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+                        append_item_ids(&mut params, chunk);
+                        let mut rows = transaction
+                            .query(&sql::select_purge_items(chunk.len()), params)
+                            .await
+                            .map_err(storage)?;
+                        while let Some(row) = rows.next().await.map_err(storage)? {
+                            // Validate the persisted state while retaining the key for every successful
+                            // API-001 removal, including pending and force-purged leased items.
+                            let _state = parse_state(&text(&row.get_value(2).map_err(storage)?)?)?;
+                            if definition.client_item_key_retention_ms > 0 {
+                                retention.push((
+                                    text(&row.get_value(1).map_err(storage)?)?,
+                                    text(&row.get_value(0).map_err(storage)?)?,
+                                ));
+                            }
                         }
                     }
-                    drop(rows);
                     let retention_nanos = i64::try_from(definition.client_item_key_retention_ms)
                         .unwrap_or(i64::MAX)
                         .saturating_mul(1_000_000);
                     let expires = ts_nanos(envelope.created_at).saturating_add(retention_nanos);
-                    for (key, item) in retention {
+                    for chunk in retention.chunks(KEY_RETENTION_WRITE_CHUNK) {
+                        let mut params = Vec::with_capacity(chunk.len() * 5);
+                        for (key, item) in chunk {
+                            params.extend([
+                                Value::Text(tenant.clone()),
+                                Value::Text(queue.clone()),
+                                Value::Text(key.clone()),
+                                Value::Text(item.clone()),
+                                Value::Integer(expires),
+                            ]);
+                        }
                         transaction
                             .execute(
-                                sql::UPSERT_KEY_RETENTION,
-                                vec![
-                                    Value::Text(tenant.clone()),
-                                    Value::Text(queue.clone()),
-                                    Value::Text(key),
-                                    Value::Text(item),
-                                    Value::Integer(expires),
-                                ],
+                                format!(
+                                    "INSERT INTO pqueue_item_key_retention \
+                                     (tenant_id,queue_id,client_item_key,item_id,expires_at) VALUES {} \
+                                     ON CONFLICT(tenant_id,queue_id,client_item_key) DO UPDATE SET \
+                                     item_id=excluded.item_id,expires_at=excluded.expires_at",
+                                    values_rows(chunk.len(), 5)
+                                ),
+                                params,
                             )
                             .await
                             .map_err(storage)?;
                     }
                     execute_for_items(
                         &transaction,
-                        sql::delete_item_gates(purge.item_ids.len()),
+                        sql::delete_item_gates,
                         vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
                         &purge.item_ids,
                     )
                     .await?;
                     execute_for_items(
                         &transaction,
-                        sql::delete_item_indexes(purge.item_ids.len()),
+                        sql::delete_item_indexes,
                         vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
                         &purge.item_ids,
                     )
                     .await?;
                     execute_for_items(
                         &transaction,
-                        sql::delete_items(purge.item_ids.len()),
+                        sql::delete_items,
                         vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
                         &purge.item_ids,
                     )
@@ -2465,16 +2629,29 @@ async fn apply_owned(
             .or_insert(epoch);
     }
 
-    for (shard, next) in next_by_queue {
+    let cursor_updates = next_by_queue.into_iter().collect::<Vec<_>>();
+    for chunk in cursor_updates.chunks(CURSOR_UPDATE_CHUNK) {
+        let mut params = Vec::with_capacity(chunk.len() * 4);
+        for (shard, next) in chunk {
+            let epoch = max_epoch.get(shard).copied().unwrap_or(0);
+            params.extend([
+                Value::Text(shard.tenant_id.as_str().to_string()),
+                Value::Text(shard.queue_id.as_str().to_string()),
+                Value::Integer(*next),
+                Value::Integer(epoch),
+            ]);
+        }
         transaction
             .execute(
-                sql::UPDATE_CURSOR,
-                vec![
-                    Value::Text(shard.tenant_id.as_str().to_string()),
-                    Value::Text(shard.queue_id.as_str().to_string()),
-                    Value::Integer(next),
-                    Value::Integer(max_epoch.get(&shard).copied().unwrap_or(0)),
-                ],
+                format!(
+                    "WITH updates(tenant,queue,next_seq,assignment_epoch) AS (VALUES {}) \
+                     UPDATE relational_cursor AS c SET next_seq=u.next_seq,\
+                      assignment_epoch=CASE WHEN c.assignment_epoch<u.assignment_epoch \
+                      THEN u.assignment_epoch ELSE c.assignment_epoch END FROM updates AS u \
+                     WHERE c.tenant=u.tenant AND c.queue=u.queue",
+                    values_rows(chunk.len(), 4)
+                ),
+                params,
             )
             .await
             .map_err(storage)?;
@@ -2845,6 +3022,7 @@ impl AsyncProjectionStore for TursoRelational {
                 let definition = definition_in_transaction(&transaction, &shard).await?;
                 let mut keys = HashSet::new();
                 let mut item_ids = HashSet::new();
+                let mut group_order = Vec::new();
                 let mut grouped = HashMap::<String, u64>::new();
                 for item in &items {
                     if !keys.insert(item.client_item_key.as_str().to_string())
@@ -2856,26 +3034,90 @@ impl AsyncProjectionStore for TursoRelational {
                         return Err(EngineError::Invalid("cohort_size requires group_key"));
                     }
                     if let Some(group) = &item.group_key {
-                        *grouped.entry(group.as_str().to_string()).or_default() += 1;
+                        let group = group.as_str().to_string();
+                        let added = grouped.entry(group.clone()).or_insert_with(|| {
+                            group_order.push(group);
+                            0
+                        });
+                        *added += 1;
                     }
-                    let existing = one_row(&transaction,
-                        "SELECT 1 FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-                         AND (item_id=?3 OR (client_item_key=?4 AND superseded=0)) \
-                         UNION ALL SELECT 1 FROM pqueue_item_key_retention WHERE tenant_id=?1 AND queue_id=?2 \
-                         AND client_item_key=?4 AND expires_at>?5 LIMIT 1",
-                        vec![tenant.clone().into(), queue.clone().into(), item.item_id.to_string().into(),
-                             item.client_item_key.as_str().to_string().into(), Value::Integer(ts_nanos(now))]).await?;
-                    if existing.is_some() { return Err(EngineError::Conflict); }
                 }
-                for (group, added) in grouped {
-                    let Some(max) = definition.max_eligible_group_size else { continue };
-                    let row = one_row(&transaction,
-                        "SELECT COUNT(*) FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 \
-                         AND group_key=?3 AND lifecycle_state IN ('Pending','Leased') AND superseded=0",
-                        vec![tenant.clone().into(), queue.clone().into(), group.into()]).await?
-                        .ok_or_else(|| storage("group count missing"))?;
-                    if nonnegative_u64(integer(&row[0])?, "group count")?.saturating_add(added) > max {
+
+                for chunk in items.chunks(PUSH_IDENTITY_CHECK_CHUNK) {
+                    let mut params = vec![
+                        Value::Text(tenant.clone()),
+                        Value::Text(queue.clone()),
+                        Value::Integer(ts_nanos(now)),
+                    ];
+                    for item in chunk {
+                        params.extend([
+                            Value::Text(item.item_id.to_string()),
+                            Value::Text(item.client_item_key.as_str().to_string()),
+                        ]);
+                    }
+                    let conflict = one_row(
+                        &transaction,
+                        &format!(
+                            "WITH requested(item_id,client_item_key) AS (VALUES {}) \
+                             SELECT 1 FROM requested r WHERE EXISTS (SELECT 1 FROM pqueue_items i \
+                               WHERE i.tenant_id=?1 AND i.queue_id=?2 AND \
+                               (i.item_id=r.item_id OR (i.client_item_key=r.client_item_key AND i.superseded=0))) \
+                             OR EXISTS (SELECT 1 FROM pqueue_item_key_retention k \
+                               WHERE k.tenant_id=?1 AND k.queue_id=?2 \
+                               AND k.client_item_key=r.client_item_key AND k.expires_at>?3) LIMIT 1",
+                            numbered_values_rows(chunk.len(), 2, 4)
+                        ),
+                        params,
+                    )
+                    .await?;
+                    if conflict.is_some() {
                         return Err(EngineError::Conflict);
+                    }
+                }
+
+                if let Some(max) = definition.max_eligible_group_size {
+                    for chunk in group_order.chunks(GROUP_COUNT_CHUNK) {
+                        let placeholders = (0..chunk.len())
+                            .map(|offset| format!("?{}", offset + 3))
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let mut params =
+                            vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+                        params.extend(chunk.iter().cloned().map(Value::Text));
+                        let mut rows = transaction
+                            .query(
+                                format!(
+                                    "SELECT group_key,COUNT(*) FROM pqueue_items \
+                                     WHERE tenant_id=?1 AND queue_id=?2 \
+                                     AND group_key IN ({placeholders}) \
+                                     AND lifecycle_state IN ('Pending','Leased') AND superseded=0 \
+                                     GROUP BY group_key"
+                                ),
+                                params,
+                            )
+                            .await
+                            .map_err(storage)?;
+                        let mut counts = HashMap::with_capacity(chunk.len());
+                        while let Some(row) = rows.next().await.map_err(storage)? {
+                            counts.insert(
+                                row.get::<String>(0).map_err(storage)?,
+                                nonnegative_u64(
+                                    row.get::<i64>(1).map_err(storage)?,
+                                    "group count",
+                                )?,
+                            );
+                        }
+                        for group in chunk {
+                            if counts
+                                .get(group)
+                                .copied()
+                                .unwrap_or_default()
+                                .saturating_add(grouped[group])
+                                > max
+                            {
+                                return Err(EngineError::Conflict);
+                            }
+                        }
                     }
                 }
                 maintain_typed_indexes_on_insert(&transaction, &tenant, &queue, &definition.typed_indexes, &items).await?;
@@ -3634,8 +3876,11 @@ mod push_batch_lowering_tests {
     use pqueue_core::{IndexDeclaration, IndexDef, IndexType, ItemId, QueueIndex};
 
     use super::{
-        GROUP_SUMMARY_CHUNK, PUSH_GATE_CHUNK, PUSH_INDEX_CHUNK, PUSH_ITEM_CHUNK,
-        UNIQUE_CHECK_CHUNK, VALIDATION_ITEM_CHUNK, index_is_unique, typed_index_keys,
+        COHORT_ACTIVE_WRITE_CHUNK, COHORT_GENERATION_WRITE_CHUNK, COHORT_READ_CHUNK,
+        GATE_BLOCK_WRITE_CHUNK, GROUP_COUNT_CHUNK, GROUP_SUMMARY_CHUNK, KEY_RETENTION_WRITE_CHUNK,
+        PUSH_GATE_CHUNK, PUSH_IDENTITY_CHECK_CHUNK, PUSH_INDEX_CHUNK, PUSH_ITEM_CHUNK,
+        SCHEDULE_UPDATE_CHUNK, SIDE_RECORD_WRITE_CHUNK, UNIQUE_CHECK_CHUNK, VALIDATION_ITEM_CHUNK,
+        index_is_unique, typed_index_keys,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3777,6 +4022,106 @@ mod push_batch_lowering_tests {
             assert_eq!(operation.matches("validation_rows_by_item(").count(), 1);
             assert!(!operation.contains("one_row("));
         }
+    }
+
+    #[test]
+    fn mutation_round_trips_scale_by_bind_chunks_not_input_cardinality() {
+        #[derive(Debug, PartialEq, Eq)]
+        struct RoundTrips {
+            push_identity_reads: usize,
+            group_count_reads: usize,
+            cohort_reads: usize,
+            cohort_generation_writes: usize,
+            cohort_active_writes: usize,
+            schedule_writes: usize,
+            gate_block_writes: usize,
+            side_record_writes: usize,
+            retention_writes: usize,
+        }
+        let shape = |cardinality: usize| RoundTrips {
+            push_identity_reads: cardinality.div_ceil(PUSH_IDENTITY_CHECK_CHUNK),
+            group_count_reads: cardinality.div_ceil(GROUP_COUNT_CHUNK),
+            cohort_reads: cardinality.div_ceil(COHORT_READ_CHUNK),
+            cohort_generation_writes: cardinality.div_ceil(COHORT_GENERATION_WRITE_CHUNK),
+            cohort_active_writes: cardinality.div_ceil(COHORT_ACTIVE_WRITE_CHUNK),
+            schedule_writes: cardinality.div_ceil(SCHEDULE_UPDATE_CHUNK),
+            gate_block_writes: cardinality.div_ceil(GATE_BLOCK_WRITE_CHUNK),
+            side_record_writes: cardinality.div_ceil(SIDE_RECORD_WRITE_CHUNK),
+            retention_writes: cardinality.div_ceil(KEY_RETENTION_WRITE_CHUNK),
+        };
+        assert_eq!(
+            shape(1),
+            RoundTrips {
+                push_identity_reads: 1,
+                group_count_reads: 1,
+                cohort_reads: 1,
+                cohort_generation_writes: 1,
+                cohort_active_writes: 1,
+                schedule_writes: 1,
+                gate_block_writes: 1,
+                side_record_writes: 1,
+                retention_writes: 1,
+            }
+        );
+        assert_eq!(
+            shape(100),
+            RoundTrips {
+                push_identity_reads: 1,
+                group_count_reads: 1,
+                cohort_reads: 1,
+                cohort_generation_writes: 2,
+                cohort_active_writes: 1,
+                schedule_writes: 1,
+                gate_block_writes: 1,
+                side_record_writes: 1,
+                retention_writes: 1,
+            }
+        );
+        assert_eq!(
+            shape(1_000),
+            RoundTrips {
+                push_identity_reads: 3,
+                group_count_reads: 2,
+                cohort_reads: 2,
+                cohort_generation_writes: 12,
+                cohort_active_writes: 5,
+                schedule_writes: 4,
+                gate_block_writes: 4,
+                side_record_writes: 5,
+                retention_writes: 6,
+            }
+        );
+
+        let source = include_str!("projection.rs");
+        let cohorts = source
+            .split("async fn upsert_cohorts(")
+            .nth(1)
+            .unwrap()
+            .split("async fn cohort_item_ids(")
+            .next()
+            .unwrap();
+        assert!(!cohorts.contains("for (group, (size, added))"));
+        assert!(cohorts.contains("cohort_order.chunks(COHORT_READ_CHUNK)"));
+        assert!(cohorts.contains("generation_rows.chunks(COHORT_GENERATION_WRITE_CHUNK)"));
+        assert!(cohorts.contains("active_rows.chunks(COHORT_ACTIVE_WRITE_CHUNK)"));
+
+        let validate = source
+            .split("fn validate_push(")
+            .nth(1)
+            .unwrap()
+            .split("fn pause_blocks_intake(")
+            .next()
+            .unwrap();
+        let item_validation = validate
+            .split("for item in &items {")
+            .nth(1)
+            .unwrap()
+            .split("for chunk in items.chunks")
+            .next()
+            .unwrap();
+        assert!(!item_validation.contains(".await"));
+        assert!(validate.contains("items.chunks(PUSH_IDENTITY_CHECK_CHUNK)"));
+        assert!(validate.contains("group_order.chunks(GROUP_COUNT_CHUNK)"));
     }
 
     #[test]
