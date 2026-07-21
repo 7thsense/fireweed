@@ -21,6 +21,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
 mod blocking_backend;
 
 use axon_esf::encode_index_value;
