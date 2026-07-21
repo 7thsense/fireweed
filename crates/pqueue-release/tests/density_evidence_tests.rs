@@ -53,6 +53,12 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
     assert!(control_plane_execute.contains("resource: \"runtime tasks\""));
     assert!(!control_plane_execute.contains("pqueue_resp::spawn_governed"));
     assert!(SERVICE_MAIN.contains("set_max_runtime_tasks(64)"));
+    assert!(SERVICE_MAIN.contains("/sys/fs/cgroup/memory.current"));
+    assert!(SERVICE_MAIN.contains("/sys/fs/cgroup/memory.peak"));
+    assert!(SERVICE_MAIN.contains("/sys/fs/cgroup/memory.max"));
+    assert!(DENSITY_KIND_HARNESS.contains("--memory-current-bytes"));
+    assert!(DENSITY_KIND_HARNESS.contains("--memory-peak-bytes"));
+    assert!(DENSITY_KIND_HARNESS.contains("--memory-limit-bytes"));
     let dispatch = POSTGRES_WHOLE_OPERATION_ADAPTER
         .split("fn dispatch")
         .nth(1)
@@ -89,8 +95,9 @@ fn density_resp_xadd_pipeline_uses_bounded_downstream_batches() {
     assert!(RESP_SERVER.contains("PIPELINE_XADD_BYTE_LIMIT: usize = 1024 * 1024"));
     assert!(RESP_SERVER.contains("BufReader::with_capacity(PIPELINE_XADD_BYTE_LIMIT"));
     assert!(RESP_SERVER.contains("fn buffered_xadd_window("));
-    assert!(RESP_SERVER.contains("async fn push_xadd_batch<B: PushPort>("));
-    assert!(RESP_SERVER.contains("backend.push(shard, specs, now, expected_epoch)"));
+    assert!(RESP_SERVER.contains("async fn push_xadds_concurrently<B: PushPort>("));
+    assert!(RESP_SERVER.contains("PIPELINE_XADD_CONCURRENCY: usize = 64"));
+    assert!(RESP_SERVER.contains(".push(shard, vec![spec], now, expected_epoch)"));
     assert!(RESP_SERVER.contains("async fn xadd_admission<H: RespHooks>("));
 }
 
@@ -135,6 +142,10 @@ fn measurement() -> DensityMeasurement {
         connection_limit: 32,
         task_count: 17,
         task_limit: 64,
+        memory_current_bytes: 512 * 1024 * 1024,
+        memory_peak_bytes: 1024 * 1024 * 1024,
+        memory_limit_bytes: 4 * 1024 * 1024 * 1024,
+        memory_accounting_source: "cgroup_v2".into(),
         resource_enforcement_active: true,
         hot_phase_resource_samples: 5,
         first_hot_resource_sample_unix_ms: 1_700_000_001_000,
@@ -226,12 +237,14 @@ fn density_validator_rejects_self_selected_resource_limits() {
     measured.shared_worker_limit = 8;
     measured.connection_limit = 16;
     measured.task_limit = 17;
+    measured.memory_limit_bytes = 8 * 1024 * 1024 * 1024;
     let row = build_release_row(&measured, &metadata());
     assert_eq!(row.evidence_tier, "smoke");
     let errors = validate_release_row(&row).unwrap_err().join("\n");
     assert!(errors.contains("governed shared_worker_limit=4"));
     assert!(errors.contains("governed connection_limit=32"));
     assert!(errors.contains("governed task_limit=64"));
+    assert!(errors.contains("current<=peak<=limit=4294967296"));
 }
 
 #[test]
@@ -345,6 +358,16 @@ fn density_validator_rejects_direct_tampering_of_an_otherwise_valid_release_row(
         ("shared_worker_count", serde_json::json!(0)),
         ("connection_count", serde_json::json!(0)),
         ("task_count", serde_json::json!(0)),
+        ("memory_current_bytes", serde_json::json!(0)),
+        (
+            "memory_peak_bytes",
+            serde_json::json!(5_u64 * 1024 * 1024 * 1024),
+        ),
+        (
+            "memory_limit_bytes",
+            serde_json::json!(8_u64 * 1024 * 1024 * 1024),
+        ),
+        ("memory_accounting_source", serde_json::json!("process_rss")),
         ("resource_enforcement_active", serde_json::json!(false)),
     ];
     for (key, value) in mutations {
@@ -381,6 +404,10 @@ fn semantic_density_validator_rejects_every_required_bar_when_missing() {
         "duplicate_transitions",
         "queue_global_progress_violations",
         "shared_worker_count",
+        "memory_current_bytes",
+        "memory_peak_bytes",
+        "memory_limit_bytes",
+        "memory_accounting_source",
         "noisy_neighbor_ingest_retention_pct",
     ] {
         let mut row = build_release_row(&measurement(), &metadata());

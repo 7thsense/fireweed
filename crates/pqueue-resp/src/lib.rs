@@ -13,6 +13,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use pqueue_core::{
     ClientItemKey, GroupKey, ItemId, LeaseToken, Metadata, MetadataValue, PriorityValue, QueueId,
     TenantId, UtcTimestamp, WorkerId,
@@ -369,6 +370,12 @@ async fn read_command<R: AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Opt
         })?;
         let mut buf = vec![0u8; allocation];
         r.read_exact(&mut buf).await?;
+        if &buf[len..] != b"\r\n" {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bulk string missing terminator",
+            ));
+        }
         buf.truncate(len);
         args.push(buf);
     }
@@ -378,6 +385,7 @@ async fn read_command<R: AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<Opt
 const PIPELINE_XADD_COMMAND_LIMIT: usize = 1_000;
 const PIPELINE_XADD_BYTE_LIMIT: usize = 1024 * 1024;
 const PIPELINE_XADD_ARG_LIMIT: usize = 65_536;
+const PIPELINE_XADD_CONCURRENCY: usize = 64;
 
 /// Parse one complete command already buffered by Tokio without awaiting or consuming a partial frame.
 /// The connection loop uses this only for pipeline lookahead, so shutdown never cancels a partially-consuming
@@ -664,22 +672,49 @@ fn arg_eq(a: &[u8], s: &str) -> bool {
     a.eq_ignore_ascii_case(s.as_bytes())
 }
 
-async fn push_xadd_batch<B: PushPort>(
+async fn push_xadds_concurrently<B: PushPort>(
     backend: &B,
     shard: &QueueKey,
     specs: Vec<PushSpec>,
     now: UtcTimestamp,
     expected_epoch: Option<u64>,
 ) -> Vec<Resp> {
-    let count = specs.len();
-    match backend.push(shard, specs, now, expected_epoch).await {
-        Ok(ids) if ids.len() == count => ids
-            .into_iter()
-            .map(|id| Resp::Bulk(id.to_string().into_bytes()))
-            .collect(),
-        Ok(_) => vec![Resp::Error("ERR invalid backend push response".into()); count],
-        Err(error) => vec![err_reply(&error); count],
+    async fn one<B: PushPort>(
+        backend: &B,
+        shard: &QueueKey,
+        index: usize,
+        spec: PushSpec,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> (usize, Resp) {
+        let reply = match backend.push(shard, vec![spec], now, expected_epoch).await {
+            Ok(ids) if ids.len() == 1 => Resp::Bulk(ids[0].to_string().into_bytes()),
+            Ok(_) => Resp::Error("ERR invalid backend push response".into()),
+            Err(error) => err_reply(&error),
+        };
+        (index, reply)
     }
+
+    let count = specs.len();
+    let mut specs = specs.into_iter().enumerate();
+    let mut pending = FuturesUnordered::new();
+    let mut replies = vec![None; count];
+    for _ in 0..PIPELINE_XADD_CONCURRENCY {
+        let Some((index, spec)) = specs.next() else {
+            break;
+        };
+        pending.push(one(backend, shard, index, spec, now, expected_epoch));
+    }
+    while let Some((index, reply)) = pending.next().await {
+        replies[index] = Some(reply);
+        if let Some((index, spec)) = specs.next() {
+            pending.push(one(backend, shard, index, spec, now, expected_epoch));
+        }
+    }
+    replies
+        .into_iter()
+        .map(|reply| reply.expect("every XADD future completed"))
+        .collect()
 }
 
 async fn xadd_admission<H: RespHooks>(
@@ -733,9 +768,10 @@ async fn dispatch_simple_xadd_batch_at<B: PushPort, H: RespHooks>(
         Ok(epoch) => epoch,
         Err(reply) => return vec![reply; commands.len()],
     };
-    // HELIX BatchPush semantics make this one atomic queue operation. The cached epoch is checked by
-    // the backend at commit, so a handoff cannot partially authorize or commit this batch.
-    push_xadd_batch(
+    // One queue admission is shared by the contiguous pipeline, but each RESP command retains its own
+    // scalar transaction and reply. Every backend commit checks the cached epoch, so a handoff fences
+    // the not-yet-committed commands without rolling back successful independent siblings.
+    push_xadds_concurrently(
         backend,
         &shard,
         parsed.into_iter().map(|parsed| parsed.spec).collect(),
@@ -1911,6 +1947,10 @@ mod tests {
     #[derive(Default)]
     struct SpyPush {
         calls: Mutex<Vec<usize>>,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        next_id: AtomicUsize,
+        fail_priority: Option<i64>,
     }
 
     #[derive(Default)]
@@ -1957,9 +1997,15 @@ mod tests {
             _expected_epoch: Option<u64>,
         ) -> EngineResult<Vec<ItemId>> {
             self.calls.lock().unwrap().push(items.len());
-            Ok((1..=items.len())
-                .map(|n| ItemId::from_u64(n as u64))
-                .collect())
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if items[0].priority == self.fail_priority.map(PriorityValue::Int64) {
+                return Err(EngineError::Invalid("spy item failure"));
+            }
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(vec![ItemId::from_u64(id as u64)])
         }
 
         async fn push_with_request_id(
@@ -2038,10 +2084,15 @@ mod tests {
         assert!(parse_buffered_command(&excessive_bulk).is_err());
         let mut reader = BufReader::new(excessive_bulk.as_slice());
         assert!(read_command(&mut reader).await.is_err());
+
+        let malformed_terminator = b"*1\r\n$4\r\nPINGxx";
+        assert!(parse_buffered_command(malformed_terminator).is_err());
+        let mut reader = BufReader::new(malformed_terminator.as_slice());
+        assert!(read_command(&mut reader).await.is_err());
     }
 
     #[tokio::test]
-    async fn xadd_batches_use_one_queue_admission_and_one_push_or_n_errors() {
+    async fn xadd_windows_use_one_admission_bounded_scalar_pushes_and_isolated_errors() {
         let now = UtcTimestamp::new(1, 0).unwrap();
         for count in [1, 100, 1_000] {
             let commands: Vec<_> = (0..count).map(|n| plain_xadd(b"tenant:q", n)).collect();
@@ -2050,7 +2101,11 @@ mod tests {
             let replies = dispatch_simple_xadd_batch_at(&spy, &hooks, now, &commands).await;
             assert_eq!(hooks.routes.load(Ordering::SeqCst), 1);
             assert_eq!(hooks.epochs.load(Ordering::SeqCst), 1);
-            assert_eq!(spy.calls.lock().unwrap().as_slice(), &[count]);
+            assert_eq!(spy.calls.lock().unwrap().len(), count);
+            assert!(spy.calls.lock().unwrap().iter().all(|size| *size == 1));
+            if count > 1 {
+                assert!(spy.max_active.load(Ordering::SeqCst) > 1);
+            }
             assert_eq!(replies.len(), count);
         }
 
@@ -2068,10 +2123,30 @@ mod tests {
             replies,
             vec![Resp::Error("ERR pqueue unavailable".into()); 100]
         );
+
+        let hooks = CountingAdmission::default();
+        let spy = SpyPush {
+            fail_priority: Some(42),
+            ..SpyPush::default()
+        };
+        let replies = dispatch_simple_xadd_batch_at(&spy, &hooks, now, &commands).await;
+        assert_eq!(replies.len(), 100);
+        assert!(matches!(&replies[42], Resp::Error(error) if error.contains("invalid")));
+        assert!(
+            replies[..42]
+                .iter()
+                .all(|reply| matches!(reply, Resp::Bulk(_)))
+        );
+        assert!(
+            replies[43..]
+                .iter()
+                .all(|reply| matches!(reply, Resp::Bulk(_)))
+        );
+        assert_eq!(spy.calls.lock().unwrap().len(), 100);
     }
 
     #[tokio::test]
-    async fn compatible_xadd_windows_use_one_downstream_batch_for_1_100_and_1000() {
+    async fn compatible_xadd_windows_use_bounded_concurrent_scalar_pushes_for_1_100_and_1000() {
         let shard = parse_shard(b"tenant:q").unwrap();
         let now = UtcTimestamp::new(1, 0).unwrap();
         for count in [1, 100, 1_000] {
@@ -2089,14 +2164,11 @@ mod tests {
                 .map(|args| parse_xadd(args).unwrap().spec)
                 .collect();
             let spy = SpyPush::default();
-            let replies = push_xadd_batch(&spy, &shard, specs, now, Some(7)).await;
-            assert_eq!(spy.calls.lock().unwrap().as_slice(), &[count]);
+            let replies = push_xadds_concurrently(&spy, &shard, specs, now, Some(7)).await;
+            assert_eq!(spy.calls.lock().unwrap().len(), count);
+            assert!(spy.calls.lock().unwrap().iter().all(|size| *size == 1));
             assert_eq!(replies.len(), count);
-            assert_eq!(replies[0], Resp::Bulk(b"1".to_vec()));
-            assert_eq!(
-                replies[count - 1],
-                Resp::Bulk(count.to_string().into_bytes())
-            );
+            assert!(replies.iter().all(|reply| matches!(reply, Resp::Bulk(_))));
         }
     }
 

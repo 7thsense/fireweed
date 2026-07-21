@@ -1584,6 +1584,7 @@ pub mod density {
     pub const MAX_SERVER_THREADS: usize = CANONICAL_SERVER_WORKERS;
     pub const MAX_SERVER_CONNECTIONS: usize = 32;
     pub const MAX_SERVER_TASKS: usize = 64;
+    pub const MAX_SERVICE_MEMORY_BYTES: u64 = 4 * 1024 * 1024 * 1024;
     pub const QUEUE_ACTIVITY_DEFINITION: &str = "a cold queue is active only when final XLEN is >0, and progress-eligible only when a non-empty claim/finalize operation started after HOT_START, completed before HOT_END, and completed before the item was reseeded; elapsed latency is capacity evidence only";
     pub const CANONICAL_PASS_BAR: &str = "exactly 1000 cold queues plus one hot queue on one live objectlog/sqlite node; exact accepted/claimed/finalized/pending reconciliation with zero lost or duplicate transitions; every cold queue claims/finalizes during active hot work with zero empty claims or progress violations; allocation-enforced shared resource caps; bracketed same-run measurements are complete and internally consistent; elapsed time, latency, and throughput are capacity evidence only; failover excluded (pqueue-0a1d4386)";
 
@@ -1628,6 +1629,10 @@ pub mod density {
         pub connection_limit: usize,
         pub task_count: usize,
         pub task_limit: usize,
+        pub memory_current_bytes: u64,
+        pub memory_peak_bytes: u64,
+        pub memory_limit_bytes: u64,
+        pub memory_accounting_source: String,
         pub resource_enforcement_active: bool,
         pub hot_phase_resource_samples: usize,
         pub first_hot_resource_sample_unix_ms: u64,
@@ -1751,6 +1756,11 @@ pub mod density {
             && m.task_limit == MAX_SERVER_TASKS
             && m.task_count > 0
             && m.task_count <= m.task_limit
+            && m.memory_current_bytes > 0
+            && m.memory_current_bytes <= m.memory_peak_bytes
+            && m.memory_peak_bytes <= m.memory_limit_bytes
+            && m.memory_limit_bytes == MAX_SERVICE_MEMORY_BYTES
+            && m.memory_accounting_source == "cgroup_v2"
             && m.resource_enforcement_active
             && m.hot_phase_started_unix_ms > 0
             && m.hot_phase_ended_unix_ms > m.hot_phase_started_unix_ms
@@ -1902,6 +1912,22 @@ pub mod density {
             ),
             ("task_count".into(), serde_json::json!(m.task_count)),
             ("task_limit".into(), serde_json::json!(m.task_limit)),
+            (
+                "memory_current_bytes".into(),
+                serde_json::json!(m.memory_current_bytes),
+            ),
+            (
+                "memory_peak_bytes".into(),
+                serde_json::json!(m.memory_peak_bytes),
+            ),
+            (
+                "memory_limit_bytes".into(),
+                serde_json::json!(m.memory_limit_bytes),
+            ),
+            (
+                "memory_accounting_source".into(),
+                serde_json::json!(m.memory_accounting_source),
+            ),
             (
                 "resource_enforcement_active".into(),
                 serde_json::json!(m.resource_enforcement_active),
@@ -2177,6 +2203,27 @@ pub mod density {
                     "{count} must be bounded by governed {limit}={governed_limit}"
                 )),
             }
+        }
+        match (
+            integer("memory_current_bytes"),
+            integer("memory_peak_bytes"),
+            integer("memory_limit_bytes"),
+        ) {
+            (Some(current), Some(peak), Some(limit))
+                if current > 0
+                    && current <= peak
+                    && peak <= limit
+                    && limit == MAX_SERVICE_MEMORY_BYTES => {}
+            _ => errors.push(format!(
+                "service memory must be cgroup-bounded current<=peak<=limit={MAX_SERVICE_MEMORY_BYTES}"
+            )),
+        }
+        if values
+            .get("memory_accounting_source")
+            .and_then(serde_json::Value::as_str)
+            != Some("cgroup_v2")
+        {
+            errors.push("memory_accounting_source must be cgroup_v2".into());
         }
         require_nonempty("revision", &mut errors);
         if values

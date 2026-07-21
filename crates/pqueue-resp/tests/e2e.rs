@@ -510,7 +510,7 @@ fn ts_millis(ts: UtcTimestamp) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn thousand_prebuffered_xadds_reach_backend_as_one_bounded_batch() {
+async fn thousand_prebuffered_xadds_reach_backend_as_bounded_concurrent_scalar_pushes() {
     let backend = Arc::new(LyingClaimedViewBackend::new(composed_memory_backend()));
     backend.inner.create_queue(qdef()).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -551,10 +551,46 @@ async fn thousand_prebuffered_xadds_reach_backend_as_one_bounded_batch() {
         reader.read_line(&mut line).await.unwrap();
         assert!(line.ends_with("\r\n"));
     }
-    assert_eq!(
-        backend.push_batch_sizes.lock().unwrap().as_slice(),
-        &[1_000]
-    );
+    let batch_sizes = backend.push_batch_sizes.lock().unwrap();
+    assert_eq!(batch_sizes.len(), 1_000);
+    assert!(batch_sizes.iter().all(|size| *size == 1));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_bulk_terminator_closes_after_valid_prefix_without_running_suffix() {
+    fn raw(args: &[&[u8]]) -> Vec<u8> {
+        let mut command = format!("*{}\r\n", args.len()).into_bytes();
+        for arg in args {
+            command.extend_from_slice(format!("${}\r\n", arg.len()).as_bytes());
+            command.extend_from_slice(arg);
+            command.extend_from_slice(b"\r\n");
+        }
+        command
+    }
+
+    let backend = Arc::new(LyingClaimedViewBackend::new(composed_memory_backend()));
+    backend.inner.create_queue(qdef()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let valid = raw(&[b"XADD", b"t1:q1", b"*", b"priority", b"1"]);
+    let mut pipeline = valid.clone();
+    pipeline.extend_from_slice(b"*1\r\n$4\r\nPINGxx");
+    pipeline.extend_from_slice(&valid);
+    socket.write_all(&pipeline).await.unwrap();
+    let server = tokio::spawn(serve(listener, backend.clone(), Arc::new(SystemClock)));
+
+    let mut reader = BufReader::new(socket);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(line.starts_with('$'));
+    line.clear();
+    reader.read_line(&mut line).await.unwrap();
+    assert!(line.ends_with("\r\n"));
+    line.clear();
+    assert_eq!(reader.read_line(&mut line).await.unwrap(), 0);
+    assert_eq!(backend.push_batch_sizes.lock().unwrap().as_slice(), &[1]);
     server.abort();
 }
 

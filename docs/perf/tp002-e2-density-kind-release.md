@@ -79,7 +79,13 @@ allocation, aborts the service on a worker/task bound violation, and exports
 process-lifetime high-water counters in its atomic in-container snapshot. The
 row records the actual worker-pool size and maximum live async tasks
 (detached object-log flushers, background loops, and connection handlers), and
-and the allocation-observed maximum live RESP connections.
+the allocation-observed maximum live RESP connections. The same snapshot reads
+the service container's cgroup v2 `memory.current`, `memory.peak`, and
+`memory.max` counters, which cover the complete process (RESP buffers and
+backend state together). The sampler carries those counters through the hot
+phase and the row names `cgroup_v2` as their accounting source. Canonical
+evidence fails closed unless current <= peak <= the fixed 4 GiB container
+limit; memory is a governed resource bound, not a host-performance gate.
 The governed maxima are four Tokio workers, 32 connections, and 64 live tasks;
 these limits are fixed in the semantic validator rather than selected by the
 run. The snapshot reporter is disabled in normal service deployments and is

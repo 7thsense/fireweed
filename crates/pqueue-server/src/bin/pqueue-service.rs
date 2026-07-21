@@ -103,10 +103,15 @@ async fn report_runtime_resources(path: PathBuf) {
             pqueue_resp::runtime_task_resource_counts();
         let (live_connections, max_connections, connection_limit) =
             pqueue_resp::connection_resource_counts();
+        let memory_current_bytes = read_cgroup_u64("/sys/fs/cgroup/memory.current");
+        let memory_peak_bytes = read_cgroup_u64("/sys/fs/cgroup/memory.peak");
+        let memory_limit_bytes = read_cgroup_u64("/sys/fs/cgroup/memory.max");
         if metrics.num_workers() > 4
             || alive_tasks > task_limit
             || max_alive_tasks > task_limit
             || max_connections > connection_limit
+            || memory_current_bytes > memory_limit_bytes
+            || memory_peak_bytes > memory_limit_bytes
         {
             eprintln!(
                 "density resource bound exceeded: workers={} tasks={alive_tasks}/{task_limit} max_tasks={max_alive_tasks}/{task_limit} connections={max_connections}/{connection_limit}",
@@ -121,10 +126,24 @@ async fn report_runtime_resources(path: PathBuf) {
             "live_connections": live_connections,
             "max_live_connections": max_connections,
             "connection_limit": connection_limit,
+            "memory_current_bytes": memory_current_bytes,
+            "memory_peak_bytes": memory_peak_bytes,
+            "memory_limit_bytes": memory_limit_bytes,
+            "memory_accounting_source": "cgroup_v2",
             "resource_enforcement_active": true,
         });
         if std::fs::write(&tmp, snapshot.to_string()).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
     }
+}
+
+fn read_cgroup_u64(path: &str) -> u64 {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("density cgroup accounting unavailable at {path}: {error}"))
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| {
+            panic!("density cgroup accounting at {path} is not numeric: {error}")
+        })
 }

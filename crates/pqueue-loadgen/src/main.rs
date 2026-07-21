@@ -1370,6 +1370,11 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
     let connection_limit = parse_usize_arg(args, "--connection-limit", 32);
     let observed_tasks = parse_usize_arg(args, "--observed-tasks", usize::MAX);
     let task_limit = parse_usize_arg(args, "--task-limit", 64);
+    let memory_current_bytes = parse_u64_arg(args, "--memory-current-bytes", 0);
+    let memory_peak_bytes = parse_u64_arg(args, "--memory-peak-bytes", 0);
+    let memory_limit_bytes = parse_u64_arg(args, "--memory-limit-bytes", 0);
+    let memory_accounting_source =
+        arg_value(args, "--memory-accounting-source").unwrap_or_default();
     let hot_phase_resource_samples = parse_usize_arg(args, "--hot-phase-resource-samples", 0);
     let first_hot_resource_sample_unix_ms =
         parse_u64_arg(args, "--first-hot-resource-sample-ms", 0);
@@ -1420,6 +1425,10 @@ fn cmd_density_emit_row(args: &[String]) -> ! {
         connection_limit,
         task_count: observed_tasks,
         task_limit,
+        memory_current_bytes,
+        memory_peak_bytes,
+        memory_limit_bytes,
+        memory_accounting_source,
         resource_enforcement_active: true,
         hot_phase_resource_samples,
         first_hot_resource_sample_unix_ms,
@@ -1463,7 +1472,7 @@ fn main() {
             eprintln!(
                 "usage:\n  pqueue-loadgen run --spec <json>|--spec-file <path> [--items-per-queue N] \
                  [--conns-per-queue C] [--pipe P] [--batch B]\n  pqueue-loadgen emit-row --result <f> \
-                 --result <f> --result <f> --tuning <json> --out <path>\n  pqueue-loadgen density-run --addr <host:port> --queue-count 1001 [--items N] [--seed N]\n  pqueue-loadgen density-emit-row --result <f> --observed-threads N --observed-connections N --observed-tasks N --hot-phase-resource-samples N --first-hot-resource-sample-ms N --last-hot-resource-sample-ms N --revision <sha> --image-digest <sha256> --topology <description> --hardware <description> --out <path>\ngot: {other:?}"
+                 --result <f> --result <f> --tuning <json> --out <path>\n  pqueue-loadgen density-run --addr <host:port> --queue-count 1001 [--items N] [--seed N]\n  pqueue-loadgen density-emit-row --result <f> --observed-threads N --observed-connections N --observed-tasks N --memory-current-bytes N --memory-peak-bytes N --memory-limit-bytes N --memory-accounting-source cgroup_v2 --hot-phase-resource-samples N --first-hot-resource-sample-ms N --last-hot-resource-sample-ms N --revision <sha> --image-digest <sha256> --topology <description> --hardware <description> --out <path>\ngot: {other:?}"
             );
             exit(2);
         }

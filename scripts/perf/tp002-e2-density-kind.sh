@@ -231,9 +231,12 @@ LOG_WATCH_PID=$!
       runtime=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/pqueue-runtime-resources.json 2>/dev/null) || continue
       threads=$(jq -r '.tokio_worker_threads' <<<"$runtime")
       tasks=$(jq -r '.tokio_alive_tasks' <<<"$runtime")
+      memory_current=$(jq -r '.memory_current_bytes' <<<"$runtime")
+      memory_peak=$(jq -r '.memory_peak_bytes' <<<"$runtime")
+      memory_limit=$(jq -r '.memory_limit_bytes' <<<"$runtime")
       connections=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- sh -c \
         'awk '\''$2 ~ /:1F90$/ && $4 == "01" {n++} END {print n+0}'\'' /proc/1/net/tcp' 2>/dev/null) || continue
-      printf '%s %s %s %s\n' "$(date +%s%3N)" "$threads" "$connections" "$tasks" >>"$RESOURCE_FILE"
+      printf '%s %s %s %s %s %s %s\n' "$(date +%s%3N)" "$threads" "$connections" "$tasks" "$memory_current" "$memory_peak" "$memory_limit" >>"$RESOURCE_FILE"
     fi
     sleep 0.25
   done
@@ -273,7 +276,7 @@ LOG_WATCH_PID=
 printf '%s\n' "$logs" >"$PHASE_LOG"
 HOT_START_MS=$(jq -r '.hot_phase_started_unix_ms' "$RESULT_FILE")
 HOT_END_MS=$(jq -r '.hot_phase_ended_unix_ms' "$RESULT_FILE")
-read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_SAMPLES FIRST_HOT_SAMPLE_MS LAST_HOT_SAMPLE_MS < <(
+read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_SAMPLES FIRST_HOT_SAMPLE_MS LAST_HOT_SAMPLE_MS SAMPLED_MEMORY_CURRENT SAMPLED_MEMORY_PEAK SAMPLED_MEMORY_LIMIT < <(
   awk -v start="$HOT_START_MS" -v end="$HOT_END_MS" '
     $1 >= start && $1 <= end {
       if (samples == 0) first=$1
@@ -281,9 +284,12 @@ read -r OBSERVED_THREADS OBSERVED_CONNECTIONS OBSERVED_TASKS HOT_PHASE_RESOURCE_
       if ($2 > threads) threads=$2
       if ($3 > connections) connections=$3
       if ($4 > tasks) tasks=$4
+      if ($5 > memory_current) memory_current=$5
+      if ($6 > memory_peak) memory_peak=$6
+      if ($7 > memory_limit) memory_limit=$7
       samples++
     }
-    END { print threads+0, connections+0, tasks+0, samples+0, first+0, last+0 }
+    END { print threads+0, connections+0, tasks+0, samples+0, first+0, last+0, memory_current+0, memory_peak+0, memory_limit+0 }
   ' "$RESOURCE_FILE"
 )
 # Release bounds come from allocation-time enforcement and process-lifetime high-water counters, not
@@ -293,7 +299,16 @@ FINAL_RUNTIME=$(kubectl -n "$NAMESPACE" exec "$SERVER_POD" -- cat /tmp/pqueue-ru
 OBSERVED_THREADS=$(jq -r '.tokio_worker_threads' <<<"$FINAL_RUNTIME")
 OBSERVED_CONNECTIONS=$(jq -r '.max_live_connections' <<<"$FINAL_RUNTIME")
 OBSERVED_TASKS=$(jq -r '.tokio_max_alive_tasks' <<<"$FINAL_RUNTIME")
-jq -e '.resource_enforcement_active == true and .connection_limit == 32' <<<"$FINAL_RUNTIME" >/dev/null
+OBSERVED_MEMORY_CURRENT=$(jq -r '.memory_current_bytes' <<<"$FINAL_RUNTIME")
+OBSERVED_MEMORY_PEAK=$(jq -r '.memory_peak_bytes' <<<"$FINAL_RUNTIME")
+OBSERVED_MEMORY_LIMIT=$(jq -r '.memory_limit_bytes' <<<"$FINAL_RUNTIME")
+MEMORY_ACCOUNTING_SOURCE=$(jq -r '.memory_accounting_source' <<<"$FINAL_RUNTIME")
+jq -e '.resource_enforcement_active == true and .connection_limit == 32
+  and .memory_accounting_source == "cgroup_v2"
+  and .memory_current_bytes > 0
+  and .memory_current_bytes <= .memory_peak_bytes
+  and .memory_peak_bytes <= .memory_limit_bytes
+  and .memory_limit_bytes == 4294967296' <<<"$FINAL_RUNTIME" >/dev/null
 
 mkdir -p "$(dirname "$LEDGER_OUT")"
 assert_source_unchanged
@@ -321,6 +336,10 @@ if [[ "$EVIDENCE_MODE" == d5-diagnostic ]]; then
     --argjson observed_threads "$OBSERVED_THREADS" \
     --argjson observed_connections "$OBSERVED_CONNECTIONS" \
     --argjson observed_tasks "$OBSERVED_TASKS" \
+    --argjson memory_current_bytes "$OBSERVED_MEMORY_CURRENT" \
+    --argjson memory_peak_bytes "$OBSERVED_MEMORY_PEAK" \
+    --argjson memory_limit_bytes "$OBSERVED_MEMORY_LIMIT" \
+    --arg memory_accounting_source "$MEMORY_ACCOUNTING_SOURCE" \
     --argjson resource_samples "$HOT_PHASE_RESOURCE_SAMPLES" '
       {
         suite: "pqueue-d5-live-density-diagnostic",
@@ -342,6 +361,10 @@ if [[ "$EVIDENCE_MODE" == d5-diagnostic ]]; then
           tokio_worker_threads: $observed_threads,
           established_connections: $observed_connections,
           live_tasks: $observed_tasks,
+          memory_current_bytes: $memory_current_bytes,
+          memory_peak_bytes: $memory_peak_bytes,
+          memory_limit_bytes: $memory_limit_bytes,
+          memory_accounting_source: $memory_accounting_source,
           hot_phase_samples: $resource_samples
         },
         phase_log_sha256: $phase_log_sha256,
@@ -377,6 +400,10 @@ rustup run 1.92.0 cargo run --locked --quiet -p pqueue-loadgen -- density-emit-r
   --observed-threads "$OBSERVED_THREADS" --thread-limit "$THREAD_LIMIT" \
   --observed-connections "$OBSERVED_CONNECTIONS" --connection-limit "$CONNECTION_LIMIT" \
   --observed-tasks "$OBSERVED_TASKS" --task-limit "$TASK_LIMIT" \
+  --memory-current-bytes "$OBSERVED_MEMORY_CURRENT" \
+  --memory-peak-bytes "$OBSERVED_MEMORY_PEAK" \
+  --memory-limit-bytes "$OBSERVED_MEMORY_LIMIT" \
+  --memory-accounting-source "$MEMORY_ACCOUNTING_SOURCE" \
   --hot-phase-resource-samples "$HOT_PHASE_RESOURCE_SAMPLES" \
   --first-hot-resource-sample-ms "$FIRST_HOT_SAMPLE_MS" \
   --last-hot-resource-sample-ms "$LAST_HOT_SAMPLE_MS" \
