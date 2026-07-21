@@ -143,6 +143,15 @@ BEGIN
     SELECT NEW.tenant_id,NEW.queue_id,NEW.request_id,value
     FROM json_each(NEW.response_payload,'$.item_ids');
 END;
+-- One-time upgrade bridge for replay rows written before the normalized reverse index existed.  Normal
+-- steady-state opens hit the migration marker and do no replay-history work.
+INSERT OR IGNORE INTO pqueue_claim_replay_items (tenant_id,queue_id,request_id,item_id)
+SELECT r.tenant_id,r.queue_id,r.request_id,j.value
+FROM pqueue_request_idempotency r,json_each(r.response_payload,'$.item_ids') j
+WHERE r.operation='claim_by_query'
+  AND NOT EXISTS (SELECT 1 FROM pqueue_schema_migrations
+                  WHERE migration_name='claim_replay_items_v1');
+INSERT OR IGNORE INTO pqueue_schema_migrations (migration_name) VALUES ('claim_replay_items_v1');
 -- TD-002 §cohort lifecycle projection. The group_key is the logical cohort key; cohort_id is the stable
 -- generation identity returned to callers and changes only after terminal retention permits group reuse.
 CREATE TABLE IF NOT EXISTS pqueue_cohorts (
