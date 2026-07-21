@@ -347,6 +347,7 @@ struct BoundConfig {
     max_latency_ms: u64,
 }
 
+#[derive(Clone)]
 struct S3Env {
     endpoint: String,
     bucket: String,
@@ -2246,7 +2247,17 @@ async fn performance_object_log_e3_live_tests() {
         let fence_output = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT").expect(
             "release E3 requires an output path for executed Postgres-pointer fence evidence",
         );
-        prove_postgres_pointer_fence(&s3, &source_revision, std::path::Path::new(&fence_output));
+        let fence_s3 = s3.clone();
+        let fence_revision = source_revision.clone();
+        tokio::task::spawn_blocking(move || {
+            prove_postgres_pointer_fence(
+                &fence_s3,
+                &fence_revision,
+                std::path::Path::new(&fence_output),
+            );
+        })
+        .await
+        .expect("executed Postgres-pointer fence worker must join");
     }
 
     let runs = [
