@@ -63,25 +63,26 @@ use pqueue_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, Backend, ClaimCommand, ClaimCompatibility, ClaimPort,
     ClaimRequest, ClaimUnit, Claimed, ClaimedItem, CohortClaimCommand, CohortExpiredCommand,
     CohortFinalizeCommand, CohortFinalizePort, CohortLeaseTarget, CohortRenewLeaseCommand,
-    CohortRenewLeasePort, CommandEnvelope, CommandPosition, CommitCapabilities, CommitEntryOutcome,
-    CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity,
-    DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery, FinalizeCommand,
-    FinalizeKind, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision,
-    IndexHit, IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView,
-    PayloadUpdate, PendingPage, PendingSummary, ProjectionRead, PurgeItemsCommand, PurgePort,
-    PushCommand, PushFingerprint, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters,
-    QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, ScheduleUpdate,
-    SetGatesCommand, SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
-    compile_entity_schema, project_scopes, validate_api001_reserved_write_fields,
+    CohortRenewLeasePort, CommandChecksum, CommandEnvelope, CommandId, CommandPosition,
+    CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitOutcomeEntry, CommitRecovery,
+    CommitRejection, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
+    ControlPlaneStore, CreateQueueOutcome, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
+    DurableIntegrityStage, EngineError, EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind,
+    FinalizeOutcome, FinalizePort, HistoricalProjectionRead, IdempotencyDecision, IndexHit,
+    IndexQueryPort, ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate,
+    PendingPage, PendingSummary, ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand,
+    PushFingerprint, PushItem, PushPort, PushSpec, QueueCommand, QueueCounters, QueueKey,
+    QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand, RequestOutcome,
+    ScheduleUpdate, SetGatesCommand, SetGatesPort, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
+    build_push_items, compile_entity_schema, project_scopes, validate_api001_reserved_write_fields,
     validate_claim_compatibility, validate_entity, validate_gate_push, validate_instance_fence,
     validate_purge_force,
 };
 use pqueue_engine::{
     AsOfProjectionStore, CommandPage, ComposedBackend, InProcessControlPlane, LogLineageIdentity,
-    LogStore, ProjectionSnapshot, ProjectionStore, RichClaimSelection, SnapshotRef,
+    LogRead, LogStore, ProjectionSnapshot, ProjectionStore, RichClaimSelection, SnapshotRef,
 };
 use sha2::{Digest, Sha256};
 
@@ -181,6 +182,39 @@ CREATE TABLE IF NOT EXISTS relational_cursor (
     next_item_seq BIGINT NOT NULL,
     assignment_epoch BIGINT NOT NULL DEFAULT 0,   -- TD-003 durable ownership epoch (the fence authority)
     PRIMARY KEY (tenant, queue)
+);
+CREATE TABLE IF NOT EXISTS pqueue_commands (
+    tenant TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    assignment_epoch BIGINT NOT NULL,
+    seq BIGINT NOT NULL,
+    envelope BYTEA NOT NULL,
+    envelope_sha256 BYTEA NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (tenant, queue, seq)
+);
+CREATE INDEX IF NOT EXISTS pqueue_commands_read_idx
+    ON pqueue_commands (tenant, queue, seq);
+CREATE TABLE IF NOT EXISTS pqueue_command_baselines (
+    tenant TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    schema_version BIGINT NOT NULL,
+    assignment_epoch BIGINT NOT NULL,
+    next_seq BIGINT NOT NULL,
+    row_count BIGINT NOT NULL,
+    snapshot_digest BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (tenant, queue)
+);
+CREATE TABLE IF NOT EXISTS pqueue_command_baseline_rows (
+    tenant TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    relation_name TEXT NOT NULL,
+    row_ordinal BIGINT NOT NULL,
+    payload JSONB NOT NULL,
+    PRIMARY KEY (tenant, queue, generation, relation_name, row_ordinal)
 );
 CREATE TABLE IF NOT EXISTS pqueue_id_high_water (
     tenant_id TEXT NOT NULL, queue_id TEXT NOT NULL,
@@ -313,6 +347,62 @@ CREATE TABLE IF NOT EXISTS pqueue_instance_fences (
     PRIMARY KEY (tenant_id, queue_id, instance_key)
 );
 "#;
+
+const COMMAND_LOG_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS pqueue_commands (
+    tenant TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    assignment_epoch BIGINT NOT NULL,
+    seq BIGINT NOT NULL,
+    envelope BYTEA NOT NULL,
+    envelope_sha256 BYTEA NOT NULL,
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (tenant, queue, seq)
+);
+CREATE INDEX IF NOT EXISTS pqueue_commands_read_idx
+    ON pqueue_commands (tenant, queue, seq);
+CREATE TABLE IF NOT EXISTS pqueue_command_baselines (
+    tenant TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    schema_version BIGINT NOT NULL,
+    assignment_epoch BIGINT NOT NULL,
+    next_seq BIGINT NOT NULL,
+    row_count BIGINT NOT NULL,
+    snapshot_digest BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (tenant, queue)
+);
+CREATE TABLE IF NOT EXISTS pqueue_command_baseline_rows (
+    tenant TEXT NOT NULL,
+    queue TEXT NOT NULL,
+    generation TEXT NOT NULL,
+    relation_name TEXT NOT NULL,
+    row_ordinal BIGINT NOT NULL,
+    payload JSONB NOT NULL,
+    PRIMARY KEY (tenant, queue, generation, relation_name, row_ordinal)
+);
+"#;
+
+const BASELINE_RELATIONS: &[(&str, &str, &str)] = &[
+    ("queues", "tenant", "queue"),
+    ("relational_emission_cursor", "tenant", "queue"),
+    ("pqueue_id_high_water", "tenant_id", "queue_id"),
+    ("pqueue_items", "tenant_id", "queue_id"),
+    ("pqueue_group_summary", "tenant_id", "queue_id"),
+    ("pqueue_group_due_pending", "tenant_id", "queue_id"),
+    ("pqueue_item_key_retention", "tenant_id", "queue_id"),
+    ("pqueue_cohorts", "tenant_id", "queue_id"),
+    ("pqueue_item_gates", "tenant_id", "queue_id"),
+    ("pqueue_gate_state", "tenant_id", "queue_id"),
+    ("pqueue_request_idempotency", "tenant_id", "queue_id"),
+    ("pqueue_item_index", "tenant_id", "queue_id"),
+    ("pqueue_item_index_component", "tenant_id", "queue_id"),
+    ("pqueue_metrics_counted_item", "tenant_id", "queue_id"),
+    ("pqueue_queue_metrics_v2", "tenant_id", "queue_id"),
+    ("pqueue_side_records", "tenant_id", "queue_id"),
+    ("pqueue_instance_fences", "tenant_id", "queue_id"),
+];
 
 const QUEUE_METRICS_MIGRATION: &str = r#"
 -- The operator migration is standalone: it must create every relation used by
@@ -699,7 +789,7 @@ fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
 
 fn push_request_fingerprint(items: &[PushSpec]) -> EngineResult<Vec<u8>> {
     let bytes = serde_json::to_vec(items).map_err(|e| EngineError::Storage(e.to_string()))?;
-    Ok(Sha256::digest(&bytes).to_vec())
+    Ok(Sha256::digest(&bytes)[..8].to_vec())
 }
 
 fn request_expires_at(
@@ -812,7 +902,7 @@ const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 
 fn commit_request_fingerprint(entries: &[CommitTransitionEntry]) -> EngineResult<Vec<u8>> {
     let bytes = serde_json::to_vec(entries).map_err(|e| EngineError::Storage(e.to_string()))?;
-    Ok(Sha256::digest(&bytes).to_vec())
+    Ok(Sha256::digest(&bytes)[..8].to_vec())
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -922,6 +1012,34 @@ fn recovery_to_outcomes(recovery: &[EntryRecovery]) -> Vec<CommitEntryOutcome> {
             CommitEntryStatus::Rejected(e) => CommitEntryOutcome::Rejected(e.clone()),
         })
         .collect()
+}
+
+fn durable_outcome_entry(recovery: &EntryRecovery) -> CommitOutcomeEntry {
+    CommitOutcomeEntry {
+        consumed_input_id: recovery.consumed_input_id,
+        additional_consumed_input_ids: recovery.additional_consumed_input_ids.clone(),
+        instance: recovery.instance.clone(),
+        side_record_keys: recovery.side_record_keys.clone(),
+        lifecycle_item_ids: recovery.lifecycle_item_ids.clone(),
+        rejection: match &recovery.status {
+            CommitEntryStatus::Committed => None,
+            CommitEntryStatus::Rejected(error) => Some(CommitRejection::from_error(error)),
+        },
+    }
+}
+
+fn recovery_from_durable_outcome(entry: CommitOutcomeEntry) -> EntryRecovery {
+    EntryRecovery {
+        consumed_input_id: entry.consumed_input_id,
+        additional_consumed_input_ids: entry.additional_consumed_input_ids,
+        instance: entry.instance,
+        side_record_keys: entry.side_record_keys,
+        lifecycle_item_ids: entry.lifecycle_item_ids,
+        status: match entry.rejection {
+            Some(rejection) => CommitEntryStatus::Rejected(rejection.into_error()),
+            None => CommitEntryStatus::Committed,
+        },
+    }
 }
 
 fn encode_commit_recovery(recovery: &[EntryRecovery]) -> EngineResult<String> {
@@ -1443,6 +1561,142 @@ fn maintain_typed_indexes_on_insert(
 // Inner: the durable client + the queue-definition cache + the live-token map
 // ---------------------------------------------------------------------------
 
+fn persist_command_envelopes(
+    tx: &mut postgres::Transaction<'_>,
+    positions: &[CommandPosition],
+    commands: &[CommandEnvelope],
+) -> EngineResult<()> {
+    if positions.len() != commands.len() {
+        return Err(EngineError::Storage(
+            "command position/envelope cardinality mismatch".into(),
+        ));
+    }
+    for chunk_start in (0..positions.len()).step_by(1024) {
+        let chunk_end = (chunk_start + 1024).min(positions.len());
+        let mut tenants = Vec::with_capacity(chunk_end - chunk_start);
+        let mut queues = Vec::with_capacity(chunk_end - chunk_start);
+        let mut epochs = Vec::with_capacity(chunk_end - chunk_start);
+        let mut sequences = Vec::with_capacity(chunk_end - chunk_start);
+        let mut envelopes = Vec::with_capacity(chunk_end - chunk_start);
+        let mut checksums = Vec::with_capacity(chunk_end - chunk_start);
+        let mut created_at = Vec::with_capacity(chunk_end - chunk_start);
+        for (position, envelope) in positions[chunk_start..chunk_end]
+            .iter()
+            .zip(&commands[chunk_start..chunk_end])
+        {
+            let (tenant, queue) = parts(&position.queue);
+            let encoded = serde_json::to_vec(envelope).map_err(|error| {
+                EngineError::Storage(format!("command serialization failed: {error}"))
+            })?;
+            tenants.push(tenant);
+            queues.push(queue);
+            epochs.push(position.backend_epoch as i64);
+            sequences.push(position.sequence as i64);
+            checksums.push(Sha256::digest(&encoded).to_vec());
+            envelopes.push(encoded);
+            created_at.push(ts_nanos(envelope.created_at));
+        }
+        st(tx.execute(
+            "INSERT INTO pqueue_commands \
+             (tenant,queue,assignment_epoch,seq,envelope,envelope_sha256,created_at) \
+             SELECT * FROM UNNEST($1::text[],$2::text[],$3::bigint[],$4::bigint[],\
+                                  $5::bytea[],$6::bytea[],$7::bigint[])",
+            &[
+                &tenants,
+                &queues,
+                &epochs,
+                &sequences,
+                &envelopes,
+                &checksums,
+                &created_at,
+            ],
+        ))?;
+    }
+    Ok(())
+}
+
+fn direct_command_envelope(
+    shard: &QueueKey,
+    command: QueueCommand,
+    now: UtcTimestamp,
+    epoch: u64,
+    seq: u64,
+) -> CommandEnvelope {
+    let (tenant, queue) = parts(shard);
+    let item_ids = command_item_ids(&command);
+    CommandEnvelope {
+        command_id: CommandId::new(format!("pgrel-{tenant}-{queue}-{epoch}-{seq}")),
+        request_id: None,
+        request_fingerprint: None,
+        request_outcome: None,
+        item_ids,
+        command,
+        checksum: CommandChecksum(0),
+        created_at: now,
+    }
+}
+
+fn command_item_ids(command: &QueueCommand) -> Vec<ItemId> {
+    match command {
+        QueueCommand::Push(command) => command.items.iter().map(|item| item.item_id).collect(),
+        QueueCommand::Claim(command) => command.item_ids.clone(),
+        QueueCommand::CohortClaim(command) => command.item_ids.clone(),
+        QueueCommand::RenewLease(command) => command.item_ids.clone(),
+        QueueCommand::CohortRenewLease(_) => Vec::new(),
+        QueueCommand::ReassignLease(command) => command.item_ids.clone(),
+        QueueCommand::Finalize(command) => command
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.item_id)
+            .collect(),
+        QueueCommand::CohortFinalize(_) => Vec::new(),
+        QueueCommand::PurgeItems(command) => command.item_ids.clone(),
+        QueueCommand::LeaseExpired(command) => command.item_ids.clone(),
+        QueueCommand::CohortExpired(_) => Vec::new(),
+        QueueCommand::FenceLease(command) => command.item_ids.clone(),
+        QueueCommand::UnfenceLease(command) => command.item_ids.clone(),
+        QueueCommand::ReplacePending(command) => vec![command.replacement.item_id],
+        QueueCommand::UpdateFields(command) => vec![command.item_id],
+        QueueCommand::CreateQueue(_)
+        | QueueCommand::PauseQueue(_)
+        | QueueCommand::ResumeQueue
+        | QueueCommand::SetGates(_)
+        | QueueCommand::WriteSideRecords(_)
+        | QueueCommand::AdvanceInstanceFence(_) => Vec::new(),
+    }
+}
+
+struct DirectCommand<'a> {
+    shard: &'a QueueKey,
+    epoch: u64,
+    seq: u64,
+    now: UtcTimestamp,
+    command: QueueCommand,
+}
+
+fn persist_and_apply_command(
+    tx: &mut postgres::Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    token_ops: &mut Vec<TokenOp>,
+    direct: DirectCommand<'_>,
+) -> EngineResult<()> {
+    let DirectCommand {
+        shard,
+        epoch,
+        seq,
+        now,
+        command,
+    } = direct;
+    let position = CommandPosition::new(shard.clone(), epoch, seq);
+    let envelope = direct_command_envelope(shard, command, now, epoch, seq);
+    persist_command_envelopes(
+        tx,
+        std::slice::from_ref(&position),
+        std::slice::from_ref(&envelope),
+    )?;
+    apply_command_sql(tx, queues, token_ops, shard, seq, now, &envelope.command)
+}
+
 struct Inner {
     client: Client,
     queues: HashMap<QueueKey, QueueDefinition>,
@@ -1511,8 +1765,23 @@ impl Inner {
             return Err(EngineError::EpochFenced);
         }
         let seq = alloc_seq(&mut tx, &t, &q)?;
+        let position = CommandPosition::new(shard.clone(), epoch as u64, seq);
+        let envelope = direct_command_envelope(shard, command, now, epoch as u64, seq);
+        persist_command_envelopes(
+            &mut tx,
+            std::slice::from_ref(&position),
+            std::slice::from_ref(&envelope),
+        )?;
         let mut token_ops = Vec::new();
-        apply_command_sql(&mut tx, queues, &mut token_ops, shard, seq, now, &command)?;
+        apply_command_sql(
+            &mut tx,
+            queues,
+            &mut token_ops,
+            shard,
+            seq,
+            now,
+            &envelope.command,
+        )?;
         st(tx.commit())?;
         apply_token_ops(live_tokens, token_ops);
         Ok(())
@@ -1524,10 +1793,26 @@ impl Inner {
 /// never read the same value (the I4 TOCTOU the log-backed backend documented is structurally impossible
 /// here). Returns the allocated value (the pre-increment counter).
 fn alloc_seq(tx: &mut postgres::Transaction<'_>, t: &str, q: &str) -> EngineResult<u64> {
+    alloc_seq_range(tx, t, q, 1)
+}
+
+fn alloc_seq_range(
+    tx: &mut postgres::Transaction<'_>,
+    t: &str,
+    q: &str,
+    count: usize,
+) -> EngineResult<u64> {
+    if count == 0 {
+        return Err(EngineError::Invalid(
+            "command sequence range must be non-empty",
+        ));
+    }
+    let count = i64::try_from(count)
+        .map_err(|_| EngineError::Invalid("command sequence range exceeds postgres limit"))?;
     let row = st(tx.query_opt(
-        "UPDATE relational_cursor SET next_seq = next_seq + 1 WHERE tenant=$1 AND queue=$2 \
-         RETURNING next_seq - 1",
-        &[&t, &q],
+        "UPDATE relational_cursor SET next_seq = next_seq + $3 WHERE tenant=$1 AND queue=$2 \
+         RETURNING next_seq - $3",
+        &[&t, &q, &count],
     ))?
     .ok_or(EngineError::NotFound)?;
     let seq: i64 = row.get(0);
@@ -2344,12 +2629,36 @@ fn apply_command_sql(
     let now_n = ts_nanos(now);
     let seqi = seq as i64;
     match command {
-        QueueCommand::CreateQueue(_) => Ok(()),
+        QueueCommand::CreateQueue(command) => {
+            let definition = to_json(&command.definition)?;
+            st(tx.execute(
+                "INSERT INTO queues(tenant,queue,definition,paused,pause_drain_intake) \
+                 VALUES($1,$2,$3,false,false) \
+                 ON CONFLICT(tenant,queue) DO UPDATE SET definition=EXCLUDED.definition",
+                &[&t, &q, &definition],
+            ))?;
+            st(tx.execute(
+                "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq,assignment_epoch) \
+                 VALUES($1,$2,0,0,0) ON CONFLICT(tenant,queue) DO NOTHING",
+                &[&t, &q],
+            ))?;
+            Ok(())
+        }
         QueueCommand::Push(c) => {
             let model = queues
                 .get(shard)
                 .map(|d| d.priority_model)
                 .ok_or(EngineError::NotFound)?;
+            let client_keys: Vec<&str> = c
+                .items
+                .iter()
+                .map(|item| item.client_item_key.as_str())
+                .collect();
+            st(tx.execute(
+                "DELETE FROM pqueue_item_key_retention \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=ANY($3) AND expires_at<=$4",
+                &[&t, &q, &client_keys, &now_n],
+            ))?;
             insert_items(tx, queues, &model, shard, &c.items, seq, now)?;
             let minted_ids: Vec<ItemId> = c.items.iter().map(|item| item.item_id).collect();
             advance_id_high_water(tx, shard, &minted_ids)?;
@@ -4208,6 +4517,9 @@ impl PostgresRelationalBackend {
                    AND to_regclass('pqueue_metrics_counted_item') IS NOT NULL \
                    AND to_regclass('pqueue_group_due_pending') IS NOT NULL \
                    AND to_regclass('pqueue_item_index_component') IS NOT NULL \
+                   AND to_regclass('pqueue_commands') IS NOT NULL \
+                   AND to_regclass('pqueue_command_baselines') IS NOT NULL \
+                   AND to_regclass('pqueue_commands_read_idx') IS NOT NULL \
                    AND to_regprocedure('pqueue_apply_metrics_delta()') IS NOT NULL \
                    AND to_regprocedure('pqueue_index_components(bytea)') IS NOT NULL \
                    AND to_regprocedure('pqueue_sync_index_components()') IS NOT NULL \
@@ -4228,6 +4540,33 @@ impl PostgresRelationalBackend {
             .get(0);
             if !maintenance_ready {
                 return Err(EngineError::Unavailable);
+            }
+            let command_log_ready: bool = st(client.query_one(
+                "SELECT NOT EXISTS ( \
+                   SELECT 1 FROM relational_cursor c \
+                   LEFT JOIN pqueue_command_baselines b \
+                     ON b.tenant=c.tenant AND b.queue=c.queue \
+                   LEFT JOIN LATERAL ( \
+                     SELECT seq FROM pqueue_commands p \
+                     WHERE p.tenant=c.tenant AND p.queue=c.queue ORDER BY seq ASC LIMIT 1 \
+                   ) first_command ON true \
+                   LEFT JOIN LATERAL ( \
+                     SELECT seq FROM pqueue_commands p \
+                     WHERE p.tenant=c.tenant AND p.queue=c.queue ORDER BY seq DESC LIMIT 1 \
+                   ) last_command ON true \
+                   WHERE b.tenant IS NULL OR octet_length(b.snapshot_digest)<>32 \
+                      OR b.next_seq<0 OR b.next_seq>c.next_seq \
+                      OR (first_command.seq IS NULL AND c.next_seq<>b.next_seq) \
+                      OR (first_command.seq IS NOT NULL AND first_command.seq<>b.next_seq) \
+                      OR (last_command.seq IS NOT NULL AND last_command.seq+1<>c.next_seq) \
+                 )",
+                &[],
+            ))?
+            .get(0);
+            if !command_log_ready {
+                return Err(EngineError::Storage(
+                    "postgres command log baseline/head integrity check failed".into(),
+                ));
             }
         }
         if fresh {
@@ -4311,14 +4650,308 @@ impl PostgresRelationalBackend {
         self.node_id = node_id;
         self
     }
+
+    /// The named, durable snapshot that must be restored before reading a compacted command tail.
+    pub fn command_baseline_ref(&self, shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
+        let (tenant, queue) = parts(shard);
+        let mut inner = self.inner.lock().expect("poisoned");
+        let row = st(inner.client.query_opt(
+            "SELECT generation,assignment_epoch,next_seq FROM pqueue_command_baselines \
+             WHERE tenant=$1 AND queue=$2",
+            &[&tenant, &queue],
+        ))?
+        .ok_or_else(|| EngineError::Storage("postgres command log baseline is missing".into()))?;
+        let generation: String = row.get(0);
+        let epoch: i64 = row.get(1);
+        let next_seq: i64 = row.get(2);
+        if epoch < 0 || next_seq < 0 {
+            return Err(EngineError::DurableDataCorrupt {
+                stage: DurableIntegrityStage::Position,
+                manifest_index: 0,
+                locator: "baseline".into(),
+            });
+        }
+        Ok((next_seq > 0).then(|| SnapshotRef {
+            queue: shard.clone(),
+            position: CommandPosition::new(shard.clone(), epoch as u64, next_seq as u64 - 1),
+            ref_id: generation,
+        }))
+    }
+
+    /// Atomically restore the versioned SQL snapshot and replay its retained command tail in bounded pages.
+    pub fn rebuild_from_command_baseline(&self, shard: &QueueKey) -> EngineResult<()> {
+        let (tenant, queue) = parts(shard);
+        let mut inner = self.inner.lock().expect("poisoned");
+        let Inner {
+            client,
+            queues,
+            live_tokens,
+            ..
+        } = &mut *inner;
+        let mut tx = st(client.transaction())?;
+        let cursor = st(tx.query_one(
+            "SELECT next_seq,assignment_epoch FROM relational_cursor \
+             WHERE tenant=$1 AND queue=$2 FOR UPDATE",
+            &[&tenant, &queue],
+        ))?;
+        let durable_head: i64 = cursor.get(0);
+        let durable_epoch: i64 = cursor.get(1);
+        let baseline = st(tx.query_one(
+            "SELECT generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest \
+             FROM pqueue_command_baselines WHERE tenant=$1 AND queue=$2",
+            &[&tenant, &queue],
+        ))?;
+        let generation: String = baseline.get(0);
+        let schema_version: i64 = baseline.get(1);
+        let baseline_epoch: i64 = baseline.get(2);
+        let baseline_next: i64 = baseline.get(3);
+        let expected_count: i64 = baseline.get(4);
+        let expected_digest: Vec<u8> = baseline.get(5);
+        if schema_version != 1
+            || baseline_epoch < 0
+            || baseline_next < 0
+            || baseline_next > durable_head
+            || expected_count < 0
+        {
+            return Err(EngineError::DurableDataCorrupt {
+                stage: DurableIntegrityStage::Manifest,
+                manifest_index: 0,
+                locator: "baseline".into(),
+            });
+        }
+        let digest_row = st(tx.query_one(
+            "SELECT COUNT(*)::text, \
+                    COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,0)::numeric),0)::text, \
+                    COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,2147483647)::numeric),0)::text \
+             FROM pqueue_command_baseline_rows \
+             WHERE tenant=$1 AND queue=$2 AND generation=$3",
+            &[&tenant, &queue, &generation],
+        ))?;
+        let actual_count = digest_row.get::<_, String>(0).parse::<i64>().map_err(|_| {
+            EngineError::Storage("snapshot row count exceeds postgres range".into())
+        })?;
+        let summary = format!(
+            "{}:{}:{}",
+            digest_row.get::<_, String>(0),
+            digest_row.get::<_, String>(1),
+            digest_row.get::<_, String>(2)
+        );
+        if actual_count != expected_count
+            || Sha256::digest(summary.as_bytes()).as_slice() != expected_digest.as_slice()
+        {
+            return Err(EngineError::DurableDataCorrupt {
+                stage: DurableIntegrityStage::Sha256,
+                manifest_index: 0,
+                locator: "baseline".into(),
+            });
+        }
+
+        st(tx.batch_execute("ALTER TABLE pqueue_items DISABLE TRIGGER USER"))?;
+        for &(relation, tenant_column, queue_column) in BASELINE_RELATIONS.iter().rev() {
+            st(tx.execute(
+                &format!("DELETE FROM {relation} WHERE {tenant_column}=$1 AND {queue_column}=$2"),
+                &[&tenant, &queue],
+            ))?;
+        }
+        for &(relation, _, _) in BASELINE_RELATIONS {
+            st(tx.execute(
+                &format!(
+                    "INSERT INTO {relation} SELECT (jsonb_populate_record(NULL::{relation},payload)).* \
+                     FROM pqueue_command_baseline_rows \
+                     WHERE tenant=$1 AND queue=$2 AND generation=$3 AND relation_name=$4 \
+                     ORDER BY row_ordinal"
+                ),
+                &[&tenant, &queue, &generation, &relation],
+            ))?;
+        }
+        st(tx.batch_execute("ALTER TABLE pqueue_items ENABLE TRIGGER USER"))?;
+        st(tx.execute(
+            "UPDATE relational_cursor SET next_seq=$3,assignment_epoch=$4 \
+             WHERE tenant=$1 AND queue=$2",
+            &[&tenant, &queue, &baseline_next, &baseline_epoch],
+        ))?;
+
+        let mut next = baseline_next;
+        let mut token_ops = Vec::new();
+        while next < durable_head {
+            let rows = st(tx.query(
+                "SELECT assignment_epoch,seq,envelope,envelope_sha256 FROM pqueue_commands \
+                 WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT 1024",
+                &[&tenant, &queue, &next],
+            ))?;
+            if rows.is_empty() {
+                return Err(EngineError::DurableDataCorrupt {
+                    stage: DurableIntegrityStage::Position,
+                    manifest_index: next as u64,
+                    locator: format!("command:{next}"),
+                });
+            }
+            for row in rows {
+                let epoch: i64 = row.get(0);
+                let sequence: i64 = row.get(1);
+                let encoded: Vec<u8> = row.get(2);
+                let checksum: Vec<u8> = row.get(3);
+                if sequence != next || epoch < 0 || Sha256::digest(&encoded).as_slice() != checksum
+                {
+                    return Err(EngineError::DurableDataCorrupt {
+                        stage: DurableIntegrityStage::Position,
+                        manifest_index: next as u64,
+                        locator: format!("command:{next}"),
+                    });
+                }
+                let envelope: CommandEnvelope = serde_json::from_slice(&encoded).map_err(|_| {
+                    EngineError::DurableDataCorrupt {
+                        stage: DurableIntegrityStage::Payload,
+                        manifest_index: next as u64,
+                        locator: format!("command:{next}"),
+                    }
+                })?;
+                apply_command_sql(
+                    &mut tx,
+                    queues,
+                    &mut token_ops,
+                    shard,
+                    next as u64,
+                    envelope.created_at,
+                    &envelope.command,
+                )?;
+                if let (Some(request_id), Some(fingerprint), Some(outcome)) = (
+                    &envelope.request_id,
+                    envelope.request_fingerprint,
+                    &envelope.request_outcome,
+                ) {
+                    let fingerprint = fingerprint.to_be_bytes();
+                    let expires_at = request_expires_at(queues, shard, envelope.created_at)?;
+                    match outcome {
+                        RequestOutcome::Push { item_ids } => record_request_idempotency(
+                            &mut tx,
+                            shard,
+                            IDEMPOTENCY_OPERATION_PUSH,
+                            request_id,
+                            &fingerprint,
+                            item_ids,
+                            envelope.created_at,
+                            expires_at,
+                        )?,
+                        RequestOutcome::CommitTransition { entries } => {
+                            let recovery = entries
+                                .iter()
+                                .cloned()
+                                .map(recovery_from_durable_outcome)
+                                .collect::<Vec<_>>();
+                            record_commit_idempotency(
+                                &mut tx,
+                                shard,
+                                request_id,
+                                &fingerprint,
+                                &recovery,
+                                envelope.created_at,
+                                expires_at,
+                            )?;
+                        }
+                        RequestOutcome::ClaimByQuery { .. } => {}
+                    }
+                }
+                next += 1;
+            }
+        }
+        st(tx.execute(
+            "UPDATE relational_cursor SET next_seq=$3,assignment_epoch=$4 \
+             WHERE tenant=$1 AND queue=$2",
+            &[&tenant, &queue, &durable_head, &durable_epoch],
+        ))?;
+        st(tx.commit())?;
+        apply_token_ops(live_tokens, token_ops);
+        Ok(())
+    }
 }
 
 fn apply_concurrent_migrations(client: &mut Client) -> EngineResult<()> {
+    apply_command_log_migration(client)?;
     st(client.batch_execute(QUEUE_METRICS_MIGRATION))?;
     for (_, ddl) in GROUP_SUMMARY_INDEX_MIGRATIONS {
         st(client.batch_execute(ddl))?;
     }
     verify_group_summary_indexes(client, false)
+}
+
+fn apply_command_log_migration(client: &mut Client) -> EngineResult<()> {
+    let mut tx = st(client.transaction())?;
+    st(tx.batch_execute(COMMAND_LOG_MIGRATION))?;
+    st(tx.batch_execute("LOCK TABLE relational_cursor IN EXCLUSIVE MODE"))?;
+    let queues = st(tx.query(
+        "SELECT tenant,queue,next_seq,assignment_epoch FROM relational_cursor ORDER BY tenant,queue",
+        &[],
+    ))?;
+    for row in queues {
+        let tenant: String = row.get(0);
+        let queue: String = row.get(1);
+        let next_seq: i64 = row.get(2);
+        let assignment_epoch: i64 = row.get(3);
+        let generation = format!("baseline-{assignment_epoch}-{next_seq}");
+        let has_baseline: bool = st(tx.query_one(
+            "SELECT EXISTS(SELECT 1 FROM pqueue_command_baselines \
+             WHERE tenant=$1 AND queue=$2)",
+            &[&tenant, &queue],
+        ))?
+        .get(0);
+        if has_baseline {
+            continue;
+        }
+        let command_count: i64 = st(tx.query_one(
+            "SELECT COUNT(*) FROM pqueue_commands WHERE tenant=$1 AND queue=$2",
+            &[&tenant, &queue],
+        ))?
+        .get(0);
+        if command_count != 0 {
+            return Err(EngineError::Storage(
+                "command history exists without a snapshot baseline".into(),
+            ));
+        }
+        for &(relation, tenant_column, queue_column) in BASELINE_RELATIONS {
+            let sql = format!(
+                "INSERT INTO pqueue_command_baseline_rows \
+                   (tenant,queue,generation,relation_name,row_ordinal,payload) \
+                 SELECT $1,$2,$3,$4,row_number() OVER (ORDER BY ctid),to_jsonb(source) \
+                 FROM {relation} source WHERE {tenant_column}=$1 AND {queue_column}=$2"
+            );
+            st(tx.execute(&sql, &[&tenant, &queue, &generation, &relation]))?;
+        }
+        // The baseline is a real, database-resident, set-based restorable snapshot. Seal its rows without
+        // materializing them in the client; ordinary startup validates the anchor and never blesses state.
+        let digest_row = st(tx.query_one(
+            "SELECT COUNT(*)::text, \
+                    COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,0)::numeric),0)::text, \
+                    COALESCE(SUM(hashtextextended(relation_name||':'||payload::text,2147483647)::numeric),0)::text \
+             FROM pqueue_command_baseline_rows WHERE tenant=$1 AND queue=$2 AND generation=$3",
+            &[&tenant, &queue, &generation],
+        ))?;
+        let summary = format!(
+            "{}:{}:{}",
+            digest_row.get::<_, String>(0),
+            digest_row.get::<_, String>(1),
+            digest_row.get::<_, String>(2)
+        );
+        let snapshot_digest = Sha256::digest(summary.as_bytes()).to_vec();
+        let row_count = digest_row.get::<_, String>(0).parse::<i64>().map_err(|_| {
+            EngineError::Storage("snapshot row count exceeds postgres range".into())
+        })?;
+        st(tx.execute(
+            "INSERT INTO pqueue_command_baselines \
+               (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
+             VALUES($1,$2,$3,1,$4,$5,$6,$7)",
+            &[
+                &tenant,
+                &queue,
+                &generation,
+                &assignment_epoch,
+                &next_seq,
+                &row_count,
+                &snapshot_digest,
+            ],
+        ))?;
+    }
+    st(tx.commit())
 }
 
 fn migrate_id_high_water(client: &mut Client) -> EngineResult<()> {
@@ -4596,11 +5229,19 @@ impl PgRelLogTxn<'_, '_> {
         if expected_epoch != epoch {
             return Err(EngineError::EpochFenced);
         }
-        let mut positions = Vec::with_capacity(commands.len());
-        for _ in commands {
+        if commands.is_empty() {
+            return Ok(Vec::new());
+        }
+        let base = {
             let mut tx = self.tx.borrow_mut();
-            let seq = alloc_seq(&mut tx, &t, &q)?;
-            positions.push(CommandPosition::new(shard.clone(), epoch, seq));
+            alloc_seq_range(&mut tx, &t, &q, commands.len())?
+        };
+        let positions = (0..commands.len())
+            .map(|offset| CommandPosition::new(shard.clone(), epoch, base + offset as u64))
+            .collect::<Vec<_>>();
+        {
+            let mut tx = self.tx.borrow_mut();
+            persist_command_envelopes(&mut tx, &positions, commands)?;
         }
         Ok(positions)
     }
@@ -4765,14 +5406,41 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                 key.queue_id.as_str().to_string(),
             );
             let def_json = to_json(&definition)?;
-            st(g.client.execute(
+            let mut tx = st(g.client.transaction())?;
+            st(tx.execute(
                 "INSERT INTO queues(tenant,queue,definition,paused) VALUES($1,$2,$3,false)",
                 &[&t, &q, &def_json],
             ))?;
-            st(g.client.execute(
+            st(tx.execute(
                 "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES($1,$2,0,0)",
                 &[&t, &q],
             ))?;
+            let empty_snapshot_digest = Sha256::digest([]).to_vec();
+            st(tx.execute(
+                "INSERT INTO pqueue_command_baselines \
+                   (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
+                 VALUES($1,$2,'genesis',1,0,0,0,$3)",
+                &[&t, &q, &empty_snapshot_digest],
+            ))?;
+            let create = direct_command_envelope(
+                &key,
+                QueueCommand::CreateQueue(pqueue_engine::CreateQueueCommand {
+                    definition: definition.clone(),
+                }),
+                UtcTimestamp::new(0, 0).expect("unix epoch is valid"),
+                0,
+                0,
+            );
+            persist_command_envelopes(
+                &mut tx,
+                std::slice::from_ref(&CommandPosition::new(key.clone(), 0, 0)),
+                std::slice::from_ref(&create),
+            )?;
+            st(tx.execute(
+                "UPDATE relational_cursor SET next_seq=1 WHERE tenant=$1 AND queue=$2",
+                &[&t, &q],
+            ))?;
+            st(tx.commit())?;
             if let Some(cs) = compiled_schema {
                 g.schemas.insert(key.clone(), cs);
             }
@@ -5135,6 +5803,130 @@ impl IndexQueryPort for PostgresRelationalBackend {
     }
 }
 
+impl LogRead for PostgresRelationalBackend {
+    fn read_from(
+        &self,
+        shard: &QueueKey,
+        from: Option<CommandPosition>,
+        limit: usize,
+    ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
+        const MAX_PAGE_SIZE: usize = 1024;
+        let result = (|| {
+            if let Some(position) = &from
+                && &position.queue != shard
+            {
+                return Err(EngineError::Invalid("log cursor belongs to another queue"));
+            }
+            let page_size = limit.min(MAX_PAGE_SIZE);
+            if page_size == 0 {
+                return Ok(CommandPage {
+                    entries: Vec::new(),
+                    next: None,
+                });
+            }
+            let requested_start = from.as_ref().map_or(Ok(0), |position| {
+                position.sequence.checked_add(1).ok_or(EngineError::Invalid(
+                    "log cursor exceeds postgres sequence range",
+                ))
+            })?;
+            let fetch_limit = i64::try_from(page_size + 1)
+                .map_err(|_| EngineError::Invalid("log page exceeds postgres limit"))?;
+            let (tenant, queue) = parts(shard);
+            let mut inner = self.inner.lock().expect("poisoned");
+            let baseline_row = st(inner.client.query_opt(
+                "SELECT b.next_seq,c.next_seq FROM pqueue_command_baselines b \
+                 JOIN relational_cursor c ON c.tenant=b.tenant AND c.queue=b.queue \
+                 WHERE b.tenant=$1 AND b.queue=$2",
+                &[&tenant, &queue],
+            ))?
+            .ok_or_else(|| {
+                EngineError::Storage("postgres command log baseline is missing".into())
+            })?;
+            let baseline: i64 = baseline_row.get(0);
+            let durable_head: i64 = baseline_row.get(1);
+            if baseline < 0 || durable_head < baseline {
+                return Err(EngineError::DurableDataCorrupt {
+                    stage: DurableIntegrityStage::Position,
+                    manifest_index: 0,
+                    locator: "baseline".into(),
+                });
+            }
+            if from.is_none() && baseline > 0 {
+                return Err(EngineError::Invalid(
+                    "restore the named command baseline before reading its retained tail",
+                ));
+            }
+            if from.is_some() && requested_start < baseline as u64 {
+                return Err(EngineError::Invalid(
+                    "log cursor precedes the retained snapshot baseline",
+                ));
+            }
+            let start = if from.is_none() {
+                baseline as u64
+            } else {
+                requested_start
+            };
+            let start = i64::try_from(start)
+                .map_err(|_| EngineError::Invalid("log cursor exceeds postgres sequence range"))?;
+            let mut rows = st(inner.client.query(
+                "SELECT assignment_epoch,seq,envelope,envelope_sha256 FROM pqueue_commands \
+                 WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT $4",
+                &[&tenant, &queue, &start, &fetch_limit],
+            ))?;
+            let has_more = rows.len() > page_size;
+            if has_more {
+                rows.pop();
+            }
+            let mut entries = Vec::with_capacity(rows.len());
+            let mut expected_sequence = start as u64;
+            for row in rows {
+                let epoch: i64 = row.get(0);
+                let sequence: i64 = row.get(1);
+                let encoded: Vec<u8> = row.get(2);
+                let stored_checksum: Vec<u8> = row.get(3);
+                if epoch < 0 || sequence < 0 || sequence as u64 != expected_sequence {
+                    return Err(EngineError::DurableDataCorrupt {
+                        stage: DurableIntegrityStage::Position,
+                        manifest_index: sequence.max(0) as u64,
+                        locator: format!("command:{expected_sequence}"),
+                    });
+                }
+                if Sha256::digest(&encoded).as_slice() != stored_checksum.as_slice() {
+                    return Err(EngineError::DurableDataCorrupt {
+                        stage: DurableIntegrityStage::Sha256,
+                        manifest_index: sequence as u64,
+                        locator: format!("command:{sequence}"),
+                    });
+                }
+                let envelope: CommandEnvelope = serde_json::from_slice(&encoded).map_err(|_| {
+                    EngineError::DurableDataCorrupt {
+                        stage: DurableIntegrityStage::Payload,
+                        manifest_index: sequence as u64,
+                        locator: format!("command:{sequence}"),
+                    }
+                })?;
+                entries.push((
+                    CommandPosition::new(shard.clone(), epoch as u64, sequence as u64),
+                    envelope,
+                ));
+                expected_sequence += 1;
+            }
+            if !has_more && expected_sequence != durable_head as u64 {
+                return Err(EngineError::DurableDataCorrupt {
+                    stage: DurableIntegrityStage::Position,
+                    manifest_index: expected_sequence,
+                    locator: format!("command:{expected_sequence}"),
+                });
+            }
+            let next = has_more
+                .then(|| entries.last().map(|(position, _)| position.clone()))
+                .flatten();
+            Ok(CommandPage { entries, next })
+        })();
+        std::future::ready(result)
+    }
+}
+
 impl DiscoveryPort for PostgresRelationalBackend {
     fn discover_active_scopes(
         &self,
@@ -5245,6 +6037,23 @@ impl PushPort for PostgresRelationalBackend {
             let (push_items, ids) =
                 build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
             let seq = alloc_seq(&mut tx, &t, &q)?;
+            let command = QueueCommand::Push(PushCommand { items: push_items });
+            let mut envelope =
+                direct_command_envelope(shard, command, now, cursor_epoch as u64, seq);
+            envelope.request_id = Some(request_id.clone());
+            envelope.request_fingerprint = fingerprint
+                .get(..8)
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_be_bytes);
+            envelope.request_outcome = Some(RequestOutcome::Push {
+                item_ids: ids.clone(),
+            });
+            let position = CommandPosition::new(shard.clone(), cursor_epoch as u64, seq);
+            persist_command_envelopes(
+                &mut tx,
+                std::slice::from_ref(&position),
+                std::slice::from_ref(&envelope),
+            )?;
             let mut token_ops = Vec::new();
             apply_command_sql(
                 &mut tx,
@@ -5253,7 +6062,7 @@ impl PushPort for PostgresRelationalBackend {
                 shard,
                 seq,
                 now,
-                &QueueCommand::Push(PushCommand { items: push_items }),
+                &envelope.command,
             )?;
             record_request_idempotency(
                 &mut tx,
@@ -5373,6 +6182,25 @@ impl ClaimPort for PostgresRelationalBackend {
                     claimed_ids
                         .push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
                 }
+                let claim_command = QueueCommand::Claim(ClaimCommand {
+                    item_ids: claimed_ids.clone(),
+                    lease_token: req.lease_token.clone(),
+                    lease_expires_at: req.lease_expires_at,
+                    worker_id: Some(req.worker_id.clone()),
+                });
+                let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
+                let envelope = direct_command_envelope(
+                    &req.shard,
+                    claim_command,
+                    req.now,
+                    claim_epoch as u64,
+                    seq,
+                );
+                persist_command_envelopes(
+                    &mut tx,
+                    std::slice::from_ref(&position),
+                    std::slice::from_ref(&envelope),
+                )?;
                 let mut gate_keys_by_id = item_gate_keys_by_id(&mut tx, &req.shard, &claimed_ids)?;
                 let mut items = Vec::with_capacity(rows.len());
                 let mut token_ops = Vec::new();
@@ -5481,6 +6309,19 @@ impl ClaimPort for PostgresRelationalBackend {
                     worker_id: Some(req.worker_id.clone()),
                 })
             };
+            let position = CommandPosition::new(req.shard.clone(), claim_epoch as u64, seq);
+            let envelope = direct_command_envelope(
+                &req.shard,
+                claim_command,
+                req.now,
+                claim_epoch as u64,
+                seq,
+            );
+            persist_command_envelopes(
+                &mut tx,
+                std::slice::from_ref(&position),
+                std::slice::from_ref(&envelope),
+            )?;
             apply_command_sql(
                 &mut tx,
                 queues,
@@ -5488,7 +6329,7 @@ impl ClaimPort for PostgresRelationalBackend {
                 &req.shard,
                 seq,
                 req.now,
-                &claim_command,
+                &envelope.command,
             )?;
             st(tx.commit())?;
             apply_token_ops(live_tokens, token_ops); // tokens live only after the durable commit
@@ -5572,11 +6413,6 @@ impl UpsertPort for PostgresRelationalBackend {
                         if expires > ts_nanos(now) {
                             return Err(EngineError::Terminal);
                         }
-                        st(g.client.execute(
-                            "DELETE FROM pqueue_item_key_retention \
-                             WHERE tenant_id=$1 AND queue_id=$2 AND client_item_key=$3",
-                            &[&t, &q, &client_item_key.as_str()],
-                        ))?;
                     }
                     g.commit_command(
                         shard,
@@ -5733,32 +6569,40 @@ impl CommitTransitionPort for PostgresRelationalBackend {
                     .map(|f| (f.instance_key.clone(), f.next));
 
                 if !entry.side_records.is_empty() {
-                    apply_command_sql(
+                    persist_and_apply_command(
                         &mut tx,
                         queues,
                         &mut token_ops,
-                        shard,
-                        seq,
-                        now,
-                        &QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                            records: entry.side_records,
-                        }),
+                        DirectCommand {
+                            shard,
+                            epoch: cursor_epoch as u64,
+                            seq,
+                            now,
+                            command: QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                                records: entry.side_records,
+                            }),
+                        },
                     )?;
                     seq += 1;
                 }
                 if let Some(fence) = entry.instance_fence {
-                    apply_command_sql(
+                    persist_and_apply_command(
                         &mut tx,
                         queues,
                         &mut token_ops,
-                        shard,
-                        seq,
-                        now,
-                        &QueueCommand::AdvanceInstanceFence(AdvanceInstanceFenceCommand {
-                            instance_key: fence.instance_key,
-                            expected: fence.expected,
-                            next: fence.next,
-                        }),
+                        DirectCommand {
+                            shard,
+                            epoch: cursor_epoch as u64,
+                            seq,
+                            now,
+                            command: QueueCommand::AdvanceInstanceFence(
+                                AdvanceInstanceFenceCommand {
+                                    instance_key: fence.instance_key,
+                                    expected: fence.expected,
+                                    next: fence.next,
+                                },
+                            ),
+                        },
                     )?;
                     seq += 1;
                 }
@@ -5775,30 +6619,36 @@ impl CommitTransitionPort for PostgresRelationalBackend {
                         max_attempts,
                     );
                     lifecycle_item_ids = ids;
-                    apply_command_sql(
+                    persist_and_apply_command(
                         &mut tx,
                         queues,
                         &mut token_ops,
-                        shard,
-                        seq,
-                        now,
-                        &QueueCommand::Push(PushCommand { items: push_items }),
+                        DirectCommand {
+                            shard,
+                            epoch: cursor_epoch as u64,
+                            seq,
+                            now,
+                            command: QueueCommand::Push(PushCommand { items: push_items }),
+                        },
                     )?;
                     seq += 1;
                 }
-                apply_command_sql(
+                persist_and_apply_command(
                     &mut tx,
                     queues,
                     &mut token_ops,
-                    shard,
-                    seq,
-                    now,
-                    &QueueCommand::Finalize(FinalizeCommand {
-                        outcomes: std::iter::once(&entry.claim_ref)
-                            .chain(&entry.additional_claim_refs)
-                            .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
-                            .collect(),
-                    }),
+                    DirectCommand {
+                        shard,
+                        epoch: cursor_epoch as u64,
+                        seq,
+                        now,
+                        command: QueueCommand::Finalize(FinalizeCommand {
+                            outcomes: std::iter::once(&entry.claim_ref)
+                                .chain(&entry.additional_claim_refs)
+                                .map(|claim| FinalizeOutcome::new(claim.item_id, entry.finalize))
+                                .collect(),
+                        }),
+                    },
                 )?;
                 seq += 1;
                 recovery.push(EntryRecovery {
@@ -5809,6 +6659,37 @@ impl CommitTransitionPort for PostgresRelationalBackend {
                     lifecycle_item_ids,
                     status: CommitEntryStatus::Committed,
                 });
+            }
+            if let Some(rid) = &request_id {
+                let command = QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                    records: Vec::new(),
+                });
+                let mut marker =
+                    direct_command_envelope(shard, command, now, cursor_epoch as u64, seq);
+                marker.request_id = Some(rid.clone());
+                marker.request_fingerprint = fingerprint
+                    .get(..8)
+                    .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                    .map(u64::from_be_bytes);
+                marker.request_outcome = Some(RequestOutcome::CommitTransition {
+                    entries: recovery.iter().map(durable_outcome_entry).collect(),
+                });
+                let position = CommandPosition::new(shard.clone(), cursor_epoch as u64, seq);
+                persist_command_envelopes(
+                    &mut tx,
+                    std::slice::from_ref(&position),
+                    std::slice::from_ref(&marker),
+                )?;
+                apply_command_sql(
+                    &mut tx,
+                    queues,
+                    &mut token_ops,
+                    shard,
+                    seq,
+                    now,
+                    &marker.command,
+                )?;
+                seq += 1;
             }
             let outcomes = recovery_to_outcomes(&recovery);
 
@@ -6307,7 +7188,7 @@ impl ReclaimDriver for PostgresRelationalBackend {
                 } else {
                     None
                 };
-                let _ = reap_terminal_items_sql(
+                let reaped = terminal_items_to_reap_sql(
                     &mut g.client,
                     &shard,
                     now,
@@ -6315,6 +7196,17 @@ impl ReclaimDriver for PostgresRelationalBackend {
                     emit_change_records,
                     emission_cursor.as_ref(),
                 )?;
+                if !reaped.is_empty() {
+                    g.commit_command(
+                        &shard,
+                        QueueCommand::PurgeItems(PurgeItemsCommand {
+                            item_ids: reaped,
+                            force: true,
+                        }),
+                        now,
+                        None,
+                    )?;
+                }
             }
             Ok(report)
         })();
@@ -6515,9 +7407,7 @@ fn expired_leases_page_sql(
     Ok(pqueue_engine::ExpiredLeasePage { leases, next })
 }
 
-/// Terminal records that are past both the retention window and, for emit-enabled queues, the durable
-/// emission frontier. `emit_change_records=false` keeps the retention-only opt-out path.
-fn reap_terminal_items_sql(
+fn terminal_items_to_reap_sql(
     client: &mut impl GenericClient,
     shard: &QueueKey,
     now: UtcTimestamp,
@@ -6553,19 +7443,6 @@ fn reap_terminal_items_sql(
         let id: String = row.get(0);
         ids.push(ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?);
     }
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let id_strs: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-    st(client.execute(
-        "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
-        &[&t, &q, &id_strs],
-    ))?;
-    st(client.execute(
-        "DELETE FROM pqueue_item_gates WHERE tenant_id=$1 AND queue_id=$2 AND item_id = ANY($3)",
-        &[&t, &q, &id_strs],
-    ))?;
-    delete_typed_index_rows(client, &t, &q, &id_strs)?;
     Ok(ids)
 }
 
@@ -7321,16 +8198,43 @@ impl ProjectionStore for PostgresRelational {
         }
         let (t, q) = parts(&key);
         let def_json = to_json(definition)?;
-        st(g.client.execute(
+        let mut tx = st(g.client.transaction())?;
+        st(tx.execute(
             "INSERT INTO queues(tenant,queue,definition,paused) VALUES($1,$2,$3,false) \
              ON CONFLICT (tenant,queue) DO NOTHING",
             &[&t, &q, &def_json],
         ))?;
-        st(g.client.execute(
+        st(tx.execute(
             "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES($1,$2,0,0) \
              ON CONFLICT (tenant,queue) DO NOTHING",
             &[&t, &q],
         ))?;
+        let empty_snapshot_digest = Sha256::digest([]).to_vec();
+        st(tx.execute(
+            "INSERT INTO pqueue_command_baselines \
+               (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
+             VALUES($1,$2,'genesis',1,0,0,0,$3) ON CONFLICT (tenant,queue) DO NOTHING",
+            &[&t, &q, &empty_snapshot_digest],
+        ))?;
+        let create = direct_command_envelope(
+            &key,
+            QueueCommand::CreateQueue(pqueue_engine::CreateQueueCommand {
+                definition: definition.clone(),
+            }),
+            UtcTimestamp::new(0, 0).expect("unix epoch is valid"),
+            0,
+            0,
+        );
+        persist_command_envelopes(
+            &mut tx,
+            std::slice::from_ref(&CommandPosition::new(key.clone(), 0, 0)),
+            std::slice::from_ref(&create),
+        )?;
+        st(tx.execute(
+            "UPDATE relational_cursor SET next_seq=1 WHERE tenant=$1 AND queue=$2 AND next_seq=0",
+            &[&t, &q],
+        ))?;
+        st(tx.commit())?;
         g.queues.insert(key, definition.clone());
         Ok(())
     }
@@ -7356,6 +8260,7 @@ impl ProjectionStore for PostgresRelational {
         let mut tx = st(client.transaction())?;
         let mut token_ops = Vec::new();
         let mut max_position: HashMap<QueueKey, (u64, u64)> = HashMap::new();
+        persist_command_envelopes(&mut tx, positions, commands)?;
         for (pos, env) in positions.iter().zip(commands) {
             let (tenant, queue) = parts(&pos.queue);
             let epoch_row = st(tx.query_one(
@@ -7806,24 +8711,16 @@ impl ProjectionStore for PostgresRelational {
 
     fn reap_terminal_items(
         &mut self,
-        shard: &QueueKey,
-        now: UtcTimestamp,
-        terminal_retention_ms: u64,
-        emit_change_records: bool,
-        emission_cursor: Option<&CommandPosition>,
+        _shard: &QueueKey,
+        _now: UtcTimestamp,
+        _terminal_retention_ms: u64,
+        _emit_change_records: bool,
+        _emission_cursor: Option<&CommandPosition>,
     ) -> EngineResult<Vec<ItemId>> {
-        let mut g = self.lock();
-        let mut tx = st(g.client.transaction())?;
-        let reaped = reap_terminal_items_sql(
-            &mut tx,
-            shard,
-            now,
-            terminal_retention_ms,
-            emit_change_records,
-            emission_cursor,
-        )?;
-        st(tx.commit())?;
-        Ok(reaped)
+        // This legacy generic projection axis cannot append the matching PurgeItems envelope. Keep the
+        // unsafe capability explicitly unavailable; production uses PostgresRelationalBackend, whose tick
+        // routes retention through the atomic logged command path.
+        Err(EngineError::Unavailable)
     }
 
     fn index_get_unique(
@@ -8302,6 +9199,42 @@ mod sql_shape_tests {
         assert!(!verifier.contains("advisory"));
         assert!(!RELATIONAL_SCHEMA.contains("rep_created_seq"));
         assert!(source.contains("verify_group_summary_indexes(&mut client, fresh)"));
+    }
+
+    #[test]
+    fn native_lifecycle_batch_ports_remain_set_based_downstream() {
+        let source = include_str!("relational.rs");
+        let insert = source
+            .split("fn insert_items")
+            .nth(1)
+            .unwrap()
+            .split("fn insert_gates")
+            .next()
+            .unwrap();
+        assert!(insert.contains("rows.chunks(PG_INSERT_CHUNK)"));
+        assert!(insert.contains("INSERT INTO pqueue_items"));
+
+        let claim = source
+            .split("impl ClaimPort for PostgresRelationalBackend")
+            .nth(1)
+            .unwrap()
+            .split("impl UpsertPort for PostgresRelationalBackend")
+            .next()
+            .unwrap();
+        assert!(claim.contains("CLAIM_CTE"));
+        assert!(claim.contains("req.max_items as i64"));
+
+        let finalize = source
+            .split("QueueCommand::Finalize(c) =>")
+            .nth(1)
+            .unwrap()
+            .split("QueueCommand::LeaseExpired")
+            .next()
+            .unwrap();
+        assert!(finalize.contains("item_id = ANY"));
+        assert!(finalize.contains("to_complete"));
+        assert!(finalize.contains("to_failed"));
+        assert!(finalize.contains("to_pending"));
     }
 }
 
@@ -10761,4 +11694,228 @@ mod commit_transition_tests {
     // `supports_commit_transition` (trait default `false`), so it does not offer the vectorized commit path
     // at all, AND its append+apply commit in ONE postgres transaction — a failed apply rolls the append back,
     // so no durable-but-unappliable batch can exist. Hence there is no postgres analog of the sqlite fix.
+}
+
+#[cfg(test)]
+mod command_log_recovery_tests {
+    use super::*;
+    use futures::executor::block_on;
+    use pqueue_engine::{ControlPlaneStore, LogRead, ProjectionRead, PushPort};
+
+    fn live_url() -> Option<String> {
+        std::env::var("PQUEUE_PG_TEST_URL").ok()
+    }
+
+    fn unique_schema(tag: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "pq_rel_log_{}_{}_{}",
+            tag,
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        )
+    }
+
+    #[test]
+    fn nonempty_prelog_upgrade_restores_snapshot_and_exposes_baseline_ref() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("upgrade");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(async {
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .unwrap();
+            backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default()],
+                    pqueue_conformance::ts(1),
+                    None,
+                )
+                .await
+                .unwrap();
+        });
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            st(inner.client.batch_execute(
+                "DROP TABLE pqueue_command_baseline_rows; \
+                 DROP TABLE pqueue_command_baselines; DROP TABLE pqueue_commands",
+            ))
+            .unwrap();
+        }
+        drop(backend);
+        PostgresRelationalBackend::apply_concurrent_migrations_in_schema(&url, &schema).unwrap();
+        let reopened = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        let baseline = reopened
+            .command_baseline_ref(&shard)
+            .unwrap()
+            .expect("nonempty upgrade has a named baseline");
+        assert_eq!(baseline.position.sequence, 1);
+        assert!(block_on(reopened.read_from(&shard, None, 10)).is_err());
+        {
+            let mut inner = reopened.inner.lock().unwrap();
+            st(inner.client.execute(
+                "DELETE FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2",
+                &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
+            ))
+            .unwrap();
+        }
+        reopened.rebuild_from_command_baseline(&shard).unwrap();
+        assert_eq!(
+            block_on(reopened.select_eligible(&shard, pqueue_conformance::ts(2), 10))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn deleted_terminal_log_suffix_fails_closed() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("suffix");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(async {
+            backend
+                .create_queue(pqueue_conformance::qdef())
+                .await
+                .unwrap();
+            backend
+                .push(
+                    &shard,
+                    vec![PushSpec::default()],
+                    pqueue_conformance::ts(1),
+                    None,
+                )
+                .await
+                .unwrap();
+        });
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            st(inner.client.execute(
+                "DELETE FROM pqueue_commands WHERE tenant=$1 AND queue=$2 AND seq=1",
+                &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
+            ))
+            .unwrap();
+        }
+        assert!(matches!(
+            block_on(backend.read_from(&shard, None, 10)),
+            Err(EngineError::DurableDataCorrupt {
+                stage: DurableIntegrityStage::Position,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn projection_failure_rolls_back_command_append() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("rollback");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(pqueue_conformance::qdef())).unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            st(inner.client.batch_execute(
+                "CREATE FUNCTION reject_item_insert() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                   BEGIN RAISE EXCEPTION 'injected projection failure'; END $$; \
+                 CREATE TRIGGER reject_item_insert BEFORE INSERT ON pqueue_items \
+                   FOR EACH ROW EXECUTE FUNCTION reject_item_insert()",
+            ))
+            .unwrap();
+        }
+        assert!(
+            block_on(backend.push(
+                &shard,
+                vec![PushSpec::default()],
+                pqueue_conformance::ts(1),
+                None,
+            ))
+            .is_err()
+        );
+        let mut inner = backend.inner.lock().unwrap();
+        let count: i64 = st(inner.client.query_one(
+            "SELECT COUNT(*) FROM pqueue_commands WHERE tenant=$1 AND queue=$2",
+            &[&shard.tenant_id.as_str(), &shard.queue_id.as_str()],
+        ))
+        .unwrap()
+        .get(0);
+        assert_eq!(count, 1, "failed projection must leave no phantom command");
+    }
+
+    #[test]
+    fn command_reads_hard_bound_each_page() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("page");
+        let shard = pqueue_conformance::shard();
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(pqueue_conformance::qdef())).unwrap();
+        {
+            let mut inner = backend.inner.lock().unwrap();
+            let mut tx = st(inner.client.transaction()).unwrap();
+            let (tenant, queue) = parts(&shard);
+            let base = alloc_seq_range(&mut tx, &tenant, &queue, 1100).unwrap();
+            let positions = (0..1100)
+                .map(|offset| CommandPosition::new(shard.clone(), 0, base + offset))
+                .collect::<Vec<_>>();
+            let commands = positions
+                .iter()
+                .map(|position| {
+                    direct_command_envelope(
+                        &shard,
+                        QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
+                            records: Vec::new(),
+                        }),
+                        pqueue_conformance::ts(1),
+                        0,
+                        position.sequence,
+                    )
+                })
+                .collect::<Vec<_>>();
+            persist_command_envelopes(&mut tx, &positions, &commands).unwrap();
+            st(tx.commit()).unwrap();
+        }
+        let first = block_on(backend.read_from(&shard, None, usize::MAX)).unwrap();
+        assert_eq!(first.entries.len(), 1024);
+        let second = block_on(backend.read_from(&shard, first.next, usize::MAX)).unwrap();
+        assert_eq!(second.entries.len(), 77);
+        assert!(second.next.is_none());
+    }
+
+    #[test]
+    fn legacy_projection_axis_cannot_bypass_logged_terminal_reap() {
+        let Some(url) = live_url() else {
+            eprintln!("POSTGRES COMMAND LOG TEST SKIPPED — set PQUEUE_PG_TEST_URL");
+            return;
+        };
+        let schema = unique_schema("reap_guard");
+        let mut store = PostgresRelational::connect_in_schema(&url, &schema).unwrap();
+        ProjectionStore::ensure_shard(&mut store, &pqueue_conformance::qdef()).unwrap();
+        assert!(matches!(
+            ProjectionStore::reap_terminal_items(
+                &mut store,
+                &pqueue_conformance::shard(),
+                pqueue_conformance::ts(1),
+                0,
+                false,
+                None,
+            ),
+            Err(EngineError::Unavailable)
+        ));
+    }
 }
