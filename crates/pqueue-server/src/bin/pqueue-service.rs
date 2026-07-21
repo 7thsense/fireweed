@@ -90,22 +90,26 @@ async fn run(config: Config, runtime_resource_metrics_path: Option<PathBuf>) {
     }
 }
 
-/// Export authoritative Tokio runtime gauges for the live process. `num_alive_tasks` includes detached
-/// object-log flushers, the server background loops, and per-connection handler tasks, so the density
-/// proof does not substitute OS file descriptors for async work. Rename makes each JSON snapshot atomic.
+/// Export authoritative Tokio task-ownership gauges for the live process. The explicit RAII count includes
+/// detached object-log flushers, server background loops, and per-connection handler tasks without relying
+/// on when Tokio reclaims completed task allocations. Rename makes each JSON snapshot atomic.
 async fn report_runtime_resources(path: PathBuf) {
     let tmp = PathBuf::from(format!("{}.tmp", path.display()));
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
     loop {
         tick.tick().await;
         let metrics = tokio::runtime::Handle::current().metrics();
-        let alive_tasks = metrics.num_alive_tasks();
-        let max_alive_tasks = pqueue_resp::max_observed_runtime_tasks();
+        let (alive_tasks, max_alive_tasks, task_limit) =
+            pqueue_resp::runtime_task_resource_counts();
         let (live_connections, max_connections, connection_limit) =
             pqueue_resp::connection_resource_counts();
-        if metrics.num_workers() > 4 || alive_tasks > 64 || max_connections > connection_limit {
+        if metrics.num_workers() > 4
+            || alive_tasks > task_limit
+            || max_alive_tasks > task_limit
+            || max_connections > connection_limit
+        {
             eprintln!(
-                "density resource bound exceeded: workers={} tasks={alive_tasks}/64 connections={max_connections}/{connection_limit}",
+                "density resource bound exceeded: workers={} tasks={alive_tasks}/{task_limit} max_tasks={max_alive_tasks}/{task_limit} connections={max_connections}/{connection_limit}",
                 metrics.num_workers()
             );
             std::process::abort();

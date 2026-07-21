@@ -27,6 +27,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufR
 
 static MAX_LIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(usize::MAX);
 static MAX_RUNTIME_TASKS: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LIVE_RUNTIME_TASKS: AtomicUsize = AtomicUsize::new(0);
 static MAX_OBSERVED_TASKS: AtomicUsize = AtomicUsize::new(0);
 static TASK_SPAWN_LOCK: Mutex<()> = Mutex::new(());
 static LIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -57,22 +58,48 @@ pub fn max_observed_runtime_tasks() -> usize {
     MAX_OBSERVED_TASKS.load(Ordering::SeqCst)
 }
 
+pub fn runtime_task_resource_counts() -> (usize, usize, usize) {
+    (
+        LIVE_RUNTIME_TASKS.load(Ordering::SeqCst),
+        MAX_OBSERVED_TASKS.load(Ordering::SeqCst),
+        MAX_RUNTIME_TASKS.load(Ordering::SeqCst),
+    )
+}
+
+struct RuntimeTaskGuard;
+
+impl Drop for RuntimeTaskGuard {
+    fn drop(&mut self) {
+        LIVE_RUNTIME_TASKS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Allocate one application-owned async task while `TASK_SPAWN_LOCK` is held. This counter follows
+/// task ownership directly and therefore does not depend on when Tokio reclaims completed task allocations.
+fn try_acquire_runtime_task_locked() -> Option<RuntimeTaskGuard> {
+    let live = LIVE_RUNTIME_TASKS.load(Ordering::SeqCst);
+    let limit = MAX_RUNTIME_TASKS.load(Ordering::SeqCst);
+    if live >= limit {
+        return None;
+    }
+    let live = LIVE_RUNTIME_TASKS.fetch_add(1, Ordering::SeqCst) + 1;
+    MAX_OBSERVED_TASKS.fetch_max(live, Ordering::SeqCst);
+    Some(RuntimeTaskGuard)
+}
+
 pub fn spawn_governed<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
     let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
-    let alive = tokio::runtime::Handle::current()
-        .metrics()
-        .num_alive_tasks();
     let limit = MAX_RUNTIME_TASKS.load(Ordering::SeqCst);
-    assert!(
-        alive < limit,
-        "runtime task allocation would exceed governed limit {limit}"
-    );
-    MAX_OBSERVED_TASKS.fetch_max(alive + 1, Ordering::SeqCst);
-    tokio::spawn(future)
+    let guard = try_acquire_runtime_task_locked()
+        .unwrap_or_else(|| panic!("runtime task allocation would exceed governed limit {limit}"));
+    tokio::spawn(async move {
+        let _guard = guard;
+        future.await
+    })
 }
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
@@ -376,16 +403,18 @@ pub async fn serve_with_shutdown_and_hooks<B: RespBackend, H: RespHooks>(
                 };
                 let live = LIVE_CONNECTIONS.fetch_add(1, Ordering::SeqCst) + 1;
                 let limit = MAX_LIVE_CONNECTIONS.load(Ordering::SeqCst);
-                let task_limit = MAX_RUNTIME_TASKS.load(Ordering::SeqCst);
                 let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
-                let alive_tasks = tokio::runtime::Handle::current().metrics().num_alive_tasks();
-                if live > limit || alive_tasks >= task_limit {
+                if live > limit {
                     LIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
                     drop(stream);
                     continue;
                 }
+                let Some(task_guard) = try_acquire_runtime_task_locked() else {
+                    LIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
+                    drop(stream);
+                    continue;
+                };
                 MAX_OBSERVED_CONNECTIONS.fetch_max(live, Ordering::SeqCst);
-                MAX_OBSERVED_TASKS.fetch_max(alive_tasks + 1, Ordering::SeqCst);
                 // RESP is a small-message request/reply protocol: leaving Nagle on coalesces each tiny
                 // reply and, paired with the peer's delayed-ACK, stalls a pipelined connection ~40ms per
                 // command over a real (non-loopback) link. Disable it so replies flush immediately.
@@ -395,6 +424,7 @@ pub async fn serve_with_shutdown_and_hooks<B: RespBackend, H: RespHooks>(
                 let state = state.clone();
                 let conn_cancel = cancel.clone();
                 conns.spawn(async move {
+                    let _task_guard = task_guard;
                     let _ = handle_conn(stream, backend, hooks, state, conn_cancel).await;
                     LIVE_CONNECTIONS.fetch_sub(1, Ordering::SeqCst);
                 });

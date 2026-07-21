@@ -25,8 +25,11 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
     assert!(DENSITY_LOADGEN.contains("LifecycleIdentityLedger"));
     assert!(DENSITY_KIND_HARNESS.contains("resource_enforcement_active == true"));
     assert!(!DENSITY_KIND_HARNESS.contains("(( HOT_PHASE_RESOURCE_SAMPLES > 0 ))"));
-    assert!(RESP_SERVER.contains("MAX_OBSERVED_TASKS.fetch_max(alive + 1"));
-    assert!(RESP_SERVER.contains("alive_tasks >= task_limit"));
+    assert!(RESP_SERVER.contains("LIVE_RUNTIME_TASKS.fetch_add(1"));
+    assert!(RESP_SERVER.contains("LIVE_RUNTIME_TASKS.fetch_sub(1"));
+    assert!(RESP_SERVER.contains("let _task_guard = task_guard"));
+    assert!(!SERVICE_MAIN.contains("metrics.num_alive_tasks()"));
+    assert!(SERVICE_MAIN.contains("runtime_task_resource_counts()"));
     assert!(SERVICE_MAIN.contains("set_max_runtime_tasks(64)"));
     let dispatch = POSTGRES_WHOLE_OPERATION_ADAPTER
         .split("fn dispatch")
