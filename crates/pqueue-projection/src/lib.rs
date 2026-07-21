@@ -21,7 +21,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ops::Bound::{Excluded, Unbounded};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 
 mod compose_impls;
 pub use compose_impls::{AsyncInMemoryProjection, AsyncMemoryLog, InMemoryProjection, MemoryLog};
@@ -75,6 +75,7 @@ struct ItemRecord {
     created_seq: u64,
     lease_token: Option<LeaseToken>,
     lease_expires_at: Option<UtcTimestamp>,
+    lease_is_cohort: bool,
     worker_id: Option<pqueue_core::WorkerId>,
     fenced: bool,
     superseded: bool,
@@ -102,6 +103,10 @@ pub struct ProjectionImageItem {
     pub created_seq: u64,
     pub lease_token: Option<LeaseToken>,
     pub lease_expires_at: Option<UtcTimestamp>,
+    /// Whether the active lease was acquired as a whole cohort. Older images
+    /// predate cohort leasing and therefore default to an ordinary lease.
+    #[serde(default)]
+    pub lease_is_cohort: bool,
     #[serde(default)]
     pub worker_id: Option<pqueue_core::WorkerId>,
     pub fenced: bool,
@@ -130,6 +135,7 @@ impl From<&ItemRecord> for ProjectionImageItem {
             created_seq: rec.created_seq,
             lease_token: rec.lease_token.clone(),
             lease_expires_at: rec.lease_expires_at,
+            lease_is_cohort: rec.lease_is_cohort,
             worker_id: rec.worker_id.clone(),
             fenced: rec.fenced,
             superseded: rec.superseded,
@@ -160,6 +166,7 @@ impl From<ProjectionImageItem> for ItemRecord {
             created_seq: item.created_seq,
             lease_token: item.lease_token,
             lease_expires_at: item.lease_expires_at,
+            lease_is_cohort: item.lease_is_cohort,
             worker_id: item.worker_id,
             fenced: item.fenced,
             superseded: item.superseded,
@@ -1394,6 +1401,10 @@ pub struct ProjectionData {
     /// requested page instead of scanning every resident item or lease.
     leased_ids: BTreeSet<ItemId>,
     leased_by_consumer: FastHashMap<LeaseToken, BTreeSet<ItemId>>,
+    /// Ordinary (non-cohort) leases keyed first by their expiry. The nested id
+    /// set makes a same-expiry continuation exact without walking unrelated
+    /// resident items.
+    ordinary_leases_by_expiry: BTreeMap<UtcTimestamp, BTreeSet<ItemId>>,
     by_key: FastHashMap<ClientItemKey, ItemId>,
     eligible: EligibilityIndex,
     metrics: QueueMetrics,
@@ -1450,6 +1461,7 @@ impl ProjectionData {
             items: FastHashMap::default(),
             leased_ids: BTreeSet::new(),
             leased_by_consumer: FastHashMap::default(),
+            ordinary_leases_by_expiry: BTreeMap::new(),
             by_key: FastHashMap::default(),
             eligible: EligibilityIndex::new(),
             metrics: QueueMetrics::default(),
@@ -1546,6 +1558,17 @@ impl ProjectionData {
                     .or_default()
                     .insert(rec.item_id);
             }
+            if rec.state == ItemState::Leased
+                && !rec.superseded
+                && !rec.lease_is_cohort
+                && let Some(expires) = rec.lease_expires_at
+            {
+                projection
+                    .ordinary_leases_by_expiry
+                    .entry(expires)
+                    .or_default()
+                    .insert(rec.item_id);
+            }
             if !rec.superseded {
                 projection.metrics_inc(rec.state);
             }
@@ -1629,6 +1652,7 @@ impl ProjectionData {
             created_seq: seq,
             lease_token: None,
             lease_expires_at: None,
+            lease_is_cohort: false,
             worker_id: None,
             fenced: false,
             superseded: false,
@@ -1696,7 +1720,7 @@ impl ProjectionData {
         terminal_position: Option<&CommandPosition>,
     ) -> EngineResult<ItemState> {
         let model = self.priority_model;
-        let (old_key, new_key, old_state, new_state, old_token) = {
+        let (old_key, new_key, old_state, new_state, old_token, old_expiry) = {
             let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
             // A superseded id (replaced by upsert) must never re-enter eligible or mutate
             // (TD-007 §2.3): the orchestration ports map this to `-ERR pqueue superseded`.
@@ -1721,10 +1745,20 @@ impl ProjectionData {
                 rec.terminal_position = None;
             }
             let nk = (new == ItemState::Pending).then(|| EligibilityIndex::token(rec, &model));
-            (old, nk, old_state, new, rec.lease_token.clone())
+            (
+                old,
+                nk,
+                old_state,
+                new,
+                rec.lease_token.clone(),
+                rec.lease_expires_at,
+            )
         };
         if old_state == ItemState::Leased && new_state != ItemState::Leased {
             self.leased_ids.remove(id);
+            if let Some(expires) = old_expiry {
+                self.remove_ordinary_lease(expires, id);
+            }
             if let Some(token) = old_token
                 && let Some(ids) = self.leased_by_consumer.get_mut(&token)
             {
@@ -1779,11 +1813,16 @@ impl ProjectionData {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = Some(c.lease_token.clone());
                     rec.lease_expires_at = Some(c.lease_expires_at);
+                    rec.lease_is_cohort = false;
                     rec.worker_id = c.worker_id.clone();
                     rec.attempt_count += 1; // delivery count (flavor-diff 7)
                     self.leased_ids.insert(*id);
                     self.leased_by_consumer
                         .entry(c.lease_token.clone())
+                        .or_default()
+                        .insert(*id);
+                    self.ordinary_leases_by_expiry
+                        .entry(c.lease_expires_at)
                         .or_default()
                         .insert(*id);
                 }
@@ -1795,6 +1834,7 @@ impl ProjectionData {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = Some(c.lease_token.clone());
                     rec.lease_expires_at = Some(c.lease_expires_at);
+                    rec.lease_is_cohort = true;
                     rec.attempt_count += 1;
                     self.leased_ids.insert(*id);
                     self.leased_by_consumer
@@ -1806,6 +1846,14 @@ impl ProjectionData {
             }
             QueueCommand::RenewLease(c) => {
                 for id in &c.item_ids {
+                    let old_expiry = self
+                        .items
+                        .get(id)
+                        .ok_or(EngineError::NotFound)?
+                        .lease_expires_at;
+                    if let Some(expires) = old_expiry {
+                        self.remove_ordinary_lease(expires, id);
+                    }
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     // Unlike the `transition()`-routed arms, renew bare-mutates the deadline, so it
                     // relies entirely on every caller pre-validating via `renew_validate`. Assert the
@@ -1820,12 +1868,24 @@ impl ProjectionData {
                     );
                     rec.lease_expires_at = Some(c.lease_expires_at);
                     rec.item_version += 1;
+                    self.ordinary_leases_by_expiry
+                        .entry(c.lease_expires_at)
+                        .or_default()
+                        .insert(*id);
                 }
                 Ok(())
             }
             QueueCommand::CohortRenewLease(_) => Ok(()),
             QueueCommand::ReassignLease(c) => {
                 for id in &c.item_ids {
+                    let old_expiry = self
+                        .items
+                        .get(id)
+                        .ok_or(EngineError::NotFound)?
+                        .lease_expires_at;
+                    if let Some(expires) = old_expiry {
+                        self.remove_ordinary_lease(expires, id);
+                    }
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     // Like RenewLease, this bare-mutates an already-Leased item, so it relies on the
                     // caller pre-validating via `reassign_validate`. Assert the pre-condition so a
@@ -1841,6 +1901,10 @@ impl ProjectionData {
                     rec.lease_expires_at = Some(c.lease_expires_at);
                     rec.attempt_count += 1; // a re-delivery to a new consumer is a delivery (TD-006:129)
                     rec.item_version += 1;
+                    self.ordinary_leases_by_expiry
+                        .entry(c.lease_expires_at)
+                        .or_default()
+                        .insert(*id);
                     if let Some(old_token) = old_token
                         && let Some(ids) = self.leased_by_consumer.get_mut(&old_token)
                     {
@@ -2010,6 +2074,7 @@ impl ProjectionData {
                             .ok_or(EngineError::NotFound)?;
                         rec.lease_token = None;
                         rec.lease_expires_at = None;
+                        rec.lease_is_cohort = false;
                         rec.fenced = false;
                         // A rearm that returned to Pending (within `until`) resets the delivery count and,
                         // when the caller supplied the next-occurrence time, defers re-eligibility to that
@@ -2091,6 +2156,7 @@ impl ProjectionData {
                     let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
                     rec.lease_token = None;
                     rec.lease_expires_at = None;
+                    rec.lease_is_cohort = false;
                     // INVARIANT: `attempt_count` = number of times the item was handed to a worker, so
                     // it increments ONLY in the Claim arm. A reclaim returns the item to pending (not a
                     // delivery) and does NOT charge — the subsequent redelivery (a fresh Claim) charges
@@ -2434,6 +2500,9 @@ impl ProjectionData {
         }
         if rec.state == ItemState::Leased {
             self.leased_ids.remove(&rec.item_id);
+            if let Some(expires) = rec.lease_expires_at {
+                self.remove_ordinary_lease(expires, &rec.item_id);
+            }
             if let Some(token) = rec.lease_token.as_ref()
                 && let Some(ids) = self.leased_by_consumer.get_mut(token)
             {
@@ -3356,37 +3425,64 @@ impl ProjectionData {
     /// Ids whose lease has expired strictly before `now` (half-open: valid through `lease_expires_at`).
     /// Drives the reclaim tick.
     pub fn expired_leases(&self, now: UtcTimestamp) -> Vec<ItemId> {
-        self.items
-            .values()
-            .filter(|r| {
-                r.state == ItemState::Leased
-                    && r.lease_expires_at.map(|exp| exp < now).unwrap_or(false)
-            })
-            .map(|r| r.item_id)
+        self.ordinary_leases_by_expiry
+            .range(..now)
+            .flat_map(|(_, ids)| ids.iter().copied())
             .collect()
     }
 
-    /// A bounded, ordered expired-lease slice for composed background maintenance. This scans the hot
-    /// in-memory map but never materializes the queue's complete expired set.
+    fn remove_ordinary_lease(&mut self, expires: UtcTimestamp, id: &ItemId) {
+        let remove_bucket = if let Some(ids) = self.ordinary_leases_by_expiry.get_mut(&expires) {
+            ids.remove(id);
+            ids.is_empty()
+        } else {
+            false
+        };
+        if remove_bucket {
+            self.ordinary_leases_by_expiry.remove(&expires);
+        }
+    }
+
+    /// A bounded expiry-ordered slice for composed background maintenance.
+    /// The ordering member of `after` compares this projection's queue with
+    /// the queue embedded in the global cursor. The returned work count is
+    /// deliberately the number of index rows visited, enabling a
+    /// scale-independent proof.
     pub(crate) fn expired_leases_after(
         &self,
         now: UtcTimestamp,
-        after: Option<ItemId>,
+        after: Option<(UtcTimestamp, Ordering, &ItemId)>,
         limit: usize,
-    ) -> Vec<ItemId> {
-        let mut ids = self
-            .items
-            .values()
-            .filter(|record| {
-                record.state == ItemState::Leased
-                    && record.lease_expires_at.is_some_and(|expires| expires < now)
-                    && after.is_none_or(|after| record.item_id > after)
-            })
-            .map(|record| record.item_id)
-            .collect::<Vec<_>>();
-        ids.sort_unstable();
-        ids.truncate(limit);
-        ids
+    ) -> (Vec<(UtcTimestamp, ItemId)>, usize) {
+        let mut rows = Vec::with_capacity(limit);
+        let mut visited = 0;
+        let lower = after.map_or(Unbounded, |(expires, _, _)| Included(expires));
+        for (expires, ids) in self.ordinary_leases_by_expiry.range((lower, Excluded(now))) {
+            let cursor_ids = after.and_then(|(cursor_expiry, queue_order, cursor_id)| {
+                (*expires == cursor_expiry && queue_order == Ordering::Equal).then_some(cursor_id)
+            });
+            if after.is_some_and(|(cursor_expiry, queue_order, _)| {
+                *expires == cursor_expiry && queue_order == Ordering::Less
+            }) {
+                continue;
+            }
+            let remaining = limit.saturating_sub(rows.len());
+            let mut append = |id: &ItemId| {
+                visited += 1;
+                rows.push((*expires, *id));
+            };
+            match cursor_ids {
+                Some(cursor_id) => ids
+                    .range((Excluded(cursor_id), Unbounded))
+                    .take(remaining)
+                    .for_each(&mut append),
+                None => ids.iter().take(remaining).for_each(&mut append),
+            }
+            if rows.len() == limit {
+                break;
+            }
+        }
+        (rows, visited)
     }
 }
 
@@ -3396,17 +3492,17 @@ mod tests {
     //! port-level conformance is exercised against the backends in `pqueue-conformance`.
     use super::*;
     use pqueue_core::{
-        CohortPolicy, EligibilityPolicy, IndexSpec, MetadataValue, PriorityDirection,
+        CohortId, CohortPolicy, EligibilityPolicy, IndexSpec, MetadataValue, PriorityDirection,
         PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RetryPolicy, TenantId,
         WorkerId,
     };
     use pqueue_engine::{
         AdvanceInstanceFenceCommand, ChangeRecordSink, ClaimCommand, ClaimCompatibility, ClaimPort,
-        ClaimRequest, CommandChecksum, CommandId, ComposedBackend, ControlPlaneStore,
-        FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, InProcessControlPlane,
-        LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand, PushCommand, PushPort,
-        PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand, RenewLeaseCommand, SideRecord,
-        UpdateFieldsCommand, WriteSideRecordsCommand,
+        ClaimRequest, CohortClaimCommand, CommandChecksum, CommandId, ComposedBackend,
+        ControlPlaneStore, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
+        InProcessControlPlane, LogStore, PauseQueueCommand, ProjectionStore, PurgeItemsCommand,
+        PushCommand, PushPort, PushSpec, QueueKey, QueueMetrics, ReassignLeaseCommand,
+        RenewLeaseCommand, SideRecord, UpdateFieldsCommand, WriteSideRecordsCommand,
     };
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
@@ -3744,6 +3840,7 @@ mod tests {
             created_seq: 0,
             lease_token: None,
             lease_expires_at: None,
+            lease_is_cohort: false,
             worker_id: None,
             fenced: false,
             superseded: false,
@@ -3919,6 +4016,7 @@ mod tests {
             created_seq: 0,
             lease_token: None,
             lease_expires_at: None,
+            lease_is_cohort: false,
             worker_id: None,
             fenced: false,
             superseded: false,
@@ -4074,6 +4172,175 @@ mod tests {
             vec![(first, 998), (second, 2)],
             "consumer counts come from the maintained set index"
         );
+    }
+
+    #[test]
+    fn ordinary_expiry_index_tracks_every_lease_lifecycle_transition() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        projection
+            .apply_command(&QueueCommand::Push(PushCommand {
+                items: (1..=5)
+                    .map(|id| push_item(&id.to_string(), &format!("k{id}"), id))
+                    .collect(),
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("1")],
+                lease_token: LeaseToken::new("ordinary-1").unwrap(),
+                lease_expires_at: ts(10),
+                worker_id: None,
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("2")],
+                lease_token: LeaseToken::new("ordinary-2").unwrap(),
+                lease_expires_at: ts(100),
+                worker_id: None,
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::CohortClaim(CohortClaimCommand {
+                cohort_id: CohortId::new("cohort").unwrap(),
+                item_ids: vec![iid("3")],
+                lease_token: LeaseToken::new("cohort-lease").unwrap(),
+                lease_expires_at: ts(5),
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("4")],
+                lease_token: LeaseToken::new("ordinary-4").unwrap(),
+                lease_expires_at: ts(30),
+                worker_id: None,
+            }))
+            .unwrap();
+        assert_eq!(projection.expired_leases(ts(50)), vec![iid("1"), iid("4")]);
+
+        projection
+            .apply_command(&QueueCommand::RenewLease(RenewLeaseCommand {
+                item_ids: vec![iid("1")],
+                lease_expires_at: ts(60),
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::ReassignLease(ReassignLeaseCommand {
+                item_ids: vec![iid("2")],
+                lease_token: LeaseToken::new("ordinary-2b").unwrap(),
+                lease_expires_at: ts(20),
+            }))
+            .unwrap();
+        assert_eq!(projection.expired_leases(ts(50)), vec![iid("2"), iid("4")]);
+
+        projection
+            .apply_command(&QueueCommand::Finalize(FinalizeCommand {
+                outcomes: vec![FinalizeOutcome::new(iid("2"), FinalizeKind::Complete)],
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::LeaseExpired(
+                pqueue_engine::LeaseExpiredCommand {
+                    item_ids: vec![iid("4")],
+                },
+            ))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::Claim(ClaimCommand {
+                item_ids: vec![iid("5")],
+                lease_token: LeaseToken::new("ordinary-5").unwrap(),
+                lease_expires_at: ts(15),
+                worker_id: None,
+            }))
+            .unwrap();
+        projection
+            .apply_command(&QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: vec![iid("5")],
+                force: true,
+            }))
+            .unwrap();
+        assert!(projection.expired_leases(ts(50)).is_empty());
+
+        let image = projection.to_image(None);
+        let restored = ProjectionData::from_image(&definition, image).unwrap();
+        assert_eq!(restored.expired_leases(ts(70)), vec![iid("1")]);
+        assert!(!restored.expired_leases(ts(200)).contains(&iid("3")));
+    }
+
+    #[test]
+    fn ten_million_analog_expiry_page_work_ignores_nonexpired_residents() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        projection
+            .ordinary_leases_by_expiry
+            .entry(ts(1))
+            .or_default()
+            .extend([ItemId::from_u64(1), ItemId::from_u64(2)]);
+        let (_, baseline_work) = projection.expired_leases_after(ts(10), None, 2);
+
+        // Each synthetic row stands for one hundred resident leases in the 10M proof scale. The
+        // work counter measures index rows actually visited, not wall-clock host performance.
+        projection
+            .ordinary_leases_by_expiry
+            .entry(ts(1_000))
+            .or_default()
+            .extend((10_000..110_000).map(ItemId::from_u64));
+        let (rows, scaled_work) = projection.expired_leases_after(ts(10), None, 2);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(baseline_work, 2);
+        assert_eq!(scaled_work, baseline_work);
+    }
+
+    #[test]
+    fn expiry_cursor_is_exact_across_queues_sharing_a_deadline() {
+        let definition = qdef();
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        );
+        projection
+            .ordinary_leases_by_expiry
+            .entry(ts(10))
+            .or_default()
+            .extend([iid("1"), iid("2")]);
+        projection
+            .ordinary_leases_by_expiry
+            .entry(ts(20))
+            .or_default()
+            .insert(iid("3"));
+
+        let (queue_after_cursor, _) = projection.expired_leases_after(
+            ts(30),
+            Some((ts(10), Ordering::Greater, &iid("999"))),
+            8,
+        );
+        assert_eq!(
+            queue_after_cursor,
+            vec![(ts(10), iid("1")), (ts(10), iid("2")), (ts(20), iid("3"))]
+        );
+        let (same_queue, _) =
+            projection.expired_leases_after(ts(30), Some((ts(10), Ordering::Equal, &iid("1"))), 8);
+        assert_eq!(same_queue, vec![(ts(10), iid("2")), (ts(20), iid("3"))]);
+        let (queue_before_cursor, _) =
+            projection.expired_leases_after(ts(30), Some((ts(10), Ordering::Less, &iid("0"))), 8);
+        assert_eq!(queue_before_cursor, vec![(ts(20), iid("3"))]);
     }
 
     #[test]
@@ -4691,6 +4958,7 @@ mod tests {
                     created_seq: 0,
                     lease_token: None,
                     lease_expires_at: None,
+                    lease_is_cohort: false,
                     worker_id: None,
                     fenced: false,
                     superseded: true,
@@ -4715,6 +4983,7 @@ mod tests {
                     created_seq: 1,
                     lease_token: None,
                     lease_expires_at: None,
+                    lease_is_cohort: false,
                     worker_id: None,
                     fenced: false,
                     superseded: false,
