@@ -2472,8 +2472,7 @@ fn apply_command_sql(
                 let model = queues
                     .get(shard)
                     .ok_or(EngineError::NotFound)?
-                    .priority_model
-                    .clone();
+                    .priority_model;
                 priority_sort_key = elig_sort(next, &model);
             }
             if let ScheduleUpdate::Set(next) = &c.set_not_before {
