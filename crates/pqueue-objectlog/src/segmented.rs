@@ -1312,6 +1312,14 @@ pub struct ObjectStoreStats {
     pub max_object_bytes: u64,
 }
 
+#[derive(Clone, Copy)]
+enum SealTrigger {
+    Size,
+    Latency,
+    Forced,
+    Rollover,
+}
+
 /// Release-measurable counters: how many segments sealed, how many objects were PUT to the store (segment
 /// objects + manifest objects + fence entries), how many commands committed, and the per-segment
 /// group-commit batch sizes. Surfaced to the release ledger harness as the object-log cost evidence
@@ -1326,6 +1334,14 @@ pub struct SegmentCounters {
     pub commands_committed: u64,
     /// Per-segment group-commit batch size (commands per sealed segment), in seal order.
     pub group_commit_batches: Vec<usize>,
+    /// Segments sealed because buffered serialized bytes reached `target_bytes`.
+    pub size_triggered_seals: u64,
+    /// Segments sealed because the oldest buffered command reached `max_latency_ms`.
+    pub latency_triggered_seals: u64,
+    /// Segments sealed explicitly by a caller (shutdown, test crash seam, or operator action).
+    pub forced_seals: u64,
+    /// Prefix segments sealed to stay below the maximum writable frame size.
+    pub rollover_seals: u64,
     /// Current object/file count under the object-log store prefix.
     pub object_count: u64,
     /// Current total bytes retained under the object-log store prefix.
@@ -4078,7 +4094,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
                 .is_none_or(|len| len > crate::segment_integrity::MAX_SEGMENT_BYTES)
         };
         let mut presealed = if should_preseal {
-            self.seal(shard, expected_epoch, now_ms)?
+            self.seal_with_trigger(shard, expected_epoch, now_ms, SealTrigger::Rollover)?
         } else {
             Vec::new()
         };
@@ -4122,7 +4138,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             )
         };
         let mut committed = if should_seal {
-            self.seal(shard, expected_epoch, now_ms)?
+            self.seal_with_trigger(shard, expected_epoch, now_ms, SealTrigger::Size)?
         } else {
             Vec::new()
         };
@@ -4156,7 +4172,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             }
         };
         if due {
-            self.seal(shard, expected_epoch, now_ms)
+            self.seal_with_trigger(shard, expected_epoch, now_ms, SealTrigger::Latency)
         } else {
             Ok(Vec::new())
         }
@@ -4173,6 +4189,16 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         shard: &QueueKey,
         expected_epoch: u64,
         now_ms: i64,
+    ) -> EngineResult<Vec<CommandPosition>> {
+        self.seal_with_trigger(shard, expected_epoch, now_ms, SealTrigger::Forced)
+    }
+
+    fn seal_with_trigger(
+        &self,
+        shard: &QueueKey,
+        expected_epoch: u64,
+        now_ms: i64,
+        trigger: SealTrigger,
     ) -> EngineResult<Vec<CommandPosition>> {
         let prefix = shard_prefix(shard);
         // 1. Snapshot+drain the buffer under the lock; nothing buffered → nothing to do.
@@ -4357,6 +4383,12 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
             g.counters.segments_sealed += 1;
             g.counters.commands_committed += n as u64;
             g.counters.group_commit_batches.push(n);
+            match trigger {
+                SealTrigger::Size => g.counters.size_triggered_seals += 1,
+                SealTrigger::Latency => g.counters.latency_triggered_seals += 1,
+                SealTrigger::Forced => g.counters.forced_seals += 1,
+                SealTrigger::Rollover => g.counters.rollover_seals += 1,
+            }
             let buf = g.shards.get_mut(shard).ok_or(EngineError::NotFound)?;
             buf.next_seq = last_seq + 1;
             buf.next_manifest_index = cur_index + 1;

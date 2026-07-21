@@ -43,6 +43,22 @@ impl Fixture {
         fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     }
 
+    fn mutate_e3_row(&self, index: usize, mutate: impl FnOnce(&mut serde_json::Value)) {
+        let path = self.root.join("e3.jsonl");
+        let body = fs::read_to_string(&path).unwrap();
+        let mut rows = body
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        mutate(&mut rows[index]);
+        let body = rows
+            .into_iter()
+            .map(|row| serde_json::to_string(&row).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, format!("{body}\n")).unwrap();
+    }
+
     fn errors(&self) -> String {
         verify_e3_contract(&self.manifest(), REVISION)
             .unwrap_err()
@@ -113,6 +129,45 @@ fn rejects_marker_only_recovery_and_recorder_controls() {
 }
 
 #[test]
+fn rejects_missing_tampered_or_zero_recovery_load_batch_measurements() {
+    let missing = Fixture::new();
+    missing.mutate_e3_row(0, |row| {
+        row["measurements"]
+            .as_object_mut()
+            .unwrap()
+            .remove("recovery_load_mean_commands_per_segment");
+    });
+    assert!(
+        missing
+            .errors()
+            .contains("recovery_load_mean_commands_per_segment")
+    );
+
+    let zero = Fixture::new();
+    zero.mutate_e3_row(0, |row| {
+        row["measurements"]["recovery_load_segment_bytes"] = serde_json::json!(0);
+    });
+    assert!(zero.errors().contains("exact streaming 10M recovery"));
+
+    let tampered = Fixture::new();
+    tampered.mutate_e3_row(0, |row| {
+        row["measurements"]["recovery_load_mean_commands_per_segment"] = serde_json::json!(99.0);
+        row["measurements"]["recovery_load_max_commands_per_segment"] = serde_json::json!(1);
+    });
+    assert!(tampered.errors().contains("exact streaming 10M recovery"));
+}
+
+#[test]
+fn rejects_zero_sqlite_command_count_without_panicking() {
+    let fixture = Fixture::new();
+    fixture.mutate_e3_row(1, |row| {
+        row["measurements"]["recovery_command_count"] = serde_json::json!(0);
+        row["measurements"]["recovery_load_command_count"] = serde_json::json!(0);
+    });
+    assert!(fixture.errors().contains("exact streaming 10M recovery"));
+}
+
+#[test]
 fn rejects_true_recorder_marker_without_matching_complete_state_fingerprints() {
     let fixture = Fixture::new();
     let path = fixture.root.join("e3.jsonl");
@@ -130,12 +185,87 @@ fn rejects_true_recorder_marker_without_matching_complete_state_fingerprints() {
 }
 
 #[test]
+fn rejects_missing_or_unbounded_interleaved_recorder_degradation() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"bound_1ms_recorder_overhead_ratio\":1.0",
+        "\"bound_1ms_recorder_overhead_ratio\":1.021",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("must prove recorder overhead ratio <= 1.02")
+    );
+
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"bound_1ms_disabled_control_throughput_per_s\":1000.0,",
+        "",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("positive interleaved disabled-recorder control")
+    );
+}
+
+#[test]
+fn rejects_lockstepped_or_forged_recorder_control_distribution() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "independent-bounded-blocks-seeded-alternating-order-v1",
+        "paired-operation-barriers-concurrent-worker-partitions-v1",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(fixture.errors().contains("recorder_control_schedule"));
+
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"bound_1ms_recorder_overhead_ratio_samples\":[1.0,1.0,1.0,1.0,1.0]",
+        "\"bound_1ms_recorder_overhead_ratio_samples\":[1.0,1.0,1.5,1.5,1.5]",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("must prove recorder overhead ratio <= 1.02")
+    );
+}
+
+#[test]
 fn rejects_profile_incorrect_canonical_recovery_command_count() {
     let fixture = Fixture::new();
     let path = fixture.root.join("e3.jsonl");
     let body = fs::read_to_string(&path).unwrap().replacen(
         "\"recovery_command_count\":10001",
         "\"recovery_command_count\":10000",
+        1,
+    );
+    fs::write(path, body).unwrap();
+    assert!(
+        fixture
+            .errors()
+            .contains("exact streaming 10M recovery with monotonic replay progress")
+    );
+}
+
+#[test]
+fn rejects_inexact_recovery_command_range_even_with_matching_state_digest() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("e3.jsonl");
+    let body = fs::read_to_string(&path).unwrap().replacen(
+        "\"recovery_tail_replayed\":10000",
+        "\"recovery_tail_replayed\":9999",
         1,
     );
     fs::write(path, body).unwrap();

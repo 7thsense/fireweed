@@ -62,10 +62,14 @@ use pqueue_core::{
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
-use pqueue_engine::{ControlPlaneStore, EngineError, ProjectionRead, PushPort, PushSpec, QueueKey};
+use pqueue_engine::{
+    CommandChecksum, CommandEnvelope, CommandId, ControlPlaneStore, EngineError, ProjectionRead,
+    PushCommand, PushPort, PushSpec, QueueCommand, QueueKey, build_push_items,
+};
 use pqueue_objectlog::object_store_observability::{
     BlobBackendKind, BlobMetricsRecorder, BlobPhysicalTotals, InstrumentedBlobStore,
 };
+use pqueue_objectlog::prepare_serialized_commands;
 use pqueue_objectlog::segmented::{
     BlobStore, FaultCutPoint, PointerFencedBlobStore, S3_LIST_PAGE_MAX_KEYS, S3BlobStore,
     SegmentConfig, SegmentCounters, SegmentedObjectLog,
@@ -76,10 +80,17 @@ use pqueue_server::{
 
 /// The release resident shape: the full TP-002 E3 10M-item snapshot-tail recovery measurement.
 const RELEASE_RESIDENT: u64 = 10_000_000;
+/// SP-04 slice 6: production recorder overhead versus an interleaved,
+/// byte-identical disabled-recorder control must stay within two percent.
+const MAX_RECORDER_OVERHEAD_RATIO: f64 = 1.02;
+const RECORDER_CONTROL_BLOCKS: usize = 5;
 const RELEASE_ACK_PUSHES: u64 = 100_000;
 const RELEASE_ACK_CONCURRENCY: u64 = 384;
 const RELEASE_LOAD_BATCH: u64 = 1_000;
 const RELEASE_LOAD_CONCURRENCY: u64 = 8;
+const RELEASE_LOAD_SEGMENT_TARGET_BYTES: usize = 917_504;
+const RELEASE_LOAD_SIZE_SEAL_COMMANDS: usize = 4;
+const RELEASE_QUEUE_WAITING_BYTES: usize = 16 * 1024 * 1024;
 const STORE_OBJECT_PAGE_LIMIT: u64 = S3_LIST_PAGE_MAX_KEYS as u64;
 
 struct FailNextManifestMirrorStore {
@@ -89,7 +100,7 @@ struct FailNextManifestMirrorStore {
 
 impl BlobStore for FailNextManifestMirrorStore {
     fn put(&self, key: &str, body: &[u8]) -> pqueue_engine::EngineResult<()> {
-        if key.contains("/manifest_head/")
+        if key.contains("/authority_head/")
             && self.fail_next_manifest_mirror.swap(false, Ordering::SeqCst)
         {
             return Err(EngineError::Storage(
@@ -123,8 +134,22 @@ impl BlobStore for FailNextManifestMirrorStore {
     }
 }
 
+#[test]
+fn fence_failure_injector_targets_the_post_cas_authority_mirror() {
+    let store = FailNextManifestMirrorStore {
+        inner: Arc::new(pqueue_objectlog::segmented::InMemoryBlobStore::new()),
+        fail_next_manifest_mirror: AtomicBool::new(true),
+    };
+    let result = store.put(
+        "t/tenant/q/queue/authority_head/00000000000000000001.json",
+        b"mirror",
+    );
+    assert!(matches!(result, Err(EngineError::Storage(_))));
+    assert!(!store.fail_next_manifest_mirror.load(Ordering::SeqCst));
+}
+
 fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std::path::Path) {
-    use pqueue_conformance::{envelope, item, qdef as conformance_qdef, shard};
+    use pqueue_conformance::{envelope, item};
     use pqueue_engine::{PushCommand, QueueCommand};
 
     let postgres_url = std::env::var("PQUEUE_E3_POSTGRES_POINTER_DATABASE_URL")
@@ -139,6 +164,43 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
         )
         .expect("build no-CAS S3 object store"),
     );
+    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
+    let push = |id: &str, suffix: &str| {
+        vec![envelope(
+            QueueCommand::Push(PushCommand {
+                items: vec![item(id, &format!("e3-fence-{suffix}"), 0)],
+            }),
+            vec![],
+        )]
+    };
+
+    // Execute the release store's native create-only-CAS fence path over MinIO. These observations are
+    // independent of the Postgres pointer fallback below; neither path may lend booleans to the other.
+    let native_def = qdef("e3", &format!("e3-native-fence-{}", std::process::id()));
+    let native_shard = QueueKey::new(native_def.tenant_id.clone(), native_def.queue_id.clone());
+    let native_a = SegmentedObjectLog::open(raw_objects.clone(), cfg);
+    native_a.create_queue(&native_def).unwrap();
+    assert_eq!(native_a.fence_epoch(&native_shard, 0, 1).unwrap(), 0);
+    native_a
+        .enqueue(&native_shard, &push("1", "native-a"), 0, 2)
+        .unwrap();
+    native_a.seal(&native_shard, 0, 3).unwrap();
+    let native_b = SegmentedObjectLog::open(raw_objects.clone(), cfg);
+    native_b.create_queue(&native_def).unwrap();
+    assert_eq!(native_b.acquire_epoch(&native_shard, 4).unwrap(), 1);
+    native_b
+        .enqueue(&native_shard, &push("2", "native-b"), 1, 5)
+        .unwrap();
+    native_b.seal(&native_shard, 1, 6).unwrap();
+    let native_current_epoch_committed = native_b.read_all(&native_shard).unwrap().len() == 2;
+    native_a
+        .enqueue(&native_shard, &push("3", "native-stale"), 0, 7)
+        .unwrap();
+    let native_stale_epoch_rejected =
+        native_a.seal(&native_shard, 0, 8) == Err(EngineError::EpochFenced);
+    assert!(native_current_epoch_committed);
+    assert!(native_stale_epoch_rejected);
+
     let objects = Arc::new(FailNextManifestMirrorStore {
         inner: raw_objects,
         fail_next_manifest_mirror: AtomicBool::new(false),
@@ -152,35 +214,27 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
         pqueue_postgres::PostgresManifestPointer::open(&postgres_url)
             .expect("open owner-B Postgres pointer"),
     );
-    let cfg = SegmentConfig::new(10_000_000, 100).unwrap();
-    let shard = shard();
-    let push = |suffix: &str| {
-        vec![envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item(suffix, &format!("e3-pg-{suffix}"), 0)],
-            }),
-            vec![],
-        )]
-    };
+    let no_cas_def = qdef("e3", &format!("e3-pg-fence-{}", std::process::id()));
+    let shard = QueueKey::new(no_cas_def.tenant_id.clone(), no_cas_def.queue_id.clone());
     let adapter_a = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_a));
     let owner_a = SegmentedObjectLog::open(adapter_a, cfg);
-    owner_a.create_queue(&conformance_qdef()).unwrap();
+    owner_a.create_queue(&no_cas_def).unwrap();
     assert_eq!(owner_a.fence_epoch(&shard, 0, 1).unwrap(), 0);
-    owner_a.enqueue(&shard, &push("a"), 0, 2).unwrap();
+    owner_a.enqueue(&shard, &push("1", "a"), 0, 2).unwrap();
     owner_a.seal(&shard, 0, 3).unwrap();
 
     let adapter_b = Arc::new(PointerFencedBlobStore::new(objects.clone(), pointer_b));
     let owner_b = SegmentedObjectLog::open(adapter_b.clone(), cfg);
-    owner_b.create_queue(&conformance_qdef()).unwrap();
+    owner_b.create_queue(&no_cas_def).unwrap();
     assert_eq!(owner_b.acquire_epoch(&shard, 4).unwrap(), 1);
-    owner_b.enqueue(&shard, &push("b"), 1, 5).unwrap();
+    owner_b.enqueue(&shard, &push("2", "b"), 1, 5).unwrap();
     objects
         .fail_next_manifest_mirror
         .store(true, Ordering::SeqCst);
     owner_b.seal(&shard, 1, 6).unwrap();
     assert!(!objects.fail_next_manifest_mirror.load(Ordering::SeqCst));
     assert_eq!(adapter_b.pending_manifest_mirrors(), 1);
-    owner_a.enqueue(&shard, &push("stale"), 0, 7).unwrap();
+    owner_a.enqueue(&shard, &push("3", "stale"), 0, 7).unwrap();
     assert_eq!(owner_a.seal(&shard, 0, 8), Err(EngineError::EpochFenced));
     assert_eq!(owner_b.read_all(&shard).unwrap().len(), 2);
 
@@ -209,8 +263,8 @@ fn prove_postgres_pointer_fence(s3: &S3Env, source_revision: &str, output: &std:
     let row = pqueue_release::e3_contract::build_e3_fence_evidence(
         pqueue_release::e3_contract::E3FenceObservation {
             source_revision: source_revision.to_owned(),
-            stale_epoch_rejected: true,
-            current_epoch_committed: true,
+            stale_epoch_rejected: native_stale_epoch_rejected,
+            current_epoch_committed: native_current_epoch_committed,
             no_cas_stale_epoch_rejected: true,
             no_cas_current_epoch_committed: true,
             no_cas_pointer_and_epoch_atomic: true,
@@ -322,6 +376,13 @@ fn ts() -> UtcTimestamp {
     UtcTimestamp::new(1_700_000_000, 0).unwrap()
 }
 
+fn wall_ts() -> UtcTimestamp {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after Unix epoch");
+    UtcTimestamp::new(now.as_secs() as i64, now.subsec_nanos()).unwrap()
+}
+
 fn pct(latencies_ms: &mut [f64], p: f64) -> f64 {
     if latencies_ms.is_empty() {
         return 0.0;
@@ -344,6 +405,7 @@ struct BoundConfig {
     max_latency_ms: u64,
 }
 
+#[derive(Clone)]
 struct S3Env {
     endpoint: String,
     bucket: String,
@@ -490,6 +552,8 @@ struct AckResult {
     throughput_per_s: f64,
     disabled_control_throughput_per_s: f64,
     recorder_overhead_ratio: f64,
+    recorder_overhead_ratio_samples: Vec<f64>,
+    recorder_control_order_seed: u64,
     recorder_control_schedule: &'static str,
     recorder_control_fingerprint_algorithm: &'static str,
     recorder_enabled_state_fingerprint: String,
@@ -655,8 +719,7 @@ struct AckArmConfig {
     pushes: u64,
     concurrency: u64,
     recorder_enabled: bool,
-    paired_start: Arc<tokio::sync::Barrier>,
-    paired_workers: Arc<Vec<Arc<tokio::sync::Barrier>>>,
+    block: usize,
 }
 
 async fn run_ack_arm<B, F>(s3: &S3Env, config: AckArmConfig, open: F) -> AckArm
@@ -670,9 +733,10 @@ where
         "disabled"
     };
     let qid = format!(
-        "e3ack-{}-{}-{arm}-{}",
+        "e3ack-{}-{}-{arm}-block{}-{}",
         config.profile,
         config.bound.label,
+        config.block,
         std::process::id()
     );
     let def = qdef("e3", &qid);
@@ -688,9 +752,6 @@ where
     backend.create_queue(def).await.expect("create queue");
     let flusher = backend.spawn_background_flusher();
     let store_baseline = recorder.snapshot();
-    // Do not let setup time turn the control into two serial samples: both fully initialized arms enter
-    // their identical worker partitions together and remain live concurrently.
-    config.paired_start.wait().await;
     let started = Instant::now();
 
     let mut handles = Vec::new();
@@ -699,14 +760,9 @@ where
         let end_index = (t + 1) * config.pushes / config.concurrency;
         let backend = backend.clone();
         let shard = shard.clone();
-        let paired_worker = config.paired_workers[t as usize].clone();
         handles.push(tokio::spawn(async move {
             let mut lat = Vec::with_capacity((end_index - start_index) as usize);
             for i in start_index..end_index {
-                // Each enabled/disabled worker pair launches the same logical operation together. Other
-                // worker pairs remain independent, preserving concurrent load while making the cross-arm
-                // interleaving explicit and reproducible.
-                paired_worker.wait().await;
                 let start = Instant::now();
                 backend
                     .push(&shard, vec![ack_spec(t, i)], ts(), None)
@@ -749,8 +805,105 @@ where
     }
 }
 
-/// Interleave an enabled recorder arm with a disabled-recorder control over byte-identical seeded work.
-/// Logical equality is a release bar; elapsed-time ratio is only declared-topology capacity evidence.
+fn aggregate_ack_arms(arms: Vec<AckArm>) -> AckArm {
+    assert!(!arms.is_empty());
+    let mut counters = SegmentCounters::default();
+    let mut store_operations = StoreOperations::default();
+    let mut resource_bounds = ResourceBounds::default();
+    let mut wall_s = 0.0;
+    let mut latencies = Vec::new();
+    let mut pending = 0;
+    let mut digest = StreamingDigest::new();
+    let mut fingerprint = StateFingerprint {
+        digest: String::new(),
+        verified: 0,
+        missing: 0,
+        duplicates: 0,
+        invalid: 0,
+    };
+    for arm in arms {
+        counters.segments_sealed += arm.counters.segments_sealed;
+        counters.objects_put += arm.counters.objects_put;
+        counters.commands_committed += arm.counters.commands_committed;
+        counters
+            .group_commit_batches
+            .extend(arm.counters.group_commit_batches);
+        counters.size_triggered_seals += arm.counters.size_triggered_seals;
+        counters.latency_triggered_seals += arm.counters.latency_triggered_seals;
+        counters.forced_seals += arm.counters.forced_seals;
+        counters.rollover_seals += arm.counters.rollover_seals;
+        counters.object_count += arm.counters.object_count;
+        counters.total_bytes += arm.counters.total_bytes;
+        counters.segment_bytes += arm.counters.segment_bytes;
+        counters.max_object_bytes = counters.max_object_bytes.max(arm.counters.max_object_bytes);
+        counters.put_count += arm.counters.put_count;
+        counters.get_count += arm.counters.get_count;
+        counters.list_count += arm.counters.list_count;
+        counters.delete_count += arm.counters.delete_count;
+        counters.request_bytes += arm.counters.request_bytes;
+        counters.response_bytes += arm.counters.response_bytes;
+        store_operations.puts += arm.store_operations.puts;
+        store_operations.gets += arm.store_operations.gets;
+        store_operations.lists += arm.store_operations.lists;
+        store_operations.deletes += arm.store_operations.deletes;
+        store_operations.request_bytes += arm.store_operations.request_bytes;
+        store_operations.response_bytes += arm.store_operations.response_bytes;
+        resource_bounds.configured_global_bytes = resource_bounds
+            .configured_global_bytes
+            .max(arm.resource_bounds.configured_global_bytes);
+        resource_bounds.current_bytes += arm.resource_bounds.current_bytes;
+        resource_bounds.peak_bytes = resource_bounds
+            .peak_bytes
+            .max(arm.resource_bounds.peak_bytes);
+        resource_bounds.waiters += arm.resource_bounds.waiters;
+        resource_bounds.recorder_in_flight += arm.resource_bounds.recorder_in_flight;
+        resource_bounds.recorder_peak_in_flight = resource_bounds
+            .recorder_peak_in_flight
+            .max(arm.resource_bounds.recorder_peak_in_flight);
+        resource_bounds.task_count = resource_bounds
+            .task_count
+            .max(arm.resource_bounds.task_count);
+        resource_bounds.task_limit = resource_bounds
+            .task_limit
+            .max(arm.resource_bounds.task_limit);
+        resource_bounds.store_in_flight_limit = resource_bounds
+            .store_in_flight_limit
+            .max(arm.resource_bounds.store_in_flight_limit);
+        resource_bounds.object_page_limit = resource_bounds
+            .object_page_limit
+            .max(arm.resource_bounds.object_page_limit);
+        wall_s += arm.wall_s;
+        latencies.extend(arm.latencies);
+        pending += arm.pending;
+        digest.update(arm.state_fingerprint.digest.as_bytes());
+        fingerprint.verified += arm.state_fingerprint.verified;
+        fingerprint.missing += arm.state_fingerprint.missing;
+        fingerprint.duplicates += arm.state_fingerprint.duplicates;
+        fingerprint.invalid += arm.state_fingerprint.invalid;
+    }
+    fingerprint.digest = digest.finish();
+    AckArm {
+        counters,
+        store_operations,
+        resource_bounds,
+        wall_s,
+        latencies,
+        pending,
+        state_fingerprint: fingerprint,
+    }
+}
+
+fn recorder_control_order_seed(profile: &str, bound: BoundConfig) -> u64 {
+    let mut seed = 0xcbf2_9ce4_8422_2325u64 ^ bound.max_latency_ms;
+    for byte in profile.bytes() {
+        seed ^= u64::from(byte);
+        seed = seed.wrapping_mul(0x100_0000_01b3);
+    }
+    seed
+}
+
+/// Compare independent, bounded enabled/disabled blocks over byte-identical seeded work. The seeded first
+/// arm alternates on every block so neither recorder mode always benefits from warm caches or run order.
 async fn run_ack_config<B, F>(
     s3: &S3Env,
     profile: &'static str,
@@ -763,45 +916,57 @@ where
     B: E3Backend,
     F: Copy + Fn(Arc<dyn BlobStore>, &str, SegmentConfig) -> pqueue_engine::EngineResult<B>,
 {
-    let paired_start = Arc::new(tokio::sync::Barrier::new(2));
-    let paired_workers = Arc::new(
-        (0..concurrency)
-            .map(|_| Arc::new(tokio::sync::Barrier::new(2)))
-            .collect::<Vec<_>>(),
-    );
-    let (mut enabled, disabled) = tokio::join!(
-        run_ack_arm::<B, _>(
-            s3,
-            AckArmConfig {
-                profile,
-                bound,
-                pushes,
-                concurrency,
-                recorder_enabled: true,
-                paired_start: paired_start.clone(),
-                paired_workers: paired_workers.clone(),
-            },
-            open,
-        ),
-        run_ack_arm::<B, _>(
-            s3,
-            AckArmConfig {
-                profile,
-                bound,
-                pushes,
-                concurrency,
-                recorder_enabled: false,
-                paired_start,
-                paired_workers,
-            },
-            open,
-        ),
-    );
+    let order_seed = recorder_control_order_seed(profile, bound);
+    let first_block_enabled_first = order_seed & 1 == 0;
+    let mut enabled_blocks = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
+    let mut disabled_blocks = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
+    let mut overhead_samples = Vec::with_capacity(RECORDER_CONTROL_BLOCKS);
+    for block in 0..RECORDER_CONTROL_BLOCKS {
+        let block_start = block as u64 * pushes / RECORDER_CONTROL_BLOCKS as u64;
+        let block_end = (block as u64 + 1) * pushes / RECORDER_CONTROL_BLOCKS as u64;
+        let block_pushes = block_end - block_start;
+        let run = |recorder_enabled| {
+            run_ack_arm::<B, _>(
+                s3,
+                AckArmConfig {
+                    profile,
+                    bound,
+                    pushes: block_pushes,
+                    concurrency,
+                    recorder_enabled,
+                    block,
+                },
+                open,
+            )
+        };
+        let enabled_first = if block % 2 == 0 {
+            first_block_enabled_first
+        } else {
+            !first_block_enabled_first
+        };
+        let (enabled, disabled) = if enabled_first {
+            let enabled = run(true).await;
+            let disabled = run(false).await;
+            (enabled, disabled)
+        } else {
+            let disabled = run(false).await;
+            let enabled = run(true).await;
+            (enabled, disabled)
+        };
+        overhead_samples.push(enabled.wall_s / disabled.wall_s.max(f64::MIN_POSITIVE));
+        enabled_blocks.push(enabled);
+        disabled_blocks.push(disabled);
+    }
+    let mut enabled = aggregate_ack_arms(enabled_blocks);
+    let disabled = aggregate_ack_arms(disabled_blocks);
 
     let c = enabled.counters;
     let throughput_per_s = pushes as f64 / enabled.wall_s.max(f64::MIN_POSITIVE);
     let disabled_control_throughput_per_s = pushes as f64 / disabled.wall_s.max(f64::MIN_POSITIVE);
-    let recorder_overhead_ratio = enabled.wall_s / disabled.wall_s.max(f64::MIN_POSITIVE);
+    let mut ordered_overhead_samples = overhead_samples.clone();
+    let recorder_overhead_ratio = pct(&mut ordered_overhead_samples, 0.50);
+    let recorder_degradation_met = recorder_overhead_ratio.is_finite()
+        && recorder_overhead_ratio <= MAX_RECORDER_OVERHEAD_RATIO;
     let ack_p50 = pct(&mut enabled.latencies, 0.50);
     let ack_p95 = pct(&mut enabled.latencies, 0.95);
     let ack_p99 = pct(&mut enabled.latencies, 0.99);
@@ -841,6 +1006,7 @@ where
     let bar_met = throughput_progress_met
         && latency_distribution_met
         && load_shape_met
+        && recorder_degradation_met
         && recorder_control_logical_match;
 
     AckResult {
@@ -857,7 +1023,9 @@ where
         throughput_per_s: round3(throughput_per_s),
         disabled_control_throughput_per_s: round3(disabled_control_throughput_per_s),
         recorder_overhead_ratio: round3(recorder_overhead_ratio),
-        recorder_control_schedule: "paired-operation-barriers-concurrent-worker-partitions-v1",
+        recorder_overhead_ratio_samples: overhead_samples.into_iter().map(round3).collect(),
+        recorder_control_order_seed: order_seed,
+        recorder_control_schedule: "independent-bounded-blocks-seeded-alternating-order-v1",
         recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
         recorder_enabled_state_fingerprint: enabled.state_fingerprint.digest,
         recorder_disabled_state_fingerprint: disabled.state_fingerprint.digest,
@@ -878,6 +1046,16 @@ struct RecoveryResult {
     resident: u64,
     load_batch: u64,
     load_task_count: u64,
+    load_command_count: u64,
+    load_segments_sealed: u64,
+    load_size_triggered_seals: u64,
+    load_latency_triggered_seals: u64,
+    load_forced_seals: u64,
+    load_rollover_seals: u64,
+    load_segment_bytes: u64,
+    load_mean_commands_per_segment: f64,
+    load_max_commands_per_segment: usize,
+    load_group_commit_batch_sum: u64,
     command_count: u64,
     total_commands: u64,
     start_seq: u64,
@@ -1224,7 +1402,7 @@ async fn fingerprint_state<B: ProjectionRead + E3OrderProbe>(
 async fn push_with_retry<B: PushPort>(backend: &B, shard: &QueueKey, items: Vec<PushSpec>) {
     let mut attempt = 0u64;
     loop {
-        match backend.push(shard, items.clone(), ts(), None).await {
+        match backend.push(shard, items.clone(), wall_ts(), None).await {
             Ok(_) => return,
             Err(EngineError::Conflict) if attempt < 16 => {
                 attempt += 1;
@@ -1247,6 +1425,269 @@ fn concurrent_load_command_count(resident: u64, load_batch: u64, concurrency: u6
         .sum()
 }
 
+#[derive(Debug)]
+struct ReleaseLoadPreflight {
+    raw_bytes: Vec<usize>,
+    charged_bytes: Vec<usize>,
+}
+
+impl ReleaseLoadPreflight {
+    fn smallest_subset_raw_bytes(&self, count: usize) -> usize {
+        let mut raw = self.raw_bytes.clone();
+        raw.sort_unstable();
+        raw.into_iter().take(count).sum()
+    }
+
+    fn full_wave_charged_bytes(&self) -> usize {
+        self.charged_bytes.iter().sum()
+    }
+}
+
+/// Serialize the exact first wave emitted by the governed loader. This preflight makes the relationship
+/// between command shape, size sealing, and byte admission a release invariant instead of a host-speed
+/// assumption.
+fn release_load_preflight(
+    resident: u64,
+    load_batch: u64,
+    load_concurrency: u64,
+) -> ReleaseLoadPreflight {
+    let share = resident.div_ceil(load_concurrency);
+    let mut raw_bytes = Vec::new();
+    let mut charged_bytes = Vec::new();
+    for worker in 0..load_concurrency {
+        let start = worker * share;
+        let end = (start + load_batch).min(resident);
+        let specs = (start..end)
+            .map(|id| {
+                let key = format!("i{id}");
+                keyed_spec(&key, Some(ClientItemKey::new(key.clone()).unwrap()))
+            })
+            .collect();
+        let (items, ids) = build_push_items(
+            specs,
+            0,
+            0,
+            u32::try_from(worker * load_batch).expect("release counter fits u32"),
+            1_000_000,
+        );
+        let envelope = CommandEnvelope {
+            command_id: CommandId::new(format!("seginmem-0-{worker}")),
+            request_id: None,
+            request_fingerprint: None,
+            request_outcome: None,
+            item_ids: ids,
+            command: QueueCommand::Push(PushCommand { items }),
+            checksum: CommandChecksum(0),
+            created_at: ts(),
+        };
+        let (serialized, charged) =
+            prepare_serialized_commands(vec![envelope], RELEASE_QUEUE_WAITING_BYTES)
+                .expect("serialize release load command");
+        raw_bytes.push(serialized[0].record_len());
+        charged_bytes.push(charged);
+    }
+    ReleaseLoadPreflight {
+        raw_bytes,
+        charged_bytes,
+    }
+}
+
+fn assert_release_load_preflight() -> ReleaseLoadPreflight {
+    let preflight = release_load_preflight(
+        RELEASE_RESIDENT,
+        RELEASE_LOAD_BATCH,
+        RELEASE_LOAD_CONCURRENCY,
+    );
+    let smallest_size_seal_raw =
+        preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS);
+    let smaller_subset_raw =
+        preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS - 1);
+    assert!(
+        smallest_size_seal_raw * 100 >= RELEASE_LOAD_SEGMENT_TARGET_BYTES * 110,
+        "four smallest first-wave commands must exceed the target by at least ten percent"
+    );
+    assert!(
+        smaller_subset_raw < RELEASE_LOAD_SEGMENT_TARGET_BYTES,
+        "three smallest first-wave commands must stay below the target"
+    );
+    assert!(
+        preflight
+            .raw_bytes
+            .iter()
+            .all(|bytes| *bytes < RELEASE_LOAD_SEGMENT_TARGET_BYTES),
+        "one command must not size-seal alone"
+    );
+    assert!(
+        preflight.full_wave_charged_bytes() <= RELEASE_QUEUE_WAITING_BYTES / 2,
+        "full first wave must consume at most half the queue byte-admission cap"
+    );
+    preflight
+}
+
+fn release_load_batch_shape_met(counters: &SegmentCounters) -> bool {
+    counters.size_triggered_seals > 0
+        && counters.latency_triggered_seals <= 1
+        && counters.forced_seals == 0
+        && counters.rollover_seals == 0
+        && counters.max_batch_size() > 1
+        && counters.group_commit_batches.iter().sum::<usize>() as u64 == counters.commands_committed
+}
+
+async fn run_release_load_shape_calibration(
+    s3: &S3Env,
+    label: &str,
+    resident: u64,
+    load_batch: u64,
+    load_concurrency: u64,
+    target_bytes: usize,
+    max_latency_ms: u64,
+) -> SegmentCounters {
+    let qid = format!("e3-load-calibration-{label}-{}", std::process::id());
+    let def = qdef("e3", &qid);
+    let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
+    let projection = projection_path(&format!("load-calibration-{label}"));
+    // Pass/fail is based only on explicit seal-trigger and batch counters, never on elapsed time. The tuned
+    // arm uses the governed 10 s cap; the one-wave negative control uses a shorter cap only to expose the
+    // otherwise unreachable 8 MiB target without repeating the same blocked wave.
+    let cfg = SegmentConfig::new(target_bytes, max_latency_ms).unwrap();
+    let (store, _) = s3.instrumented_store(true);
+    let backend = Arc::new(
+        SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, cfg)
+            .expect("open calibration backend"),
+    );
+    backend.create_queue(def).await.expect("create queue");
+    let flusher = backend.spawn_background_flusher();
+    let share = resident.div_ceil(load_concurrency);
+    let mut handles = Vec::new();
+    for worker in 0..load_concurrency {
+        let start = worker * share;
+        if start >= resident {
+            break;
+        }
+        let end = (start + share).min(resident);
+        let backend = Arc::clone(&backend);
+        let shard = shard.clone();
+        handles.push(tokio::spawn(async move {
+            let mut commands = 0;
+            let mut id = start;
+            while id < end {
+                let count = (end - id).min(load_batch);
+                let items = (0..count)
+                    .map(|offset| {
+                        let key = format!("i{}", id + offset);
+                        keyed_spec(&key, Some(ClientItemKey::new(key.clone()).unwrap()))
+                    })
+                    .collect();
+                push_with_retry(backend.as_ref(), &shard, items).await;
+                id += count;
+                commands += 1;
+            }
+            commands
+        }));
+    }
+    let mut commands = 0;
+    for handle in handles {
+        commands += handle.await.expect("calibration loader joined");
+    }
+    assert_eq!(
+        commands,
+        concurrent_load_command_count(resident, load_batch, load_concurrency)
+    );
+    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    while backend.metrics(&shard).await.unwrap().pending < resident && Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    flusher.abort();
+    assert_eq!(backend.metrics(&shard).await.unwrap().pending, resident);
+    let counters = backend.segment_counters();
+    let _ = std::fs::remove_file(projection);
+    counters
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires live MinIO release-shape batching calibration"]
+async fn e3_release_load_shape_calibration() {
+    let s3 = S3Env {
+        endpoint: std::env::var("PQUEUE_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
+        bucket: std::env::var("PQUEUE_S3_TEST_BUCKET")
+            .unwrap_or_else(|_| "pqueue-e3-load-calibration".into()),
+        access: std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into()),
+    };
+    S3BlobStore::new(
+        &s3.endpoint,
+        &s3.bucket,
+        &s3.access,
+        &s3.secret,
+        "us-east-1",
+    )
+    .expect("build S3 client")
+    .create_bucket()
+    .expect("create bucket");
+
+    let preflight = assert_release_load_preflight();
+    let smallest_size_seal_raw =
+        preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS);
+    eprintln!(
+        "E3_LOAD_PREFLIGHT target_bytes={} size_seal_commands={} smallest_size_seal_raw={} full_wave_raw={} full_wave_charged={} queue_cap={} raw_commands={:?} charged_commands={:?}",
+        RELEASE_LOAD_SEGMENT_TARGET_BYTES,
+        RELEASE_LOAD_SIZE_SEAL_COMMANDS,
+        smallest_size_seal_raw,
+        preflight.raw_bytes.iter().sum::<usize>(),
+        preflight.full_wave_charged_bytes(),
+        RELEASE_QUEUE_WAITING_BYTES,
+        preflight.raw_bytes,
+        preflight.charged_bytes,
+    );
+
+    let old = run_release_load_shape_calibration(
+        &s3,
+        "old",
+        8_000,
+        RELEASE_LOAD_BATCH,
+        RELEASE_LOAD_CONCURRENCY,
+        8_388_608,
+        500,
+    )
+    .await;
+    let tuned = run_release_load_shape_calibration(
+        &s3,
+        "tuned",
+        64_000,
+        RELEASE_LOAD_BATCH,
+        RELEASE_LOAD_CONCURRENCY,
+        RELEASE_LOAD_SEGMENT_TARGET_BYTES,
+        10_000,
+    )
+    .await;
+    let report = |name: &str, counters: &SegmentCounters| {
+        eprintln!(
+            "E3_LOAD_CALIBRATION name={name} commands={} segments={} size={} latency={} forced={} rollover={} mean_batch={:.3} max_batch={} segment_bytes={} bytes_per_command={:.3} shape_met={}",
+            counters.commands_committed,
+            counters.segments_sealed,
+            counters.size_triggered_seals,
+            counters.latency_triggered_seals,
+            counters.forced_seals,
+            counters.rollover_seals,
+            counters.mean_batch_size(),
+            counters.max_batch_size(),
+            counters.segment_bytes,
+            counters.segment_bytes as f64 / counters.commands_committed.max(1) as f64,
+            release_load_batch_shape_met(counters),
+        );
+    };
+    report("old-8mib-1000x8", &old);
+    report("tuned-896kib-1000x8", &tuned);
+    assert!(
+        !release_load_batch_shape_met(&old),
+        "old underfilled release load shape must be rejected"
+    );
+    assert!(
+        release_load_batch_shape_met(&tuned),
+        "tuned release load shape must be dominated by size-triggered seals"
+    );
+}
+
 /// Load `resident` items over MinIO, then reopen and measure the projection-specific rebuild contract.
 async fn run_recovery<B, F>(
     s3: &S3Env,
@@ -1265,12 +1706,9 @@ where
     let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
     let proj = projection_path(&format!("recovery-{profile}"));
     let control_proj = projection_path(&format!("recovery-control-{profile}"));
-    // A large byte target + a generous latency cap so the bulk load seals FEW, LARGE segments: concurrent
-    // loaders fill the 8 MiB buffer fast (size-triggered seals), and the 10 s cap means even a load stall
-    // produces only a handful of latency-sealed segments. This keeps the per-queue manifest small (the seal
-    // cost amortizes over a big group-commit batch — the whole point of the segmented substrate) rather than
-    // one tiny segment per push.
-    let cfg = SegmentConfig::new(8_388_608, 10_000).unwrap();
+    // The target is below four exact governed load commands with serialized-byte margin. Eight callers
+    // can therefore drive a size seal without depending on host timing or the latency flusher.
+    let cfg = SegmentConfig::new(RELEASE_LOAD_SEGMENT_TARGET_BYTES, 10_000).unwrap();
     let load_concurrency = env_u64("PQUEUE_E3_LOAD_CONCURRENCY", 8).max(1);
     let (store, recorder) = s3.instrumented_store(true);
     let verification_chunk_items = env_u64("PQUEUE_E3_VERIFY_CHUNK_ITEMS", 512).clamp(1, 512);
@@ -1280,7 +1718,7 @@ where
     } else {
         resident
     };
-    let (command_count, load_task_count, total_commands, pending_loaded, baseline_state) = {
+    let (command_count, load_task_count, load_counters, pending_loaded, baseline_state) = {
         let backend = Arc::new(open(store.clone(), &proj, cfg).expect("open backend for load"));
         backend
             .create_queue(def.clone())
@@ -1340,6 +1778,7 @@ where
         }
         flusher.abort();
         let pending = backend.metrics(&shard).await.unwrap().pending;
+        let load_counters = backend.snapshot_segment_counters();
         let baseline_state = if requires_snapshot {
             copy_sqlite_projection(&proj, &control_proj);
             let hook = Arc::new(CommitBeforeApplyCrash {
@@ -1373,11 +1812,10 @@ where
                     .await,
             )
         };
-        let total_commands = backend.snapshot_segment_counters().commands_committed;
         (
             command_count + u64::from(requires_snapshot),
             load_task_count,
-            total_commands,
+            load_counters,
             pending,
             baseline_state,
         )
@@ -1431,6 +1869,18 @@ where
     let start_seq = recovery_stats.start_seq;
     let tail_replayed = recovery_stats.tail_replayed;
     let snapshot_used = recovery_stats.snapshot_used;
+    let total_commands = start_seq
+        .checked_add(tail_replayed)
+        .expect("recovery command range must not overflow");
+    assert_eq!(
+        load_counters.commands_committed + u64::from(requires_snapshot),
+        total_commands,
+        "production recovery range must include the deliberately committed crash tail exactly once"
+    );
+    assert_eq!(
+        total_commands, command_count,
+        "recovery command authority must reconcile with executed load commands"
+    );
 
     // SQLite must prove snapshot-bounded replay. The ephemeral in-memory projection must prove the opposite
     // exact contract: a full durable-log replay, still bounded by the same command budget.
@@ -1490,7 +1940,8 @@ where
         && pending_after == resident
         && state_exact
         && replay_progress_monotonic
-        && resources_met;
+        && resources_met
+        && release_load_batch_shape_met(&load_counters);
 
     let _ = std::fs::remove_file(&proj);
     let _ = std::fs::remove_file(&control_proj);
@@ -1499,6 +1950,17 @@ where
         resident,
         load_batch,
         load_task_count,
+        load_command_count: load_counters.commands_committed,
+        load_segments_sealed: load_counters.segments_sealed,
+        load_size_triggered_seals: load_counters.size_triggered_seals,
+        load_latency_triggered_seals: load_counters.latency_triggered_seals,
+        load_forced_seals: load_counters.forced_seals,
+        load_rollover_seals: load_counters.rollover_seals,
+        load_segment_bytes: load_counters.segment_bytes,
+        load_mean_commands_per_segment: round3(load_counters.mean_batch_size()),
+        load_max_commands_per_segment: load_counters.max_batch_size(),
+        load_group_commit_batch_sum: load_counters.group_commit_batches.iter().sum::<usize>()
+            as u64,
         command_count,
         total_commands,
         start_seq,
@@ -1627,6 +2089,39 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                     run.backend_profile, result.label
                 ));
             }
+            if !result.recorder_overhead_ratio.is_finite()
+                || result.recorder_overhead_ratio > MAX_RECORDER_OVERHEAD_RATIO
+            {
+                errors.push(format!(
+                    "profile {} bound {} recorder overhead ratio {} exceeds the interleaved-control limit {}",
+                    run.backend_profile,
+                    result.label,
+                    result.recorder_overhead_ratio,
+                    MAX_RECORDER_OVERHEAD_RATIO
+                ));
+            }
+            let mut overhead_samples = result.recorder_overhead_ratio_samples.clone();
+            let sample_distribution_valid = overhead_samples.len() == RECORDER_CONTROL_BLOCKS
+                && overhead_samples
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0);
+            let measured_median = if sample_distribution_valid {
+                pct(&mut overhead_samples, 0.50)
+            } else {
+                f64::NAN
+            };
+            if result.recorder_control_schedule
+                != "independent-bounded-blocks-seeded-alternating-order-v1"
+                || result.recorder_control_order_seed == 0
+                || !sample_distribution_valid
+                || (measured_median - result.recorder_overhead_ratio).abs() > 0.001
+                || measured_median > MAX_RECORDER_OVERHEAD_RATIO
+            {
+                errors.push(format!(
+                    "profile {} bound {} lacks a valid independent bounded-block recorder-control distribution",
+                    run.backend_profile, result.label
+                ));
+            }
         }
         for bound in E3_BOUND_CONFIGS {
             if !seen_bounds.contains(bound.label) {
@@ -1652,6 +2147,34 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                 {
                     errors.push(format!(
                         "profile {} recovery did not reproduce the exact complete state",
+                        run.backend_profile
+                    ));
+                }
+                if recovery.start_seq.checked_add(recovery.tail_replayed)
+                    != Some(recovery.total_commands)
+                    || recovery.total_commands != recovery.command_count
+                {
+                    errors.push(format!(
+                        "profile {} recovery command range is not exact: start_seq={} + tail_replayed={} != total_commands={} == command_count={}",
+                        run.backend_profile,
+                        recovery.start_seq,
+                        recovery.tail_replayed,
+                        recovery.total_commands,
+                        recovery.command_count
+                    ));
+                }
+                if recovery.load_size_triggered_seals <= recovery.load_latency_triggered_seals
+                    || recovery.load_latency_triggered_seals > 1
+                    || recovery.load_forced_seals != 0
+                    || recovery.load_rollover_seals != 0
+                    || recovery
+                        .load_size_triggered_seals
+                        .checked_add(recovery.load_latency_triggered_seals)
+                        != Some(recovery.load_segments_sealed)
+                    || recovery.load_group_commit_batch_sum != recovery.load_command_count
+                {
+                    errors.push(format!(
+                        "profile {} recovery load lacks exact size-triggered group-commit batching",
                         run.backend_profile
                     ));
                 }
@@ -1898,6 +2421,79 @@ fn profile_row(
                 serde_json::json!(recovery.load_task_count),
             );
             values.insert(
+                "recovery_load_command_count".into(),
+                serde_json::json!(recovery.load_command_count),
+            );
+            let load_preflight = release_load_preflight(
+                RELEASE_RESIDENT,
+                RELEASE_LOAD_BATCH,
+                RELEASE_LOAD_CONCURRENCY,
+            );
+            values.insert(
+                "recovery_load_segment_target_bytes".into(),
+                serde_json::json!(RELEASE_LOAD_SEGMENT_TARGET_BYTES),
+            );
+            values.insert(
+                "recovery_load_size_seal_commands".into(),
+                serde_json::json!(RELEASE_LOAD_SIZE_SEAL_COMMANDS),
+            );
+            values.insert(
+                "recovery_load_smallest_size_seal_raw_bytes".into(),
+                serde_json::json!(
+                    load_preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS)
+                ),
+            );
+            values.insert(
+                "recovery_load_smaller_subset_raw_bytes".into(),
+                serde_json::json!(
+                    load_preflight.smallest_subset_raw_bytes(RELEASE_LOAD_SIZE_SEAL_COMMANDS - 1)
+                ),
+            );
+            values.insert(
+                "recovery_load_full_wave_charged_bytes".into(),
+                serde_json::json!(load_preflight.full_wave_charged_bytes()),
+            );
+            values.insert(
+                "recovery_load_queue_waiting_bytes".into(),
+                serde_json::json!(RELEASE_QUEUE_WAITING_BYTES),
+            );
+            values.insert(
+                "recovery_load_segments_sealed".into(),
+                serde_json::json!(recovery.load_segments_sealed),
+            );
+            values.insert(
+                "recovery_load_size_triggered_seals".into(),
+                serde_json::json!(recovery.load_size_triggered_seals),
+            );
+            values.insert(
+                "recovery_load_latency_triggered_seals".into(),
+                serde_json::json!(recovery.load_latency_triggered_seals),
+            );
+            values.insert(
+                "recovery_load_forced_seals".into(),
+                serde_json::json!(recovery.load_forced_seals),
+            );
+            values.insert(
+                "recovery_load_rollover_seals".into(),
+                serde_json::json!(recovery.load_rollover_seals),
+            );
+            values.insert(
+                "recovery_load_segment_bytes".into(),
+                serde_json::json!(recovery.load_segment_bytes),
+            );
+            values.insert(
+                "recovery_load_mean_commands_per_segment".into(),
+                serde_json::json!(recovery.load_mean_commands_per_segment),
+            );
+            values.insert(
+                "recovery_load_max_commands_per_segment".into(),
+                serde_json::json!(recovery.load_max_commands_per_segment),
+            );
+            values.insert(
+                "recovery_load_group_commit_batch_sum".into(),
+                serde_json::json!(recovery.load_group_commit_batch_sum),
+            );
+            values.insert(
                 "recovery_load_task_limit".into(),
                 serde_json::json!(RELEASE_LOAD_CONCURRENCY),
             );
@@ -2025,6 +2621,18 @@ fn profile_row(
         values.insert(
             format!("{prefix}_recorder_overhead_ratio"),
             serde_json::json!(result.recorder_overhead_ratio),
+        );
+        values.insert(
+            format!("{prefix}_recorder_overhead_ratio_samples"),
+            serde_json::json!(result.recorder_overhead_ratio_samples),
+        );
+        values.insert(
+            format!("{prefix}_recorder_control_block_count"),
+            serde_json::json!(result.recorder_overhead_ratio_samples.len()),
+        );
+        values.insert(
+            format!("{prefix}_recorder_control_order_seed"),
+            serde_json::json!(result.recorder_control_order_seed),
         );
         values.insert(
             format!("{prefix}_recorder_control_schedule"),
@@ -2222,6 +2830,7 @@ async fn performance_object_log_e3_live_tests() {
         assert_eq!(ack_pushes, RELEASE_ACK_PUSHES);
         assert_eq!(ack_concurrency, RELEASE_ACK_CONCURRENCY);
         assert_eq!(load_concurrency, RELEASE_LOAD_CONCURRENCY);
+        let _ = assert_release_load_preflight();
         assert_eq!(
             env_u64("PQUEUE_RECOVERY_MAX_TAIL_COMMANDS", 1_000_000),
             1_000_000
@@ -2229,7 +2838,17 @@ async fn performance_object_log_e3_live_tests() {
         let fence_output = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT").expect(
             "release E3 requires an output path for executed Postgres-pointer fence evidence",
         );
-        prove_postgres_pointer_fence(&s3, &source_revision, std::path::Path::new(&fence_output));
+        let fence_s3 = s3.clone();
+        let fence_revision = source_revision.clone();
+        tokio::task::spawn_blocking(move || {
+            prove_postgres_pointer_fence(
+                &fence_s3,
+                &fence_revision,
+                std::path::Path::new(&fence_output),
+            );
+        })
+        .await
+        .expect("executed Postgres-pointer fence worker must join");
     }
 
     let runs = [
@@ -2398,6 +3017,31 @@ async fn performance_object_log_e3_live_tests() {
     );
 }
 
+#[test]
+#[ignore = "requires live MinIO and Postgres release-fence endpoints"]
+fn e3_release_fence_proofs_only() {
+    let s3 = S3Env {
+        endpoint: std::env::var("PQUEUE_S3_TEST_ENDPOINT").expect("live MinIO endpoint"),
+        bucket: std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into()),
+        access: std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into()),
+        secret: std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into()),
+    };
+    S3BlobStore::new(
+        &s3.endpoint,
+        &s3.bucket,
+        &s3.access,
+        &s3.secret,
+        "us-east-1",
+    )
+    .expect("build S3 client")
+    .create_bucket()
+    .expect("create/ensure bucket");
+    let source_revision =
+        std::env::var("PQUEUE_E3_SOURCE_REVISION").expect("exact source revision");
+    let output = std::env::var("PQUEUE_E3_FENCE_EVIDENCE_OUT").expect("fence evidence path");
+    prove_postgres_pointer_fence(&s3, &source_revision, std::path::Path::new(&output));
+}
+
 fn synthetic_ack(
     label: &'static str,
     throughput_per_s: f64,
@@ -2436,7 +3080,9 @@ fn synthetic_ack(
         throughput_per_s,
         disabled_control_throughput_per_s: throughput_per_s,
         recorder_overhead_ratio: 1.0,
-        recorder_control_schedule: "paired-operation-barriers-concurrent-worker-partitions-v1",
+        recorder_overhead_ratio_samples: vec![1.0; RECORDER_CONTROL_BLOCKS],
+        recorder_control_order_seed: 7,
+        recorder_control_schedule: "independent-bounded-blocks-seeded-alternating-order-v1",
         recorder_control_fingerprint_algorithm: "fnv1a128+disk-unique-id-index+canonical-live-state-v1",
         recorder_enabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
         recorder_disabled_state_fingerprint: "fnv1a128:0123456789abcdef0123456789abcdef".into(),
@@ -2458,10 +3104,20 @@ fn synthetic_recovery(bar_met: bool, requires_snapshot: bool) -> RecoveryResult 
         resident: 10_000_000,
         load_batch: 1_000,
         load_task_count: RELEASE_LOAD_CONCURRENCY,
-        command_count: 10,
+        load_command_count: if requires_snapshot { 99 } else { 100 },
+        load_segments_sealed: 10,
+        load_size_triggered_seals: 9,
+        load_latency_triggered_seals: 1,
+        load_forced_seals: 0,
+        load_rollover_seals: 0,
+        load_segment_bytes: 80_000_000,
+        load_mean_commands_per_segment: 10.0,
+        load_max_commands_per_segment: 16,
+        load_group_commit_batch_sum: if requires_snapshot { 99 } else { 100 },
+        command_count: 100,
         total_commands: 100,
         start_seq: if requires_snapshot { 10 } else { 0 },
-        tail_replayed: if requires_snapshot { 0 } else { 100 },
+        tail_replayed: if requires_snapshot { 90 } else { 100 },
         snapshot_used: requires_snapshot,
         recovery_max_tail: 1_000_000,
         recovery_wall_ms: 5.0,
@@ -2608,6 +3264,44 @@ fn e3_matrix_rejects_recorder_control_divergence() {
 }
 
 #[test]
+fn e3_matrix_rejects_unbounded_recorder_degradation() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_overhead_ratio = MAX_RECORDER_OVERHEAD_RATIO + 0.001;
+    run.ack_results[0].bar_met = false;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("recorder overhead ratio")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_forged_or_lockstepped_recorder_distribution() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_overhead_ratio_samples = vec![1.0, 1.0, 1.5, 1.5, 1.5];
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("independent bounded-block recorder-control distribution")),
+        "{errors:?}"
+    );
+
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_control_schedule =
+        "paired-operation-barriers-concurrent-worker-partitions-v1";
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("independent bounded-block recorder-control distribution")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn e3_matrix_rejects_recovery_digest_drift() {
     let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
     let recovery = run.recovery.as_mut().unwrap();
@@ -2618,6 +3312,34 @@ fn e3_matrix_rejects_recovery_digest_drift() {
         errors
             .iter()
             .any(|error| error.contains("exact complete state")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_inexact_recovery_command_range() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let recovery = run.recovery.as_mut().unwrap();
+    recovery.tail_replayed -= 1;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("recovery command range is not exact")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_latency_driven_or_inexact_recovery_load_batching() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    let recovery = run.recovery.as_mut().unwrap();
+    recovery.load_latency_triggered_seals = 5;
+    recovery.load_group_commit_batch_sum -= 1;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors.iter().any(|error| error
+            .contains("recovery load lacks exact size-triggered group-commit batching")),
         "{errors:?}"
     );
 }
