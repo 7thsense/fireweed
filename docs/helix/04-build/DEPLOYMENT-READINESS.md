@@ -38,11 +38,11 @@ rendering, and CI evidence actually cover.
 ## Current Release Boundary
 
 > **Version source of truth:** the workspace `Cargo.toml` `[workspace.package] version`
-> (currently **0.19.4**) is canonical for the current release line. Release tags follow it
-> (`v0.19.4`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
+> (currently **0.19.5**) is canonical for the current release line. Release tags follow it
+> (`v0.19.5`, …). Version-specific docs under `docs/releases/` and `docs/perf/` are
 > historical snapshots of the version in their filename and are not statements about the current line.
 
-The v0.19.4 release packaging ships the `pqueue-service` RESP binary, container
+The v0.19.5 release packaging ships the `pqueue-service` RESP binary, container
 image, Helm chart, binary archive, checksums, and release evidence. The service
 runtime (`crates/pqueue-server/src/env_config.rs`) currently wires these
 executable combinations:
