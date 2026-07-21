@@ -167,7 +167,8 @@ impl<T> RespBackend for T where
 }
 
 pub trait RespHooks: Send + Sync + 'static {
-    /// Optional live-routing hook. Default single-node/backward-compatible behavior serves locally.
+    /// Optional live-routing hook. Routing is queue-scoped: one decision authorizes one atomic batch of
+    /// contiguous commands for the same queue. Default single-node/backward-compatible behavior serves locally.
     fn route_command(
         &self,
         _name: &str,
@@ -179,7 +180,8 @@ pub trait RespHooks: Send + Sync + 'static {
         std::future::ready(Ok(RouteDecision::Serve))
     }
 
-    /// Optional ownership fence hook for queue writes. Default backends run the degenerate sole-owner path.
+    /// Optional cached ownership epoch for queue writes. One lookup fences one atomic same-queue batch;
+    /// the backend validates the epoch again at commit. Default backends run the degenerate sole-owner path.
     fn expected_epoch_for_write(
         &self,
         _shard: &QueueKey,
@@ -713,55 +715,34 @@ async fn dispatch_simple_xadd_batch<B: RespBackend, H: RespHooks>(
     state: &Arc<ServerState>,
     commands: &[Vec<Vec<u8>>],
 ) -> Vec<Resp> {
+    dispatch_simple_xadd_batch_at(backend.as_ref(), hooks.as_ref(), state.now(), commands).await
+}
+
+async fn dispatch_simple_xadd_batch_at<B: PushPort, H: RespHooks>(
+    backend: &B,
+    hooks: &H,
+    now: UtcTimestamp,
+    commands: &[Vec<Vec<u8>>],
+) -> Vec<Resp> {
     let parsed: Vec<_> = commands
         .iter()
         .map(|args| parse_xadd(args).expect("buffered XADD window contains parsed commands"))
         .collect();
     let shard = parsed[0].shard.clone();
-    let now = state.now();
-    let mut replies = Vec::with_capacity(commands.len());
-    let mut pending_specs = Vec::new();
-    let mut pending_epoch = None;
-    for (args, parsed) in commands.iter().zip(parsed) {
-        let admission = xadd_admission(hooks.as_ref(), args, &shard, now).await;
-        let epoch = match admission {
-            Ok(epoch) => epoch,
-            Err(reply) => {
-                if let Some(epoch) = pending_epoch.take() {
-                    replies.extend(
-                        push_xadd_batch(
-                            backend.as_ref(),
-                            &shard,
-                            std::mem::take(&mut pending_specs),
-                            now,
-                            epoch,
-                        )
-                        .await,
-                    );
-                }
-                replies.push(reply);
-                continue;
-            }
-        };
-        if pending_epoch.is_some_and(|pending| pending != epoch) {
-            replies.extend(
-                push_xadd_batch(
-                    backend.as_ref(),
-                    &shard,
-                    std::mem::take(&mut pending_specs),
-                    now,
-                    pending_epoch.take().unwrap(),
-                )
-                .await,
-            );
-        }
-        pending_epoch = Some(epoch);
-        pending_specs.push(parsed.spec);
-    }
-    if let Some(epoch) = pending_epoch {
-        replies.extend(push_xadd_batch(backend.as_ref(), &shard, pending_specs, now, epoch).await);
-    }
-    replies
+    let expected_epoch = match xadd_admission(hooks, &commands[0], &shard, now).await {
+        Ok(epoch) => epoch,
+        Err(reply) => return vec![reply; commands.len()],
+    };
+    // HELIX BatchPush semantics make this one atomic queue operation. The cached epoch is checked by
+    // the backend at commit, so a handoff cannot partially authorize or commit this batch.
+    push_xadd_batch(
+        backend,
+        &shard,
+        parsed.into_iter().map(|parsed| parsed.spec).collect(),
+        now,
+        expected_epoch,
+    )
+    .await
 }
 
 async fn dispatch<B: RespBackend, H: RespHooks>(
@@ -1932,12 +1913,14 @@ mod tests {
         calls: Mutex<Vec<usize>>,
     }
 
-    struct ChangingAdmission {
-        routes: Mutex<std::collections::VecDeque<RouteDecision>>,
-        epochs: Mutex<std::collections::VecDeque<Option<u64>>>,
+    #[derive(Default)]
+    struct CountingAdmission {
+        routes: AtomicUsize,
+        epochs: AtomicUsize,
+        unavailable: bool,
     }
 
-    impl RespHooks for ChangingAdmission {
+    impl RespHooks for CountingAdmission {
         async fn route_command(
             &self,
             _name: &str,
@@ -1946,7 +1929,12 @@ mod tests {
             _now: UtcTimestamp,
             _is_new_claim: bool,
         ) -> EngineResult<RouteDecision> {
-            Ok(self.routes.lock().unwrap().pop_front().unwrap())
+            self.routes.fetch_add(1, Ordering::SeqCst);
+            Ok(if self.unavailable {
+                RouteDecision::Unavailable
+            } else {
+                RouteDecision::Serve
+            })
         }
 
         async fn expected_epoch_for_write(
@@ -1955,7 +1943,8 @@ mod tests {
             _now: UtcTimestamp,
             _is_new_claim: bool,
         ) -> EngineResult<Option<u64>> {
-            Ok(self.epochs.lock().unwrap().pop_front().unwrap())
+            self.epochs.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(7))
         }
     }
 
@@ -2052,34 +2041,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_buffered_xadd_gets_its_own_route_and_epoch_admission() {
-        let shard = parse_shard(b"tenant:q").unwrap();
-        let args = plain_xadd(b"tenant:q", 1);
+    async fn xadd_batches_use_one_queue_admission_and_one_push_or_n_errors() {
         let now = UtcTimestamp::new(1, 0).unwrap();
-        let hooks = ChangingAdmission {
-            routes: Mutex::new(
-                [
-                    RouteDecision::Serve,
-                    RouteDecision::Serve,
-                    RouteDecision::Unavailable,
-                ]
-                .into(),
-            ),
-            epochs: Mutex::new([Some(7), Some(8)].into()),
+        for count in [1, 100, 1_000] {
+            let commands: Vec<_> = (0..count).map(|n| plain_xadd(b"tenant:q", n)).collect();
+            let hooks = CountingAdmission::default();
+            let spy = SpyPush::default();
+            let replies = dispatch_simple_xadd_batch_at(&spy, &hooks, now, &commands).await;
+            assert_eq!(hooks.routes.load(Ordering::SeqCst), 1);
+            assert_eq!(hooks.epochs.load(Ordering::SeqCst), 1);
+            assert_eq!(spy.calls.lock().unwrap().as_slice(), &[count]);
+            assert_eq!(replies.len(), count);
+        }
+
+        let commands: Vec<_> = (0..100).map(|n| plain_xadd(b"tenant:q", n)).collect();
+        let hooks = CountingAdmission {
+            unavailable: true,
+            ..CountingAdmission::default()
         };
+        let spy = SpyPush::default();
+        let replies = dispatch_simple_xadd_batch_at(&spy, &hooks, now, &commands).await;
+        assert_eq!(hooks.routes.load(Ordering::SeqCst), 1);
+        assert_eq!(hooks.epochs.load(Ordering::SeqCst), 0);
+        assert!(spy.calls.lock().unwrap().is_empty());
         assert_eq!(
-            xadd_admission(&hooks, &args, &shard, now).await,
-            Ok(Some(7))
+            replies,
+            vec![Resp::Error("ERR pqueue unavailable".into()); 100]
         );
-        assert_eq!(
-            xadd_admission(&hooks, &args, &shard, now).await,
-            Ok(Some(8))
-        );
-        assert_eq!(
-            xadd_admission(&hooks, &args, &shard, now).await,
-            Err(Resp::Error("ERR pqueue unavailable".into()))
-        );
-        assert!(hooks.epochs.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
