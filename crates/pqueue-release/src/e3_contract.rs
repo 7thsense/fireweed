@@ -20,6 +20,7 @@ pub const REQUIRED_E3_PROFILES: [&str; 2] = [
     "object_log_sqlite_projection",
 ];
 pub const REQUIRED_BOUNDS_MS: [u64; 4] = [1, 5, 20, 100];
+pub const MAX_RECORDER_OVERHEAD_RATIO: f64 = 1.02;
 pub const REQUIRED_TXN_ACS: [&str; 6] = [
     "AC-TXN-1", "AC-TXN-2", "AC-TXN-3", "AC-TXN-4", "AC-TXN-6", "AC-TXN-7",
 ];
@@ -738,6 +739,16 @@ fn require_complete_recorder_control(
         errors,
     );
     let commands = require_u64(row, &format!("{prefix}_commands_committed"), errors);
+    let disabled_throughput = row
+        .measurements
+        .values
+        .get(&format!("{prefix}_disabled_control_throughput_per_s"))
+        .and_then(serde_json::Value::as_f64);
+    let overhead_ratio = row
+        .measurements
+        .values
+        .get(&format!("{prefix}_recorder_overhead_ratio"))
+        .and_then(serde_json::Value::as_f64);
     if enabled.is_none()
         || enabled != disabled
         || enabled.is_some_and(|digest| !digest_valid(digest))
@@ -746,6 +757,16 @@ fn require_complete_recorder_control(
     {
         errors.push(E3ContractError(format!(
             "E3 ledger profile {} {prefix} requires matching complete recorder-control state fingerprints for every committed item",
+            row.backend_profile
+        )));
+    }
+    if disabled_throughput.is_none_or(|value| !value.is_finite() || value <= 0.0)
+        || overhead_ratio.is_none_or(|value| {
+            !value.is_finite() || value <= 0.0 || value > MAX_RECORDER_OVERHEAD_RATIO
+        })
+    {
+        errors.push(E3ContractError(format!(
+            "E3 ledger profile {} {prefix} must prove recorder overhead ratio <= {MAX_RECORDER_OVERHEAD_RATIO} against a positive interleaved disabled-recorder control",
             row.backend_profile
         )));
     }

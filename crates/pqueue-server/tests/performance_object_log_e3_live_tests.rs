@@ -76,6 +76,9 @@ use pqueue_server::{
 
 /// The release resident shape: the full TP-002 E3 10M-item snapshot-tail recovery measurement.
 const RELEASE_RESIDENT: u64 = 10_000_000;
+/// SP-04 slice 6: production recorder overhead versus an interleaved,
+/// byte-identical disabled-recorder control must stay within two percent.
+const MAX_RECORDER_OVERHEAD_RATIO: f64 = 1.02;
 const RELEASE_ACK_PUSHES: u64 = 100_000;
 const RELEASE_ACK_CONCURRENCY: u64 = 384;
 const RELEASE_LOAD_BATCH: u64 = 1_000;
@@ -802,6 +805,8 @@ where
     let throughput_per_s = pushes as f64 / enabled.wall_s.max(f64::MIN_POSITIVE);
     let disabled_control_throughput_per_s = pushes as f64 / disabled.wall_s.max(f64::MIN_POSITIVE);
     let recorder_overhead_ratio = enabled.wall_s / disabled.wall_s.max(f64::MIN_POSITIVE);
+    let recorder_degradation_met = recorder_overhead_ratio.is_finite()
+        && recorder_overhead_ratio <= MAX_RECORDER_OVERHEAD_RATIO;
     let ack_p50 = pct(&mut enabled.latencies, 0.50);
     let ack_p95 = pct(&mut enabled.latencies, 0.95);
     let ack_p99 = pct(&mut enabled.latencies, 0.99);
@@ -841,6 +846,7 @@ where
     let bar_met = throughput_progress_met
         && latency_distribution_met
         && load_shape_met
+        && recorder_degradation_met
         && recorder_control_logical_match;
 
     AckResult {
@@ -1625,6 +1631,17 @@ fn validate_e3_profile_matrix(runs: &[ProfileRun], require_bars: bool) -> Result
                 errors.push(format!(
                     "profile {} bound {} enabled/disabled recorder controls diverged logically",
                     run.backend_profile, result.label
+                ));
+            }
+            if !result.recorder_overhead_ratio.is_finite()
+                || result.recorder_overhead_ratio > MAX_RECORDER_OVERHEAD_RATIO
+            {
+                errors.push(format!(
+                    "profile {} bound {} recorder overhead ratio {} exceeds the interleaved-control limit {}",
+                    run.backend_profile,
+                    result.label,
+                    result.recorder_overhead_ratio,
+                    MAX_RECORDER_OVERHEAD_RATIO
                 ));
             }
         }
@@ -2603,6 +2620,20 @@ fn e3_matrix_rejects_recorder_control_divergence() {
         errors
             .iter()
             .any(|error| error.contains("recorder controls diverged logically")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn e3_matrix_rejects_unbounded_recorder_degradation() {
+    let mut run = synthetic_profile_run("object_log_sqlite_projection", "sqlite", true);
+    run.ack_results[0].recorder_overhead_ratio = MAX_RECORDER_OVERHEAD_RATIO + 0.001;
+    run.ack_results[0].bar_met = false;
+    let errors = validate_e3_profile_matrix(&[run], true).unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("recorder overhead ratio")),
         "{errors:?}"
     );
 }
