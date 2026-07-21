@@ -1544,8 +1544,8 @@ pub trait HistoricalProjectionRead: Send + Sync {
         query: F,
     ) -> impl std::future::Future<Output = EngineResult<T>> + Send
     where
-        T: Send,
-        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send;
+        T: Send + 'static,
+        F: FnOnce(&Self::AsOfProjection) -> EngineResult<T> + Send + 'static;
 }
 
 #[cfg(test)]

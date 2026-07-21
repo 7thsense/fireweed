@@ -21,6 +21,8 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+mod blocking_backend;
+
 use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
 use pqueue_core::WorkerId;
@@ -477,6 +479,7 @@ type ObjectLogPostgresBackend = pqueue_engine::ComposedBackend<
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 struct ObjectLogPostgresLifecycle {
     backend: Arc<ObjectLogPostgresBackend>,
+    executor: blocking_backend::OwnedBlockingExecutor,
     max_tail_commands: u64,
     stop: Arc<std::sync::atomic::AtomicBool>,
     flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -537,13 +540,14 @@ fn validate_objectlog_postgres_catalog(
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 impl ObjectLogPostgresLifecycle {
-    fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
+    fn verify_backend(
+        backend: &ObjectLogPostgresBackend,
+    ) -> EngineResult<EmbeddedProjectionVerification> {
         use pqueue_engine::{LogStore, ProjectionStore};
 
-        let projection = self.backend.with_projection(Clone::clone);
-        let definitions = self
-            .backend
-            .with_log(|log| validate_objectlog_postgres_catalog(log, &projection))?;
+        let projection = backend.with_projection(Clone::clone);
+        let definitions =
+            backend.with_log(|log| validate_objectlog_postgres_catalog(log, &projection))?;
         let mut projection_sequence = 0;
         let mut authoritative_sequence = 0;
         for definition in definitions {
@@ -553,7 +557,7 @@ impl ObjectLogPostgresLifecycle {
                     .map_or(0, |position| position.sequence),
             );
             authoritative_sequence = authoritative_sequence.max(
-                self.backend
+                backend
                     .with_log(|log| LogStore::high_water(log, &key))?
                     .map_or(0, |position| position.sequence),
             );
@@ -565,27 +569,27 @@ impl ObjectLogPostgresLifecycle {
         })
     }
 
-    fn rehydrate_now(&self) -> EngineResult<EmbeddedRehydration> {
+    fn rehydrate_backend(
+        backend: &ObjectLogPostgresBackend,
+        max_tail_commands: u64,
+    ) -> EngineResult<EmbeddedRehydration> {
         use pqueue_engine::{LogStore, ProjectionStore};
 
-        let mut projection = self.backend.with_projection(Clone::clone);
-        let definitions = self
-            .backend
-            .with_log(|log| validate_objectlog_postgres_catalog(log, &projection))?;
+        let mut projection = backend.with_projection(Clone::clone);
+        let definitions =
+            backend.with_log(|log| validate_objectlog_postgres_catalog(log, &projection))?;
         let mut replay = Vec::new();
         for definition in &definitions {
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             ProjectionStore::ensure_shard(&mut projection, definition)?;
             let mut from = projection.recovery_high_water(&key)?;
             loop {
-                let page = self
-                    .backend
-                    .with_log(|log| log.read_from(&key, from.clone(), 1_024))?;
+                let page = backend.with_log(|log| log.read_from(&key, from.clone(), 1_024))?;
                 replay.extend(page.entries);
-                if replay.len() as u64 > self.max_tail_commands {
+                if replay.len() as u64 > max_tail_commands {
                     return Err(EngineError::Storage(format!(
                         "projection rehydrate exceeds configured tail bound {}",
-                        self.max_tail_commands
+                        max_tail_commands
                     )));
                 }
                 match page.next {
@@ -599,7 +603,7 @@ impl ObjectLogPostgresLifecycle {
             let commands: Vec<_> = chunk.iter().map(|(_, command)| command.clone()).collect();
             projection.apply_recovery(&positions, &commands)?;
         }
-        let verification = self.verify_now()?;
+        let verification = Self::verify_backend(backend)?;
         Ok(EmbeddedRehydration {
             snapshot_used: false,
             tail_commands_replayed: replay.len() as u64,
@@ -619,18 +623,27 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
     }
 
     fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
-        Box::pin(async { self.verify_now() })
+        let backend = Arc::clone(&self.backend);
+        Box::pin(
+            self.executor
+                .run(move || Self::verify_backend(backend.as_ref())),
+        )
     }
 
     fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
-        Box::pin(async {
-            self.backend
-                .with_projection(pqueue_postgres::PostgresRelational::delete_projection)
-        })
+        let backend = Arc::clone(&self.backend);
+        Box::pin(self.executor.run(move || {
+            backend.with_projection(pqueue_postgres::PostgresRelational::delete_projection)
+        }))
     }
 
     fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
-        Box::pin(async { self.rehydrate_now() })
+        let backend = Arc::clone(&self.backend);
+        let max_tail_commands = self.max_tail_commands;
+        Box::pin(
+            self.executor
+                .run(move || Self::rehydrate_backend(backend.as_ref(), max_tail_commands)),
+        )
     }
 
     fn shutdown(&mut self) {
@@ -651,6 +664,7 @@ type ObjectLogSqliteBackend = pqueue_engine::ComposedBackend<
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 struct ObjectLogSqliteLifecycle {
     backend: Arc<ObjectLogSqliteBackend>,
+    executor: blocking_backend::OwnedBlockingExecutor,
     max_tail_commands: u64,
     stop: Arc<std::sync::atomic::AtomicBool>,
     flusher: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -791,8 +805,10 @@ fn verify_objectlog_sqlite_axes(
 
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
 impl ObjectLogSqliteLifecycle {
-    fn verify_now(&self) -> EngineResult<EmbeddedProjectionVerification> {
-        self.backend
+    fn verify_backend(
+        backend: &ObjectLogSqliteBackend,
+    ) -> EngineResult<EmbeddedProjectionVerification> {
+        backend
             .with_quiesced_log_and_projection_mut(|log, projection| {
                 // Async writes may have advanced the authoritative log while their bounded SQLite
                 // checkpoint remains queued. Drain every admitted chunk under the lifecycle lock before
@@ -816,59 +832,60 @@ impl ObjectLogSqliteLifecycle {
             })
     }
 
-    fn rehydrate_now(&self) -> EngineResult<EmbeddedRehydration> {
+    fn rehydrate_backend(
+        backend: &ObjectLogSqliteBackend,
+        max_tail_commands: u64,
+    ) -> EngineResult<EmbeddedRehydration> {
         use pqueue_engine::LogStore;
 
-        self.backend
-            .with_quiesced_log_and_projection_mut(|log, projection| {
-                projection.begin_durable_rebuild()?;
-                let definitions = LogStore::recover_definitions(log)?;
-                let mut replayed = 0_u64;
-                for definition in &definitions {
-                    let key =
-                        QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-                    projection
-                        .sqlite()
-                        .create_queue_projection(definition.clone())?;
-                    let mut from = None;
-                    loop {
-                        let page = log.read_from(&key, from.clone(), 1_024)?;
-                        replayed = replayed.saturating_add(page.entries.len() as u64);
-                        if replayed > self.max_tail_commands {
-                            return Err(EngineError::Storage(format!(
-                                "projection rehydrate exceeds configured tail bound {}",
-                                self.max_tail_commands
-                            )));
-                        }
-                        if !page.entries.is_empty() {
-                            let positions: Vec<_> = page
-                                .entries
-                                .iter()
-                                .map(|(position, _)| position.clone())
-                                .collect();
-                            let commands: Vec<_> = page
-                                .entries
-                                .iter()
-                                .map(|(_, command)| command.clone())
-                                .collect();
-                            projection
-                                .sqlite()
-                                .apply_committed_batch(&positions, &commands)?;
-                        }
-                        match page.next {
-                            Some(next) => from = Some(next),
-                            None => break,
-                        }
+        backend.with_quiesced_log_and_projection_mut(|log, projection| {
+            projection.begin_durable_rebuild()?;
+            let definitions = LogStore::recover_definitions(log)?;
+            let mut replayed = 0_u64;
+            for definition in &definitions {
+                let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+                projection
+                    .sqlite()
+                    .create_queue_projection(definition.clone())?;
+                let mut from = None;
+                loop {
+                    let page = log.read_from(&key, from.clone(), 1_024)?;
+                    replayed = replayed.saturating_add(page.entries.len() as u64);
+                    if replayed > max_tail_commands {
+                        return Err(EngineError::Storage(format!(
+                            "projection rehydrate exceeds configured tail bound {}",
+                            max_tail_commands
+                        )));
+                    }
+                    if !page.entries.is_empty() {
+                        let positions: Vec<_> = page
+                            .entries
+                            .iter()
+                            .map(|(position, _)| position.clone())
+                            .collect();
+                        let commands: Vec<_> = page
+                            .entries
+                            .iter()
+                            .map(|(_, command)| command.clone())
+                            .collect();
+                        projection
+                            .sqlite()
+                            .apply_committed_batch(&positions, &commands)?;
+                    }
+                    match page.next {
+                        Some(next) => from = Some(next),
+                        None => break,
                     }
                 }
-                let verification = verify_objectlog_sqlite_axes(log, projection, false)?;
-                projection.finish_durable_rebuild();
-                Ok(EmbeddedRehydration {
-                    snapshot_used: false,
-                    tail_commands_replayed: replayed,
-                    projection_sequence: verification.projection_sequence,
-                })
+            }
+            let verification = verify_objectlog_sqlite_axes(log, projection, false)?;
+            projection.finish_durable_rebuild();
+            Ok(EmbeddedRehydration {
+                snapshot_used: false,
+                tail_commands_replayed: replayed,
+                projection_sequence: verification.projection_sequence,
             })
+        })
     }
 }
 
@@ -883,20 +900,29 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
     }
 
     fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
-        Box::pin(async { self.verify_now() })
+        let backend = Arc::clone(&self.backend);
+        Box::pin(
+            self.executor
+                .run(move || Self::verify_backend(backend.as_ref())),
+        )
     }
 
     fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
-        Box::pin(async {
-            self.backend
-                .with_quiesced_log_and_projection_mut(|_, projection| {
-                    projection.delete_durable_projection()
-                })
-        })
+        let backend = Arc::clone(&self.backend);
+        Box::pin(self.executor.run(move || {
+            backend.with_quiesced_log_and_projection_mut(|_, projection| {
+                projection.delete_durable_projection()
+            })
+        }))
     }
 
     fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
-        Box::pin(async { self.rehydrate_now() })
+        let backend = Arc::clone(&self.backend);
+        let max_tail_commands = self.max_tail_commands;
+        Box::pin(
+            self.executor
+                .run(move || Self::rehydrate_backend(backend.as_ref(), max_tail_commands)),
+        )
     }
 
     fn shutdown(&mut self) {
@@ -2010,8 +2036,10 @@ impl<B: LibBackend> Pqueue<B> {
         query: F,
     ) -> EngineResult<T>
     where
-        T: Send,
-        F: FnOnce(&<B as HistoricalProjectionRead>::AsOfProjection) -> EngineResult<T> + Send,
+        T: Send + 'static,
+        F: FnOnce(&<B as HistoricalProjectionRead>::AsOfProjection) -> EngineResult<T>
+            + Send
+            + 'static,
     {
         self.backend.read_as_of(queue, position, query).await
     }
@@ -2509,8 +2537,9 @@ pub fn open_sqlite(
     path: &str,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Pqueue<impl LibBackend + use<>>> {
+    let backend = Arc::new(pqueue_sqlite::composed_sqlite_backend(path)?);
     Ok(Pqueue::new(
-        Arc::new(pqueue_sqlite::composed_sqlite_backend(path)?),
+        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
     ))
 }
@@ -2522,8 +2551,9 @@ pub fn open_objectlog(
     root: impl Into<std::path::PathBuf>,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Pqueue<impl LibBackend>> {
+    let backend = Arc::new(pqueue_objectlog::ObjectLogBackend::open(root)?);
     Ok(Pqueue::new(
-        Arc::new(pqueue_objectlog::ObjectLogBackend::open(root)?),
+        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
     ))
 }
@@ -2565,6 +2595,8 @@ pub fn open_embedded(
         .recover()?;
     let flush_interval = backend.group_commit_flush_interval_ms();
     let backend = Arc::new(backend);
+    let blocking_backend = blocking_backend::BlockingLibBackend::new(Arc::clone(&backend))?;
+    let lifecycle_executor = blocking_backend.executor();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
@@ -2590,6 +2622,7 @@ pub fn open_embedded(
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogPostgresLifecycle {
                 backend: Arc::clone(&backend),
+                executor: lifecycle_executor,
                 max_tail_commands: config.recovery.max_tail_commands,
                 stop,
                 flusher: Mutex::new(Some(flusher)),
@@ -2597,7 +2630,7 @@ pub fn open_embedded(
         }),
     };
     Ok(EmbeddedPqueue {
-        pqueue: Pqueue::new(backend, clock),
+        pqueue: Pqueue::new(Arc::new(blocking_backend), clock),
         lifecycle,
     })
 }
@@ -2654,6 +2687,8 @@ pub fn open_embedded_sqlite(
         .recover()?;
     let flush_interval = backend.group_commit_flush_interval_ms();
     let backend = Arc::new(backend);
+    let blocking_backend = blocking_backend::BlockingLibBackend::new(Arc::clone(&backend))?;
+    let lifecycle_executor = blocking_backend.executor();
     let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
@@ -2680,6 +2715,7 @@ pub fn open_embedded_sqlite(
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogSqliteLifecycle {
                 backend: Arc::clone(&backend),
+                executor: lifecycle_executor,
                 max_tail_commands: config.recovery.max_tail_commands,
                 stop,
                 flusher: Mutex::new(Some(flusher)),
@@ -2687,7 +2723,7 @@ pub fn open_embedded_sqlite(
         }),
     };
     Ok(EmbeddedPqueue {
-        pqueue: Pqueue::new(backend, clock),
+        pqueue: Pqueue::new(Arc::new(blocking_backend), clock),
         lifecycle,
     })
 }
@@ -2696,8 +2732,9 @@ pub fn open_embedded_sqlite(
 /// feature (opt-in). For a durable **multi-instance** deployment use [`open_postgres_coordinated`].
 #[cfg(feature = "postgres")]
 pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Pqueue<impl LibBackend>> {
+    let backend = Arc::new(pqueue_postgres::PostgresBackend::connect(url)?);
     Ok(Pqueue::new(
-        Arc::new(pqueue_postgres::PostgresBackend::connect(url)?),
+        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
     ))
 }
@@ -2717,6 +2754,7 @@ pub fn open_postgres_coordinated(
     let control_plane: Arc<dyn QueueControlPlane> = Arc::new(
         pqueue_postgres::PostgresControlPlane::connect(url, control_plane_config)?,
     );
+    let backend = Arc::new(blocking_backend::BlockingLibBackend::new(backend)?);
     Pqueue::with_control_plane(backend, clock, instance_id, control_plane)
 }
 
