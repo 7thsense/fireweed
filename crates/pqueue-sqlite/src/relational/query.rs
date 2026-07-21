@@ -1618,9 +1618,9 @@ mod reclaim_page_tests {
     static RECLAIM_SELECTS: AtomicUsize = AtomicUsize::new(0);
 
     fn count_reclaim_select(statement: &str) {
-        if statement.starts_with(
-            "SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items",
-        ) {
+        if statement
+            .starts_with("SELECT lease_expires_at,tenant_id,queue_id,item_id FROM pqueue_items")
+        {
             RECLAIM_SELECTS.fetch_add(1, Ordering::Relaxed);
         }
     }
