@@ -333,7 +333,9 @@ impl Inner {
         }
         let json = to_json(&env)?;
         let seq: i64 = st(tx.query_one(
-            "SELECT COALESCE(MAX(seq), -1) + 1 FROM log_entries WHERE tenant=$1 AND queue=$2",
+            "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,1) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET next_seq = log_counters.next_seq + 1 \
+             RETURNING next_seq - 1",
             &[&t, &q],
         ))?
         .get(0);
@@ -343,7 +345,8 @@ impl Inner {
         ))?;
         st(tx.execute(
             "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq",
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+             WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)",
             &[&t, &q, &epoch, &seq],
         ))?;
         st(tx.execute(
@@ -580,7 +583,12 @@ impl PgLogTxn<'_> {
             validate_gate_command(false, &env.command)?;
         }
         let (t, q) = parts(shard);
-        let mut positions = Vec::with_capacity(commands.len());
+        // Serialize the complete batch before opening the transaction. A malformed envelope therefore
+        // cannot hold the queue's epoch/counter rows while returning an application-level error.
+        let envelopes = commands
+            .iter()
+            .map(to_json)
+            .collect::<EngineResult<Vec<_>>>()?;
         let mut tx = st(self.client.transaction())?;
         // TD-003 fence: reject a non-current epoch (a stale owner) before writing anything.
         let epoch: i64 = st(tx.query_opt(
@@ -592,33 +600,43 @@ impl PgLogTxn<'_> {
         if expected_epoch != epoch as u64 {
             return Err(EngineError::EpochFenced);
         }
-        for env in commands {
-            let json = to_json(env)?;
-            let seq: i64 = st(tx.query_one(
-                "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,1) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET next_seq = log_counters.next_seq + 1 \
-                 RETURNING next_seq - 1",
-                &[&t, &q],
-            ))?
-            .get(0);
-            st(tx.execute(
-                "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) VALUES($1,$2,$3,$4,$5)",
-                &[&t, &q, &epoch, &seq, &json],
-            ))?;
-            st(tx.execute(
-                "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
-                 ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
-                 WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)",
-                &[&t, &q, &epoch, &seq],
-            ))?;
-            positions.push(CommandPosition::new(
-                shard.clone(),
-                epoch as u64,
-                seq as u64,
-            ));
+        if envelopes.is_empty() {
+            st(tx.commit())?;
+            return Ok(Vec::new());
         }
+
+        let batch_len = i64::try_from(envelopes.len())
+            .map_err(|_| EngineError::Invalid("postgres append batch is too large"))?;
+        // Reserve the batch's entire contiguous sequence range in one statement. The previous
+        // implementation repeated allocation + INSERT + high-water UPDATE once per command, turning one
+        // engine batch into 3N database round trips.
+        let first_seq: i64 = st(tx.query_one(
+            "INSERT INTO log_counters(tenant,queue,next_seq) VALUES($1,$2,$3) \
+             ON CONFLICT(tenant,queue) DO UPDATE \
+             SET next_seq = log_counters.next_seq + EXCLUDED.next_seq \
+             RETURNING next_seq - $3",
+            &[&t, &q, &batch_len],
+        ))?
+        .get(0);
+        let sequences = (first_seq..first_seq + batch_len).collect::<Vec<_>>();
+        st(tx.execute(
+            "INSERT INTO log_entries(tenant,queue,epoch,seq,envelope) \
+             SELECT $1,$2,$3,batch.seq,batch.envelope \
+             FROM UNNEST($4::bigint[],$5::text[]) AS batch(seq,envelope)",
+            &[&t, &q, &epoch, &sequences, &envelopes],
+        ))?;
+        let last_seq = first_seq + batch_len - 1;
+        st(tx.execute(
+            "INSERT INTO high_water(tenant,queue,epoch,seq) VALUES($1,$2,$3,$4) \
+             ON CONFLICT(tenant,queue) DO UPDATE SET epoch=EXCLUDED.epoch, seq=EXCLUDED.seq \
+             WHERE (high_water.epoch, high_water.seq) <= (EXCLUDED.epoch, EXCLUDED.seq)",
+            &[&t, &q, &epoch, &last_seq],
+        ))?;
         st(tx.commit())?;
-        Ok(positions)
+        Ok(sequences
+            .into_iter()
+            .map(|sequence| CommandPosition::new(shard.clone(), epoch as u64, sequence as u64))
+            .collect())
     }
 }
 
@@ -1337,21 +1355,33 @@ impl LogRead for PostgresBackend {
     ) -> impl std::future::Future<Output = EngineResult<CommandPage>> + Send {
         let result = (|| {
             let (t, q) = parts(shard);
+            if limit == 0 {
+                return Ok(CommandPage {
+                    entries: Vec::new(),
+                    next: None,
+                });
+            }
             let start = match &from {
                 Some(p) => p.sequence + 1,
                 None => 0,
             };
+            let start = i64::try_from(start)
+                .map_err(|_| EngineError::Invalid("log cursor exceeds postgres sequence range"))?;
+            let fetch_limit = i64::try_from(limit)
+                .unwrap_or(i64::MAX - 1)
+                .saturating_add(1);
             let mut g = self.inner.lock().expect("poisoned");
-            let total: i64 = st(g.client.query_one(
-                "SELECT COUNT(*) FROM log_entries WHERE tenant=$1 AND queue=$2",
-                &[&t, &q],
-            ))?
-            .get(0);
-            let rows = st(g.client.query(
+            // One lookahead row proves continuation without a history-wide COUNT(*). The database work
+            // for a page is bounded by the requested page size, independent of retained log length.
+            let mut rows = st(g.client.query(
                 "SELECT seq, epoch, envelope FROM log_entries \
                  WHERE tenant=$1 AND queue=$2 AND seq>=$3 ORDER BY seq LIMIT $4",
-                &[&t, &q, &(start as i64), &(limit as i64)],
+                &[&t, &q, &start, &fetch_limit],
             ))?;
+            let has_more = rows.len() > limit;
+            if has_more {
+                rows.pop();
+            }
             let mut entries = Vec::with_capacity(rows.len());
             // BQ-20: carry each entry's stored epoch (not a hardcoded 0) so a position replayed across an
             // epoch boundary keeps its true `(epoch, seq)` and the high-water guard never false-regresses.
@@ -1366,10 +1396,11 @@ impl LogRead for PostgresBackend {
                     env,
                 ));
             }
-            let consumed = start + entries.len() as u64;
-            let cursor_epoch = entries.last().map(|(p, _)| p.backend_epoch).unwrap_or(0);
-            let next = (consumed < total as u64)
-                .then(|| CommandPosition::new(shard.clone(), cursor_epoch, consumed));
+            // A continuation cursor is the last returned position; `read_from` adds one on the next call.
+            // Returning the next sequence itself would skip one command at every page boundary.
+            let next = has_more
+                .then(|| entries.last().map(|(position, _)| position.clone()))
+                .flatten();
             Ok(CommandPage { entries, next })
         })();
         std::future::ready(result)
@@ -1566,24 +1597,23 @@ impl SnapshotStore for PostgresBackend {
         let result = (|| {
             let (t, q) = parts(shard);
             let mut g = self.inner.lock().expect("poisoned");
-            let n: i64 = st(g.client.query_one(
-                "SELECT COUNT(*) FROM snapshots WHERE tenant=$1 AND queue=$2",
-                &[&t, &q],
-            ))?
-            .get(0);
-            let ref_id = format!("snap-{n}");
-            st(g.client.execute(
-                "INSERT INTO snapshots(tenant,queue,ref_id,epoch,seq,payload) \
-                 VALUES($1,$2,$3,$4,$5,$6)",
+            // Allocate the identifier from the table's sequence in the INSERT itself. Counting every
+            // retained snapshot made snapshot creation O(history) and raced across backend connections.
+            let ref_id: String = st(g.client.query_one(
+                "WITH allocated AS ( \
+                   SELECT nextval(pg_get_serial_sequence('snapshots','ord')) AS ord \
+                 ) INSERT INTO snapshots(tenant,queue,ref_id,ord,epoch,seq,payload) \
+                 SELECT $1,$2,'snap-' || allocated.ord,allocated.ord,$3,$4,$5 FROM allocated \
+                 RETURNING ref_id",
                 &[
                     &t,
                     &q,
-                    &ref_id,
                     &(position.backend_epoch as i64),
                     &(position.sequence as i64),
                     &snapshot.payload,
                 ],
-            ))?;
+            ))?
+            .get(0);
             Ok(SnapshotRef {
                 queue: shard.clone(),
                 position,
@@ -1780,6 +1810,83 @@ impl HistoricalProjectionRead for PostgresBackend {
             from = page.next;
         }
         query(&as_of)
+    }
+}
+
+#[cfg(test)]
+mod batching_structure_tests {
+    #[test]
+    fn raw_append_uses_a_fixed_statement_set_for_any_nonempty_batch() {
+        let source = include_str!("lib.rs");
+        let append = source
+            .split("impl PgLogTxn<'_>")
+            .nth(1)
+            .expect("PgLogTxn implementation")
+            .split("struct PgProjectionTxn")
+            .next()
+            .expect("PgLogTxn body");
+
+        // One fence read + one range allocation + one vector insert + one high-water update. Commands
+        // are serialized in memory, and the only command loop is validation; SQL never appears inside it.
+        assert_eq!(append.matches("tx.query_opt(").count(), 1);
+        assert_eq!(append.matches("tx.query_one(").count(), 1);
+        assert_eq!(append.matches("tx.execute(").count(), 2);
+        assert!(append.contains("FROM UNNEST($4::bigint[],$5::text[])"));
+        let sql_tail = append
+            .split("let batch_len")
+            .nth(1)
+            .expect("set-based append tail");
+        assert!(!sql_tail.contains("for env in commands"));
+
+        // The shape is invariant for 1, 100, or 1,000 records; only the two bound arrays grow.
+        let statement_count = |batch_len: usize| 1 + usize::from(batch_len > 0) * 3;
+        assert_eq!(statement_count(1), 4);
+        assert_eq!(statement_count(100), 4);
+        assert_eq!(statement_count(1_000), 4);
+    }
+
+    #[test]
+    fn request_id_push_allocates_from_the_durable_counter_without_a_log_scan() {
+        let source = include_str!("lib.rs");
+        let request_push = source
+            .split("fn commit_request_id_push_locked(")
+            .nth(1)
+            .expect("request-id push implementation")
+            .split("fn rebuild_all(")
+            .next()
+            .expect("request-id push body");
+        assert!(request_push.contains("INSERT INTO log_counters"));
+        assert!(!request_push.contains("MAX(seq)"));
+    }
+
+    #[test]
+    fn log_pages_use_one_bounded_lookahead_query_without_counting_history() {
+        let source = include_str!("lib.rs");
+        let read = source
+            .split("impl LogRead for PostgresBackend")
+            .nth(1)
+            .expect("PostgresBackend LogRead implementation")
+            .split("impl ProjectionRead for PostgresBackend")
+            .next()
+            .expect("LogRead body");
+        assert_eq!(read.matches("g.client.query(").count(), 1);
+        assert!(!read.contains("\"SELECT COUNT(*)"));
+        assert!(read.contains("saturating_add(1)"));
+        assert!(read.contains("rows.len() > limit"));
+    }
+
+    #[test]
+    fn snapshot_ids_are_sequence_allocated_without_counting_retained_snapshots() {
+        let source = include_str!("lib.rs");
+        let write = source
+            .split("impl SnapshotStore for PostgresBackend")
+            .nth(1)
+            .expect("PostgresBackend SnapshotStore implementation")
+            .split("fn latest_snapshot(")
+            .next()
+            .expect("write_snapshot body");
+        assert!(write.contains("nextval(pg_get_serial_sequence('snapshots','ord'))"));
+        assert!(!write.contains("COUNT(*)"));
     }
 }
 mod manifest_pointer;

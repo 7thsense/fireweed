@@ -106,10 +106,20 @@ fn write_side_records_and_advance_instance_fence_persist_and_survive_reconnect()
             &backend,
             &shard,
             QueueCommand::WriteSideRecords(WriteSideRecordsCommand {
-                records: vec![SideRecord {
-                    key: b"state/run-1".to_vec(),
-                    payload: Bytes::from_static(b"opaque-bytes"),
-                }],
+                records: vec![
+                    SideRecord {
+                        key: b"state/run-1".to_vec(),
+                        payload: Bytes::from_static(b"superseded-in-batch"),
+                    },
+                    SideRecord {
+                        key: b"state/run-2".to_vec(),
+                        payload: Bytes::from_static(b"second-record"),
+                    },
+                    SideRecord {
+                        key: b"state/run-1".to_vec(),
+                        payload: Bytes::from_static(b"opaque-bytes"),
+                    },
+                ],
             }),
         )
         .await;
@@ -129,6 +139,11 @@ fn write_side_records_and_advance_instance_fence_persist_and_survive_reconnect()
     assert_eq!(
         read_side_record(&url, &schema, b"state/run-1"),
         Some(b"opaque-bytes".to_vec())
+    );
+    assert_eq!(
+        read_side_record(&url, &schema, b"state/run-2"),
+        Some(b"second-record".to_vec()),
+        "one vector statement must persist every distinct side-record key"
     );
     assert_eq!(read_instance_fence(&url, &schema, b"instance/a"), Some(7));
 
