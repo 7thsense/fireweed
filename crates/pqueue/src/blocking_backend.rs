@@ -23,15 +23,20 @@ const DEFAULT_PENDING_PER_WORKER: usize = 64;
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
 struct WorkerPool {
-    senders: Mutex<Option<Vec<mpsc::SyncSender<Job>>>>,
+    senders: Mutex<Option<WorkerSenders>>,
     _workers: Mutex<Option<Vec<JoinHandle<()>>>>,
+}
+
+struct WorkerSenders {
+    data: Vec<mpsc::SyncSender<Job>>,
+    coordination: mpsc::SyncSender<Job>,
 }
 
 /// Cloneable handle for non-port lifecycle operations that must use the same
 /// owned blocking boundary as queue operations.
 #[derive(Clone)]
 pub(crate) struct OwnedBlockingExecutor {
-    pool: &'static WorkerPool,
+    pool: Arc<WorkerPool>,
 }
 
 impl OwnedBlockingExecutor {
@@ -43,26 +48,37 @@ impl OwnedBlockingExecutor {
         T: Send + 'static,
         F: FnOnce() -> EngineResult<T> + Send + 'static,
     {
-        self.pool.submit(0, operation)
+        self.pool.submit_data(0, operation)
     }
 
-    /// Run a complete control-plane sequence on the worker adjacent to the
-    /// queue's data-plane worker. This keeps both on the shared bounded pool
-    /// while allowing the sequence to synchronously await queue-affine backend
-    /// fencing without recursively submitting to its own worker.
+    /// Run non-queue-addressed control-plane work on the reserved lane.
     #[cfg(any(feature = "postgres", test))]
-    pub(crate) fn run_for_control_plane_queue<T, F>(
+    pub(crate) fn run_control_plane<T, F>(
         &self,
-        queue: &QueueKey,
         operation: F,
     ) -> impl Future<Output = EngineResult<T>> + Send + use<T, F>
     where
         T: Send + 'static,
         F: FnOnce() -> EngineResult<T> + Send + 'static,
     {
-        let workers = self.pool.worker_count();
-        let data_worker = queue_worker_partition(queue, workers);
-        self.pool.submit((data_worker + 1) % workers, operation)
+        self.pool.submit_coordination(operation)
+    }
+
+    /// Run a complete control-plane sequence on the pool's reserved
+    /// coordination lane. Data-plane work is never submitted to this lane, so
+    /// the sequence can synchronously await queue-affine storage fencing
+    /// without creating a cycle when every data lane is occupied.
+    #[cfg(any(feature = "postgres", test))]
+    pub(crate) fn run_for_control_plane_queue<T, F>(
+        &self,
+        _queue: &QueueKey,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
+    {
+        self.pool.submit_coordination(operation)
     }
 }
 
@@ -73,8 +89,8 @@ impl WorkerPool {
                 "blocking worker bounds must be non-zero",
             ));
         }
-        let mut senders = Vec::with_capacity(worker_count);
-        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count);
+        let mut data_senders = Vec::with_capacity(worker_count);
+        let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count + 1);
         for index in 0..worker_count {
             let (sender, receiver) = mpsc::sync_channel::<Job>(pending_per_worker);
             let worker = match std::thread::Builder::new()
@@ -86,23 +102,45 @@ impl WorkerPool {
                 }) {
                 Ok(worker) => worker,
                 Err(error) => {
-                    drop(senders);
+                    drop(data_senders);
                     for worker in workers {
                         let _ = worker.join();
                     }
                     return Err(EngineError::Storage(error.to_string()));
                 }
             };
-            senders.push(sender);
+            data_senders.push(sender);
             workers.push(worker);
         }
+        let (coordination_sender, coordination_receiver) =
+            mpsc::sync_channel::<Job>(pending_per_worker);
+        let coordination_worker = match std::thread::Builder::new()
+            .name("pqueue-library-coordination".into())
+            .spawn(move || {
+                while let Ok(job) = coordination_receiver.recv() {
+                    job();
+                }
+            }) {
+            Ok(worker) => worker,
+            Err(error) => {
+                drop(data_senders);
+                for worker in workers {
+                    let _ = worker.join();
+                }
+                return Err(EngineError::Storage(error.to_string()));
+            }
+        };
+        workers.push(coordination_worker);
         Ok(Self {
-            senders: Mutex::new(Some(senders)),
+            senders: Mutex::new(Some(WorkerSenders {
+                data: data_senders,
+                coordination: coordination_sender,
+            })),
             _workers: Mutex::new(Some(workers)),
         })
     }
 
-    fn submit<T, F>(
+    fn submit_data<T, F>(
         &self,
         worker: usize,
         operation: F,
@@ -117,22 +155,49 @@ impl WorkerPool {
             .expect("blocking worker senders poisoned")
             .as_ref()
             .ok_or(EngineError::Unavailable)
-            .map(|senders| senders[worker % senders.len()].clone());
-        async move {
-            let (result_tx, result_rx) = futures::channel::oneshot::channel();
-            let job: Job = Box::new(move || {
-                let _ = result_tx.send(operation());
-            });
-            sender?.try_send(job).map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => EngineError::Backpressure {
-                    resource: "embedded durable operations",
-                },
-                mpsc::TrySendError::Disconnected(_) => EngineError::Unavailable,
-            })?;
-            result_rx.await.map_err(|_| {
-                EngineError::Storage("embedded durable operation worker stopped".into())
-            })?
-        }
+            .map(|senders| senders.data[worker % senders.data.len()].clone());
+        Self::submit_to(sender, operation)
+    }
+
+    fn submit_coordination<T, F>(
+        &self,
+        operation: F,
+    ) -> impl Future<Output = EngineResult<T>> + Send + use<T, F>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
+    {
+        let sender = self
+            .senders
+            .lock()
+            .expect("blocking worker senders poisoned")
+            .as_ref()
+            .ok_or(EngineError::Unavailable)
+            .map(|senders| senders.coordination.clone());
+        Self::submit_to(sender, operation)
+    }
+
+    async fn submit_to<T, F>(
+        sender: EngineResult<mpsc::SyncSender<Job>>,
+        operation: F,
+    ) -> EngineResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> EngineResult<T> + Send + 'static,
+    {
+        let (result_tx, result_rx) = futures::channel::oneshot::channel();
+        let job: Job = Box::new(move || {
+            let _ = result_tx.send(operation());
+        });
+        sender?.try_send(job).map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => EngineError::Backpressure {
+                resource: "embedded durable operations",
+            },
+            mpsc::TrySendError::Disconnected(_) => EngineError::Unavailable,
+        })?;
+        result_rx
+            .await
+            .map_err(|_| EngineError::Storage("embedded durable operation worker stopped".into()))?
     }
 
     fn worker_count(&self) -> usize {
@@ -140,7 +205,7 @@ impl WorkerPool {
             .lock()
             .expect("blocking worker senders poisoned")
             .as_ref()
-            .map_or(1, Vec::len)
+            .map_or(1, |senders| senders.data.len())
     }
 
     #[cfg(test)]
@@ -162,13 +227,14 @@ impl WorkerPool {
     }
 }
 
-fn shared_worker_pool() -> EngineResult<&'static WorkerPool> {
-    static POOL: OnceLock<Result<WorkerPool, String>> = OnceLock::new();
+fn shared_worker_pool() -> EngineResult<Arc<WorkerPool>> {
+    static POOL: OnceLock<Result<Arc<WorkerPool>, String>> = OnceLock::new();
     match POOL.get_or_init(|| {
         WorkerPool::new(DEFAULT_WORKERS, DEFAULT_PENDING_PER_WORKER)
+            .map(Arc::new)
             .map_err(|error| error.to_string())
     }) {
-        Ok(pool) => Ok(pool),
+        Ok(pool) => Ok(Arc::clone(pool)),
         Err(error) => Err(EngineError::Storage(error.clone())),
     }
 }
@@ -176,7 +242,7 @@ fn shared_worker_pool() -> EngineResult<&'static WorkerPool> {
 /// Complete, bounded blocking boundary for the library's full backend surface.
 pub(crate) struct BlockingLibBackend<B: super::LibBackend + 'static> {
     inner: Arc<B>,
-    pool: &'static WorkerPool,
+    pool: Arc<WorkerPool>,
 }
 
 impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
@@ -188,7 +254,9 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
     }
 
     pub(crate) fn executor(&self) -> OwnedBlockingExecutor {
-        OwnedBlockingExecutor { pool: self.pool }
+        OwnedBlockingExecutor {
+            pool: Arc::clone(&self.pool),
+        }
     }
 
     fn worker(queue: &QueueKey, workers: usize) -> usize {
@@ -206,9 +274,9 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
         F: FnOnce(Arc<B>) -> Fut + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
-        let pool = self.pool;
+        let pool = Arc::clone(&self.pool);
         let worker = Self::worker(&queue, pool.worker_count());
-        pool.submit(worker, move || {
+        pool.submit_data(worker, move || {
             futures::executor::block_on(operation(inner))
         })
     }
@@ -838,7 +906,7 @@ mod tests {
         let pool = WorkerPool::new(1, 1).unwrap();
         let ran = Arc::new(AtomicBool::new(false));
         let ran_job = Arc::clone(&ran);
-        let mut future = Box::pin(pool.submit(0, move || {
+        let mut future = Box::pin(pool.submit_data(0, move || {
             std::thread::sleep(Duration::from_millis(20));
             ran_job.store(true, Ordering::Release);
             Ok(())
@@ -854,16 +922,16 @@ mod tests {
         let pool = WorkerPool::new(1, 1).unwrap();
         let (release_tx, release_rx) = mpsc::channel();
         let (started_tx, started_rx) = mpsc::channel();
-        let mut first = Box::pin(pool.submit(0, move || {
+        let mut first = Box::pin(pool.submit_data(0, move || {
             started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             Ok(())
         }));
         admit(&mut first);
         started_rx.recv().unwrap();
-        let mut second = Box::pin(pool.submit(0, || Ok(())));
+        let mut second = Box::pin(pool.submit_data(0, || Ok(())));
         admit(&mut second);
-        let rejected = pool.submit(0, || Ok(()));
+        let rejected = pool.submit_data(0, || Ok(()));
         assert!(matches!(
             futures::executor::block_on(rejected),
             Err(EngineError::Backpressure { .. })
@@ -887,7 +955,7 @@ mod tests {
             }
         });
         let worker_thread = pool
-            .submit(0, move || {
+            .submit_data(0, move || {
                 std::thread::sleep(Duration::from_millis(25));
                 Ok(std::thread::current().id())
             })
@@ -896,6 +964,117 @@ mod tests {
         ticker.await.unwrap();
         assert_ne!(worker_thread, reactor_thread);
         assert_eq!(ticks.load(Ordering::Relaxed), 32);
+        pool.shutdown();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ownership_establishes_cannot_cycle_when_every_data_lane_is_saturated() {
+        const DATA_LANES: usize = 4;
+        let pool = Arc::new(WorkerPool::new(DATA_LANES, DATA_LANES + 1).unwrap());
+        let reactor_thread = std::thread::current().id();
+        let (started_tx, started_rx) = mpsc::channel();
+        let mut releases = Vec::new();
+        let mut blockers: Vec<std::pin::Pin<Box<dyn Future<Output = EngineResult<()>> + Send>>> =
+            Vec::new();
+
+        // Occupy every data worker. Under the old adjacent-worker scheme, one
+        // establish per lane could then consume all data workers while each
+        // synchronously waited for fencing on another data worker.
+        for lane in 0..DATA_LANES {
+            let (release_tx, release_rx) = mpsc::channel();
+            releases.push(release_tx);
+            let started_tx = started_tx.clone();
+            let mut blocker = Box::pin(pool.submit_data(lane, move || {
+                started_tx.send(lane).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            }));
+            admit(&mut blocker);
+            blockers.push(blocker);
+        }
+        for _ in 0..DATA_LANES {
+            started_rx.recv().unwrap();
+        }
+
+        let completed = Arc::new(AtomicUsize::new(0));
+        let coordination_threads = Arc::new(Mutex::new(Vec::new()));
+        let data_threads = Arc::new(Mutex::new(Vec::new()));
+        let mut establishes: Vec<std::pin::Pin<Box<dyn Future<Output = EngineResult<()>> + Send>>> =
+            Vec::new();
+        for lane in 0..DATA_LANES {
+            let nested_pool = Arc::clone(&pool);
+            let completed = Arc::clone(&completed);
+            let coordination_threads = Arc::clone(&coordination_threads);
+            let data_threads = Arc::clone(&data_threads);
+            let mut establish = Box::pin(pool.submit_coordination(move || {
+                coordination_threads
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::current().id());
+                let data_thread = futures::executor::block_on(
+                    nested_pool.submit_data(lane, || Ok(std::thread::current().id())),
+                )?;
+                data_threads.lock().unwrap().push(data_thread);
+                completed.fetch_add(1, Ordering::Release);
+                Ok(())
+            }));
+            admit(&mut establish);
+            establishes.push(establish);
+        }
+
+        // Cancellation of the response waiter does not cancel the admitted
+        // register -> resolve -> acquire -> fence/confirm sequence.
+        drop(establishes.remove(0));
+
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let ticking = Arc::clone(&ticks);
+        let ticker = tokio::spawn(async move {
+            for _ in 0..32 {
+                ticking.fetch_add(1, Ordering::Relaxed);
+                tokio::task::yield_now().await;
+            }
+        });
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for establish in establishes {
+                establish.await?;
+            }
+            while completed.load(Ordering::Acquire) != DATA_LANES {
+                tokio::task::yield_now().await;
+            }
+            EngineResult::Ok(())
+        })
+        .await
+        .expect("reserved coordination lane deadlocked with saturated data lanes")
+        .unwrap();
+        for blocker in blockers {
+            blocker.await.unwrap();
+        }
+        ticker.await.unwrap();
+
+        assert_eq!(ticks.load(Ordering::Relaxed), 32);
+        let coordination_threads = coordination_threads.lock().unwrap();
+        assert_eq!(coordination_threads.len(), DATA_LANES);
+        assert!(
+            coordination_threads
+                .iter()
+                .all(|thread| *thread != reactor_thread)
+        );
+        assert!(
+            coordination_threads
+                .windows(2)
+                .all(|pair| pair[0] == pair[1])
+        );
+        assert!(
+            data_threads
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|thread| *thread != reactor_thread && *thread != coordination_threads[0])
+        );
+        drop(coordination_threads);
         pool.shutdown();
     }
 }

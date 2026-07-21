@@ -1441,7 +1441,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
         now: UtcTimestamp,
     ) -> EngineResult<Vec<pqueue_engine::LeaseRenewalOutcome>> {
         let control_plane = Arc::clone(&self.control_plane);
-        futures::executor::block_on(self.executor.run(move || {
+        futures::executor::block_on(self.executor.run_control_plane(move || {
             control_plane.heartbeat(&owner, now)?;
             control_plane.renew_queue_leases(&renewals, now)
         }))
