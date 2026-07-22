@@ -7,7 +7,7 @@
 //! prices, sensitivity/crossover table) and appends the E3 **cost-model** ledger row.
 //!
 //! Usage:
-//!   pqueue-cost-model [--out <doc.md>] [--ledger <ledger.jsonl>] [--print]
+//!   pqueue-cost-model [--out <doc.md>] [--ledger <ledger.jsonl>] [--print] [--granularity-only]
 //!
 //! Defaults: `--out docs/perf/tp002-e3-cost-model.md` and consumes the governed live E3 ledger. With
 //! `--ledger` it writes the eight release-tier E3 cost rows.
@@ -22,9 +22,9 @@ use std::process::ExitCode;
 
 use pqueue_release::LedgerRow;
 use pqueue_release::cost::{
-    CostComparison, ObjectLogCounts, PriceInputs, RecoveryMode, ReleaseCostInput,
-    WorkloadAssumptions, build_release_cost_rows, compute_comparison, release_cost_inputs,
-    validate_release_cost_rows,
+    CostComparison, GranularityAssumptions, ObjectLogCounts, PriceInputs, RecoveryMode,
+    ReleaseCostInput, WorkloadAssumptions, build_release_cost_rows, compute_comparison,
+    estimate_granularity, release_cost_inputs, validate_release_cost_rows,
 };
 
 const REPRO_COMMAND: &str = "cargo run -p pqueue-release --bin pqueue-cost-model -- \
@@ -36,6 +36,7 @@ fn main() -> ExitCode {
     let mut ledger: Option<PathBuf> = None;
     let mut e3_ledger = PathBuf::from("docs/perf/evidence/tp002-e3-objectlog-minio-release.jsonl");
     let mut print = false;
+    let mut granularity_only = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -53,11 +54,29 @@ fn main() -> ExitCode {
                 None => return fail("--e3-ledger requires a path"),
             },
             "--print" => print = true,
+            "--granularity-only" => granularity_only = true,
             other => return fail(&format!("unknown argument: {other}")),
         }
     }
 
     let prices = PriceInputs::adr_001_us_east_1();
+    if granularity_only {
+        if ledger.is_some() {
+            return fail("--ledger cannot be combined with --granularity-only");
+        }
+        let doc = render_granularity_artifact(&prices);
+        if print {
+            println!("{doc}");
+        }
+        if let Err(error) = atomic_write(&out, doc.as_bytes()) {
+            return fail(&format!("cannot write {out:?}: {error}"));
+        }
+        eprintln!(
+            "wrote object-granularity economics artifact: {}",
+            out.display()
+        );
+        return ExitCode::SUCCESS;
+    }
     let workload = WorkloadAssumptions::tp002_e3_push_baseline();
     let source_rows = match read_rows(&e3_ledger) {
         Ok(rows) => rows,
@@ -280,12 +299,202 @@ fn sensitivity(base_w: &WorkloadAssumptions, base_p: &PriceInputs) -> Vec<Scenar
     ]
 }
 
+fn granularity_scenarios() -> Vec<GranularityAssumptions> {
+    let scenario = |label: &str,
+                    command_rate_per_s,
+                    input_batch_commands,
+                    encoded_command_bytes,
+                    target_segment_bytes,
+                    max_latency_ms,
+                    starting_recovery_index_entries| GranularityAssumptions {
+        label: label.into(),
+        active_queue_count: 1.0,
+        command_rate_per_s,
+        input_batch_commands,
+        encoded_command_bytes,
+        target_segment_bytes,
+        max_latency_ms,
+        starting_recovery_index_entries,
+        billing_window_hours: pqueue_release::cost::HOURS_PER_MONTH,
+        recovery_window_hours: 24.0,
+    };
+    let mut scenarios = vec![
+        scenario(
+            "default, low-rate scalar input",
+            10.0,
+            1.0,
+            1_024.0,
+            262_144.0,
+            20.0,
+            0,
+        ),
+        scenario(
+            "default, sustained; 100-command downstream batches",
+            1_000.0,
+            100.0,
+            1_024.0,
+            262_144.0,
+            20.0,
+            0,
+        ),
+        scenario(
+            "default, hot; 1000-command downstream batches",
+            20_000.0,
+            1_000.0,
+            1_024.0,
+            262_144.0,
+            20.0,
+            0,
+        ),
+        scenario(
+            "default, 16 KiB commands; 100-command batches",
+            1_000.0,
+            100.0,
+            16_384.0,
+            262_144.0,
+            20.0,
+            0,
+        ),
+        scenario(
+            "100 ms bound; 100-command batches",
+            1_000.0,
+            100.0,
+            1_024.0,
+            262_144.0,
+            100.0,
+            0,
+        ),
+        scenario(
+            "8 MiB target; 1000-command batches",
+            20_000.0,
+            1_000.0,
+            1_024.0,
+            8_388_608.0,
+            100.0,
+            0,
+        ),
+        scenario(
+            "hot scalar input; fresh queue",
+            20_000.0,
+            1.0,
+            1_024.0,
+            262_144.0,
+            20.0,
+            0,
+        ),
+        scenario(
+            "hot scalar input; aged queue",
+            20_000.0,
+            1.0,
+            1_024.0,
+            262_144.0,
+            20.0,
+            16_777_216,
+        ),
+    ];
+    let mut density = scenarios[0].clone();
+    density.label = "PRD density: 1000 queues at 10 cmd/s each".into();
+    density.active_queue_count = 1_000.0;
+    scenarios.insert(1, density);
+    scenarios
+}
+
 fn winner(c: &CostComparison) -> &'static str {
     if c.objectlog_wins {
         "object_log"
     } else {
         "postgres"
     }
+}
+
+fn render_granularity_artifact(p: &PriceInputs) -> String {
+    let mut output = String::new();
+    let _ = writeln!(
+        output,
+        "# TP-002 — object-log granularity PUT and payload-storage sensitivity\n"
+    );
+    let _ = writeln!(
+        output,
+        "This document is GENERATED from explicit workload assumptions. It is modelled sensitivity, not \
+         measured release evidence. Regenerate it with:\n\n```\ncargo run -p pqueue-release --bin \
+         pqueue-cost-model -- --granularity-only --out \
+         docs/perf/tp002-objectlog-granularity-economics.md\n```\n"
+    );
+    render_granularity_section(&mut output, p);
+    let _ = writeln!(
+        output,
+        "## Price provenance\n\n- {}\n- {}\n",
+        p.instance_source, p.iops_source
+    );
+    output
+}
+
+fn render_granularity_section(s: &mut String, p: &PriceInputs) {
+    let _ = writeln!(s, "## Workload-driven object granularity\n");
+    let _ = writeln!(
+        s,
+        "This table is **fixed-batch, regular-arrival sensitivity**, not measured release evidence or a \
+         universal prediction. It models the real downstream primitive explicitly: \
+         `commands/segment = min(batch * ceil(target bytes / batch bytes), batch * \
+         ceil(commands arriving inside latency bound / batch))`. This admits target overshoot by a whole \
+         downstream batch and assumes a due flush wins ties at the exact deadline. Real arrival and batch \
+         distributions must come from E3 counters. The production \
+         defaults are `PQUEUE_SEGMENT_TARGET_BYTES=262144` and \
+         `PQUEUE_SEGMENT_MAX_LATENCY_MS=20`. Steady successful non-genesis PUT amplification is derived from \
+         the current authority-head algorithm: segment + manifest candidate + versioned head + one \
+         copy-on-write node per recovery-index level + one retirement marker, or `5 + resulting index \
+         height` on an ordinary post-genesis append. A root-height transition reuses the old root and omits \
+         that retirement marker. The calculator integrates fanout-64 height transitions from each scenario's \
+         starting lifetime entry count across all per-queue seals in the billing window; it does not hold \
+         height constant. Queue initialization, fences, retries, and maintenance remain measured-only terms. Storage bytes \
+         are uncompressed command \
+         payload and exclude framing and metadata overhead; measured E3 primitive and byte counters remain \
+         authoritative for releases. Queue count is explicit because independent queues cannot share a \
+         segment; fleet request and byte totals are the per-queue shape multiplied by active queues.\n"
+    );
+    let _ = writeln!(
+        s,
+        "| Scenario | active queues | cmd/s/queue | input batch | encoded bytes/cmd | target | bound | starting index entries | ending height | avg PUT/seal | trigger | cmd/segment | mean segment | fill | PUT requests/month | PUT $/month | PUT $/B commands | ingress GB/month | retained payload 24h GB | payload storage $/month |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    );
+    for assumptions in granularity_scenarios() {
+        let estimate = estimate_granularity(&assumptions, p)
+            .expect("built-in granularity scenarios have positive finite inputs");
+        let _ = writeln!(
+            s,
+            "| {} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} ms | {} | {} | {:.2} | {} | {:.0} | {:.0} B | {:.1}% | {:.0} | ${:.2} | ${:.2} | {:.1} | {:.1} | ${:.2} |",
+            assumptions.label,
+            assumptions.active_queue_count,
+            assumptions.command_rate_per_s,
+            assumptions.input_batch_commands,
+            assumptions.encoded_command_bytes,
+            assumptions.target_segment_bytes,
+            assumptions.max_latency_ms,
+            assumptions.starting_recovery_index_entries,
+            estimate.ending_recovery_index_height,
+            estimate.put_requests_per_segment,
+            estimate.seal_trigger,
+            estimate.commands_per_segment,
+            estimate.segment_bytes,
+            estimate.fill_ratio * 100.0,
+            estimate.put_requests_per_billing_window,
+            estimate.put_usd_per_billing_window,
+            estimate.put_usd_per_billion_commands,
+            estimate.ingress_gb_per_billing_window,
+            estimate.retained_log_gb,
+            estimate.payload_storage_usd_per_month,
+        );
+    }
+    let _ = writeln!(
+        s,
+        "\n**Interpretation:** granularity optimization means allowing more commands to share each segment \
+         object while respecting the operator-selected commit-latency bound. At low arrival rates the \
+         latency bound correctly wins and may produce one-command segments; the table makes that cost \
+         visible instead of pretending every queue fills its byte target. At high rates or with larger \
+         commands, the byte target wins. A large downstream primitive may overshoot the soft byte target; \
+         that is visible rather than hidden. Changing the target, bound, or downstream batch is an \
+         economic/latency decision, never a durability change. The full TP-002 E3 cost model—not this \
+         sensitivity table—adds measured metadata bytes, retries, GET/LIST/DELETE, recovery, and compute.\n"
+    );
 }
 
 fn render_artifact(
@@ -526,6 +735,8 @@ fn render_artifact(
     );
     let _ = writeln!(s);
 
+    render_granularity_section(&mut s, p);
+
     // Prices.
     let _ = writeln!(s, "## Cited price inputs\n");
     let _ = writeln!(s, "| Input | Value |\n|---|---|");
@@ -679,5 +890,19 @@ mod tests {
             report
                 .contains("Measured source revision:** `1111111111111111111111111111111111111111`")
         );
+    }
+
+    #[test]
+    fn granularity_report_exposes_defaults_and_write_amplification_assumptions() {
+        let report = render_granularity_artifact(&PriceInputs::adr_001_us_east_1());
+        assert!(report.contains("PQUEUE_SEGMENT_TARGET_BYTES=262144"));
+        assert!(report.contains("PQUEUE_SEGMENT_MAX_LATENCY_MS=20"));
+        assert!(report.contains("fixed-batch, regular-arrival sensitivity"));
+        assert!(report.contains("5 + resulting index"));
+        assert!(report.contains("does not hold height constant"));
+        assert!(report.contains("whole downstream batch"));
+        assert!(report.contains("retained payload 24h GB"));
+        assert!(report.contains("1000 queues at 10 cmd/s each"));
+        assert!(report.contains("independent queues cannot share a segment"));
     }
 }

@@ -438,6 +438,17 @@ failures in 82.38 seconds at 101,068 KiB maximum RSS. Phase-addressed outcomes c
 durable-effect-then-error/ambiguous create, CAS loss, stale LIST, incomplete page, and partial deletion.
 After final oracle/adapter reconciliation, the complete eight-test integration target also passed another
 100/100 process invocations with zero failures.
+SP-08 adds two enumerated composed-path cases and one honestly scoped log-level retry case to the same
+integration target. They drive the real `InMemoryControlPlane`, engine `acquire_and_fence`, and
+`SegmentedObjectLog` with logical time through `PendingFence`, failure-before-effect, effect-then-error,
+exact fence retry, lease expiry/reassignment, stale returned-session rejection, unrelated-queue progress
+before retry, log-level ambiguous manifest retry, and exact fresh reopen. The focused full target passes
+11/11 locally:
+
+```text
+cargo test -p pqueue-objectlog --test deterministic_storage_simulation
+```
+
 The typed corpus detects the two historical and five synthetic mutants with expected invariant identity.
 Untargeted discovery of both historical bugs, cross-host repeats, clean target-dir growth, and process-kill
 replay remain release evidence and were not claimed or run here. The suite has a precise repeat-suite entry

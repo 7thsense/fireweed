@@ -58,8 +58,9 @@ This is evidence-gated. Stop after slice 2 if replay is not deterministic across
 after slice 3 if the independent oracle cannot detect mutants injected into the system-under-test adapter or
 production transition layer. Required mutants reconstruct the historical group-seal `committed_at` race and
 stale manifest-deletion-watermark cache, plus synthetic stale-writer and delete-before-advance faults. Scope
-epoch handoff to the shipped single-owner plus manifest-CAS fencing surface; full acquire-to-fence handoff is
-forward-looking model coverage and carries no production mutation-detection claim.
+epoch handoff to the shipped single-owner plus manifest-CAS fencing surface. SP-08 now adds enumerated,
+real-component acquire-to-fence integration coverage; generated multi-owner handoff remains forward-looking
+model coverage and carries no production mutation-detection claim.
 
 SP-02 is deterministic model-based DST supporting AC-TXN-4. It feeds, but does not replace, TP-003's separate
 process-kill `fault_injection_harness_tests`: the model searches/shrinks durable schedules; the process harness
@@ -114,9 +115,14 @@ Focused evidence on Rust 1.92, local in-memory object store, seed `0x5eed`, trac
   passed another 100/100 process invocations with zero failures.
 
 The separate TP-003 process-kill matrix, cross-host 100-repeat evidence, and long release seed campaigns
-remain deferred to their existing release lanes. This iteration makes no claim about deterministic Tokio
-scheduling, full multi-owner acquire-to-fence handoff, or lease-level INV-1 beyond the storage prerequisite
-of one durable transition per request. The suite TOML is deliberately not added to a broad GitHub Actions
+remain deferred to their existing release lanes. SP-08 subsequently added two deterministic integration
+scenarios over the real `InMemoryControlPlane`, engine `acquire_and_fence`, and `SegmentedObjectLog`:
+failure-before-effect plus logical lease expiry/reassignment, and effect-then-error plus exact same-owner
+retry. They prove no owned session escapes before fence confirmation, a stale returned session is rejected,
+an unrelated queue advances before the failed queue retries, and fresh reopen is exact. A third honestly
+scoped log-level case retains ambiguous manifest retry coverage. This remains enumerated integration
+evidence, not generated lease-level mutation detection. The suite makes no claim
+about deterministic Tokio scheduling. The suite TOML is deliberately not added to a broad GitHub Actions
 workflow; the exact local/release command above is the integration seam until CI cost and clean target growth
 are measured. Therefore the spike is retained as a local GO-with-conditions, not a completed release gate.
 

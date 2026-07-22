@@ -2673,6 +2673,198 @@ pub mod cost {
         }
     }
 
+    /// Workload assumptions for the object-granularity sensitivity model. Unlike [`ObjectLogCounts`], these
+    /// are not measured release evidence: they make the relationship between arrival rate, encoded command
+    /// size, the byte target, and the latency seal explicit for capacity and cost planning.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct GranularityAssumptions {
+        pub label: String,
+        /// Independently segmented active queues with this same per-queue workload shape.
+        pub active_queue_count: f64,
+        /// Arrival rate for each queue, because queues cannot share a segment.
+        pub command_rate_per_s: f64,
+        /// Fixed downstream primitive batch size for this deterministic sensitivity case.
+        pub input_batch_commands: f64,
+        pub encoded_command_bytes: f64,
+        pub target_segment_bytes: f64,
+        pub max_latency_ms: f64,
+        /// Lifetime recovery-index entries already present at the start of the billing window.
+        pub starting_recovery_index_entries: u64,
+        pub billing_window_hours: f64,
+        pub recovery_window_hours: f64,
+    }
+
+    /// Derived steady-arrival object-log shape. Every field is a deterministic function of
+    /// [`GranularityAssumptions`] and the cited S3 PUT price.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct GranularityEstimate {
+        pub seal_trigger: &'static str,
+        pub put_requests_per_segment: f64,
+        pub ending_recovery_index_height: u8,
+        pub commands_per_segment: f64,
+        pub segment_bytes: f64,
+        pub fill_ratio: f64,
+        pub commands_per_billing_window: f64,
+        pub segments_per_billing_window: f64,
+        pub put_requests_per_billing_window: f64,
+        pub ingress_gb_per_billing_window: f64,
+        pub retained_log_gb: f64,
+        pub payload_storage_usd_per_month: f64,
+        pub put_usd_per_billing_window: f64,
+        pub put_usd_per_billion_commands: f64,
+    }
+
+    fn recovery_index_height(entries: u64) -> u8 {
+        let mut height = 0_u8;
+        let mut capacity = 64_u128;
+        while u128::from(entries) > capacity && height < 10 {
+            height += 1;
+            capacity = capacity.saturating_mul(64);
+        }
+        height
+    }
+
+    /// Integrate successful-seal PUT amplification across fanout-64 recovery-index height transitions.
+    /// Entry one writes segment + candidate + head + the first leaf (4 PUTs). Later appends write those
+    /// three base objects, one COW node per level, and one retirement marker: `5 + resulting height` on an
+    /// ordinary append. A root-height transition reuses the old root and has no retirement marker.
+    fn recovery_index_put_requests(start: u64, appends: u64) -> Result<(u64, u8), &'static str> {
+        let end = start
+            .checked_add(appends)
+            .ok_or("recovery-index entry count overflow")?;
+        let mut total = 0_u128;
+        if start == 0 && appends > 0 {
+            total += 4;
+        }
+        let first = start.saturating_add(1).max(2);
+        if first <= end {
+            let mut lower = 2_u64;
+            let mut upper = 64_u64;
+            for height in 0_u8..=10 {
+                let bucket_start = first.max(lower);
+                let bucket_end = end.min(upper);
+                if bucket_start <= bucket_end {
+                    let count = bucket_end - bucket_start + 1;
+                    total += u128::from(count) * u128::from(5_u8 + height);
+                }
+                if upper == u64::MAX || upper >= end {
+                    break;
+                }
+                lower = upper.saturating_add(1);
+                upper = upper.saturating_mul(64);
+            }
+
+            // A root-height transition reuses the old full root as a child. It writes the new right-edge
+            // path and new root but supersedes no node, so that one append emits no retirement marker.
+            let mut full_capacity = 64_u64;
+            while full_capacity < end {
+                let transition_entry = full_capacity.saturating_add(1);
+                if transition_entry >= first && transition_entry <= end {
+                    total = total.saturating_sub(1);
+                }
+                let next = full_capacity.saturating_mul(64);
+                if next == full_capacity {
+                    break;
+                }
+                full_capacity = next;
+            }
+        }
+        let total = u64::try_from(total).map_err(|_| "PUT request count exceeds u64")?;
+        Ok((total, recovery_index_height(end)))
+    }
+
+    /// Estimate steady-state group-commit granularity. The first command starts the latency clock; a segment
+    /// contains the smaller of (a) commands that fit under the byte target and (b) commands arriving before
+    /// the latency bound. A command larger than the target is still one legal segment and reports fill > 1.
+    pub fn estimate_granularity(
+        assumptions: &GranularityAssumptions,
+        prices: &PriceInputs,
+    ) -> Result<GranularityEstimate, &'static str> {
+        let positive_finite = |value: f64| value.is_finite() && value > 0.0;
+        if !positive_finite(assumptions.active_queue_count)
+            || !positive_finite(assumptions.command_rate_per_s)
+            || !positive_finite(assumptions.input_batch_commands)
+            || !positive_finite(assumptions.encoded_command_bytes)
+            || !positive_finite(assumptions.target_segment_bytes)
+            || !positive_finite(assumptions.max_latency_ms)
+            || !positive_finite(assumptions.billing_window_hours)
+            || !positive_finite(assumptions.recovery_window_hours)
+            || !positive_finite(prices.s3_put_per_1k)
+        {
+            return Err("granularity inputs and S3 PUT price must be finite and positive");
+        }
+
+        let input_batch_bytes =
+            assumptions.input_batch_commands * assumptions.encoded_command_bytes;
+        let size_limited_commands = (assumptions.target_segment_bytes / input_batch_bytes)
+            .ceil()
+            .max(1.0)
+            * assumptions.input_batch_commands;
+        let latency_limited_commands = (assumptions.command_rate_per_s
+            * assumptions.max_latency_ms
+            / 1000.0
+            / assumptions.input_batch_commands)
+            .ceil()
+            .max(1.0)
+            * assumptions.input_batch_commands;
+        let commands_per_segment = size_limited_commands.min(latency_limited_commands);
+        let seal_trigger = if size_limited_commands <= latency_limited_commands {
+            "size"
+        } else {
+            "latency"
+        };
+        let segment_bytes = commands_per_segment * assumptions.encoded_command_bytes;
+        let seconds = assumptions.billing_window_hours * 3600.0;
+        let commands_per_queue_window = assumptions.command_rate_per_s * seconds;
+        let commands_per_billing_window =
+            commands_per_queue_window * assumptions.active_queue_count;
+        let segments_per_queue_window = (commands_per_queue_window / commands_per_segment).ceil();
+        if segments_per_queue_window > u64::MAX as f64 {
+            return Err("per-queue segment count exceeds u64");
+        }
+        let (put_requests_per_queue_window, ending_recovery_index_height) =
+            recovery_index_put_requests(
+                assumptions.starting_recovery_index_entries,
+                segments_per_queue_window as u64,
+            )?;
+        let segments_per_billing_window =
+            segments_per_queue_window * assumptions.active_queue_count;
+        let put_requests_per_segment =
+            put_requests_per_queue_window as f64 / segments_per_queue_window;
+        let put_requests_per_billing_window =
+            put_requests_per_queue_window as f64 * assumptions.active_queue_count;
+        let put_usd_per_billing_window =
+            put_requests_per_billing_window / 1000.0 * prices.s3_put_per_1k;
+        let put_usd_per_billion_commands =
+            put_requests_per_segment / commands_per_segment * BILLION / 1000.0
+                * prices.s3_put_per_1k;
+
+        let retained_log_gb = assumptions.command_rate_per_s
+            * assumptions.active_queue_count
+            * assumptions.recovery_window_hours
+            * 3600.0
+            * assumptions.encoded_command_bytes
+            / BYTES_PER_GB;
+        Ok(GranularityEstimate {
+            seal_trigger,
+            put_requests_per_segment,
+            ending_recovery_index_height,
+            commands_per_segment,
+            segment_bytes,
+            fill_ratio: segment_bytes / assumptions.target_segment_bytes,
+            commands_per_billing_window,
+            segments_per_billing_window,
+            put_requests_per_billing_window,
+            ingress_gb_per_billing_window: commands_per_billing_window
+                * assumptions.encoded_command_bytes
+                / BYTES_PER_GB,
+            retained_log_gb,
+            payload_storage_usd_per_month: retained_log_gb * prices.s3_storage_per_gb_month,
+            put_usd_per_billing_window,
+            put_usd_per_billion_commands,
+        })
+    }
+
     /// Version tag for the cited price bundle. Validators reject rows from any older/different bundle.
     pub const PRICE_SOURCE_REVISION: &str = "aws-us-east-1-offers-2026-06-29";
     const E3_PROFILES: [&str; 2] = [
@@ -4019,6 +4211,118 @@ pub mod cost {
             assert_eq!(w.commands_per_item, 1.0);
             assert!(!w.pg_claim_finalize_in_scope);
             assert_eq!(w.pg_command_throughput_per_s(), w.pg_ingest_per_s);
+        }
+
+        #[test]
+        fn granularity_model_selects_latency_or_size_from_real_inputs() {
+            let prices = PriceInputs::adr_001_us_east_1();
+            let base = GranularityAssumptions {
+                label: "production defaults".into(),
+                active_queue_count: 1.0,
+                command_rate_per_s: 1_000.0,
+                input_batch_commands: 1.0,
+                encoded_command_bytes: 1_024.0,
+                target_segment_bytes: 262_144.0,
+                max_latency_ms: 20.0,
+                starting_recovery_index_entries: 0,
+                billing_window_hours: HOURS_PER_MONTH,
+                recovery_window_hours: 24.0,
+            };
+            let latency = estimate_granularity(&base, &prices).unwrap();
+            assert_eq!(latency.seal_trigger, "latency");
+            assert_eq!(latency.commands_per_segment, 20.0);
+            assert_eq!(latency.segment_bytes, 20_480.0);
+            assert!((latency.fill_ratio - 0.078125).abs() < f64::EPSILON);
+
+            let mut high_rate = base;
+            high_rate.command_rate_per_s = 20_000.0;
+            let size = estimate_granularity(&high_rate, &prices).unwrap();
+            assert_eq!(size.seal_trigger, "size");
+            assert_eq!(size.commands_per_segment, 256.0);
+            assert_eq!(size.segment_bytes, 262_144.0);
+            assert_eq!(size.fill_ratio, 1.0);
+            assert!(size.put_usd_per_billion_commands < latency.put_usd_per_billion_commands);
+
+            let mut batched = high_rate;
+            batched.input_batch_commands = 1_000.0;
+            let batched = estimate_granularity(&batched, &prices).unwrap();
+            assert_eq!(batched.seal_trigger, "size");
+            assert_eq!(batched.commands_per_segment, 1_000.0);
+            assert_eq!(batched.segment_bytes, 1_024_000.0);
+            assert!(
+                batched.fill_ratio > 1.0,
+                "whole input batch may overshoot target"
+            );
+        }
+
+        #[test]
+        fn granularity_model_exposes_low_rate_and_oversized_command_costs() {
+            let prices = PriceInputs::adr_001_us_east_1();
+            let low_rate = GranularityAssumptions {
+                label: "low rate".into(),
+                active_queue_count: 1.0,
+                command_rate_per_s: 10.0,
+                input_batch_commands: 1.0,
+                encoded_command_bytes: 1_024.0,
+                target_segment_bytes: 262_144.0,
+                max_latency_ms: 20.0,
+                starting_recovery_index_entries: 0,
+                billing_window_hours: HOURS_PER_MONTH,
+                recovery_window_hours: 24.0,
+            };
+            let low = estimate_granularity(&low_rate, &prices).unwrap();
+            assert_eq!(low.commands_per_segment, 1.0);
+            assert_eq!(low.seal_trigger, "latency");
+            assert!(low.put_usd_per_billion_commands > 35_000.0);
+            assert_eq!(low.ending_recovery_index_height, 4);
+
+            let mut fleet = low_rate.clone();
+            fleet.active_queue_count = 1_000.0;
+            let fleet = estimate_granularity(&fleet, &prices).unwrap();
+            assert_eq!(fleet.commands_per_segment, low.commands_per_segment);
+            assert_eq!(
+                fleet.put_requests_per_billing_window,
+                low.put_requests_per_billing_window * 1_000.0
+            );
+
+            let mut oversized = low_rate;
+            oversized.encoded_command_bytes = 524_288.0;
+            let large = estimate_granularity(&oversized, &prices).unwrap();
+            assert_eq!(large.commands_per_segment, 1.0);
+            assert_eq!(large.seal_trigger, "size");
+            assert_eq!(large.fill_ratio, 2.0);
+        }
+
+        #[test]
+        fn granularity_model_rejects_nonpositive_or_nonfinite_inputs() {
+            let prices = PriceInputs::adr_001_us_east_1();
+            let mut assumptions = GranularityAssumptions {
+                label: "invalid".into(),
+                active_queue_count: 1.0,
+                command_rate_per_s: 0.0,
+                input_batch_commands: 1.0,
+                encoded_command_bytes: 1_024.0,
+                target_segment_bytes: 262_144.0,
+                max_latency_ms: 20.0,
+                starting_recovery_index_entries: 0,
+                billing_window_hours: HOURS_PER_MONTH,
+                recovery_window_hours: 24.0,
+            };
+            assert!(estimate_granularity(&assumptions, &prices).is_err());
+            assumptions.command_rate_per_s = f64::INFINITY;
+            assert!(estimate_granularity(&assumptions, &prices).is_err());
+            assumptions.command_rate_per_s = 1.0;
+            assumptions.active_queue_count = 0.0;
+            assert!(estimate_granularity(&assumptions, &prices).is_err());
+        }
+
+        #[test]
+        fn granularity_model_integrates_recovery_index_height_transitions() {
+            assert_eq!(recovery_index_put_requests(0, 1).unwrap(), (4, 0));
+            assert_eq!(recovery_index_put_requests(0, 64).unwrap(), (319, 0));
+            assert_eq!(recovery_index_put_requests(0, 65).unwrap(), (324, 1));
+            assert_eq!(recovery_index_put_requests(262_144, 1).unwrap(), (7, 3));
+            assert!(recovery_index_put_requests(u64::MAX, 1).is_err());
         }
 
         #[test]

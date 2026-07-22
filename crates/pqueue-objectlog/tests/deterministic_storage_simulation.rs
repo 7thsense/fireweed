@@ -3,8 +3,13 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use pqueue_conformance::{envelope, item, qdef, shard};
-use pqueue_engine::{EngineError, EngineResult, PushCommand, QueueCommand};
+use pqueue_conformance::{envelope, item, qdef, shard, ts};
+use pqueue_core::{OwnerId, QueueDefinition, QueueId, TenantId};
+use pqueue_engine::{
+    ControlPlaneConfig, ControlPlaneStore, CreateQueueOutcome, EngineError, EngineResult,
+    InMemoryControlPlane, LeaseState, OwnershipOutcome, PushCommand, QueueCommand,
+    QueueControlPlane, QueueKey, acquire_and_fence,
+};
 use pqueue_objectlog::segmented::{
     BlobStore, FaultCutPoint, FaultHook, SegmentConfig, SegmentedObjectLog,
 };
@@ -1604,4 +1609,328 @@ fn fence_phase_matrix_records_authoritative_epoch_outcomes() {
             "epoch update must not be mislabeled as data manifest head for {result:?}"
         );
     }
+}
+
+fn second_queue() -> (QueueDefinition, QueueKey) {
+    let mut definition = qdef();
+    definition.queue_id = QueueId::new("q2").unwrap();
+    let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    (definition, queue)
+}
+
+fn command_ids<S: BlobStore>(
+    log: &SegmentedObjectLog<S>,
+    queue: &QueueKey,
+) -> EngineResult<Vec<String>> {
+    Ok(log
+        .read_from(queue, 0)?
+        .into_iter()
+        .map(|(_, envelope)| envelope.command_id.0)
+        .collect())
+}
+
+/// Test-only async control-plane port over the real synchronous segmented-log authority. This is the
+/// narrow adapter `acquire_and_fence` needs; it adds no state or alternate durability boundary.
+#[derive(Clone)]
+struct SegmentedControlPlaneStore {
+    log: Arc<SegmentedObjectLog<Arc<VersionedFakeStore>>>,
+}
+
+impl SegmentedControlPlaneStore {
+    fn new(log: Arc<SegmentedObjectLog<Arc<VersionedFakeStore>>>) -> Self {
+        Self { log }
+    }
+}
+
+impl ControlPlaneStore for SegmentedControlPlaneStore {
+    fn create_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
+        let result = self
+            .log
+            .create_queue(&definition)
+            .map(|()| CreateQueueOutcome {
+                created: true,
+                definition,
+            });
+        std::future::ready(result)
+    }
+
+    fn queue_definition(
+        &self,
+        _key: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<QueueDefinition>> + Send {
+        std::future::ready(Err(EngineError::NotFound))
+    }
+
+    fn list_queues(
+        &self,
+        _tenant: &TenantId,
+    ) -> impl std::future::Future<Output = EngineResult<Vec<QueueId>>> + Send {
+        std::future::ready(Ok(Vec::new()))
+    }
+
+    fn current_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        std::future::ready(self.log.current_epoch(shard))
+    }
+
+    fn acquire_epoch(
+        &self,
+        shard: &QueueKey,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        std::future::ready(self.log.acquire_epoch(shard, 0))
+    }
+
+    fn fence_epoch(
+        &self,
+        shard: &QueueKey,
+        target_epoch: u64,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        std::future::ready(self.log.fence_epoch(shard, target_epoch, 0))
+    }
+}
+
+/// SP08-2: deterministic composed-path coverage over the real lease state machine and segmented log.
+/// Logical timestamps deliberately cross the lease-expiry boundary without depending on host time.
+#[tokio::test(flavor = "current_thread")]
+async fn composed_acquire_fence_reassignment_is_fail_closed_and_queue_isolated() {
+    let queue_a = shard();
+    let (definition_b, queue_b) = second_queue();
+    let owner_a = OwnerId::new("owner-a").unwrap();
+    let owner_b = OwnerId::new("owner-b").unwrap();
+    let control_plane = InMemoryControlPlane::new(ControlPlaneConfig {
+        heartbeat_ttl_ms: 60_000,
+        lease_ttl_ms: 10_000,
+    });
+    control_plane.register_owner(&owner_a, ts(0)).unwrap();
+    control_plane.register_owner(&owner_b, ts(0)).unwrap();
+
+    let store = Arc::new(VersionedFakeStore::default());
+    let owner_a_log = Arc::new(SegmentedObjectLog::open(store.clone(), cfg()));
+    let owner_a_storage = SegmentedControlPlaneStore::new(owner_a_log.clone());
+    owner_a_log.create_queue(&qdef()).unwrap();
+    owner_a_log.create_queue(&definition_b).unwrap();
+    owner_a_log.fence_epoch(&queue_a, 0, 0).unwrap();
+    owner_a_log.fence_epoch(&queue_b, 0, 0).unwrap();
+
+    // The exact storage fence fails before effect. acquire_and_fence must not leak a session: it releases
+    // PendingFence back to non-serving Unassigned state and leaves the durable epoch unchanged.
+    store.set_head_phase(BlobPhase::EpochHead);
+    store.script(BlobPhase::EpochHead, StoreResult::FailureBeforeEffect);
+    assert!(matches!(
+        acquire_and_fence(&control_plane, &owner_a_storage, &queue_a, &owner_a, ts(0)).await,
+        Err(EngineError::Storage(_))
+    ));
+    let failed_lease = control_plane.lease(&queue_a).unwrap();
+    assert_eq!(failed_lease.state, LeaseState::Unassigned);
+    assert_eq!(failed_lease.assignment_epoch, 1);
+    assert_eq!(failed_lease.active_owner_id, None);
+    assert_eq!(owner_a_log.current_epoch(&queue_a).unwrap(), 0);
+    assert_eq!(
+        control_plane
+            .resolve_queue_owner(&queue_a, ts(0))
+            .unwrap()
+            .state,
+        LeaseState::Unassigned
+    );
+    let unfenced_view = SegmentedObjectLog::open(store.clone(), cfg());
+    unfenced_view.create_queue(&qdef()).unwrap();
+    unfenced_view
+        .enqueue(&queue_a, &[push(999, 0)], failed_lease.assignment_epoch, 0)
+        .unwrap();
+    store.set_head_phase(BlobPhase::ManifestHead);
+    assert_eq!(
+        unfenced_view.seal(&queue_a, failed_lease.assignment_epoch, 0),
+        Err(EngineError::EpochFenced),
+        "buffering is non-durable; the append linearization point must fail closed"
+    );
+    assert!(command_ids(&unfenced_view, &queue_a).unwrap().is_empty());
+
+    // Queue B advances while queue A is still failed/unowned, before queue A's retry converges.
+    store.set_head_phase(BlobPhase::EpochHead);
+    let OwnershipOutcome::Owned(first_b) =
+        acquire_and_fence(&control_plane, &owner_a_storage, &queue_b, &owner_b, ts(0))
+            .await
+            .unwrap()
+    else {
+        panic!("owner B must own queue B");
+    };
+    assert_eq!(first_b.fence_epoch, 1);
+    assert_eq!(
+        control_plane.lease(&queue_b).unwrap().state,
+        LeaseState::Assigned
+    );
+    owner_a_log
+        .enqueue(&queue_b, &[push(200, 1)], first_b.fence_epoch, 1)
+        .unwrap();
+    store.set_head_phase(BlobPhase::ManifestHead);
+    owner_a_log.seal(&queue_b, first_b.fence_epoch, 1).unwrap();
+    assert_eq!(command_ids(&owner_a_log, &queue_b).unwrap(), ["c200"]);
+
+    // Retrying the failed queue returns a session only after storage fencing and CP confirmation complete.
+    store.set_head_phase(BlobPhase::EpochHead);
+    let OwnershipOutcome::Owned(first_a) =
+        acquire_and_fence(&control_plane, &owner_a_storage, &queue_a, &owner_a, ts(0))
+            .await
+            .unwrap()
+    else {
+        panic!("owner A must own queue A after retry");
+    };
+    assert_eq!(first_a.lease_epoch, 2);
+    assert_eq!(first_a.fence_epoch, 2);
+    assert_eq!(
+        control_plane.lease(&queue_a).unwrap().state,
+        LeaseState::Assigned
+    );
+    assert_eq!(
+        owner_a_log.current_epoch(&queue_a).unwrap(),
+        first_a.fence_epoch
+    );
+    owner_a_log
+        .enqueue(&queue_a, &[push(1, 2)], first_a.fence_epoch, 2)
+        .unwrap();
+    store.set_head_phase(BlobPhase::ManifestHead);
+    owner_a_log.seal(&queue_a, first_a.fence_epoch, 2).unwrap();
+
+    // At logical t=20 the first lease is expired. The takeover session carries the new cached storage
+    // fence; the old returned session is rejected at the append linearization point.
+    control_plane.heartbeat(&owner_b, ts(20)).unwrap();
+    let owner_b_log = Arc::new(SegmentedObjectLog::open(store.clone(), cfg()));
+    owner_b_log.create_queue(&qdef()).unwrap();
+    let owner_b_storage = SegmentedControlPlaneStore::new(owner_b_log.clone());
+    store.set_head_phase(BlobPhase::EpochHead);
+    let OwnershipOutcome::Owned(second_a) =
+        acquire_and_fence(&control_plane, &owner_b_storage, &queue_a, &owner_b, ts(20))
+            .await
+            .unwrap()
+    else {
+        panic!("owner B must own expired queue A");
+    };
+    assert_eq!(second_a.lease_epoch, 3);
+    assert_eq!(second_a.fence_epoch, 3);
+
+    owner_a_log
+        .enqueue(&queue_a, &[push(99, 20_001)], first_a.fence_epoch, 20_001)
+        .unwrap();
+    store.set_head_phase(BlobPhase::ManifestHead);
+    assert_eq!(
+        owner_a_log.seal(&queue_a, first_a.fence_epoch, 20_001),
+        Err(EngineError::EpochFenced)
+    );
+
+    owner_b_log
+        .enqueue(&queue_a, &[push(2, 20_002)], second_a.fence_epoch, 20_002)
+        .unwrap();
+    store.set_head_phase(BlobPhase::ManifestHead);
+    owner_b_log
+        .seal(&queue_a, second_a.fence_epoch, 20_002)
+        .unwrap();
+
+    // A fresh process reconstructs the exact committed prefixes. The stale command never appears, and the
+    // unrelated queue's command and epoch survive the queue-A failure and reassignment schedule.
+    let reopened = SegmentedObjectLog::open(store, cfg());
+    reopened.create_queue(&qdef()).unwrap();
+    reopened.create_queue(&definition_b).unwrap();
+    assert_eq!(reopened.current_epoch(&queue_a).unwrap(), 3);
+    assert_eq!(reopened.current_epoch(&queue_b).unwrap(), 1);
+    assert_eq!(command_ids(&reopened, &queue_a).unwrap(), ["c1", "c2"]);
+    assert_eq!(command_ids(&reopened, &queue_b).unwrap(), ["c200"]);
+}
+
+/// An effect-then-error at the durable fence is resolved against the exact authority head before
+/// acquire_and_fence returns a confirmed session. Same-owner retry preserves that session's epochs.
+#[tokio::test(flavor = "current_thread")]
+async fn composed_ambiguous_fence_retry_returns_confirmed_session() {
+    let queue = shard();
+    let (definition_b, queue_b) = second_queue();
+    let owner = OwnerId::new("owner-a").unwrap();
+    let owner_b = OwnerId::new("owner-b").unwrap();
+    let control_plane = InMemoryControlPlane::new(ControlPlaneConfig {
+        heartbeat_ttl_ms: 60_000,
+        lease_ttl_ms: 10_000,
+    });
+    control_plane.register_owner(&owner, ts(0)).unwrap();
+    control_plane.register_owner(&owner_b, ts(0)).unwrap();
+
+    let store = Arc::new(VersionedFakeStore::default());
+    let log = Arc::new(SegmentedObjectLog::open(store.clone(), cfg()));
+    let storage = SegmentedControlPlaneStore::new(log.clone());
+    log.create_queue(&qdef()).unwrap();
+    log.create_queue(&definition_b).unwrap();
+    log.fence_epoch(&queue, 0, 0).unwrap();
+    log.fence_epoch(&queue_b, 0, 0).unwrap();
+    store.set_head_phase(BlobPhase::EpochHead);
+    store.script(BlobPhase::EpochHead, StoreResult::EffectThenError);
+    let OwnershipOutcome::Owned(session) =
+        acquire_and_fence(&control_plane, &storage, &queue, &owner, ts(0))
+            .await
+            .unwrap()
+    else {
+        panic!("ambiguous durable response must resolve to an owned session");
+    };
+    assert_eq!((session.lease_epoch, session.fence_epoch), (1, 1));
+    assert_eq!(log.current_epoch(&queue).unwrap(), 1);
+    assert_eq!(
+        control_plane.lease(&queue).unwrap().state,
+        LeaseState::Assigned
+    );
+    assert!(store.events().iter().any(|event| {
+        event.phase == BlobPhase::EpochHead
+            && event.result == StoreResult::EffectThenError
+            && event.effect
+    }));
+
+    let OwnershipOutcome::Owned(retried) =
+        acquire_and_fence(&control_plane, &storage, &queue, &owner, ts(1))
+            .await
+            .unwrap()
+    else {
+        panic!("same owner retry must preserve ownership");
+    };
+    assert_eq!(retried, session);
+
+    let OwnershipOutcome::Owned(session_b) =
+        acquire_and_fence(&control_plane, &storage, &queue_b, &owner_b, ts(0))
+            .await
+            .unwrap()
+    else {
+        panic!("owner B must own queue B");
+    };
+    store.set_head_phase(BlobPhase::EpochHead);
+    log.enqueue(&queue_b, &[push(701, 1)], session_b.fence_epoch, 1)
+        .unwrap();
+    store.set_head_phase(BlobPhase::ManifestHead);
+    log.seal(&queue_b, session_b.fence_epoch, 1).unwrap();
+    assert_eq!(command_ids(&log, &queue_b).unwrap(), ["c701"]);
+}
+
+/// Existing SP-02 log-level behavior: an ambiguous manifest response is resolved from the real segmented
+/// log before a caller retry, so the harness does not submit a duplicate. This is not an independent model,
+/// mutation score, or byte-identical replay claim; API-level request-id replay is covered elsewhere.
+#[test]
+fn existing_segmented_log_ambiguous_request_retry_converges_once() {
+    let mut request_runner = ProductionRunner::new(SutMutant::None);
+    request_runner.apply(&Operation::Accept {
+        request: 700,
+        created_at_ms: 1,
+    });
+    request_runner.apply(&Operation::Seal {
+        expected_epoch: 0,
+        now_ms: 1,
+        result: StoreResult::EffectThenError,
+    });
+    assert_eq!(request_runner.disposition, Disposition::Success);
+    assert_eq!(request_runner.visible().unwrap(), [700]);
+    request_runner.apply(&Operation::Retry { request: 700 });
+    assert_eq!(request_runner.disposition, Disposition::Success);
+    request_runner.restart().unwrap();
+    assert_eq!(
+        request_runner.visible().unwrap(),
+        [700],
+        "retry resolves the committed request instead of appending it again"
+    );
 }
