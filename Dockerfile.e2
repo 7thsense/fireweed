@@ -7,7 +7,7 @@
 # `command:` to run `pqueue-loadgen`. Built by `scripts/perf/tp002-e2-kind.sh`.
 
 # ---- builder ----
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.97-bookworm AS builder
 WORKDIR /build
 COPY . .
 # Cache mounts keep the cargo registry + target dir between iterative harness rebuilds (BuildKit). The
