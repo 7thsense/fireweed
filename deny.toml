@@ -22,6 +22,12 @@ version = 2
 # (hyper-rustls <- metrics-exporter-prometheus <- heimq). All are OSI permissive.
 allow = ["MIT", "Apache-2.0", "ISC", "BSD-3-Clause", "MIT-0", "Unicode-3.0", "Zlib"]
 confidence-threshold = 0.8
+# webpki-roots 1.x redistributes Mozilla's root-certificate dataset under
+# CDLA-Permissive-2.0. Permit that data license only for this package and major
+# version; other crates using the license remain denied and require review.
+exceptions = [
+    { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots", version = ">=1.0.0, <2.0.0" },
+]
 
 [sources]
 unknown-registry = "warn"
