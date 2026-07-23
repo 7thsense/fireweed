@@ -48,8 +48,8 @@ use crate::segment_integrity::{
 };
 use pqueue_core::QueueDefinition;
 use pqueue_engine::{
-    CommandEnvelope, CommandPosition, EngineError, EngineResult, QueueCommand, QueueKey,
-    validate_gate_command,
+    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, QueueCommand,
+    QueueKey, validate_gate_command,
 };
 use sha2::{Digest, Sha256};
 
@@ -8603,15 +8603,41 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         Ok(())
     }
 
+    fn definition_key(shard: &QueueKey) -> String {
+        format!("{}queue.json", shard_prefix(shard))
+    }
+
+    pub fn read_definition(&self, shard: &QueueKey) -> EngineResult<QueueDefinition> {
+        let key = Self::definition_key(shard);
+        let Some(bytes) = self.store_get(&key)? else {
+            return Err(EngineError::NotFound);
+        };
+        serde_json::from_slice(&bytes).map_err(store_err)
+    }
+
     /// Persist a queue definition as a durable per-shard `queue.json` object (ADR-012 P2 recovery-on-open).
-    /// The composition's in-process control plane is not durable, so the object log catalogs definitions
-    /// here; a reopened composition enumerates them ([`Self::recover_definitions`]) to rebuild WITHOUT a
-    /// re-create_queue. Unconditional PUT (idempotent at a stable key — a compatible re-create re-writes
-    /// identical bytes).
-    pub fn persist_definition(&self, def: &QueueDefinition) -> EngineResult<()> {
+    /// The queue catalog is create-only: racing handles converge on the durable winner and never overwrite
+    /// it. The returned definition is always decoded from the authoritative stored object.
+    pub fn create_definition(&self, def: &QueueDefinition) -> EngineResult<CreateQueueOutcome> {
         let shard = QueueKey::new(def.tenant_id.clone(), def.queue_id.clone());
-        let key = format!("{}queue.json", shard_prefix(&shard));
-        self.store_put(&key, &to_json(def)?, false)
+        let key = Self::definition_key(&shard);
+        let created = self.store_put_if_absent(&key, &to_json(def)?, false)?;
+        let stored = self.read_definition(&shard)?;
+        if stored.ordering_mode != def.ordering_mode || stored.priority_model != def.priority_model
+        {
+            return Err(EngineError::QueueDefinitionConflict);
+        }
+        Ok(CreateQueueOutcome {
+            created,
+            definition: stored,
+        })
+    }
+
+    /// Persist a queue definition as a durable per-shard `queue.json` object (ADR-012 P2 recovery-on-open).
+    /// Existing callers that only need a catalog entry use the same create-only semantics as
+    /// [`Self::create_definition`] and discard the decoded outcome.
+    pub fn persist_definition(&self, def: &QueueDefinition) -> EngineResult<()> {
+        self.create_definition(def).map(|_| ())
     }
 
     /// Enumerate every durable queue definition catalogued under the store root (the `queue.json` objects).

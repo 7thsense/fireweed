@@ -49,6 +49,7 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -555,11 +556,42 @@ fn create_queue_metadata(
     }
     let dir = shard_dir(root, &key);
     fs::create_dir_all(&dir).map_err(store)?;
-    fs::write(dir.join("queue.json"), to_json(&definition)?).map_err(store)?;
-    queues.insert(key, definition.clone());
+    let queue_file = dir.join("queue.json");
+    let bytes = to_json(&definition)?;
+    let temp_file = dir.join(format!(
+        "queue.json.tmp.{}.{:?}",
+        std::process::id(),
+        thread::current().id()
+    ));
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_file)
+            .map_err(store)?;
+        file.write_all(bytes.as_bytes()).map_err(store)?;
+        file.sync_all().map_err(store)?;
+    }
+    let created = match fs::hard_link(&temp_file, &queue_file) {
+        Ok(()) => true,
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => false,
+        Err(err) => {
+            let _ = fs::remove_file(&temp_file);
+            return Err(store(err));
+        }
+    };
+    let _ = fs::remove_file(&temp_file);
+    let stored: QueueDefinition =
+        serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?).map_err(store)?;
+    if stored.ordering_mode != definition.ordering_mode
+        || stored.priority_model != definition.priority_model
+    {
+        return Err(EngineError::QueueDefinitionConflict);
+    }
+    queues.insert(key, stored.clone());
     Ok(CreateQueueOutcome {
-        created: true,
-        definition,
+        created,
+        definition: stored,
     })
 }
 

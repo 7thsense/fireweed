@@ -1,7 +1,7 @@
 //! ADR-012 P2 recovery-on-open: the `durable_reconnect_suite!` against the two DURABLE object-log
 //! compositions, proving each recovers identically to its monolith after a reopen.
 //!
-//! - `objectlog_inmemory` — `ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>`: a
+//! - `objectlog_inmemory` — `ComposedBackend<ObjectLog, InMemoryProjection, ObjectLog>`: a
 //!   reopen enumerates the durable `queue.json` catalog and rebuilds the fresh in-memory projection by
 //!   replaying the segmented object log from genesis (mirrors the monolithic `ObjectLogBackend`, which
 //!   `reconnect_smoke.rs` runs the same suite against).

@@ -3581,17 +3581,17 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
         let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         queue_serialized(&self.mutation_gate, key.clone(), move || {
             let outcome = self.control.create_queue(definition)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let Inner {
+                log,
+                projection,
+                known_shards,
+                ..
+            } = &mut *g;
+            log.ensure_shard(&key)?;
+            projection.ensure_shard(&outcome.definition)?;
+            known_shards.insert(key.clone());
             if outcome.created {
-                let mut g = self.inner.lock().expect("poisoned");
-                let Inner {
-                    log,
-                    projection,
-                    known_shards,
-                    ..
-                } = &mut *g;
-                log.ensure_shard(&key)?;
-                projection.ensure_shard(&outcome.definition)?;
-                known_shards.insert(key.clone());
                 // Record the definition in the log's durable catalog so a reopened composition can recover
                 // this queue without a re-`create_queue` (no-op for in-process / unified-relational logs).
                 log.persist_definition(&outcome.definition)?;
