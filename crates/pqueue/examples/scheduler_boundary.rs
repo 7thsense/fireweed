@@ -49,7 +49,9 @@ async fn main() -> pqueue::EngineResult<()> {
         return Ok(());
     }
 
-    let claimed = pq.claim(&queue, capacity.granted, 30_000).await?;
+    let application_batch_ceiling = 3;
+    let max_items = capacity.granted.min(application_batch_ceiling);
+    let claimed = pq.claim(&queue, max_items, 30_000).await?;
     for item in &claimed {
         println!("processing {}", item.client_item_key.as_str());
     }
