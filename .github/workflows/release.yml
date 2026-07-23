@@ -40,6 +40,16 @@ jobs:
           path: pqueue
           fetch-depth: 0
 
+      - name: Install pinned gitleaks
+        shell: bash
+        run: |
+          bash scripts/ci/install-gitleaks.sh "${RUNNER_TEMP}/gitleaks-bin"
+          echo "${RUNNER_TEMP}/gitleaks-bin" >> "${GITHUB_PATH}"
+
+      - name: Block release on detected secrets
+        shell: bash
+        run: bash scripts/ci/gitleaks-gate.sh
+
       # No dependency pre-checkouts: cargo resolves every git dep itself and they are all public
       # (fjord=github.com/7thsense/fjord, heimq, axon), so they clone anonymously over HTTPS.
 

@@ -1,0 +1,5 @@
+[extend]
+useDefault = true
+
+# Finding-specific exclusions live in .gitleaksignore, where gitleaks supports
+# exact history fingerprints. Each entry there carries its triage rationale.
