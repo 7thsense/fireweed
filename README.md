@@ -21,6 +21,9 @@
 - [Choosing pqueue instead of a stream](docs/helix/01-frame/guides/choosing-pqueue.md)
   explains when to use pqueue's mutable-priority leased work queue model instead
   of an immutable sequential stream.
+- [Scheduler and router boundary](docs/helix/01-frame/guides/scheduler-router-boundary.md)
+  explains how to keep downstream capacity admission outside pqueue while using
+  pqueue leases and `max_items` correctly.
 
 ## Release Artifacts
 
