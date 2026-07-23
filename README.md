@@ -27,12 +27,19 @@
 
 ## Release Artifacts
 
-Published releases provide:
+Fireweed Queue's first public-preview release is `v0.20.0`. The workspace
+packages are release-synchronized at `0.20.0`. The `pqueue` package, binary,
+image, and chart names in the examples below remain compatibility aliases for
+this release; this version alignment does not rename runtime surfaces. The Helm
+chart's source defaults use independent versioning, while release packaging
+overrides its chart and application versions to `0.20.0`.
 
-- container image `ghcr.io/<owner>/pqueue-service:<version>` plus
+The `v0.20.0` release provides:
+
+- container image `ghcr.io/<owner>/pqueue-service:0.20.0` plus
   `ghcr.io/<owner>/pqueue-service:sha-<commit>`;
-- Helm chart package `pqueue-<version>.tgz`;
-- binary archives `pqueue-<version>-<target-triple>.tar.gz`;
+- Helm chart package `pqueue-0.20.0.tgz`;
+- binary archives `pqueue-0.20.0-<target-triple>.tar.gz`;
 - `SHA256SUMS`;
 - release evidence files `pqueue-service-image.txt` and
   `pqueue-helm-chart.txt`.
