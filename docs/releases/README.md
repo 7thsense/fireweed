@@ -25,8 +25,10 @@ planning, but they do not decide the release verdict. The configured
 `progress_bound_ms` is different: it is the queue's logical liveness contract
 under load, not a host-performance bar, and remains release-significant.
 
-Versioned files in this directory describe already-cut releases. This file
-defines the gate applied to future tags.
+Versioned files in this directory describe already-cut releases. Fireweed Queue
+v0.20.0 is the first renamed public preview release; v0.19.6 and earlier retain
+the pqueue identity as immutable release and audit history under ADR-020. This
+file defines the gate applied to future tags.
 
 ## Exact-revision composite staging
 
