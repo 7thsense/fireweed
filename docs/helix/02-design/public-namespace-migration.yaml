@@ -8,7 +8,7 @@ selected:
     value: Fireweed
     classification: rename-now
   repository_stem:
-    value: fireweed-queue
+    value: fireweed
     classification: rename-now
   cli_stem:
     value: fireweed
@@ -384,14 +384,14 @@ inventory:
         - crates/pqueue-sqlite/src/relational.rs
   repository_urls:
     - current: https://github.com/telepathdata/7thsense-pqueue.git
-      target: https://github.com/telepathdata/fireweed-queue.git
+      target: https://github.com/telepathdata/fireweed.git
       classification: historical allowlist
       evidence:
         - .github/workflows/release.yml
         - docs/deployment/operator-release-artifacts.md
   downstream_consumers:
     - current: GitHub Actions workflows that check out the repo as pqueue
-      target: workflows that check out fireweed-queue
+      target: workflows that check out fireweed
       classification: temporary compatibility alias
       evidence:
         - .github/workflows/ci.yml

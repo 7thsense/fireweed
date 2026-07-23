@@ -102,7 +102,8 @@ current public name.
 |---|---|
 | Display name | `Fireweed Queue` |
 | Short name | `Fireweed` |
-| Repository/package stem | `fireweed-queue` |
+| Repository stem | `fireweed` |
+| Package/chart stem | `fireweed-queue` |
 | CLI command | `fireweed` |
 | Rust crate stem | `fireweed` |
 | Environment prefix | `FIREWEED_` |

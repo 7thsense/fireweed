@@ -25,7 +25,7 @@ The naming contract for the public namespace is fixed:
 
 - display name: Fireweed Queue
 - short name: Fireweed
-- repository stem: `fireweed-queue`
+- repository stem: `fireweed`
 - CLI stem: `fireweed`
 - Rust stem: `fireweed`
 - environment prefix: `FIREWEED_`
@@ -76,7 +76,7 @@ history rewrite.
 |---|---|---|---|
 | Display name | `pqueue` / `pqueue-service` era branding | Rename-now | `Fireweed Queue` |
 | Short name | `pqueue` | Rename-now | `Fireweed` |
-| Repository | `telepathdata/7thsense-pqueue` | Rename-now | `fireweed-queue` |
+| Repository | `telepathdata/7thsense-pqueue` | Rename-now | `fireweed` |
 | Rust / CLI stem | `pqueue` | Rename-now | `fireweed` |
 | Environment prefix | `PQUEUE_` | Temporary compatibility alias | `FIREWEED_` |
 | Cargo packages | `pqueue*` | Temporary compatibility alias | `fireweed*` package names |
@@ -86,7 +86,7 @@ history rewrite.
 | Config and chart names | `pqueue` chart/package names | Temporary compatibility alias | `fireweed-queue` chart/package names |
 | Protocol and on-disk identifiers | `PQUEUE_*`, `pqueue_*`, `/var/lib/pqueue/*` | Intentionally retained persistence / wire identifier | Keep until a separate data-migration ADR changes them |
 | Services and images | `pqueue` service names, `pqueue-service` image names | Temporary compatibility alias | `fireweed` service names, `fireweed-service` image names |
-| Repository URLs | current `pqueue` remote | Historical allowlist or rename-now, depending on the URL | New `fireweed-queue` remote becomes authoritative |
+| Repository URLs | current `pqueue` remote | Historical allowlist or rename-now, depending on the URL | New `fireweed` remote becomes authoritative |
 | Downstream consumers | CI, scripts, docs, release packaging | Temporary compatibility alias | Update to `fireweed` coordinates as each consumer migrates |
 | Audit identifiers | release tags, bead IDs, historical docs | Historical allowlist | Keep as-is for traceability |
 
