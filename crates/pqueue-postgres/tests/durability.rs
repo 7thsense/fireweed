@@ -178,10 +178,9 @@ fn atomic_queue_create_child_process() {
 
 #[test]
 fn postgres_queue_create_is_atomic_across_processes() {
-    let Some(url) = pg_url() else {
-        eprintln!("POSTGRES ATOMIC CREATE SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
-        return;
-    };
+    let url = pg_url().expect(
+        "mandatory PostgreSQL atomic-create gate requires PQUEUE_PG_TEST_URL to point at a live DB",
+    );
 
     run_atomic_create_process_scenario(&url, "native");
     run_atomic_create_process_scenario(&url, "relational");
