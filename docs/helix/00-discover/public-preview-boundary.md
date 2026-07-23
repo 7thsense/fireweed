@@ -32,7 +32,8 @@ each supported 0.x minor release line. A breaking change requires a minor
 version bump and migration guidance. This is not a 1.0 SemVer stability, SLA,
 capacity, provider certification, or production-readiness claim.
 
-The public preview supports these profiles:
+The public preview supports these 11 profiles, and each row below carries one unambiguous preview
+status:
 
 | Profile | Preview status | Boundary |
 |---|---|---|
@@ -68,7 +69,8 @@ Experimental components are present in the repository but are not part of the pu
 
 Crate status describes its role in this repository and preview, not a promise
 that every crate will be published independently or has a stable SemVer API.
-The artifact-topology bead owns registry publication decisions.
+The artifact-topology bead owns registry publication decisions. These 16 workspace crates are
+classified below so the preview boundary remains explicit and auditable.
 
 | Crate | Preview class | Public commitment |
 |---|---|---|
