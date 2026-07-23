@@ -5736,11 +5736,6 @@ impl ControlPlaneStore for PostgresRelationalBackend {
             st(tx.commit())?;
             let stored: QueueDefinition = serde_json::from_str(&stored_json)
                 .map_err(|e| EngineError::Storage(e.to_string()))?;
-            if stored.ordering_mode != definition.ordering_mode
-                || stored.priority_model != definition.priority_model
-            {
-                return Err(EngineError::QueueDefinitionConflict);
-            }
             let counter_high_water = {
                 let row = st(g.client.query_opt(
                     "SELECT item_id FROM pqueue_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
@@ -5755,6 +5750,11 @@ impl ControlPlaneStore for PostgresRelationalBackend {
             g.install_queue_definition(key.clone(), stored.clone())?;
             if let Some(item_id) = counter_high_water {
                 self.counters.observe(&key, item_id);
+            }
+            if stored.ordering_mode != definition.ordering_mode
+                || stored.priority_model != definition.priority_model
+            {
+                return Err(EngineError::QueueDefinitionConflict);
             }
             Ok(CreateQueueOutcome {
                 created,

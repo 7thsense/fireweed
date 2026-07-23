@@ -187,11 +187,9 @@ struct Inner {
 }
 
 impl Inner {
-    fn install_empty_projection(
-        &mut self,
-        key: QueueKey,
-        definition: QueueDefinition,
-    ) -> EngineResult<()> {
+    fn empty_projection_and_schema(
+        definition: &QueueDefinition,
+    ) -> EngineResult<(ProjectionData, Option<Arc<CompiledSchema>>)> {
         let compiled_schema = definition
             .entity_schema
             .as_ref()
@@ -206,6 +204,15 @@ impl Inner {
             &definition.secondary_indexes,
         )
         .with_typed_indexes(&definition.typed_indexes);
+        Ok((projection, compiled_schema))
+    }
+
+    fn install_empty_projection(
+        &mut self,
+        key: QueueKey,
+        definition: QueueDefinition,
+    ) -> EngineResult<()> {
+        let (projection, compiled_schema) = Self::empty_projection_and_schema(&definition)?;
         self.projections.insert(key.clone(), projection);
         if let Some(schema) = compiled_schema {
             self.schemas.insert(key.clone(), schema);
@@ -223,9 +230,14 @@ impl Inner {
         counters: &QueueCounters,
     ) -> EngineResult<()> {
         let (t, q) = parts(&key);
-        self.install_empty_projection(key.clone(), definition)?;
+        // Stage every fallible operation before publishing any local state. In particular, a read,
+        // decode, schema-compile, or replay failure must leave this handle uncached so a retry cannot
+        // mistake a partial projection for a successfully hydrated durable winner.
+        let envelopes = self.read_log_envelopes(&t, &q)?;
+        let (mut projection, compiled_schema) = Self::empty_projection_and_schema(&definition)?;
         let mut max_cmd_seq = None;
-        for env in self.read_log_envelopes(&t, &q)? {
+        let mut observed_item_ids = Vec::new();
+        for env in envelopes {
             if let Some(n) = env
                 .command_id
                 .0
@@ -235,16 +247,22 @@ impl Inner {
             {
                 max_cmd_seq = Some(max_cmd_seq.map_or(n, |m: u64| m.max(n)));
             }
-            for id in &env.item_ids {
-                counters.observe(&key, *id);
-            }
-            self.projections
-                .get_mut(&key)
-                .expect("projection was just installed")
-                .apply_command(&env.command)?;
+            observed_item_ids.extend(env.item_ids.iter().copied());
+            projection.apply_command(&env.command)?;
         }
+
+        self.projections.insert(key.clone(), projection);
+        if let Some(schema) = compiled_schema {
+            self.schemas.insert(key.clone(), schema);
+        } else {
+            self.schemas.remove(&key);
+        }
+        self.queues.insert(key.clone(), definition);
         if let Some(n) = max_cmd_seq {
             self.cmd_seq = self.cmd_seq.max(n.saturating_add(1));
+        }
+        for id in observed_item_ids {
+            counters.observe(&key, id);
         }
         Ok(())
     }
@@ -1325,12 +1343,12 @@ impl ControlPlaneStore for PostgresBackend {
             };
             let stored: QueueDefinition = serde_json::from_str(&stored_json)
                 .map_err(|e| EngineError::Storage(e.to_string()))?;
+            g.hydrate_projection_from_durable(key, stored.clone(), &self.counters)?;
             if stored.ordering_mode != definition.ordering_mode
                 || stored.priority_model != definition.priority_model
             {
                 return Err(EngineError::QueueDefinitionConflict);
             }
-            g.hydrate_projection_from_durable(key, stored.clone(), &self.counters)?;
             Ok(CreateQueueOutcome {
                 created,
                 definition: stored,

@@ -3,12 +3,19 @@
 //! reconstructed by replaying the durable log — the property the shared conformance suite (a fresh schema
 //! per scenario) cannot exercise. Env-gated on `PQUEUE_PG_TEST_URL`; LOUD skip if absent.
 
+use std::collections::{BTreeMap, HashSet};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use axon_esf::IndexDef;
 use pqueue_conformance::{claim_req, commit, envelope, item, qdef, qkey};
-use pqueue_core::{OrderingMode, QueueDefinition};
+use pqueue_core::{
+    ClientItemKey, CohortOnIncomplete, CohortPolicy, EligibilityPolicy, EntitySchemaDocument,
+    GateKeyPolicy, IndexDeclaration, IndexSpec, IndexType, MetadataValue, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition,
+    QueueIndex, RecurrenceMode, RecurrencePolicy, RetryPolicy,
+};
 use pqueue_engine::{
     ClaimPort, ControlPlaneStore, EngineError, ProjectionRead, PushCommand, PushPort, PushSpec,
     QueueCommand,
@@ -165,11 +172,11 @@ fn atomic_queue_create_child_process() {
         .as_deref()
         == Some("1");
 
-    wait_for_parent_release(&url, &schema, &child_id);
     let outcome = futures::executor::block_on(child_create_attempt(
         &url,
         &schema,
         &backend,
+        &child_id,
         incompatible,
         exercise_loser,
     ));
@@ -184,97 +191,286 @@ fn postgres_queue_create_is_atomic_across_processes() {
 
     run_atomic_create_process_scenario(&url, "native");
     run_atomic_create_process_scenario(&url, "relational");
+    run_native_failed_hydration_retry_scenario(&url);
+}
+
+struct ChildAttempt {
+    outcome: &'static str,
+    created: bool,
+    definition: QueueDefinition,
+    push_claim_ok: bool,
 }
 
 async fn child_create_attempt(
     url: &str,
     schema: &str,
     backend: &str,
+    child_id: &str,
     incompatible: bool,
     exercise_loser: bool,
-) -> Result<(bool, QueueDefinition, bool), EngineError> {
+) -> Result<ChildAttempt, EngineError> {
     let definition = if incompatible {
         incompatible_qdef()
     } else {
-        qdef()
+        rich_qdef()
     };
     match backend {
         "native" => {
             let backend = PostgresBackend::connect_in_schema(url, schema).expect("connect native");
-            let outcome = backend.create_queue(definition).await?;
-            let push_claim_ok = if outcome.created || !exercise_loser {
-                false
-            } else {
-                push_and_claim_native(&backend).await?
-            };
-            Ok((outcome.created, outcome.definition, push_claim_ok))
+            wait_for_parent_release(url, schema, child_id);
+            match backend.create_queue(definition).await {
+                Ok(outcome) => {
+                    let push_claim_ok = if outcome.created || !exercise_loser {
+                        false
+                    } else {
+                        verify_seeded_work_native(&backend).await?
+                    };
+                    Ok(ChildAttempt {
+                        outcome: "ok",
+                        created: outcome.created,
+                        definition: outcome.definition,
+                        push_claim_ok,
+                    })
+                }
+                Err(EngineError::QueueDefinitionConflict) => Ok(ChildAttempt {
+                    outcome: "conflict",
+                    created: false,
+                    definition: backend.queue_definition(&qkey()).await?,
+                    push_claim_ok: false,
+                }),
+                Err(error) => Err(error),
+            }
         }
         "relational" => {
             let backend = PostgresRelationalBackend::connect_in_schema(url, schema)
                 .expect("connect relational");
-            let outcome = backend.create_queue(definition).await?;
-            let push_claim_ok = if outcome.created || !exercise_loser {
-                false
-            } else {
-                push_and_claim_relational(&backend).await?
-            };
-            Ok((outcome.created, outcome.definition, push_claim_ok))
+            wait_for_parent_release(url, schema, child_id);
+            match backend.create_queue(definition).await {
+                Ok(outcome) => {
+                    let push_claim_ok = if outcome.created || !exercise_loser {
+                        false
+                    } else {
+                        verify_seeded_work_relational(&backend).await?
+                    };
+                    Ok(ChildAttempt {
+                        outcome: "ok",
+                        created: outcome.created,
+                        definition: outcome.definition,
+                        push_claim_ok,
+                    })
+                }
+                Err(EngineError::QueueDefinitionConflict) => Ok(ChildAttempt {
+                    outcome: "conflict",
+                    created: false,
+                    definition: backend.queue_definition(&qkey()).await?,
+                    push_claim_ok: false,
+                }),
+                Err(error) => Err(error),
+            }
         }
         other => panic!("unknown backend {other}"),
     }
 }
 
-async fn push_and_claim_native(backend: &PostgresBackend) -> Result<bool, EngineError> {
-    backend
-        .push(
-            &qkey(),
-            vec![PushSpec::default()],
-            pqueue_conformance::ts(1),
-            None,
-        )
-        .await?;
-    let claimed = backend.claim(claim_req(1, 500, 100)).await?;
-    Ok(claimed.items.len() == 1)
+fn rich_push(key: &str, status: &str) -> PushSpec {
+    let mut fields = BTreeMap::new();
+    fields.insert("customer".to_string(), format!("customer-{key}").into());
+    fields.insert("region".to_string(), b"north".to_vec().into());
+    PushSpec {
+        client_item_key: Some(ClientItemKey::new(key).expect("valid key")),
+        entity: Some(serde_json::json!({"status": status, "attempt": 1})),
+        fields,
+        ..PushSpec::default()
+    }
 }
 
-async fn push_and_claim_relational(
-    backend: &PostgresRelationalBackend,
-) -> Result<bool, EngineError> {
-    backend
+async fn verify_seeded_work_native(backend: &PostgresBackend) -> Result<bool, EngineError> {
+    verify_seeded_reads_native(backend).await?;
+    let new_ids = backend
         .push(
             &qkey(),
-            vec![PushSpec::default()],
+            vec![rich_push("new", "new")],
             pqueue_conformance::ts(1),
             None,
         )
         .await?;
-    let claimed = backend.claim(claim_req(1, 500, 100)).await?;
-    Ok(claimed.items.len() == 1)
+    let all = backend
+        .live_items(
+            &qkey(),
+            &["seed-a", "seed-b", "new"]
+                .into_iter()
+                .map(|key| ClientItemKey::new(key).expect("valid key"))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    let all_ids = all
+        .iter()
+        .map(|item| item.as_ref().expect("live item").item_id)
+        .collect::<HashSet<_>>();
+    let claimed = backend.claim(claim_req(3, 500, 100)).await?;
+    Ok(new_ids.len() == 1
+        && all_ids.len() == 3
+        && all_ids.contains(&new_ids[0])
+        && claimed.items.len() == 3
+        && claimed
+            .items
+            .iter()
+            .map(|item| item.item_id)
+            .collect::<HashSet<_>>()
+            == all_ids)
+}
+
+async fn verify_seeded_reads_native(backend: &PostgresBackend) -> Result<(), EngineError> {
+    let seeded = backend
+        .live_items(
+            &qkey(),
+            &["seed-a", "seed-b"]
+                .into_iter()
+                .map(|key| ClientItemKey::new(key).expect("valid key"))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    if seeded.iter().any(Option::is_none) {
+        return Err(EngineError::Storage(
+            "loser did not hydrate both durable seed items".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_seeded_work_relational(
+    backend: &PostgresRelationalBackend,
+) -> Result<bool, EngineError> {
+    let new_ids = backend
+        .push(
+            &qkey(),
+            vec![rich_push("new", "new")],
+            pqueue_conformance::ts(1),
+            None,
+        )
+        .await?;
+    let all = backend
+        .live_items(
+            &qkey(),
+            &["seed-a", "seed-b", "new"]
+                .into_iter()
+                .map(|key| ClientItemKey::new(key).expect("valid key"))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+    let all_ids = all
+        .iter()
+        .map(|item| item.as_ref().expect("live item").item_id)
+        .collect::<HashSet<_>>();
+    let claimed = backend.claim(claim_req(3, 500, 100)).await?;
+    Ok(new_ids.len() == 1
+        && all_ids.len() == 3
+        && all_ids.contains(&new_ids[0])
+        && claimed.items.len() == 3
+        && claimed
+            .items
+            .iter()
+            .map(|item| item.item_id)
+            .collect::<HashSet<_>>()
+            == all_ids)
+}
+
+fn rich_qdef() -> QueueDefinition {
+    let mut blockers = BTreeMap::new();
+    blockers.insert(
+        "blocked".to_string(),
+        vec![MetadataValue::String("yes".to_string())],
+    );
+    QueueDefinition {
+        priority_model: PriorityModel {
+            kind: PriorityModelKind::Text,
+            direction: PriorityDirection::Descending,
+            tie_breaker: PriorityTieBreaker::ClientItemKey,
+        },
+        ordering_mode: OrderingMode::BoundedRelaxed,
+        max_rank_error: 7,
+        progress_bound_ms: 12_345,
+        eligibility_policy: EligibilityPolicy {
+            metadata_blockers: blockers,
+            gate_keys: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: Some(3),
+            max_gates_per_request: Some(5),
+        },
+        cohort_policy: Some(CohortPolicy {
+            enabled: true,
+            completion_bound_ms: Some(9_000),
+            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+            max_cohort_size: Some(8),
+        }),
+        recurrence: RecurrencePolicy {
+            mode: RecurrenceMode::Recurring,
+            until: Some(pqueue_conformance::ts(4_242)),
+        },
+        request_id_retention_ms: 11_000,
+        client_item_key_retention_ms: 12_000,
+        terminal_retention_ms: 13_000,
+        max_lease_duration_ms: 14_000,
+        retry_policy: RetryPolicy { max_attempts: 9 },
+        max_push_batch_size: 17,
+        max_claim_batch_size: 19,
+        max_eligible_group_size: Some(23),
+        secondary_indexes: vec![IndexSpec {
+            name: "by_customer".to_string(),
+            fields: vec!["customer".to_string(), "region".to_string()],
+            unique: true,
+        }],
+        entity_schema: Some(
+            serde_json::from_value::<EntitySchemaDocument>(serde_json::json!({
+                "entity_schema": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": {
+                        "status": {"type": "string"},
+                        "attempt": {"type": "integer"}
+                    }
+                }
+            }))
+            .expect("valid entity schema"),
+        ),
+        typed_indexes: vec![QueueIndex {
+            name: "by_status".to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "status".to_string(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        }],
+        emit_change_records: false,
+        ..qdef()
+    }
 }
 
 fn incompatible_qdef() -> QueueDefinition {
-    let mut definition = qdef();
-    definition.ordering_mode = OrderingMode::BoundedRelaxed;
-    definition
+    QueueDefinition {
+        ordering_mode: OrderingMode::Strict,
+        max_rank_error: 0,
+        ..rich_qdef()
+    }
 }
 
 fn run_atomic_create_process_scenario(url: &str, backend: &str) {
-    let schema = fresh_schema(&format!("atomic_{backend}"));
-    init_atomic_schema(url, &schema);
-    bootstrap_atomic_backend(url, &schema, backend);
+    let race_schema = fresh_schema(&format!("atomic_race_{backend}"));
+    init_atomic_schema(url, &race_schema);
+    bootstrap_atomic_backend(url, &race_schema, backend);
 
     let child_count = 6;
     let mut children = (0..child_count)
-        .map(|index| spawn_atomic_child(url, &schema, backend, index, false, false))
+        .map(|index| spawn_atomic_child(url, &race_schema, backend, index, false, false))
         .collect::<Vec<_>>();
-    release_children_when_ready(url, &schema, child_count);
+    wait_for_children(url, &race_schema, child_count);
+    release_children(url, &race_schema);
     for child in &mut children {
         let status = child.wait().expect("wait child");
         assert!(status.success(), "compatible child failed with {status}");
     }
 
-    let durable_definition = read_durable_definition(url, &schema);
-    let rows = read_atomic_results(url, &schema);
+    let durable_definition = read_durable_definition(url, &race_schema);
+    let rows = read_atomic_results(url, &race_schema);
     assert_eq!(rows.len(), child_count);
     assert_eq!(
         rows.iter().filter(|row| row.created).count(),
@@ -286,31 +482,148 @@ fn run_atomic_create_process_scenario(url: &str, backend: &str) {
             .all(|row| row.outcome == "ok" && row.definition == durable_definition),
         "{backend}: child outcomes must carry the durable stored definition"
     );
+    assert_eq!(durable_definition, rich_qdef());
+    drop_schema(url, &race_schema);
 
-    truncate_atomic_coordination(url, &schema);
-    let mut exercise_loser = spawn_atomic_child(url, &schema, backend, child_count, false, true);
-    release_children_when_ready(url, &schema, 1);
+    let handoff_schema = fresh_schema(&format!("atomic_handoff_{backend}"));
+    init_atomic_schema(url, &handoff_schema);
+    bootstrap_atomic_backend(url, &handoff_schema, backend);
+    let mut exercise_loser =
+        spawn_atomic_child(url, &handoff_schema, backend, child_count, false, true);
+    wait_for_children(url, &handoff_schema, 1);
+    seed_winner(url, &handoff_schema, backend);
+    release_children(url, &handoff_schema);
     let status = exercise_loser.wait().expect("wait exercise child");
     assert!(
         status.success(),
         "losing-handle exercise child failed with {status}"
     );
-    let rows = read_atomic_results(url, &schema);
+    let rows = read_atomic_results(url, &handoff_schema);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].outcome, "ok");
     assert!(
-        !rows[0].created && rows[0].push_claim_ok,
-        "{backend}: a compatible losing handle must push and claim immediately"
+        !rows[0].created && rows[0].definition == rich_qdef() && rows[0].push_claim_ok,
+        "{backend}: a compatible uncached loser must decode the winner, read seed work, mint a unique id, and claim all work"
     );
+    drop_schema(url, &handoff_schema);
 
-    truncate_atomic_coordination(url, &schema);
-    let mut incompatible = spawn_atomic_child(url, &schema, backend, child_count + 1, true, false);
-    release_children_when_ready(url, &schema, 1);
+    let conflict_schema = fresh_schema(&format!("atomic_conflict_{backend}"));
+    init_atomic_schema(url, &conflict_schema);
+    bootstrap_atomic_backend(url, &conflict_schema, backend);
+    let mut incompatible =
+        spawn_atomic_child(url, &conflict_schema, backend, child_count + 1, true, false);
+    wait_for_children(url, &conflict_schema, 1);
+    seed_winner(url, &conflict_schema, backend);
+    release_children(url, &conflict_schema);
     let status = incompatible.wait().expect("wait incompatible child");
     assert!(status.success(), "incompatible child failed with {status}");
-    let rows = read_atomic_results(url, &schema);
+    let rows = read_atomic_results(url, &conflict_schema);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].outcome, "conflict");
+    assert_eq!(
+        rows[0].definition,
+        rich_qdef(),
+        "{backend}: queue_definition must expose the decoded durable winner after conflict"
+    );
+    drop_schema(url, &conflict_schema);
+}
+
+fn seed_winner(url: &str, schema: &str, backend: &str) {
+    futures::executor::block_on(async {
+        match backend {
+            "native" => {
+                let winner =
+                    PostgresBackend::connect_in_schema(url, schema).expect("connect native winner");
+                assert!(winner.create_queue(rich_qdef()).await.unwrap().created);
+                let ids = winner
+                    .push(
+                        &qkey(),
+                        vec![rich_push("seed-a", "seed"), rich_push("seed-b", "seed")],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(ids.len(), 2);
+                assert_ne!(ids[0], ids[1]);
+            }
+            "relational" => {
+                let winner = PostgresRelationalBackend::connect_in_schema(url, schema)
+                    .expect("connect relational winner");
+                assert!(winner.create_queue(rich_qdef()).await.unwrap().created);
+                let ids = winner
+                    .push(
+                        &qkey(),
+                        vec![rich_push("seed-a", "seed"), rich_push("seed-b", "seed")],
+                        pqueue_conformance::ts(0),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(ids.len(), 2);
+                assert_ne!(ids[0], ids[1]);
+            }
+            other => panic!("unknown backend {other}"),
+        }
+    });
+}
+
+fn run_native_failed_hydration_retry_scenario(url: &str) {
+    let schema = fresh_schema("atomic_native_retry");
+    let loser = PostgresBackend::connect_in_schema(url, &schema).expect("connect empty loser");
+    seed_winner(url, &schema, "native");
+
+    let original = corrupt_first_log_envelope(url, &schema);
+    let first = futures::executor::block_on(loser.create_queue(rich_qdef()));
+    assert!(
+        matches!(first, Err(EngineError::Storage(_))),
+        "corrupt durable replay must fail hydration"
+    );
+    assert!(matches!(
+        futures::executor::block_on(loser.queue_definition(&qkey())),
+        Err(EngineError::NotFound)
+    ));
+
+    restore_first_log_envelope(url, &schema, &original);
+    let retry = futures::executor::block_on(loser.create_queue(rich_qdef())).unwrap();
+    assert!(!retry.created);
+    assert_eq!(retry.definition, rich_qdef());
+    assert!(futures::executor::block_on(verify_seeded_work_native(&loser)).unwrap());
+    drop_schema(url, &schema);
+}
+
+fn corrupt_first_log_envelope(url: &str, schema: &str) -> String {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).expect("connect corruption");
+    client
+        .batch_execute(&format!("SET search_path TO {schema};"))
+        .expect("set corruption search_path");
+    let original: String = client
+        .query_one(
+            "SELECT envelope FROM log_entries WHERE tenant='t1' AND queue='q1' ORDER BY epoch,seq LIMIT 1",
+            &[],
+        )
+        .expect("read original envelope")
+        .get(0);
+    client
+        .execute(
+            "UPDATE log_entries SET envelope='{not-json' WHERE tenant='t1' AND queue='q1' AND (epoch,seq)=(SELECT epoch,seq FROM log_entries WHERE tenant='t1' AND queue='q1' ORDER BY epoch,seq LIMIT 1)",
+            &[],
+        )
+        .expect("corrupt envelope");
+    original
+}
+
+fn restore_first_log_envelope(url: &str, schema: &str, original: &str) {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).expect("connect restore");
+    client
+        .batch_execute(&format!("SET search_path TO {schema};"))
+        .expect("set restore search_path");
+    client
+        .execute(
+            "UPDATE log_entries SET envelope=$1 WHERE tenant='t1' AND queue='q1' AND (epoch,seq)=(SELECT epoch,seq FROM log_entries WHERE tenant='t1' AND queue='q1' ORDER BY epoch,seq LIMIT 1)",
+            &[&original],
+        )
+        .expect("restore envelope");
 }
 
 fn bootstrap_atomic_backend(url: &str, schema: &str, backend: &str) {
@@ -329,7 +642,7 @@ fn bootstrap_atomic_backend(url: &str, schema: &str, backend: &str) {
 struct AtomicResult {
     outcome: String,
     created: bool,
-    definition: String,
+    definition: QueueDefinition,
     push_claim_ok: bool,
 }
 
@@ -347,15 +660,6 @@ fn init_atomic_schema(url: &str, schema: &str) {
              );"
         ))
         .expect("init atomic schema");
-}
-
-fn truncate_atomic_coordination(url: &str, schema: &str) {
-    let mut client = postgres::Client::connect(url, postgres::NoTls).expect("connect truncate");
-    client
-        .batch_execute(&format!(
-            "SET search_path TO {schema}; TRUNCATE atomic_create_barrier, atomic_create_results;"
-        ))
-        .expect("truncate atomic coordination");
 }
 
 fn spawn_atomic_child(
@@ -416,7 +720,7 @@ fn wait_for_parent_release(url: &str, schema: &str, child_id: &str) {
     }
 }
 
-fn release_children_when_ready(url: &str, schema: &str, child_count: usize) {
+fn wait_for_children(url: &str, schema: &str, child_count: usize) {
     let mut client =
         postgres::Client::connect(url, postgres::NoTls).expect("connect parent barrier");
     client
@@ -434,6 +738,13 @@ fn release_children_when_ready(url: &str, schema: &str, child_count: usize) {
         assert!(Instant::now() < deadline, "timed out waiting for children");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn release_children(url: &str, schema: &str) {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).expect("connect release");
+    client
+        .batch_execute(&format!("SET search_path TO {schema};"))
+        .expect("set release search_path");
     client
         .execute("UPDATE atomic_create_barrier SET released=true", &[])
         .expect("release children");
@@ -443,18 +754,15 @@ fn record_child_result(
     url: &str,
     schema: &str,
     child_id: &str,
-    result: Result<(bool, QueueDefinition, bool), EngineError>,
+    result: Result<ChildAttempt, EngineError>,
 ) {
     let (outcome, created, definition, push_claim_ok) = match result {
-        Ok((created, definition, push_claim_ok)) => (
-            "ok".to_string(),
-            created,
-            serde_json::to_string(&definition).expect("serialize definition"),
-            push_claim_ok,
+        Ok(result) => (
+            result.outcome.to_string(),
+            result.created,
+            serde_json::to_string(&result.definition).expect("serialize definition"),
+            result.push_claim_ok,
         ),
-        Err(EngineError::QueueDefinitionConflict) => {
-            ("conflict".to_string(), false, String::new(), false)
-        }
         Err(error) => panic!("unexpected child error: {error:?}"),
     };
     let mut client = postgres::Client::connect(url, postgres::NoTls).expect("connect child result");
@@ -470,18 +778,19 @@ fn record_child_result(
         .expect("record child result");
 }
 
-fn read_durable_definition(url: &str, schema: &str) -> String {
+fn read_durable_definition(url: &str, schema: &str) -> QueueDefinition {
     let mut client = postgres::Client::connect(url, postgres::NoTls).expect("connect durable read");
     client
         .batch_execute(&format!("SET search_path TO {schema};"))
         .expect("set durable search_path");
-    client
+    let definition: String = client
         .query_one(
             "SELECT definition FROM queues WHERE tenant='t1' AND queue='q1'",
             &[],
         )
         .expect("read durable definition")
-        .get(0)
+        .get(0);
+    serde_json::from_str(&definition).expect("decode durable definition")
 }
 
 fn read_atomic_results(url: &str, schema: &str) -> Vec<AtomicResult> {
@@ -496,11 +805,21 @@ fn read_atomic_results(url: &str, schema: &str) -> Vec<AtomicResult> {
         )
         .expect("read results")
         .into_iter()
-        .map(|row| AtomicResult {
-            outcome: row.get(0),
-            created: row.get(1),
-            definition: row.get(2),
-            push_claim_ok: row.get(3),
+        .map(|row| {
+            let definition: String = row.get(2);
+            AtomicResult {
+                outcome: row.get(0),
+                created: row.get(1),
+                definition: serde_json::from_str(&definition).expect("decode result definition"),
+                push_claim_ok: row.get(3),
+            }
         })
         .collect()
+}
+
+fn drop_schema(url: &str, schema: &str) {
+    let mut client = postgres::Client::connect(url, postgres::NoTls).expect("connect cleanup");
+    client
+        .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        .expect("drop test schema");
 }
