@@ -1,0 +1,6 @@
+# PostgreSQL UPSERT syntax: EXCLUDED.index_key is a pseudo-table column reference, not a credential.
+3a05401db4f524279b8663dd9292aa1e61a53ba1:crates/pqueue-postgres/src/relational.rs:generic-api-key:608
+# API-001 BatchClaim fixture: lease_7Fz6T3uA2w is a short illustrative lease token, not an issued secret.
+162effa3c9f75db63f524d34aa7f5b7dc0e79481:docs/helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:301
+# API-001 BatchFinalize fixture: this repeats the same illustrative token to demonstrate lease finalization.
+162effa3c9f75db63f524d34aa7f5b7dc0e79481:docs/helix/02-design/contracts/API-001-native-client-interface.md:generic-api-key:317
