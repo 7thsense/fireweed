@@ -16,9 +16,9 @@ ddx:
 
 ## What This Preview Is
 
-Public preview is the externally named slice of Queueyard: a durable work-state engine for ordered,
-recoverable execution. It promises the queue lifecycle, not a workflow DAG, not a generic broker, and
-not a performance benchmark.
+Public preview is the externally named slice of Fireweed Queue: a durable work-state engine for
+ordered, recoverable execution. It promises the queue lifecycle, not a workflow DAG, not a generic
+broker, and not a performance benchmark.
 
 The repository vision in [product-vision.md](./product-vision.md) says the product is a batch-centric
 state-machine queue engine. This boundary narrows the public claim to the parts that are already backed
