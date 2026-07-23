@@ -8623,8 +8623,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         let key = Self::definition_key(&shard);
         let created = self.store_put_if_absent(&key, &to_json(def)?, false)?;
         let stored = self.read_definition(&shard)?;
-        if stored.ordering_mode != def.ordering_mode || stored.priority_model != def.priority_model
-        {
+        if stored != *def {
             return Err(EngineError::QueueDefinitionConflict);
         }
         Ok(CreateQueueOutcome {

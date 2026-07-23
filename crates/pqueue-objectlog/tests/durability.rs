@@ -295,6 +295,30 @@ fn local_object_log_concurrent_incompatible_loser_conflicts() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn local_object_log_rejects_incompatible_non_placement_definition() {
+    let root = tmp_root("local-incompatible-non-placement");
+    let _ = std::fs::remove_dir_all(&root);
+    let definition = non_default_qdef();
+    let mut incompatible = definition.clone();
+    incompatible.request_id_retention_ms += 1;
+
+    let store = LocalObjectLog::open(&root).expect("open");
+    assert!(store.create_queue(definition).expect("create").created);
+    assert!(matches!(
+        store.create_queue(incompatible.clone()),
+        Err(EngineError::QueueDefinitionConflict)
+    ));
+
+    let reopened = LocalObjectLog::open(&root).expect("reopen");
+    assert!(matches!(
+        reopened.create_queue(incompatible),
+        Err(EngineError::QueueDefinitionConflict)
+    ));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
     let root = tmp_root("composed-compatible-loser-immediate-use");
@@ -323,6 +347,30 @@ async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
 
     let reopened = composed_objectlog_backend(&root).expect("reopen");
     assert_eq!(reopened.queue_definition(&qkey()).await.unwrap(), qdef());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn composed_object_log_rejects_incompatible_non_placement_definition() {
+    let root = tmp_root("composed-incompatible-non-placement");
+    let _ = std::fs::remove_dir_all(&root);
+    let definition = non_default_qdef();
+    let mut incompatible = definition.clone();
+    incompatible.request_id_retention_ms += 1;
+
+    let winner = composed_objectlog_backend(&root).expect("open winner");
+    assert!(
+        futures::executor::block_on(winner.create_queue(definition))
+            .expect("create")
+            .created
+    );
+
+    let loser = composed_objectlog_backend(&root).expect("open loser");
+    assert!(matches!(
+        futures::executor::block_on(loser.create_queue(incompatible)),
+        Err(EngineError::QueueDefinitionConflict)
+    ));
 
     let _ = std::fs::remove_dir_all(&root);
 }

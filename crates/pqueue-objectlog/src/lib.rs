@@ -544,9 +544,7 @@ fn create_queue_metadata(
 ) -> EngineResult<CreateQueueOutcome> {
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
     if let Some(existing) = queues.get(&key) {
-        if existing.ordering_mode != definition.ordering_mode
-            || existing.priority_model != definition.priority_model
-        {
+        if existing != &definition {
             return Err(EngineError::QueueDefinitionConflict);
         }
         return Ok(CreateQueueOutcome {
@@ -583,9 +581,7 @@ fn create_queue_metadata(
     let _ = fs::remove_file(&temp_file);
     let stored: QueueDefinition =
         serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?).map_err(store)?;
-    if stored.ordering_mode != definition.ordering_mode
-        || stored.priority_model != definition.priority_model
-    {
+    if stored != definition {
         return Err(EngineError::QueueDefinitionConflict);
     }
     queues.insert(key, stored.clone());
