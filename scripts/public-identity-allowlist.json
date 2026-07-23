@@ -1,0 +1,97 @@
+{
+  "schema": "fireweed-public-identity-allowlist-v1",
+  "adr": "ADR-020",
+  "source_inventory": "docs/helix/02-design/public-namespace-migration.yaml",
+  "entries": [
+    {
+      "id": "rust-workspace-compatibility-crates",
+      "class": "temporary compatibility",
+      "path_pattern": "^(Cargo\\.toml|Cargo\\.lock|crates/pqueue(?:-[^/]+)?/.*|tools/turso-compat-probe/.*)$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
+      "reason": "ADR-020 keeps current Cargo packages, crate paths, binary names, and Rust import coordinates callable as compatibility aliases until the public cutover.",
+      "owner_surface": "Rust workspace packaging and APIs",
+      "removal_condition": "Remove after v0.20.0 ships Fireweed package coordinates and the old pqueue Cargo, crate-path, binary, and import aliases have a dedicated retirement plan."
+    },
+    {
+      "id": "helm-chart-compatibility",
+      "class": "temporary compatibility",
+      "path_pattern": "^charts/pqueue/.*$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
+      "reason": "ADR-020 classifies the existing Helm chart, rendered workload names, chart package name, and runtime environment prefix as temporary compatibility aliases.",
+      "owner_surface": "Helm chart and Kubernetes deployment manifests",
+      "removal_condition": "Remove after charts/fireweed-queue is authoritative and old pqueue chart/rendered coordinates are either migrated or separately retained by an operator compatibility ADR."
+    },
+    {
+      "id": "github-workflow-compatibility",
+      "class": "temporary compatibility",
+      "path_pattern": "^\\.github/workflows/.*\\.yml$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
+      "reason": "ADR-020 identifies CI, release, checkout paths, repository URLs, and downstream workflow consumers as migration surfaces that must keep old coordinates during the dual-name period.",
+      "owner_surface": "GitHub Actions CI and release automation",
+      "removal_condition": "Remove when workflows check out fireweed-queue, publish Fireweed artifacts, and no CI job depends on pqueue compatibility coordinates."
+    },
+    {
+      "id": "deployment-docs-compatibility-and-persistence",
+      "class": "persisted/wire",
+      "path_pattern": "^docs/deployment/.*\\.md$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
+      "reason": "ADR-020 distinguishes operator-facing examples from retained on-disk and runtime wire identifiers such as /var/lib/pqueue and PQUEUE_* compatibility variables.",
+      "owner_surface": "Deployment and operator documentation",
+      "removal_condition": "Remove after public deployment examples use Fireweed coordinates and any retained pqueue storage or wire identifiers are covered by a separate data-migration ADR."
+    },
+    {
+      "id": "operator-rendered-example-compatibility",
+      "class": "temporary compatibility",
+      "path_pattern": "^docs/operator/.*$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
+      "reason": "The generated operator console remains tied to the current pqueue service and chart examples until the Fireweed public examples are rendered.",
+      "owner_surface": "Generated public operator examples",
+      "removal_condition": "Remove when generated operator examples are rebuilt with Fireweed public naming."
+    },
+    {
+      "id": "performance-and-release-audit-history",
+      "class": "historical/audit",
+      "path_pattern": "^docs/(perf|releases)/.*$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
+      "reason": "ADR-020 preserves historical release notes, evidence ledgers, benchmark commands, and audit artifacts without rewriting published history.",
+      "owner_surface": "Release evidence, performance evidence, and historical release notes",
+      "removal_condition": "Remove only if a later evidence-retention decision supersedes the no-history-rewrite policy for these tracked artifacts."
+    },
+    {
+      "id": "helix-governance-history",
+      "class": "historical/audit",
+      "path_pattern": "^docs/helix/.*$",
+      "match_pattern": "(?i)\\bQueueyard\\b|\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
+      "reason": "ADR-020 keeps historical naming analysis, bead IDs, accepted decisions, and migration inventory visible for auditability.",
+      "owner_surface": "HELIX governance documents and ADR-020 migration inventory",
+      "removal_condition": "Remove only when ADR-020 is replaced by a new governance artifact that explicitly rewrites this tracked documentation policy."
+    },
+    {
+      "id": "repository-root-runtime-compatibility",
+      "class": "temporary compatibility",
+      "path_pattern": "^(README\\.md|Dockerfile|Dockerfile\\.e2|Dockerfile\\.prebuilt|docker-compose\\.yml|\\.gitignore|deny\\.toml)$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
+      "reason": "ADR-020 classifies current public docs, container image names, local service names, and runtime coordinates as temporary compatibility surfaces.",
+      "owner_surface": "Repository root public docs and runtime packaging",
+      "removal_condition": "Remove when root docs and runtime packaging advertise Fireweed coordinates and any old local names are covered by a dedicated compatibility note."
+    },
+    {
+      "id": "operational-scripts-compatibility",
+      "class": "temporary compatibility",
+      "path_pattern": "^scripts/(ci|dev|lakebase|perf|release)/.*$",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
+      "reason": "ADR-020 lists release, perf, CI, and identity-guardrail scripts as consumers that must recognize old names during the migration window.",
+      "owner_surface": "CI, release, performance, and development scripts",
+      "removal_condition": "Remove when operational scripts invoke Fireweed coordinates only and no longer need old pqueue compatibility variables or binary names."
+    },
+    {
+      "id": "identity-guardrail-old-name-probes",
+      "class": "temporary compatibility",
+      "path_pattern": "^scripts/(verify-public-identity|test-public-identity-residue)\\.sh$",
+      "match_pattern": "(?i)\\bQueueyard\\b|\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
+      "reason": "The ADR-020 residue gate and its tests must name each old identity class so they can reject newly introduced unapproved occurrences.",
+      "owner_surface": "Public identity residue guardrail",
+      "removal_condition": "Remove when the guardrail no longer tests old pqueue, PQUEUE, Queueyard, or 7thsense-pqueue residues because those classes have fully retired."
+    }
+  ]
+}
