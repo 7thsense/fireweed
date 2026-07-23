@@ -33,3 +33,15 @@ implementing it for submission.
 
 No Contributor License Agreement (CLA) or Developer Certificate of Origin
 (DCO) applies while code contributions remain closed.
+
+## Questions and support
+
+Search the documentation and existing issues first. If they do not answer your
+question, open an issue with the Fireweed Queue version, the relevant storage
+backend, what you expected, and what happened. Support is provided on a
+best-effort basis; maintainers do not guarantee a response or resolution time.
+
+See [SUPPORT.md](SUPPORT.md) for the support boundary. Follow
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) in project discussions. Security
+vulnerabilities must be reported privately as described in
+[SECURITY.md](SECURITY.md), never as a public support issue.
