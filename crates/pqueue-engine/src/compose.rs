@@ -1377,6 +1377,13 @@ pub trait ProjectionStore: Send {
         Ok(None)
     }
 
+    /// Read the durable item-id mint ceiling without publishing it into this composition's live counters.
+    /// Create-loser hydration uses this prepare-only seam so every fallible projection read completes before
+    /// the replacement shard is installed; publication afterward is an infallible [`QueueCounters::observe`].
+    fn recovery_counter_high_water(&self, _shard: &QueueKey) -> EngineResult<Option<ItemId>> {
+        Ok(None)
+    }
+
     /// Cross-validate this projection's durably recorded object-log lineage against the log's actual
     /// `identity` (TD-004 "Async lineage validation") BEFORE the composition advertises this projection's
     /// high-water as a safe replay-skip point. Called once per durable shard during recovery-on-open, after
@@ -1429,7 +1436,10 @@ pub trait ProjectionStore: Send {
     /// durable projection snapshot, so a push after a snapshot-tail reopen never re-mints an existing id.
     /// Default: no-op — the in-memory projection has no persisted snapshot, so its counters are restored by
     /// observing the ids in the replayed log instead.
-    fn restore_counters(&self, _shard: &QueueKey, _counters: &QueueCounters) -> EngineResult<()> {
+    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+        if let Some(item_id) = self.recovery_counter_high_water(shard)? {
+            counters.observe(shard, item_id);
+        }
         Ok(())
     }
 }
@@ -3604,9 +3614,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                 ..
             } = &mut *g;
             log.ensure_shard(&key)?;
-            projection.ensure_shard(&outcome.definition)?;
             let newly_known = !known_shards.contains(&key);
             if outcome.created {
+                projection.ensure_shard(&outcome.definition)?;
                 // Record the definition in the log's durable catalog so a reopened composition can recover
                 // this queue without a re-`create_queue` (no-op for in-process / unified-relational logs).
                 log.persist_definition(&outcome.definition)?;
@@ -3615,8 +3625,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                 // object-log family is sole-owner for data-plane mutation, so handoff is ordered: commands
                 // committed before this create must be replayed, while concurrent post-create mutation by
                 // the old owner remains outside the contract. Start at a durable projection's checkpoint
-                // (genesis for InMemoryProjection), not at an empty newly ensured projection.
-                projection.restore_counters(&key, &self.counters)?;
+                // (genesis for InMemoryProjection), while keeping this handle's serving image unpublished.
+                let recovered_counter_high_water = projection.recovery_counter_high_water(&key)?;
                 let recorded_high_water = projection.recovery_high_water(&key)?;
                 let floor = log.retention_floor(&key)?;
                 if let Some(floor) = &floor
@@ -3661,6 +3671,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                 // The in-memory object-log projection overrides this seam by building a scratch ProjectionData
                 // and swapping it into place, so even a command-application error cannot leak a partial replay.
                 projection.install_recovery_shard(&outcome.definition, &positions, &commands)?;
+                if let Some(item_id) = recovered_counter_high_water {
+                    self.counters.observe(&key, item_id);
+                }
                 for item_id in observed_item_ids {
                     self.counters.observe(&key, item_id);
                 }
@@ -4127,6 +4140,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 // projection axis' rich-claim selection (BQ-14b/c). A projection without a group/cohort read model
                 // (the log-replay family) refuses the non-item units with `Unavailable` via `select_rich_claim`.
                 let def = self.control.queue_definition(&req.shard)?;
+                // The durable control-plane definition can become visible before this handle finishes
+                // create-loser hydration. Until atomic projection installation publishes `known_shards`, a
+                // claim must fail closed rather than mistake an absent/partial image for an empty queue.
+                if !self
+                    .inner
+                    .lock()
+                    .expect("poisoned")
+                    .known_shards
+                    .contains(&req.shard)
+                {
+                    return Err(EngineError::NotFound);
+                }
                 let unit = if req.compatibility != ClaimCompatibility::default() {
                     validate_claim_compatibility(&req.compatibility, req.max_items as u64, &def)?
                 } else {
@@ -8177,6 +8202,22 @@ mod ordered_tests {
                 "failed read applies no replay prefix"
             );
         });
+
+        let failed_claim = futures::executor::block_on(backend.claim(ClaimRequest {
+            eligibility_time: None,
+            shard: shard.clone(),
+            worker_id: WorkerId::new("failed-replay-worker").unwrap(),
+            max_items: 2,
+            lease_token: LeaseToken::new("failed-replay-lease").unwrap(),
+            lease_expires_at: ts(30),
+            now: ts(3),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        }));
+        assert!(
+            matches!(failed_claim, Err(EngineError::NotFound)),
+            "failed create must not expose a data-plane shard: {failed_claim:?}"
+        );
 
         let retry = futures::executor::block_on(backend.create_queue(definition))
             .expect("complete replay retries cleanly");

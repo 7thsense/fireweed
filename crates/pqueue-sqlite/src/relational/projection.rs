@@ -743,6 +743,11 @@ impl SqliteProjectionStore {
     ) -> EngineResult<()> {
         observe_id_high_water_sql(&self.lock().conn, shard, counters)
     }
+
+    /// Read the durable item-id mint ceiling without mutating the caller's live counter map.
+    pub fn recovery_counter_high_water(&self, shard: &QueueKey) -> EngineResult<Option<ItemId>> {
+        recovery_id_high_water_sql(&self.lock().conn, shard)
+    }
 }
 
 impl ProjectionRead for SqliteProjectionStore {
@@ -1004,8 +1009,8 @@ impl ProjectionStore for SqliteProjectionStore {
         )
     }
 
-    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
-        self.observe_item_counters(shard, counters)
+    fn recovery_counter_high_water(&self, shard: &QueueKey) -> EngineResult<Option<ItemId>> {
+        SqliteProjectionStore::recovery_counter_high_water(self, shard)
     }
 
     fn eligible_candidates(

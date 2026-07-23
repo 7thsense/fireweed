@@ -9140,19 +9140,18 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
-    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+    fn recovery_counter_high_water(&self, shard: &QueueKey) -> EngineResult<Option<ItemId>> {
         let mut g = self.lock();
         let (t, q) = parts(shard);
         let row = st(g.client.query_opt(
             "SELECT item_id FROM pqueue_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
             &[&t, &q],
         ))?;
-        if let Some(row) = row {
+        row.map(|row| {
             let id: String = row.get(0);
-            let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
-            counters.observe(shard, item_id);
-        }
-        Ok(())
+            ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))
+        })
+        .transpose()
     }
 
     fn eligible_candidates(

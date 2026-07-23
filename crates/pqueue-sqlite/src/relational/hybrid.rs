@@ -13,7 +13,7 @@ use pqueue_engine::{AsOfProjectionStore, ProjectionSnapshot, ProjectionStore};
 use pqueue_engine::{
     ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
     FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogLineageIdentity, PendingPage,
-    PendingSummary, PushItem, QueueCounters, QueueKey, QueueMetrics,
+    PendingSummary, PushItem, QueueKey, QueueMetrics,
 };
 use pqueue_projection::InMemoryProjection;
 
@@ -1020,10 +1020,11 @@ impl ProjectionStore for HybridProjectionStore {
         )
     }
 
-    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
-        self.require_hydrated(shard)?;
-        // Push apply advances the durable row atomically; retention reaping advances the same row.
-        self.sqlite.observe_id_high_water(shard, counters)
+    fn recovery_counter_high_water(&self, shard: &QueueKey) -> EngineResult<Option<ItemId>> {
+        // Push apply advances the durable row atomically; retention reaping advances the same row. Return
+        // the ceiling without requiring a hot image or touching live counters so create-loser publication
+        // remains atomic.
+        self.sqlite.recovery_counter_high_water(shard)
     }
 
     fn eligible_candidates(

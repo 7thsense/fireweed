@@ -51,6 +51,19 @@ pub(crate) fn observe_id_high_water_sql(
     shard: &QueueKey,
     counters: &QueueCounters,
 ) -> EngineResult<()> {
+    if let Some(id) = recovery_id_high_water_sql(conn, shard)? {
+        counters.observe(shard, id);
+    }
+    Ok(())
+}
+
+/// Read the durable item-id mint ceiling without mutating a live counter map. This is the prepare half of
+/// create-loser publication: the caller can complete this fallible SQLite read before atomically installing
+/// the recovered projection, then publish the returned id with infallible [`QueueCounters::observe`].
+pub(crate) fn recovery_id_high_water_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+) -> EngineResult<Option<ItemId>> {
     let (t, q) = parts(shard);
     let stored: Option<String> = st(conn
         .query_row(
@@ -59,11 +72,9 @@ pub(crate) fn observe_id_high_water_sql(
             |row| row.get(0),
         )
         .optional())?;
-    if let Some(s) = stored {
-        let id = ItemId::new(s).map_err(|e| EngineError::Storage(e.to_string()))?;
-        counters.observe(shard, id);
-    }
-    Ok(())
+    stored
+        .map(|value| ItemId::new(value).map_err(|error| EngineError::Storage(error.to_string())))
+        .transpose()
 }
 
 /// Restore the durable item-id high-water for EVERY queue into `counters` — the all-queues counterpart to

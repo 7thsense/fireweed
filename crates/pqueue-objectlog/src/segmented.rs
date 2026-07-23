@@ -1108,6 +1108,22 @@ pub struct LocalFsBlobStore {
     root: PathBuf,
 }
 
+/// Removes an unpublished sibling temporary file on every return path. The guard is armed immediately
+/// after `create_new` succeeds, so write, sync, hard-link, and directory-sync failures cannot leak the
+/// current attempt. Temp files left by a process crash remain harmless occupied names that a later call
+/// skips while searching for its own unique attempt path.
+struct LocalFsTempFileGuard(PathBuf);
+
+impl Drop for LocalFsTempFileGuard {
+    fn drop(&mut self) {
+        if fs::remove_file(&self.0).is_ok()
+            && let Some(parent) = self.0.parent()
+        {
+            let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+        }
+    }
+}
+
 /// Monotonic suffix source so concurrent `put`s never collide on the same temp filename.
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static SEGMENT_ATTEMPT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1137,6 +1153,19 @@ impl LocalFsBlobStore {
         let pid = std::process::id();
         let parent = target.parent().unwrap_or(Path::new("."));
         parent.join(format!(".tmp-{pid}-{n}"))
+    }
+
+    /// Open a create-new sibling temp, skipping names occupied by crash leftovers from an earlier process
+    /// incarnation (including PID reuse). Returning a guard makes cleanup unconditional after this point.
+    fn open_unique_tmp(target: &Path) -> EngineResult<(fs::File, LocalFsTempFileGuard)> {
+        loop {
+            let tmp = Self::tmp_path(target);
+            match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+                Ok(file) => return Ok((file, LocalFsTempFileGuard(tmp))),
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(store_err(error)),
+            }
+        }
     }
 }
 
@@ -1224,18 +1253,13 @@ impl BlobStore for LocalFsBlobStore {
         if let Some(parent) = path.parent() {
             create_dir_all_durable(parent)?;
         }
-        let tmp = Self::tmp_path(&path);
+        let (mut file, tmp) = Self::open_unique_tmp(&path)?;
         let result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
-                .map_err(store_err)?;
             file.write_all(body).map_err(store_err)?;
             file.sync_all().map_err(store_err)?;
             drop(file);
 
-            match fs::hard_link(&tmp, &path) {
+            match fs::hard_link(&tmp.0, &path) {
                 Ok(()) => {
                     // Persist the new directory entry after the object bytes themselves are durable.
                     if let Some(parent) = path.parent() {
@@ -1249,7 +1273,7 @@ impl BlobStore for LocalFsBlobStore {
                 Err(e) => Err(store_err(e)),
             }
         })();
-        let _ = fs::remove_file(&tmp);
+        drop(tmp);
         result
     }
 
@@ -9713,6 +9737,59 @@ mod fs_blob_store_tests {
             .map(|(_, body, _)| body)
             .unwrap();
         assert!(outcomes.iter().all(|(_, _, observed)| observed == winner));
+    }
+
+    #[test]
+    fn local_fs_create_only_skips_stale_temps_and_cleans_its_attempts() {
+        let tmp = TmpDir::new();
+        let store = LocalFsBlobStore::open(&tmp.path).unwrap();
+        let target = store.key_path("catalog/queue.json");
+        let parent = target.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+
+        // Model PID reuse after a crash: a prior process left the next process-local suffixes occupied.
+        let first = TMP_COUNTER.load(Ordering::Relaxed);
+        let stale_count = 256;
+        for attempt in first..first + stale_count {
+            fs::write(
+                parent.join(format!(".tmp-{}-{attempt}", std::process::id())),
+                b"stale",
+            )
+            .unwrap();
+        }
+
+        assert!(
+            store
+                .put_if_absent("catalog/queue.json", b"winner")
+                .unwrap()
+        );
+        assert_eq!(store.get("catalog/queue.json").unwrap().unwrap(), b"winner");
+        let winner_attempt = TMP_COUNTER.load(Ordering::Relaxed) - 1;
+        assert!(winner_attempt >= first + stale_count);
+        assert!(
+            !parent
+                .join(format!(".tmp-{}-{winner_attempt}", std::process::id()))
+                .exists(),
+            "successful publication must remove its private temp via RAII"
+        );
+
+        assert!(!store.put_if_absent("catalog/queue.json", b"loser").unwrap());
+        let loser_attempt = TMP_COUNTER.load(Ordering::Relaxed) - 1;
+        assert!(
+            !parent
+                .join(format!(".tmp-{}-{loser_attempt}", std::process::id()))
+                .exists(),
+            "CAS-loser publication must remove its private temp via RAII"
+        );
+        assert_eq!(
+            fs::read_dir(parent)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+                .count(),
+            stale_count as usize,
+            "only the deliberately injected crash leftovers remain"
+        );
     }
 }
 
