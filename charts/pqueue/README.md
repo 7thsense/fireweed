@@ -3,6 +3,20 @@
 This chart deploys the `pqueue-service` RESP runtime. Storage is configured with
 separate log and projection axes.
 
+## Fireweed Queue preview version policy
+
+`pqueue` is the Helm chart compatibility alias for Fireweed Queue during the
+ADR-020 namespace migration. This source chart keeps an independent version
+and `appVersion` for development packages. For the Fireweed Queue v0.20.0
+public preview, `scripts/release/package-helm-chart.sh --version 0.20.0`
+overrides both values and produces `pqueue-0.20.0.tgz` plus
+`pqueue-helm-chart.txt` release evidence.
+
+The `charts/pqueue` path, `pqueue` chart name, rendered Kubernetes names, and
+`pqueue-*` package/evidence names remain compatibility aliases in this release.
+Renaming those coordinates belongs to the separate chart namespace migration;
+this version policy does not rename runtime or persisted identifiers.
+
 ## Storage Axes
 
 Log backend:
