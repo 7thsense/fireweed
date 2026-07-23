@@ -451,6 +451,57 @@ impl Inner {
         read_high_water(&self.root, shard)
     }
 
+    /// Install a queue discovered through durable create authority into this handle's derived state.
+    ///
+    /// Object-log handles are sole-owner data-plane handles. The supported handoff is therefore ordered:
+    /// another handle may have durably committed commands before this independently opened handle resolves
+    /// `create_queue`, but it must not keep mutating the shard concurrently. Replaying here makes the losing
+    /// creator authoritative at the instant create returns instead of installing an empty projection.
+    fn hydrate_queue(
+        &mut self,
+        definition: &QueueDefinition,
+        counters: &QueueCounters,
+    ) -> EngineResult<()> {
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        if self.projections.contains_key(&shard) {
+            return Ok(());
+        }
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        )
+        .with_typed_indexes(&definition.typed_indexes);
+        for (_sequence, _epoch, envelope) in self.read_envelopes(&shard)? {
+            for item_id in &envelope.item_ids {
+                counters.observe(&shard, *item_id);
+            }
+            if let Some(sequence) = envelope
+                .command_id
+                .0
+                .rsplit('-')
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                self.cmd_seq = self.cmd_seq.max(sequence.saturating_add(1));
+            }
+            projection.apply_command(&envelope.command)?;
+        }
+        if let Some(schema) = definition
+            .entity_schema
+            .as_ref()
+            .and_then(|document| document.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?
+        {
+            self.schemas.insert(shard.clone(), schema);
+        }
+        self.projections.insert(shard, projection);
+        Ok(())
+    }
+
     /// Reconstruct every queue's projection from the durable object log on open (TD-007 §4 replay), and
     /// restore `cmd_seq` past the highest minted `obj-N` so a post-restart id never collides.
     fn rebuild_all(&mut self, counters: &QueueCounters) -> EngineResult<()> {
@@ -581,10 +632,12 @@ fn create_queue_metadata(
     let _ = fs::remove_file(&temp_file);
     let stored: QueueDefinition =
         serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?).map_err(store)?;
+    queues.insert(key, stored.clone());
     if stored != definition {
+        // Cache the durable winner before reporting conflict so an independently opened loser can perform
+        // the documented follow-up definition read without reopening the backend.
         return Err(EngineError::QueueDefinitionConflict);
     }
-    queues.insert(key, stored.clone());
     Ok(CreateQueueOutcome {
         created,
         definition: stored,
@@ -1325,36 +1378,23 @@ impl ControlPlaneStore for ObjectLogBackend {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
             let root = g.root.clone();
-            let outcome = create_queue_metadata(&root, &mut g.queues, definition)?;
-            let shard = QueueKey::new(
-                outcome.definition.tenant_id.clone(),
-                outcome.definition.queue_id.clone(),
-            );
-            let compiled_schema = outcome
-                .definition
-                .entity_schema
-                .as_ref()
-                .and_then(|esd| esd.entity_schema.as_ref())
-                .map(compile_entity_schema)
-                .transpose()?;
-            // A handle opened before another handle wins queue creation has no local projection for
-            // the newly durable queue. Hydrate that compatible loser from the authoritative stored
-            // definition, while preserving an existing projection (and its items) when create_queue is
-            // called again on an already-active handle.
-            g.projections.entry(shard.clone()).or_insert_with(|| {
-                ProjectionData::new(
-                    outcome.definition.priority_model,
-                    outcome.definition.ordering_mode,
-                    outcome.definition.max_rank_error,
-                    outcome.definition.recurrence,
-                    &outcome.definition.secondary_indexes,
-                )
-                .with_typed_indexes(&outcome.definition.typed_indexes)
-            });
-            if let Some(cs) = compiled_schema {
-                g.schemas.insert(shard, cs);
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            match create_queue_metadata(&root, &mut g.queues, definition) {
+                Ok(outcome) => {
+                    g.hydrate_queue(&outcome.definition, &self.counters)?;
+                    Ok(outcome)
+                }
+                Err(EngineError::QueueDefinitionConflict) => {
+                    let stored = g
+                        .queues
+                        .get(&key)
+                        .cloned()
+                        .expect("durable conflict winner was cached");
+                    g.hydrate_queue(&stored, &self.counters)?;
+                    Err(EngineError::QueueDefinitionConflict)
+                }
+                Err(error) => Err(error),
             }
-            Ok(outcome)
         })();
         std::future::ready(result)
     }

@@ -3586,16 +3586,68 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                 log,
                 projection,
                 known_shards,
+                cmd_seq,
                 ..
             } = &mut *g;
             log.ensure_shard(&key)?;
             projection.ensure_shard(&outcome.definition)?;
-            known_shards.insert(key.clone());
+            let newly_known = !known_shards.contains(&key);
             if outcome.created {
                 // Record the definition in the log's durable catalog so a reopened composition can recover
                 // this queue without a re-`create_queue` (no-op for in-process / unified-relational logs).
                 log.persist_definition(&outcome.definition)?;
+            } else if newly_known {
+                // This handle was opened before another supported handle created the durable queue. The
+                // object-log family is sole-owner for data-plane mutation, so handoff is ordered: commands
+                // committed before this create must be replayed, while concurrent post-create mutation by
+                // the old owner remains outside the contract. Start at a durable projection's checkpoint
+                // (genesis for InMemoryProjection), not at an empty newly ensured projection.
+                projection.restore_counters(&key, &self.counters)?;
+                let recorded_high_water = projection.recovery_high_water(&key)?;
+                let floor = log.retention_floor(&key)?;
+                if let Some(floor) = &floor
+                    && !recorded_high_water
+                        .as_ref()
+                        .is_some_and(|position| position.sequence >= floor.sequence)
+                {
+                    return Err(EngineError::Storage(format!(
+                        "create loser projection is behind reclaimed retention floor {}",
+                        floor.sequence
+                    )));
+                }
+                let mut from = max_position(recorded_high_water, floor);
+                loop {
+                    let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
+                    if !page.entries.is_empty() {
+                        let mut positions = Vec::with_capacity(page.entries.len());
+                        let mut commands = Vec::with_capacity(page.entries.len());
+                        for (position, envelope) in page.entries {
+                            for item_id in &envelope.item_ids {
+                                self.counters.observe(&key, *item_id);
+                            }
+                            if let Some(sequence) = envelope
+                                .command_id
+                                .0
+                                .rsplit('-')
+                                .next()
+                                .and_then(|value| value.parse::<u64>().ok())
+                            {
+                                *cmd_seq = (*cmd_seq).max(sequence.saturating_add(1));
+                            }
+                            positions.push(position);
+                            commands.push(envelope);
+                        }
+                        projection.apply_recovery(&positions, &commands)?;
+                    }
+                    match page.next {
+                        Some(next) => from = Some(next),
+                        None => break,
+                    }
+                }
             }
+            // Publish the handle-local shard only after durable catalog persistence or loser replay
+            // succeeds. A failed hydration remains retryable instead of leaving an empty known shard.
+            known_shards.insert(key.clone());
             Ok(outcome)
         })
     }

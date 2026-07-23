@@ -1100,8 +1100,9 @@ impl BlobStore for InMemoryBlobStore {
 ///
 /// - `put` is atomic (write a sibling temp file, then `rename` over the target — a reader never sees a
 ///   half-written object).
-/// - `put_if_absent` is the manifest-CAS primitive: `create_new(true)` (`O_EXCL`) — exactly one racing
-///   writer creates the manifest entry, the rest observe `AlreadyExists` and lose the CAS.
+/// - `put_if_absent` is the manifest-CAS primitive: write and sync a sibling temporary file, then publish
+///   it with a create-only hard link. Exactly one racing writer publishes the complete object; losers never
+///   observe an empty or partially written winner.
 /// - `get` returns `None` for a missing file; `list(prefix)` walks the tree and returns matching keys.
 pub struct LocalFsBlobStore {
     root: PathBuf,
@@ -1191,15 +1192,33 @@ impl BlobStore for LocalFsBlobStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(store_err)?;
         }
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut f) => {
-                f.write_all(body).map_err(store_err)?;
-                f.flush().map_err(store_err)?;
-                Ok(true)
+        let tmp = Self::tmp_path(&path);
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(store_err)?;
+            file.write_all(body).map_err(store_err)?;
+            file.sync_all().map_err(store_err)?;
+            drop(file);
+
+            match fs::hard_link(&tmp, &path) {
+                Ok(()) => {
+                    // Persist the new directory entry after the object bytes themselves are durable.
+                    if let Some(parent) = path.parent() {
+                        fs::File::open(parent)
+                            .and_then(|dir| dir.sync_all())
+                            .map_err(store_err)?;
+                    }
+                    Ok(true)
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(store_err(e)),
             }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(false),
-            Err(e) => Err(store_err(e)),
-        }
+        })();
+        let _ = fs::remove_file(&tmp);
+        result
     }
 
     fn get(&self, key: &str) -> EngineResult<Option<Vec<u8>>> {
@@ -9619,6 +9638,49 @@ mod fs_blob_store_tests {
         );
         // A second create-only PUT at the recovered manifest tail still loses the CAS (durable fence).
         assert!(!s.put_if_absent("t/a/q/b/manifest/0.json", b"dup").unwrap());
+    }
+
+    #[test]
+    fn local_fs_create_only_publish_never_exposes_partial_winner() {
+        let tmp = TmpDir::new();
+        let store = Arc::new(LocalFsBlobStore::open(&tmp.path).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        // Large, distinct bodies make the loser return while the old create_new/write implementation was
+        // still filling the winner's publicly visible file. The staged hard-link implementation publishes
+        // only after either complete body has been written and synced.
+        let bodies = [vec![0x5a; 16 * 1024 * 1024], vec![0xa5; 16 * 1024 * 1024]];
+        let threads = bodies
+            .iter()
+            .cloned()
+            .map(|body| {
+                let store = Arc::clone(&store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let created = store.put_if_absent("catalog/queue.json", &body).unwrap();
+                    let observed = store
+                        .get("catalog/queue.json")
+                        .unwrap()
+                        .expect("winner is published before either call returns");
+                    (created, body, observed)
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outcomes.iter().filter(|(created, _, _)| *created).count(),
+            1
+        );
+        let winner = outcomes
+            .iter()
+            .find(|(created, _, _)| *created)
+            .map(|(_, body, _)| body)
+            .unwrap();
+        assert!(outcomes.iter().all(|(_, _, observed)| observed == winner));
     }
 }
 

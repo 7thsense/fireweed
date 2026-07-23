@@ -376,17 +376,15 @@ async fn object_log_backend_compatible_race_loser_can_push_claim_and_reopen() {
 }
 
 #[tokio::test]
-async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
-    let root = tmp_root("composed-compatible-loser-immediate-use");
+async fn object_log_backend_loser_replays_commands_committed_before_create_handoff() {
+    let root = tmp_root("backend-loser-replays-before-create");
     let _ = std::fs::remove_dir_all(&root);
-    let winner = composed_objectlog_backend(&root).expect("open winner");
-    let loser = composed_objectlog_backend(&root).expect("open loser");
+    // Both handles open before authority exists. Data-plane ownership then hands off in order: the winner
+    // creates and durably pushes before the stale handle resolves its compatible create.
+    let winner = ObjectLogBackend::open(&root).expect("open winner");
+    let loser = ObjectLogBackend::open(&root).expect("open loser before create");
     assert!(winner.create_queue(qdef()).await.unwrap().created);
-    let loser_outcome = loser.create_queue(qdef()).await.unwrap();
-    assert!(!loser_outcome.created);
-    assert_eq!(loser_outcome.definition, qdef());
-
-    loser
+    winner
         .push(
             &qkey(),
             vec![PushSpec::default()],
@@ -394,11 +392,85 @@ async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
             None,
         )
         .await
-        .expect("loser push");
+        .expect("winner durable push");
+
+    let outcome = loser
+        .create_queue(qdef())
+        .await
+        .expect("compatible handoff");
+    assert!(!outcome.created);
+    assert_eq!(
+        loser.peek(&qkey(), 10).await.expect("replayed read").len(),
+        1
+    );
     let claimed = loser
         .claim(claim_req(10, 30, 10))
         .await
-        .expect("loser claim");
+        .expect("loser claims replayed authoritative item");
+    assert_eq!(claimed.items.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn object_log_backend_incompatible_loser_caches_durable_winner_for_read() {
+    let root = tmp_root("backend-incompatible-loser-readable");
+    let _ = std::fs::remove_dir_all(&root);
+    let definition = non_default_qdef();
+    let mut incompatible = definition.clone();
+    incompatible.request_id_retention_ms += 1;
+    let winner = ObjectLogBackend::open(&root).expect("open winner");
+    let loser = ObjectLogBackend::open(&root).expect("open loser before create");
+    assert!(
+        winner
+            .create_queue(definition.clone())
+            .await
+            .unwrap()
+            .created
+    );
+
+    assert!(matches!(
+        loser.create_queue(incompatible).await,
+        Err(EngineError::QueueDefinitionConflict)
+    ));
+    let key =
+        pqueue_engine::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    assert_eq!(
+        loser.queue_definition(&key).await.expect("cached winner"),
+        definition
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
+    let root = tmp_root("composed-compatible-loser-immediate-use");
+    let _ = std::fs::remove_dir_all(&root);
+    let winner = composed_objectlog_backend(&root).expect("open winner");
+    let loser = composed_objectlog_backend(&root).expect("open loser");
+    assert!(winner.create_queue(qdef()).await.unwrap().created);
+    winner
+        .push(
+            &qkey(),
+            vec![PushSpec::default()],
+            UtcTimestamp::new(1, 0).unwrap(),
+            None,
+        )
+        .await
+        .expect("winner durable push before handoff");
+    let loser_outcome = loser.create_queue(qdef()).await.unwrap();
+    assert!(!loser_outcome.created);
+    assert_eq!(loser_outcome.definition, qdef());
+    assert_eq!(
+        loser.peek(&qkey(), 10).await.expect("replayed read").len(),
+        1
+    );
+
+    let claimed = loser
+        .claim(claim_req(10, 30, 10))
+        .await
+        .expect("loser claims replayed authoritative item");
     assert_eq!(claimed.items.len(), 1);
 
     let reopened = composed_objectlog_backend(&root).expect("reopen");
@@ -417,7 +489,7 @@ fn composed_object_log_rejects_incompatible_non_placement_definition() {
 
     let winner = composed_objectlog_backend(&root).expect("open winner");
     assert!(
-        futures::executor::block_on(winner.create_queue(definition))
+        futures::executor::block_on(winner.create_queue(definition.clone()))
             .expect("create")
             .created
     );
@@ -427,6 +499,12 @@ fn composed_object_log_rejects_incompatible_non_placement_definition() {
         futures::executor::block_on(loser.create_queue(incompatible)),
         Err(EngineError::QueueDefinitionConflict)
     ));
+    let key =
+        pqueue_engine::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    assert_eq!(
+        futures::executor::block_on(loser.queue_definition(&key)).expect("durable winner readable"),
+        definition
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
