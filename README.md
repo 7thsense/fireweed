@@ -1,4 +1,4 @@
-# pqueue
+# Fireweed Queue
 
 ## Documentation
 
@@ -53,6 +53,13 @@ docker run --rm pqueue:dev --help
 See the
 [container runtime config contract](docs/deployment/container-runtime-contract.md)
 for the full environment, health-probe, and storage backend contract.
+
+## License
+
+Fireweed Queue is licensed under either the
+[Apache License, Version 2.0](LICENSE-APACHE) or the [MIT license](LICENSE-MIT),
+at your option (`MIT OR Apache-2.0`). See [CONTRIBUTING.md](CONTRIBUTING.md) for
+the project's issues-only contribution policy.
 
 ## Building from source
 
