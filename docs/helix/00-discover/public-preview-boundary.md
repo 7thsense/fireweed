@@ -1,6 +1,15 @@
 ---
 ddx:
   id: public-preview-boundary
+  depends_on:
+    - product-vision
+    - production-deployment-readiness
+  review:
+    self_hash: 654a47a2f3754980ce33f1348dbe42bb15c05a6f64dda4e4e2686bd84cc9f9d0
+    deps:
+      product-vision: d70aaff09b5d5f59211e5ef3ae9156ee30776e95bce7a70398978e83e39d39e8
+      production-deployment-readiness: a8c78f2f4659471b79c52db30c18a22fe6d3d74b0f8a4dd2a62b6c195ea5f6be
+    reviewed_at: "2026-07-23T01:03:20Z"
 ---
 
 # Public Preview Boundary
@@ -17,47 +26,68 @@ by release-readiness evidence and can be supported without overpromising.
 
 ## Supported
 
-Supported in the public preview:
+“Preview-supported” means maintainers accept correctness reports against the
+documented contract and intend to preserve configuration compatibility within
+each supported 0.x minor release line. A breaking change requires a minor
+version bump and migration guidance. This is not a 1.0 SemVer stability, SLA,
+capacity, provider certification, or production-readiness claim.
 
-- `objectlog/sqlite` is the baseline supported backend for preview users.
-- `objectlog/turso` is supported only as the gated Rust-native projection path described in ADR-016 and
-  TD-010, and only within the focused validation envelope those documents describe.
+The public preview supports these profiles:
 
-Operationally, the preview expects:
+| Profile | Preview status | Boundary |
+|---|---|---|
+| `sqlite/inmemory` | Supported | Single-process, locally durable embedded use. |
+| `objectlog/inmemory` | Supported | Durable object log with a rebuildable in-memory projection. |
+| `objectlog/sqlite` | Supported baseline | Durable object log with the reference persistent local projection. |
+| `objectlog/hybrid` | Supported | Hot-memory reads over the durable SQLite projection. |
+| `objectlog/hybrid-async` | Supported with limits | Async projection debt and backpressure controls are required; production scale and cost claims remain deferred. |
+| `memory/inmemory` | Development only | Conformance, examples, and local evaluation; accepted work does not survive process loss. |
+| `objectlog/turso` | Experimental | Feature-gated differential and recovery evaluation; not a supported user profile. |
+| `objectlog/hybrid-strict` | Experimental | Direct-config test surface; not chart-selectable or production-supported. |
+| `postgres/inmemory` | Deferred | Wired and exercised, but excluded from the preview support contract. |
+| `postgres/sqlite` | Deferred | Wired and exercised, but excluded from the preview support contract. |
+| `postgres/postgres` | Deferred | Wired and exercised; its composition and operational caveats remain outside this preview. |
 
-- a single release-line codebase and schema;
-- one authoritative object-log deployment for durable command history;
-- a local projection that can reopen and rebuild cleanly;
-- the supported backend pairings to preserve the same external transaction contract.
-
-The wider matrix recorded in [DEPLOYMENT-READINESS.md](../04-build/DEPLOYMENT-READINESS.md) is
-implementation evidence, not a promise that every wired combination is publicly supported in preview.
+All supported durable profiles must preserve the same external transaction
+contract: successful mutations are durable and visible, rejected mutations
+have no durable effect, and ambiguous retries are resolved by request identity.
+The wider evidence in
+[DEPLOYMENT-READINESS.md](../04-build/DEPLOYMENT-READINESS.md) does not promote a
+wired profile into this support boundary.
 
 ## Experimental
 
 Experimental components are present in the repository but are not part of the public support claim:
 
 - `objectlog/hybrid-strict` remains explicitly experimental and not production-supported.
-- `pqueue-turso` is feature-gated and validation-oriented until the focused Turso lane is promoted.
-- Any backend profile that is wired only for internal verification, local development, or matrix
-  coverage stays outside the public preview claim even if it is runnable.
+- `objectlog/turso` and `pqueue-turso` remain feature-gated and
+  validation-oriented until the focused Turso lane is separately promoted.
+- Experimental surfaces may change or be removed without compatibility aliases.
 
-## Stable Crates
+## Crate Support Classes
 
-Stable crates for the preview boundary are the ones that make up the supported public surface and the
-shared substrate it depends on:
+Crate status describes its role in this repository and preview, not a promise
+that every crate will be published independently or has a stable SemVer API.
+The artifact-topology bead owns registry publication decisions.
 
-- `pqueue-core`
-- `pqueue-engine`
-- `pqueue-projection`
-- `pqueue-relational`
-- `pqueue-objectlog`
-- `pqueue-sqlite`
-- `pqueue-server`
-- `pqueue-resp`
-
-These crates are the public preview backbone because they carry the product contract, the shared
-relational model, and the supported runtime surface.
+| Crate | Preview class | Public commitment |
+|---|---|---|
+| `pqueue` | Public Rust facade | Supported ergonomic library and composition surface. |
+| `pqueue-core` | Public contract | Supported domain types and queue contract used by the facade. |
+| `pqueue-engine` | Runtime substrate | Supported through the public facade and server, not promised as a standalone API. |
+| `pqueue-projection` | Runtime substrate | Supported through shipped profiles, not promised as a standalone API. |
+| `pqueue-relational` | Runtime substrate | Shared implementation used by supported relational projections. |
+| `pqueue-objectlog` | Runtime adapter | Supported through the object-log profiles above. |
+| `pqueue-sqlite` | Runtime adapter | Supported through `sqlite/inmemory` and object-log projection profiles. |
+| `pqueue-server` | Public runtime | Supported service binary within the profile boundary above. |
+| `pqueue-resp` | Public protocol adapter | Supported RESP surface subject to its documented conformance contract. |
+| `pqueue-memory` | Development/reference | Local evaluation and conformance only; no durability claim. |
+| `pqueue-postgres` | Deferred adapter | Present and tested, but outside the public-preview support boundary. |
+| `pqueue-turso` | Experimental adapter | Feature-gated validation surface; no compatibility promise. |
+| `pqueue-conformance` | Test tooling | Contributor-facing contract tests; not a runtime product artifact. |
+| `pqueue-loadgen` | Test tooling | Load and evidence generation; no public runtime API commitment. |
+| `pqueue-release` | Release tooling | Maintainer tooling; not a runtime product artifact. |
+| `pqueue-sim-support` | Test tooling | Simulation fixtures and support; not a runtime product artifact. |
 
 ## Non-goals
 
@@ -87,7 +117,9 @@ Deferred production claims include:
 
 - general production support for `objectlog/turso`;
 - production support for `objectlog/hybrid-strict`;
-- any public claim that the wired `postgres/*` matrix is part of this preview release;
+- provider certification and universal capacity claims for every object store;
+- release-tier cost and 10-million-item recovery claims until their open evidence beads close;
+- any public support claim for the wired `postgres/*` matrix;
 - any public promise that the preview backend selection is identical to the full deployment-readiness
   matrix.
 
