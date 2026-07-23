@@ -3578,8 +3578,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
         &self,
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
-        deferred(move || {
-            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        queue_serialized(&self.mutation_gate, key.clone(), move || {
             let outcome = self.control.create_queue(definition)?;
             if outcome.created {
                 let mut g = self.inner.lock().expect("poisoned");
@@ -5928,8 +5928,8 @@ mod ordered_tests {
         PriorityTieBreaker, RecurrencePolicy, RetryPolicy, TenantId, WorkerId,
     };
     use std::collections::{BTreeMap, BTreeSet, HashMap};
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Barrier, Mutex};
     use std::task::Poll;
 
     #[derive(Clone, Default)]
@@ -6870,6 +6870,92 @@ mod ordered_tests {
         assert!(
             matches!(poll_once(&mut list), Poll::Ready(Ok(queues)) if queues == vec![QueueId::new("queue").unwrap()])
         );
+    }
+
+    #[test]
+    fn in_process_control_plane_concurrent_creates_are_create_or_read() {
+        let control = Arc::new(InProcessControlPlane::new());
+        let barrier = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let control = Arc::clone(&control);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    ControlPlane::create_queue(control.as_ref(), qdef())
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+        assert!(outcomes.iter().all(|outcome| outcome.definition == qdef()));
+    }
+
+    #[test]
+    fn composed_backend_concurrent_compatible_creates_return_winning_definition() {
+        let backend = Arc::new(ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        ));
+        let barrier = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let backend = Arc::clone(&backend);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    futures::executor::block_on(backend.create_queue(qdef()))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+        assert!(outcomes.iter().all(|outcome| outcome.definition == qdef()));
+        assert_eq!(
+            futures::executor::block_on(backend.queue_definition(&queue())).unwrap(),
+            qdef()
+        );
+    }
+
+    #[test]
+    fn composed_backend_concurrent_incompatible_losers_conflict() {
+        let backend = Arc::new(ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        ));
+        futures::executor::block_on(backend.create_queue(qdef())).unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let handles = (0..8)
+            .map(|_| {
+                let backend = Arc::clone(&backend);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut definition = qdef();
+                    definition.ordering_mode = OrderingMode::BoundedRelaxed;
+                    barrier.wait();
+                    futures::executor::block_on(backend.create_queue(definition))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut conflicts = 0;
+        for result in handles.into_iter().map(|handle| handle.join().unwrap()) {
+            match result {
+                Err(EngineError::QueueDefinitionConflict) => conflicts += 1,
+                other => panic!("unexpected create result: {other:?}"),
+            }
+        }
+        assert_eq!(conflicts, 8);
     }
 
     fn add_millis(timestamp: UtcTimestamp, millis: u64) -> UtcTimestamp {

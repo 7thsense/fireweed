@@ -8,6 +8,7 @@
 
 use super::*;
 use pqueue_conformance::ts;
+use std::sync::{Arc, Barrier};
 
 // The full shared backend-conformance suite (16 port-level scenarios) against the composed memory backend
 // (`ComposedBackend<MemoryLog, InMemoryProjection, InProcessControlPlane>`).
@@ -53,6 +54,74 @@ async fn async_inspection_recovery_and_maintenance_helpers_are_deferred() {
         .await
         .unwrap();
     backend.recover_async().await.unwrap();
+}
+
+#[test]
+fn composed_memory_concurrent_compatible_creates_are_create_or_read() {
+    use pqueue_conformance::qdef;
+    use pqueue_engine::ControlPlaneStore;
+
+    let backend = Arc::new(composed_memory_backend());
+    let barrier = Arc::new(Barrier::new(8));
+    let handles = (0..8)
+        .map(|_| {
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(backend.create_queue(qdef()))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+    assert!(outcomes.iter().all(|outcome| outcome.definition == qdef()));
+}
+
+#[test]
+fn composed_memory_concurrent_incompatible_losers_conflict() {
+    use pqueue_conformance::qdef;
+    use pqueue_core::OrderingMode;
+    use pqueue_engine::{ControlPlaneStore, EngineError};
+
+    let backend = Arc::new(composed_memory_backend());
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(backend.create_queue(qdef()))
+        .unwrap();
+    let barrier = Arc::new(Barrier::new(8));
+    let handles = (0..8)
+        .map(|_| {
+            let backend = Arc::clone(&backend);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let mut definition = qdef();
+                definition.ordering_mode = OrderingMode::BoundedRelaxed;
+                barrier.wait();
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(backend.create_queue(definition))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut conflicts = 0;
+    for handle in handles {
+        match handle.join().unwrap() {
+            Err(EngineError::QueueDefinitionConflict) => conflicts += 1,
+            other => panic!("unexpected create result: {other:?}"),
+        }
+    }
+    assert_eq!(conflicts, 8);
 }
 
 /// ADR-012 Phase 1b-i: CAPABILITY PARITY between the composed memory backend and the monolithic

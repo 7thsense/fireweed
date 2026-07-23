@@ -2967,21 +2967,21 @@ pub fn open_postgres_coordinated(
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::future::Future;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
     use std::task::{Context, Poll};
     use std::time::{Duration, Instant};
 
     use pqueue_core::{
-        ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField, OwnerId,
-        PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex, SortDirection, TenantId,
-        TypedValue, UtcTimestamp, WorkerId,
+        ClaimByQueryRequest, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField,
+        OrderingMode, OwnerId, PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex,
+        SortDirection, TenantId, TypedValue, UtcTimestamp, WorkerId,
     };
 
     use super::{ClaimByQueryAt, NewItem, Pqueue, SystemClock, apply_owned_renewal_outcomes};
     use crate::EngineResult;
     use pqueue_engine::{
-        Clock, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
+        Clock, EngineError, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
         QueueControlPlane, QueueKey, QueueLease,
     };
 
@@ -3010,6 +3010,70 @@ mod tests {
             super::Ownership::Mine { epoch: Some(epoch) } if epoch >= 1
         ));
         assert_eq!(pq.metrics(&queue).await?.pending, 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn blocking_lib_backend_concurrent_creates_are_create_or_read() -> EngineResult<()> {
+        let raw = Arc::new(pqueue_memory::composed_memory_backend());
+        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let backend = Arc::clone(&bounded);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let pq = Pqueue::new(backend, Arc::new(SystemClock));
+                barrier.wait();
+                futures::executor::block_on(pq.create_queue(query_definition()))
+            }));
+        }
+
+        let mut created = 0;
+        for handle in handles {
+            let outcome = handle.join().unwrap()?;
+            if outcome.created {
+                created += 1;
+            }
+            assert_eq!(outcome.definition, query_definition());
+        }
+        assert_eq!(created, 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "memory")]
+    #[test]
+    fn blocking_lib_backend_concurrent_incompatible_losers_conflict() -> EngineResult<()> {
+        let raw = Arc::new(pqueue_memory::composed_memory_backend());
+        let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
+        futures::executor::block_on(
+            Pqueue::new(Arc::clone(&bounded), Arc::new(SystemClock))
+                .create_queue(query_definition()),
+        )?;
+
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let backend = Arc::clone(&bounded);
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let pq = Pqueue::new(backend, Arc::new(SystemClock));
+                let mut definition = query_definition();
+                definition.ordering_mode = OrderingMode::BoundedRelaxed;
+                barrier.wait();
+                futures::executor::block_on(pq.create_queue(definition))
+            }));
+        }
+
+        let mut conflicts = 0;
+        for handle in handles {
+            match handle.join().unwrap() {
+                Err(EngineError::QueueDefinitionConflict) => conflicts += 1,
+                other => panic!("unexpected create result: {other:?}"),
+            }
+        }
+        assert_eq!(conflicts, 8);
         Ok(())
     }
 
