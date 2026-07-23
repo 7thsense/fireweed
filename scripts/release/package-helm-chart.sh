@@ -58,13 +58,18 @@ evidence_path="${DIST_DIR}/pqueue-helm-chart.txt"
 cat > "$evidence_path" <<EOF
 artifact=pqueue-helm-chart
 chart=pqueue
+product=Fireweed Queue
 version=${VERSION}
 app_version=${VERSION}
+version_policy=release-synchronized
+source_version_policy=independent source defaults
+compatibility_alias=pqueue chart, package, and evidence coordinates retained under ADR-020
 package=${package_name}
 package_sha256=${package_sha256}
 source_chart=${CHART_DIR}
 release_tag=${TAG}
 release_asset_coordinate=github-release:${TAG}/${package_name}
+governing_decision=ADR-020
 EOF
 
 bash scripts/release/write-checksums.sh "$DIST_DIR"
