@@ -18,6 +18,9 @@
 - [Container image and runtime config contract](docs/deployment/container-runtime-contract.md)
   defines the `pqueue-service` image entrypoint, environment/config keys, health
   endpoint/port, and storage backend settings consumed by Helm.
+- [Choosing pqueue instead of a stream](docs/helix/01-frame/guides/choosing-pqueue.md)
+  explains when to use pqueue's mutable-priority leased work queue model instead
+  of an immutable sequential stream.
 
 ## Release Artifacts
 
