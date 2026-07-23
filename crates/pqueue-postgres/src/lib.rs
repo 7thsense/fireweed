@@ -187,6 +187,68 @@ struct Inner {
 }
 
 impl Inner {
+    fn install_empty_projection(
+        &mut self,
+        key: QueueKey,
+        definition: QueueDefinition,
+    ) -> EngineResult<()> {
+        let compiled_schema = definition
+            .entity_schema
+            .as_ref()
+            .and_then(|esd| esd.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?;
+        let projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        )
+        .with_typed_indexes(&definition.typed_indexes);
+        self.projections.insert(key.clone(), projection);
+        if let Some(schema) = compiled_schema {
+            self.schemas.insert(key.clone(), schema);
+        } else {
+            self.schemas.remove(&key);
+        }
+        self.queues.insert(key, definition);
+        Ok(())
+    }
+
+    fn hydrate_projection_from_durable(
+        &mut self,
+        key: QueueKey,
+        definition: QueueDefinition,
+        counters: &QueueCounters,
+    ) -> EngineResult<()> {
+        let (t, q) = parts(&key);
+        self.install_empty_projection(key.clone(), definition)?;
+        let mut max_cmd_seq = None;
+        for env in self.read_log_envelopes(&t, &q)? {
+            if let Some(n) = env
+                .command_id
+                .0
+                .rsplit('-')
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                max_cmd_seq = Some(max_cmd_seq.map_or(n, |m: u64| m.max(n)));
+            }
+            for id in &env.item_ids {
+                counters.observe(&key, *id);
+            }
+            self.projections
+                .get_mut(&key)
+                .expect("projection was just installed")
+                .apply_command(&env.command)?;
+        }
+        if let Some(n) = max_cmd_seq {
+            self.cmd_seq = self.cmd_seq.max(n.saturating_add(1));
+        }
+        Ok(())
+    }
+
     fn make_envelope(
         &mut self,
         command: QueueCommand,
@@ -393,15 +455,7 @@ impl Inner {
             let definition: QueueDefinition =
                 serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            let shard = key.clone();
-            let mut proj = ProjectionData::new(
-                definition.priority_model,
-                definition.ordering_mode,
-                definition.max_rank_error,
-                definition.recurrence,
-                &definition.secondary_indexes,
-            )
-            .with_typed_indexes(&definition.typed_indexes);
+            self.install_empty_projection(key.clone(), definition)?;
             for env in self.read_log_envelopes(&t, &q)? {
                 // Command-id is `pg-{node}-{n}` (or legacy `pg-{n}`); the trailing component is the seq.
                 if let Some(n) = env
@@ -416,12 +470,13 @@ impl Inner {
                 // Restart-safety: resume the per-queue item counter past every id already in the log so a
                 // push after reopen never re-mints an existing id (ADR-009 / `QueueCounters::observe`).
                 for id in &env.item_ids {
-                    counters.observe(&shard, *id);
+                    counters.observe(&key, *id);
                 }
-                proj.apply_command(&env.command)?;
+                self.projections
+                    .get_mut(&key)
+                    .expect("projection was just installed")
+                    .apply_command(&env.command)?;
             }
-            self.projections.insert(shard, proj);
-            self.queues.insert(key, definition);
         }
         if let Some(m) = max_cmd_seq {
             self.cmd_seq = m + 1;
@@ -1241,8 +1296,7 @@ impl ControlPlaneStore for PostgresBackend {
                     definition: existing.clone(),
                 });
             }
-            // Compile the entity schema once at create time (ADR-011).
-            let compiled_schema = definition
+            definition
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
@@ -1253,29 +1307,33 @@ impl ControlPlaneStore for PostgresBackend {
                 key.queue_id.as_str().to_string(),
             );
             let def_json = to_json(&definition)?;
-            st(g.client.execute(
-                "INSERT INTO queues(tenant,queue,definition) VALUES($1,$2,$3)",
+            let inserted = st(g.client.query_opt(
+                "INSERT INTO queues(tenant,queue,definition) VALUES($1,$2,$3) \
+                 ON CONFLICT (tenant,queue) DO NOTHING RETURNING definition",
                 &[&t, &q, &def_json],
             ))?;
-            let shard = key.clone();
-            g.projections.insert(
-                shard.clone(),
-                ProjectionData::new(
-                    definition.priority_model,
-                    definition.ordering_mode,
-                    definition.max_rank_error,
-                    definition.recurrence,
-                    &definition.secondary_indexes,
-                )
-                .with_typed_indexes(&definition.typed_indexes),
-            );
-            if let Some(cs) = compiled_schema {
-                g.schemas.insert(shard, cs);
+            let (created, stored_json) = match inserted {
+                Some(row) => (true, row.get::<_, String>(0)),
+                None => {
+                    let row = st(g.client.query_opt(
+                        "SELECT definition FROM queues WHERE tenant=$1 AND queue=$2",
+                        &[&t, &q],
+                    ))?
+                    .ok_or(EngineError::NotFound)?;
+                    (false, row.get(0))
+                }
+            };
+            let stored: QueueDefinition = serde_json::from_str(&stored_json)
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            if stored.ordering_mode != definition.ordering_mode
+                || stored.priority_model != definition.priority_model
+            {
+                return Err(EngineError::QueueDefinitionConflict);
             }
-            g.queues.insert(key, definition.clone());
+            g.hydrate_projection_from_durable(key, stored.clone(), &self.counters)?;
             Ok(CreateQueueOutcome {
-                created: true,
-                definition,
+                created,
+                definition: stored,
             })
         })();
         std::future::ready(result)

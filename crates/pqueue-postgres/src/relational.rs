@@ -1818,6 +1818,26 @@ struct Inner {
 }
 
 impl Inner {
+    fn install_queue_definition(
+        &mut self,
+        key: QueueKey,
+        definition: QueueDefinition,
+    ) -> EngineResult<()> {
+        let compiled_schema = definition
+            .entity_schema
+            .as_ref()
+            .and_then(|esd| esd.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?;
+        if let Some(schema) = compiled_schema {
+            self.schemas.insert(key.clone(), schema);
+        } else {
+            self.schemas.remove(&key);
+        }
+        self.queues.insert(key, definition);
+        Ok(())
+    }
+
     /// Reload the queue-def cache from the durable `queues` table. Command-log integrity and any explicit
     /// snapshot-tail rebuild are handled by the owning backend before this cache is served.
     ///
@@ -1830,16 +1850,7 @@ impl Inner {
             let definition: QueueDefinition =
                 serde_json::from_str(&def_json).map_err(|e| EngineError::Storage(e.to_string()))?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            if let Some(cs) = definition
-                .entity_schema
-                .as_ref()
-                .and_then(|esd| esd.entity_schema.as_ref())
-                .map(compile_entity_schema)
-                .transpose()?
-            {
-                self.schemas.insert(key.clone(), cs);
-            }
-            self.queues.insert(key, definition);
+            self.install_queue_definition(key, definition)?;
         }
         Ok(())
     }
@@ -5661,8 +5672,7 @@ impl ControlPlaneStore for PostgresRelationalBackend {
                     definition: existing.clone(),
                 });
             }
-            // Compile the entity schema once at create time (ADR-011).
-            let compiled_schema = definition
+            definition
                 .entity_schema
                 .as_ref()
                 .and_then(|esd| esd.entity_schema.as_ref())
@@ -5674,49 +5684,81 @@ impl ControlPlaneStore for PostgresRelationalBackend {
             );
             let def_json = to_json(&definition)?;
             let mut tx = st(g.client.transaction())?;
-            st(tx.execute(
-                "INSERT INTO queues(tenant,queue,definition,paused) VALUES($1,$2,$3,false)",
+            let inserted = st(tx.query_opt(
+                "INSERT INTO queues(tenant,queue,definition,paused) VALUES($1,$2,$3,false) \
+                 ON CONFLICT (tenant,queue) DO NOTHING RETURNING definition",
                 &[&t, &q, &def_json],
             ))?;
-            st(tx.execute(
-                "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES($1,$2,0,0)",
-                &[&t, &q],
-            ))?;
-            // Rebuild verifies every baseline through the canonical count/sum/sum summary, including the
-            // empty genesis snapshot. An empty relation set therefore hashes "0:0:0", not zero bytes.
-            let empty_snapshot_digest = Sha256::digest(b"0:0:0").to_vec();
-            st(tx.execute(
-                "INSERT INTO pqueue_command_baselines \
-                   (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
-                 VALUES($1,$2,'genesis',1,0,0,0,$3)",
-                &[&t, &q, &empty_snapshot_digest],
-            ))?;
-            let create = direct_command_envelope(
-                &key,
-                QueueCommand::CreateQueue(pqueue_engine::CreateQueueCommand {
-                    definition: definition.clone(),
-                }),
-                UtcTimestamp::new(0, 0).expect("unix epoch is valid"),
-                0,
-                0,
-            );
-            persist_command_envelopes(
-                &mut tx,
-                std::slice::from_ref(&CommandPosition::new(key.clone(), 0, 0)),
-                std::slice::from_ref(&create),
-            )?;
-            st(tx.execute(
-                "UPDATE relational_cursor SET next_seq=1 WHERE tenant=$1 AND queue=$2",
-                &[&t, &q],
-            ))?;
+            let (created, stored_json) = match inserted {
+                Some(row) => {
+                    st(tx.execute(
+                        "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES($1,$2,0,0)",
+                        &[&t, &q],
+                    ))?;
+                    // Rebuild verifies every baseline through the canonical count/sum/sum summary, including the
+                    // empty genesis snapshot. An empty relation set therefore hashes "0:0:0", not zero bytes.
+                    let empty_snapshot_digest = Sha256::digest(b"0:0:0").to_vec();
+                    st(tx.execute(
+                        "INSERT INTO pqueue_command_baselines \
+                           (tenant,queue,generation,schema_version,assignment_epoch,next_seq,row_count,snapshot_digest) \
+                         VALUES($1,$2,'genesis',1,0,0,0,$3)",
+                        &[&t, &q, &empty_snapshot_digest],
+                    ))?;
+                    let create = direct_command_envelope(
+                        &key,
+                        QueueCommand::CreateQueue(pqueue_engine::CreateQueueCommand {
+                            definition: definition.clone(),
+                        }),
+                        UtcTimestamp::new(0, 0).expect("unix epoch is valid"),
+                        0,
+                        0,
+                    );
+                    persist_command_envelopes(
+                        &mut tx,
+                        std::slice::from_ref(&CommandPosition::new(key.clone(), 0, 0)),
+                        std::slice::from_ref(&create),
+                    )?;
+                    st(tx.execute(
+                        "UPDATE relational_cursor SET next_seq=1 WHERE tenant=$1 AND queue=$2",
+                        &[&t, &q],
+                    ))?;
+                    (true, row.get::<_, String>(0))
+                }
+                None => {
+                    let row = st(tx.query_opt(
+                        "SELECT definition FROM queues WHERE tenant=$1 AND queue=$2",
+                        &[&t, &q],
+                    ))?
+                    .ok_or(EngineError::NotFound)?;
+                    (false, row.get(0))
+                }
+            };
             st(tx.commit())?;
-            if let Some(cs) = compiled_schema {
-                g.schemas.insert(key.clone(), cs);
+            let stored: QueueDefinition = serde_json::from_str(&stored_json)
+                .map_err(|e| EngineError::Storage(e.to_string()))?;
+            if stored.ordering_mode != definition.ordering_mode
+                || stored.priority_model != definition.priority_model
+            {
+                return Err(EngineError::QueueDefinitionConflict);
             }
-            g.queues.insert(key, definition.clone());
+            let counter_high_water = {
+                let row = st(g.client.query_opt(
+                    "SELECT item_id FROM pqueue_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
+                    &[&t, &q],
+                ))?;
+                row.map(|row| {
+                    let id: String = row.get(0);
+                    ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))
+                })
+                .transpose()?
+            };
+            g.install_queue_definition(key.clone(), stored.clone())?;
+            if let Some(item_id) = counter_high_water {
+                self.counters.observe(&key, item_id);
+            }
             Ok(CreateQueueOutcome {
-                created: true,
-                definition,
+                created,
+                definition: stored,
             })
         })();
         std::future::ready(result)
