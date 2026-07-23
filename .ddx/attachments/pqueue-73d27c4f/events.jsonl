@@ -1,0 +1,1 @@
+{"actor":"","body":"closed_because: all_children_terminal\ntotal_children: 10","created_at":"2026-07-20T01:23:22.541730641Z","kind":"epic_auto_close","source":"Store.Close.walkUpClosureCandidate","summary":"auto-closed: all children reached terminal state"}
