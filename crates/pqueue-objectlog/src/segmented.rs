@@ -1116,7 +1116,7 @@ impl LocalFsBlobStore {
     /// Open a store rooted at `root` (created on first write).
     pub fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(store_err)?;
+        create_dir_all_durable(&root)?;
         Ok(Self { root })
     }
 
@@ -1138,6 +1138,38 @@ impl LocalFsBlobStore {
         let parent = target.parent().unwrap_or(Path::new("."));
         parent.join(format!(".tmp-{pid}-{n}"))
     }
+}
+
+/// Create a directory tree and persist every new parent entry before files below it are acknowledged.
+/// Existing directories are synced as well, which makes the write paths consistent whether this is the
+/// first object under a prefix or a later publication.
+fn create_dir_all_durable(path: &Path) -> EngineResult<()> {
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        cursor = parent;
+    }
+    fs::create_dir_all(path).map_err(store_err)?;
+    for directory in missing.iter().rev() {
+        if let Some(parent) = directory.parent() {
+            fs::File::open(parent)
+                .and_then(|dir| dir.sync_all())
+                .map_err(store_err)?;
+        }
+        fs::File::open(directory)
+            .and_then(|dir| dir.sync_all())
+            .map_err(store_err)?;
+    }
+    if missing.is_empty() {
+        fs::File::open(path)
+            .and_then(|dir| dir.sync_all())
+            .map_err(store_err)?;
+    }
+    Ok(())
 }
 
 /// Recursively collect file keys (relative to `root`, `/`-joined) under `dir`, skipping temp files.
@@ -1179,7 +1211,7 @@ impl BlobStore for LocalFsBlobStore {
     fn put(&self, key: &str, body: &[u8]) -> EngineResult<()> {
         let path = self.key_path(key);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(store_err)?;
+            create_dir_all_durable(parent)?;
         }
         let tmp = Self::tmp_path(&path);
         fs::write(&tmp, body).map_err(store_err)?;
@@ -1190,7 +1222,7 @@ impl BlobStore for LocalFsBlobStore {
     fn put_if_absent(&self, key: &str, body: &[u8]) -> EngineResult<bool> {
         let path = self.key_path(key);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(store_err)?;
+            create_dir_all_durable(parent)?;
         }
         let tmp = Self::tmp_path(&path);
         let result = (|| {

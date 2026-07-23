@@ -24,6 +24,16 @@ fn tmp_root(tag: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("pqueue-objlog-dur-{tag}-{}", std::process::id()))
 }
 
+fn queue_dir(root: &std::path::Path, key: &pqueue_engine::QueueKey) -> std::path::PathBuf {
+    let raw = format!("{}\0{}", key.tenant_id.as_str(), key.queue_id.as_str());
+    let encoded = raw
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    root.join(encoded)
+}
+
 /// Overwrite the highest-numbered log object under `root`'s single shard with invalid JSON (simulates an
 /// append interrupted mid-write).
 fn corrupt_last_log_object(root: &std::path::Path) {
@@ -250,6 +260,56 @@ fn local_object_log_concurrent_compatible_create_has_one_durable_winner() {
         outcomes
             .iter()
             .all(|outcome| outcome.definition == non_default_qdef())
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn local_object_log_stale_temp_name_cannot_wedge_create_retry() {
+    let root = tmp_root("local-stale-create-temp");
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = queue_dir(&root, &qkey());
+    std::fs::create_dir_all(&dir).unwrap();
+    // Simulate a crashed prior process whose PID and a broad range of process-local attempt suffixes are
+    // reused. The create loop must skip occupied names instead of treating the first collision as fatal.
+    for attempt in 0..256 {
+        let stale = dir.join(format!("queue.json.tmp.{}.{attempt}", std::process::id()));
+        std::fs::write(stale, b"stale incomplete metadata").unwrap();
+    }
+
+    let store = LocalObjectLog::open(&root).expect("open with stale temp");
+    assert!(
+        store
+            .create_queue(qdef())
+            .expect("retry skips stale name")
+            .created
+    );
+    assert!(dir.join("queue.json").is_file());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn local_object_log_create_error_cleans_its_unique_temp_file() {
+    let root = tmp_root("local-create-error-temp-cleanup");
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = queue_dir(&root, &qkey());
+    let store = LocalObjectLog::open(&root).expect("open before invalid queue target");
+    std::fs::create_dir_all(dir.join("queue.json")).unwrap();
+    assert!(matches!(
+        store.create_queue(qdef()),
+        Err(EngineError::Storage(_))
+    ));
+    let leaked = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("queue.json.tmp."))
+        .collect::<Vec<_>>();
+    assert!(
+        leaked.is_empty(),
+        "failed create leaked temp files: {leaked:?}"
     );
 
     let _ = std::fs::remove_dir_all(&root);

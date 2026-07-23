@@ -9080,6 +9080,17 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
+    fn install_recovery_shard(
+        &mut self,
+        _definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        // `apply` publishes projection rows and the cursor in one PostgreSQL transaction. Its post-commit
+        // token-cache updates are infallible HashMap operations, so an error cannot expose a partial batch.
+        self.apply(positions, commands)
+    }
+
     // -- recovery-on-open (ADR-012 P2): the DB-authoritative store persists the applied cursor in
     //    `relational_cursor`, so recovery can resume from that durable high-water and only replay the
     //    retained log tail. Recovery also repopulates the in-process control plane and re-seeds the

@@ -969,6 +969,16 @@ impl ProjectionStore for SqliteProjectionStore {
         self.apply_committed_batch(positions, commands)
     }
 
+    fn install_recovery_shard(
+        &mut self,
+        _definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        // apply_committed_batch is one SQLite transaction: errors roll back the whole replay batch.
+        self.apply_committed_batch(positions, commands)
+    }
+
     // -- recovery-on-open (ADR-012 P2): this derived sqlite projection persists its high-water + definitions,
     //    so a reopened composition replays only the object-/sqlite-log tail beyond the snapshot.
 

@@ -513,16 +513,7 @@ impl HybridProjectionStore {
     fn hydrate_from_sqlite(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         let shard = Self::shard_for(definition);
         let image = self.sqlite.export_projection_image(&shard)?;
-        let expected_metrics = image.metrics.clone();
         let expected_high_water = image.high_water.clone();
-        self.memory.hydrate_shard(definition, image)?;
-        let actual_metrics = ProjectionStore::metrics(&self.memory, &shard)?;
-        if actual_metrics != expected_metrics {
-            return Err(EngineError::Storage(format!(
-                "hybrid projection hydration parity failed for {}/{}: sqlite metrics {:?}, memory metrics {:?}",
-                shard.tenant_id, shard.queue_id, expected_metrics, actual_metrics
-            )));
-        }
         let sqlite_high_water = self.sqlite.recovery_high_water(&shard)?;
         let high_water_matches = match (&sqlite_high_water, &expected_high_water) {
             (Some(cursor), Some(image)) => {
@@ -537,6 +528,10 @@ impl HybridProjectionStore {
                 shard.tenant_id, shard.queue_id, sqlite_high_water, expected_high_water
             )));
         }
+        // `hydrate_shard` builds ProjectionData from the complete image before its single infallible map
+        // insertion, including metrics parity validation. Do every fallible durable read above first, then
+        // publish the hot replacement.
+        self.memory.hydrate_shard(definition, image)?;
         self.memory_next_seq.insert(
             shard.clone(),
             expected_high_water.map_or(0, |pos| pos.sequence.saturating_add(1)),
@@ -714,6 +709,20 @@ impl ProjectionStore for HybridProjectionStore {
         self.deferred.push_back(deferred);
         self.observe_async_debt(&shard);
         Ok(())
+    }
+
+    fn install_recovery_shard(
+        &mut self,
+        definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        self.check_healthy()?;
+        // Create-loser installation is deliberately synchronous even for the async profile: SQLite applies
+        // the complete replay in one transaction, then the hot image is replaced from that durable snapshot.
+        // An SQLite error rolls back all commands; hydration performs all fallible reads before map insertion.
+        self.sqlite.apply_committed_batch(positions, commands)?;
+        self.hydrate_from_sqlite(definition)
     }
 
     /// Apply at most [`Self::deferred_flush_chunk`] deferred commands from the oldest non-poisoned shard,

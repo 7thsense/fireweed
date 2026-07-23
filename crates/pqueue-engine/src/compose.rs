@@ -947,6 +947,20 @@ pub trait ProjectionStore: Send {
         self.apply(positions, commands)
     }
 
+    /// Install a newly discovered shard from one complete, already-buffered durable replay.
+    ///
+    /// This is the create-loser publication boundary: implementations must either replace the shard from a
+    /// scratch image atomically or use a transactional/infallible recovery apply. Returning an error must
+    /// leave the previously serving image unchanged. This method deliberately has no default: every
+    /// projection family must make its atomicity argument explicit rather than silently inheriting a
+    /// potentially partial `apply_recovery` implementation.
+    fn install_recovery_shard(
+        &mut self,
+        _definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()>;
+
     /// Whether `shard` is in the intake-blocking pause mode. The default projection family does not
     /// track intake blocking and therefore reports `false`.
     fn pause_blocks_intake(&self, _shard: &QueueKey) -> EngineResult<bool> {
@@ -3616,15 +3630,15 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                     )));
                 }
                 let mut from = max_position(recorded_high_water, floor);
+                let mut positions = Vec::new();
+                let mut commands = Vec::new();
+                let mut observed_item_ids = Vec::new();
+                let mut next_cmd_seq = *cmd_seq;
                 loop {
                     let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
                     if !page.entries.is_empty() {
-                        let mut positions = Vec::with_capacity(page.entries.len());
-                        let mut commands = Vec::with_capacity(page.entries.len());
                         for (position, envelope) in page.entries {
-                            for item_id in &envelope.item_ids {
-                                self.counters.observe(&key, *item_id);
-                            }
+                            observed_item_ids.extend(envelope.item_ids.iter().copied());
                             if let Some(sequence) = envelope
                                 .command_id
                                 .0
@@ -3632,18 +3646,25 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
                                 .next()
                                 .and_then(|value| value.parse::<u64>().ok())
                             {
-                                *cmd_seq = (*cmd_seq).max(sequence.saturating_add(1));
+                                next_cmd_seq = next_cmd_seq.max(sequence.saturating_add(1));
                             }
                             positions.push(position);
                             commands.push(envelope);
                         }
-                        projection.apply_recovery(&positions, &commands)?;
                     }
                     match page.next {
                         Some(next) => from = Some(next),
                         None => break,
                     }
                 }
+                // No externally visible state changes until every bounded page has been read successfully.
+                // The in-memory object-log projection overrides this seam by building a scratch ProjectionData
+                // and swapping it into place, so even a command-application error cannot leak a partial replay.
+                projection.install_recovery_shard(&outcome.definition, &positions, &commands)?;
+                for item_id in observed_item_ids {
+                    self.counters.observe(&key, item_id);
+                }
+                *cmd_seq = next_cmd_seq;
             }
             // Publish the handle-local shard only after durable catalog persistence or loser replay
             // succeeds. A failed hydration remains retryable instead of leaving an empty known shard.
@@ -5994,6 +6015,8 @@ mod ordered_tests {
         emission_cursor: HashMap<QueueKey, CommandPosition>,
         definitions: BTreeMap<QueueKey, QueueDefinition>,
         cursor_write_failures: u32,
+        read_page_limit: Option<usize>,
+        fail_read_call: Option<usize>,
     }
 
     #[derive(Default)]
@@ -6059,6 +6082,17 @@ mod ordered_tests {
                 .lock()
                 .expect("fake log poisoned")
                 .cursor_write_failures += 1;
+        }
+
+        fn page_reads_at_most(&self, limit: usize) {
+            self.state
+                .lock()
+                .expect("fake log poisoned")
+                .read_page_limit = Some(limit);
+        }
+
+        fn fail_read_call_once(&self, call: usize) {
+            self.state.lock().expect("fake log poisoned").fail_read_call = Some(call);
         }
 
         fn record_definition(&self, definition: &QueueDefinition) {
@@ -6127,8 +6161,14 @@ mod ordered_tests {
             from: Option<CommandPosition>,
             limit: usize,
         ) -> EngineResult<CommandPage> {
-            self.read_calls.fetch_add(1, AtomicOrdering::Relaxed);
-            let state = self.state.lock().expect("fake log poisoned");
+            let call = self.read_calls.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            let mut state = self.state.lock().expect("fake log poisoned");
+            if state.fail_read_call == Some(call) {
+                state.fail_read_call = None;
+                return Err(EngineError::Storage(
+                    "fault-injection: later replay page read failed".into(),
+                ));
+            }
             let start = match from.as_ref() {
                 None => 0,
                 Some(cursor) => state
@@ -6146,7 +6186,10 @@ mod ordered_tests {
                         |idx| idx + 1,
                     ),
             };
-            let page_limit = limit.max(1);
+            let page_limit = state
+                .read_page_limit
+                .map_or(limit, |configured| limit.min(configured))
+                .max(1);
             let entries = state
                 .entries
                 .iter()
@@ -6435,6 +6478,21 @@ mod ordered_tests {
                     _ => {}
                 }
             }
+            Ok(())
+        }
+
+        fn install_recovery_shard(
+            &mut self,
+            definition: &QueueDefinition,
+            positions: &[CommandPosition],
+            commands: &[CommandEnvelope],
+        ) -> EngineResult<()> {
+            let mut replacement = Self::default();
+            replacement.ensure_shard(definition)?;
+            replacement.apply(positions, commands)?;
+            // Fake apply is infallible after validation; replacing the test state models the production
+            // in-memory projection's scratch-image publication seam.
+            *self = replacement;
             Ok(())
         }
 
@@ -8085,6 +8143,92 @@ mod ordered_tests {
             2,
             "8,193 retained commands require two pages, not six family-specific reads"
         );
+    }
+
+    #[test]
+    fn create_loser_later_page_failure_retries_without_partial_projection_or_publication() {
+        let shard = queue();
+        let definition = qdef();
+        let log = FakeGroupCommitLog::default();
+        log.page_reads_at_most(1);
+        log.set_entries(
+            &shard,
+            0,
+            vec![push_env("cmp-0-0", 1, ts(1)), push_env("cmp-0-1", 2, ts(2))],
+        );
+        log.fail_read_call_once(2);
+        let control = InProcessControlPlane::new();
+        assert!(control.create_queue(definition.clone()).unwrap().created);
+        let backend = ComposedBackend::new(log, FakeProjection::default(), control);
+
+        assert!(matches!(
+            futures::executor::block_on(backend.create_queue(definition.clone())),
+            Err(EngineError::Storage(message))
+                if message.contains("later replay page read failed")
+        ));
+        backend.with_projection(|projection| {
+            let state = projection.state.lock().expect("fake projection poisoned");
+            assert!(
+                state.pending.is_empty(),
+                "failed read publishes no eligible items"
+            );
+            assert!(
+                state.apply_batches.is_empty(),
+                "failed read applies no replay prefix"
+            );
+        });
+
+        let retry = futures::executor::block_on(backend.create_queue(definition))
+            .expect("complete replay retries cleanly");
+        assert!(!retry.created);
+        backend.with_projection(|projection| {
+            let state = projection.state.lock().expect("fake projection poisoned");
+            assert_eq!(
+                state.pending,
+                vec![ItemId::from_u64(1), ItemId::from_u64(2)]
+            );
+            assert_eq!(state.apply_batches, vec![vec!["push", "push"]]);
+        });
+        assert_eq!(
+            backend
+                .with_projection(|projection| projection.metrics(&shard).unwrap())
+                .pending,
+            2,
+            "retry exposes each replayed item and metric exactly once"
+        );
+
+        let claimed = futures::executor::block_on(backend.claim(ClaimRequest {
+            eligibility_time: None,
+            shard: shard.clone(),
+            worker_id: WorkerId::new("replay-worker").unwrap(),
+            max_items: 2,
+            lease_token: LeaseToken::new("replay-lease").unwrap(),
+            lease_expires_at: ts(30),
+            now: ts(3),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        }))
+        .expect("replayed items remain lifecycle-valid");
+        assert_eq!(claimed.items.len(), 2);
+
+        let fresh_ids = futures::executor::block_on(backend.push(
+            &shard,
+            vec![PushSpec::default()],
+            ts(4),
+            None,
+        ))
+        .expect("counter and command sequence publish after successful replay");
+        assert_eq!(fresh_ids.len(), 1);
+        assert!(
+            !claimed
+                .items
+                .iter()
+                .any(|item| item.item_id == fresh_ids[0])
+        );
+        backend.with_log(|log| {
+            let state = log.state.lock().expect("fake log poisoned");
+            assert_eq!(state.entries.last().unwrap().1.command_id.0, "cmp-0-3");
+        });
     }
 }
 

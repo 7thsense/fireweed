@@ -53,6 +53,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use bytes::Bytes;
@@ -466,6 +467,13 @@ impl Inner {
         if self.projections.contains_key(&shard) {
             return Ok(());
         }
+        let envelopes = self.read_envelopes(&shard)?;
+        let compiled_schema = definition
+            .entity_schema
+            .as_ref()
+            .and_then(|document| document.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?;
         let mut projection = ProjectionData::new(
             definition.priority_model,
             definition.ordering_mode,
@@ -474,10 +482,10 @@ impl Inner {
             &definition.secondary_indexes,
         )
         .with_typed_indexes(&definition.typed_indexes);
-        for (_sequence, _epoch, envelope) in self.read_envelopes(&shard)? {
-            for item_id in &envelope.item_ids {
-                counters.observe(&shard, *item_id);
-            }
+        let mut observed_item_ids = Vec::new();
+        let mut next_cmd_seq = self.cmd_seq;
+        for (_sequence, _epoch, envelope) in &envelopes {
+            observed_item_ids.extend(envelope.item_ids.iter().copied());
             if let Some(sequence) = envelope
                 .command_id
                 .0
@@ -485,20 +493,20 @@ impl Inner {
                 .next()
                 .and_then(|value| value.parse::<u64>().ok())
             {
-                self.cmd_seq = self.cmd_seq.max(sequence.saturating_add(1));
+                next_cmd_seq = next_cmd_seq.max(sequence.saturating_add(1));
             }
             projection.apply_command(&envelope.command)?;
         }
-        if let Some(schema) = definition
-            .entity_schema
-            .as_ref()
-            .and_then(|document| document.entity_schema.as_ref())
-            .map(compile_entity_schema)
-            .transpose()?
-        {
+        // ProjectionData is private scratch state until every read, schema compile, and command apply has
+        // succeeded. Publishing the maps/counters below is therefore an infallible single phase.
+        if let Some(schema) = compiled_schema {
             self.schemas.insert(shard.clone(), schema);
         }
-        self.projections.insert(shard, projection);
+        self.projections.insert(shard.clone(), projection);
+        for item_id in observed_item_ids {
+            counters.observe(&shard, item_id);
+        }
+        self.cmd_seq = next_cmd_seq;
         Ok(())
     }
 
@@ -506,7 +514,7 @@ impl Inner {
     /// restore `cmd_seq` past the highest minted `obj-N` so a post-restart id never collides.
     fn rebuild_all(&mut self, counters: &QueueCounters) -> EngineResult<()> {
         if !self.root.exists() {
-            fs::create_dir_all(&self.root).map_err(store)?;
+            create_dir_all_durable(&self.root)?;
             return Ok(());
         }
         let mut max_cmd_seq: Option<u64> = None;
@@ -570,7 +578,7 @@ impl Inner {
 fn read_queue_definitions(root: &Path) -> EngineResult<HashMap<QueueKey, QueueDefinition>> {
     let mut queues = HashMap::new();
     if !root.exists() {
-        fs::create_dir_all(root).map_err(store)?;
+        create_dir_all_durable(root)?;
         return Ok(queues);
     }
     for entry in fs::read_dir(root).map_err(store)? {
@@ -604,32 +612,29 @@ fn create_queue_metadata(
         });
     }
     let dir = shard_dir(root, &key);
-    fs::create_dir_all(&dir).map_err(store)?;
+    create_dir_all_durable(&dir)?;
     let queue_file = dir.join("queue.json");
     let bytes = to_json(&definition)?;
-    let temp_file = dir.join(format!(
-        "queue.json.tmp.{}.{:?}",
-        std::process::id(),
-        thread::current().id()
-    ));
-    {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_file)
-            .map_err(store)?;
+    let (mut file, temp_file) = open_unique_queue_temp(&dir)?;
+    let temp = TempFileGuard(temp_file);
+    let write_result = (|| {
         file.write_all(bytes.as_bytes()).map_err(store)?;
         file.sync_all().map_err(store)?;
-    }
-    let created = match fs::hard_link(&temp_file, &queue_file) {
-        Ok(()) => true,
-        Err(err) if err.kind() == ErrorKind::AlreadyExists => false,
-        Err(err) => {
-            let _ = fs::remove_file(&temp_file);
-            return Err(store(err));
+        Ok::<(), EngineError>(())
+    })();
+    drop(file);
+    // Close before propagating a write/sync error so TempFileGuard can remove the file on platforms that
+    // do not permit deleting an open handle.
+    write_result?;
+    let created = match fs::hard_link(&temp.0, &queue_file) {
+        Ok(()) => {
+            sync_directory(&dir)?;
+            true
         }
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => false,
+        Err(err) => return Err(store(err)),
     };
-    let _ = fs::remove_file(&temp_file);
+    drop(temp);
     let stored: QueueDefinition =
         serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?).map_err(store)?;
     queues.insert(key, stored.clone());
@@ -642,6 +647,63 @@ fn create_queue_metadata(
         created,
         definition: stored,
     })
+}
+
+static QUEUE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if fs::remove_file(&self.0).is_ok()
+            && let Some(parent) = self.0.parent()
+        {
+            // Best-effort durability for cleanup on early-return paths. The publication itself was already
+            // synced and must not be downgraded merely because cleanup syncing is unavailable.
+            let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+        }
+    }
+}
+
+fn open_unique_queue_temp(dir: &Path) -> EngineResult<(fs::File, PathBuf)> {
+    loop {
+        let attempt = QUEUE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("queue.json.tmp.{}.{}", std::process::id(), attempt));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(store(error)),
+        }
+    }
+}
+
+fn sync_directory(dir: &Path) -> EngineResult<()> {
+    fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(store)
+}
+
+fn create_dir_all_durable(dir: &Path) -> EngineResult<()> {
+    let mut missing = Vec::new();
+    let mut cursor = dir;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        cursor = parent;
+    }
+    fs::create_dir_all(dir).map_err(store)?;
+    for directory in missing.iter().rev() {
+        if let Some(parent) = directory.parent() {
+            sync_directory(parent)?;
+        }
+        sync_directory(directory)?;
+    }
+    if missing.is_empty() {
+        sync_directory(dir)?;
+    }
+    Ok(())
 }
 
 fn read_envelopes_from_root(

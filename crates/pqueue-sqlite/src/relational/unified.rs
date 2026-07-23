@@ -261,6 +261,16 @@ impl ProjectionStore for SqliteRelational {
         apply_committed_batch_sql(&mut g, positions, commands)
     }
 
+    fn install_recovery_shard(
+        &mut self,
+        _definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        // The unified relational apply is one SQLite transaction and therefore an atomic installation.
+        self.apply(positions, commands)
+    }
+
     // -- recovery-on-open (ADR-012 P2): the durable cursor records the last absorbed position, so a reopen
     //    can resume replay from the persisted tail while still repopulating the in-process control plane and
     //    id-mint counters from the durable sqlite rows.

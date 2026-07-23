@@ -170,7 +170,16 @@ impl InMemoryProjection {
         image: ProjectionImage,
     ) -> EngineResult<()> {
         let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let expected_metrics = image.metrics.clone();
         let projection = ProjectionData::from_image(definition, image)?;
+        if projection.metrics() != expected_metrics {
+            return Err(EngineError::Storage(format!(
+                "projection hydration metrics mismatch: image {:?}, rebuilt {:?}",
+                expected_metrics,
+                projection.metrics()
+            )));
+        }
+        // Parsing and parity validation happen against private state; insertion is the only mutation.
         self.projections.insert(key, projection);
         Ok(())
     }
@@ -240,6 +249,39 @@ impl ProjectionStore for InMemoryProjection {
         commands: &[CommandEnvelope],
     ) -> EngineResult<()> {
         self.apply_borrowed(positions, commands)
+    }
+
+    fn install_recovery_shard(
+        &mut self,
+        definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        if positions.len() != commands.len() {
+            return Err(EngineError::Storage(
+                "recovery install positions/commands length mismatch".into(),
+            ));
+        }
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let mut replacement = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        )
+        .with_typed_indexes(&definition.typed_indexes);
+        for (position, command) in positions.iter().zip(commands) {
+            replacement.apply_command_at(
+                Some(command.created_at),
+                Some(position),
+                &command.command,
+            )?;
+        }
+        // All fallible materialization happened against the private replacement. This insertion is the only
+        // serving-state mutation and cannot fail, so create-loser hydration is atomic from readers' view.
+        self.projections.insert(key, replacement);
+        Ok(())
     }
 
     fn pause_blocks_intake(&self, shard: &QueueKey) -> EngineResult<bool> {
