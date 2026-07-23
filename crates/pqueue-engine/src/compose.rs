@@ -1684,6 +1684,16 @@ pub fn queue_worker_partition(queue: &QueueKey, partitions: usize) -> usize {
 }
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> {
+    /// Reject data-plane work until this handle atomically publishes the shard's serving image. Call while
+    /// holding `inner`, before counters, command ids, caches, force-seals, or projection effects.
+    fn require_known_shard(inner: &Inner<L, P>, shard: &QueueKey) -> EngineResult<()> {
+        if inner.known_shards.contains(shard) {
+            Ok(())
+        } else {
+            Err(EngineError::NotFound)
+        }
+    }
+
     /// Assemble a backend from one of each axis.
     pub fn new(log: L, projection: P, control: C) -> Self {
         let durability = log.durability_class();
@@ -3758,11 +3768,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                     validate_entity(schema.as_ref(), item.entity.as_ref())?;
                 }
                 let max_attempts = def.retry_policy.max_attempts;
+                let mut g = self.inner.lock().expect("poisoned");
+                Self::require_known_shard(&g, shard)?;
                 let epoch = expected_epoch.unwrap_or(0);
                 let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
                 let (push_items, ids) =
                     build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
-                let mut g = self.inner.lock().expect("poisoned");
                 g.projection.admit_mutation(shard)?;
                 g.projection.index_validate_push(shard, &push_items)?;
                 if g.projection.pause_blocks_intake(shard)? {
@@ -3821,6 +3832,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(now, def.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -3910,6 +3922,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         }
         let max_attempts = def.retry_policy.max_attempts;
         let mut g = self.inner.lock().expect("poisoned");
+        Self::require_known_shard(&g, shard)?;
         let epoch = expected_epoch.unwrap_or(0);
         let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
         let (push_items, ids) =
@@ -3964,6 +3977,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         let fingerprint = commit_body_hash(std::slice::from_ref(&entry))?;
         let item_id = claim_ref.item_id;
         let mut g = self.inner.lock().expect("poisoned");
+        Self::require_known_shard(&g, shard)?;
         if !g.projection.supports_commit_transition() {
             return Err(EngineError::Unavailable);
         }
@@ -4001,6 +4015,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         // post-reopen retry of the same body computes the identical fingerprint → Replay (not Conflict).
         let fingerprint = commit_body_hash(&entries)?;
         let mut g = self.inner.lock().expect("poisoned");
+        Self::require_known_shard(&g, shard)?;
         if !g.projection.supports_commit_transition() {
             return Err(EngineError::Unavailable);
         }
@@ -4315,6 +4330,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
                 .transpose()?;
             validate_entity(schema.as_ref(), entity.as_ref())?;
             let max_attempts = def.retry_policy.max_attempts;
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let epoch = expected_epoch.unwrap_or(0);
             let counter_base = self.counters.reserve(shard, epoch, 1);
             let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
@@ -4332,7 +4349,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
                 gate_keys: Vec::new(),
                 entity_document: entity,
             };
-            let mut g = self.inner.lock().expect("poisoned");
             let existing = g.projection.lookup_by_key(shard, client_item_key)?;
             match existing {
                 None => {
@@ -4412,6 +4428,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
                 .map_err(|_| EngineError::Unavailable)?;
             let result = (|| {
                 let mut g = self.inner.lock().expect("poisoned");
+                Self::require_known_shard(&g, shard)?;
                 let gc = self.gc_active(&g);
                 g.projection.finalize_validate(shard, &outcomes)?;
                 let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
@@ -4469,6 +4486,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -4515,6 +4533,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReassignLeasePort
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -4556,6 +4575,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PurgePort for ComposedBac
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -4629,6 +4649,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
                 .transpose()?;
             validate_entity(schema.as_ref(), entity.as_ref())?;
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             g.projection
                 .update_fields_validate(shard, &item_id, expected_item_version)?;
             g.projection
@@ -4673,6 +4694,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimPort for ComposedB
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -5280,6 +5302,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
                 return Err(EngineError::Unavailable);
             }
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             // Same pre-commit gate as a field update: an absent / terminal / superseded / fenced id or a
             // version mismatch rejects and nothing is appended.
             g.projection
@@ -5392,6 +5415,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
     ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
         deferred(move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             g.projection.bounded_mutation(shard, request)
         })
     }
@@ -5423,6 +5447,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
             let fingerprint = claim_by_query_body_hash(&request)?;
             let expires_at = request_expires_at(context.now, definition.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             match g
                 .claim_by_query_idempotency
                 .entry(shard.clone())
@@ -5613,6 +5638,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 )
             };
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             if !self.is_atomic() || !g.projection.supports_commit_transition() {
                 return Err(EngineError::Unavailable);
             }
@@ -5974,6 +6000,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let env = Self::make_envelope(
                 &mut g,
                 self.node_id,
@@ -8191,6 +8218,17 @@ mod ordered_tests {
             Err(EngineError::Storage(message))
                 if message.contains("later replay page read failed")
         ));
+
+        let failed_push = futures::executor::block_on(backend.push(
+            &shard,
+            vec![PushSpec::default()],
+            ts(3),
+            None,
+        ));
+        assert!(
+            matches!(failed_push, Err(EngineError::NotFound)),
+            "failed create must reject push before reserving an id or command: {failed_push:?}"
+        );
         backend.with_projection(|projection| {
             let state = projection.state.lock().expect("fake projection poisoned");
             assert!(
@@ -8201,6 +8239,10 @@ mod ordered_tests {
                 state.apply_batches.is_empty(),
                 "failed read applies no replay prefix"
             );
+        });
+        backend.with_log(|log| {
+            let state = log.state.lock().expect("fake log poisoned");
+            assert_eq!(state.entries.len(), 2, "failed push appends no command");
         });
 
         let failed_claim = futures::executor::block_on(backend.claim(ClaimRequest {
@@ -8259,7 +8301,11 @@ mod ordered_tests {
             None,
         ))
         .expect("counter and command sequence publish after successful replay");
-        assert_eq!(fresh_ids.len(), 1);
+        assert_eq!(
+            fresh_ids,
+            vec![ItemId::from_u64(3)],
+            "failed push must consume neither the next item id nor a projection slot"
+        );
         assert!(
             !claimed
                 .items
