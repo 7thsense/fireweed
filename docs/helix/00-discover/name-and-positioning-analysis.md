@@ -12,7 +12,7 @@ ddx:
 
 # Public Name and Positioning Analysis
 
-- **Decision date**: 2026-07-22
+- **Decision date**: 2026-07-23
 - **Decision owner**: project maintainers
 - **Decision state**: selected working public identity; legal clearance pending
 - **Tracking bead**: `pqueue-1dd9158f`
@@ -38,17 +38,17 @@ a higher score means less observed risk.
 
 | Candidate | Semantic fit | Distinctiveness | Identifier ergonomics | Collision risk | Total / 20 | Result |
 |---|---:|---:|---:|---:|---:|---|
-| **Queueyard** | 5 | 4 | 5 | 5 | **19** | Selected |
+| **Fireweed Queue** | 5 | 4 | 5 | 4 | **18** | Selected |
+| Queueyard | 5 | 4 | 5 | 5 | 19 | Historical identity |
 | Taskcairn | 3 | 5 | 5 | 5 | 18 | Reserve fallback |
 | Queuewright | 4 | 4 | 3 | 3 | 14 | Reject |
 | Workspool | 4 | 4 | 5 | 1 | 14 | Reject |
 | Ledgerail | 4 | 4 | 5 | 1 | 14 | Reject |
 | Taskweir | 3 | 4 | 3 | 5 | 15 | Reject |
 
-Queueyard uses the railway classification-yard metaphor: work is held durably,
-ordered and grouped, routed to an owner, dispatched, and sometimes returned for
-another attempt. The metaphor fits configurable priority and bounded-relaxed
-ordering better than a spool, which commonly suggests FIFO printer jobs.
+Fireweed Queue keeps the same durable-work semantics while shifting the public
+identity to something shorter and less collision-prone for announcement and
+packaging. Queueyard remains a historical identity only.
 
 Taskcairn is more distinctive but describes durable markers rather than
 ordering and dispatch. Queuewright is memorable but longer, easier to misspell,
@@ -82,29 +82,31 @@ in use.
 
 ## Decision
 
-Adopt **Queueyard** as the working public name, subject to formal clearance and
-namespace reservation before the repository is announced or made public.
+Adopt **Fireweed Queue** as the working public name, subject to formal
+clearance and namespace reservation before the repository is announced or made
+public.
 
 Use the descriptor “A durable work-state engine for ordered, recoverable
-execution” on first reference. Do not position Queueyard as FIFO, a generic
-message broker, a worker pool, or a workflow-DAG engine.
+execution” on first reference. Do not position Fireweed Queue as FIFO, a
+generic message broker, a worker pool, or a workflow-DAG engine.
 
 Keep **Taskcairn** as the reserve fallback if clearance discovers a material
-Queueyard conflict. Do not use Workspool as the public name.
+Fireweed Queue conflict. Do not use Workspool as the public name.
+
+Queueyard and `pqueue` remain historical references only and are not the
+current public name.
 
 ## Identifier map
 
 | Surface | Selected value |
 |---|---|
-| Display name | `Queueyard` |
-| Identifier stem | `queueyard` |
-| CLI command | `queueyard` |
-| Cargo package prefix | `queueyard-` |
-| Primary library crate | `queueyard` |
-| Service name | `queueyard-service` |
-| Environment prefix | `QUEUEYARD_` |
-| Container and chart stem | `queueyard` |
-| Suggested documentation domain | `queueyard.dev` |
+| Display name | `Fireweed Queue` |
+| Short name | `Fireweed` |
+| Repository/package stem | `fireweed-queue` |
+| CLI command | `fireweed` |
+| Rust crate stem | `fireweed` |
+| Environment prefix | `FIREWEED_` |
+| Informal abbreviation | `FWQ` |
 
 This map is a naming input, not authorization for a mechanical global replace.
 ADR-018 must classify public, compatibility, protocol, and persisted identifiers
@@ -112,10 +114,10 @@ before implementation begins.
 
 ## Trademark caveat
 
-This analysis is preliminary naming diligence and is not trademark clearance or
-legal advice. Before public announcement, a qualified reviewer must search the
-relevant software and hosted-service classes and jurisdictions, assess confusing
-similarity, and approve use. Maintainers must then reserve the chosen domains,
-package names, source-hosting organization, and social handles together. If that
-gate fails, use the recorded fallback and repeat the same review.
-
+This analysis is preliminary naming diligence only and is not trademark
+clearance or legal advice. Before public announcement, a qualified reviewer
+must search the relevant software and hosted-service classes and jurisdictions,
+assess confusing similarity, and approve use. Maintainers must then reserve the
+chosen domains, package names, source-hosting organization, and social handles
+together. If that gate fails, use the recorded fallback and repeat the same
+review.
