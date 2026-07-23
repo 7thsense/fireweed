@@ -1902,6 +1902,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     ) -> EngineResult<usize> {
         let cursor = {
             let g = self.inner.lock().expect("composed backend poisoned");
+            Self::require_known_shard(&g, shard)?;
             g.log.emission_cursor(shard)?
         };
         let page = self
@@ -1979,6 +1980,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         emit_change_records: bool,
     ) -> EngineResult<usize> {
         let mut g = self.inner.lock().expect("composed backend poisoned");
+        Self::require_known_shard(&g, shard)?;
         Self::reap_terminal_items_locked(
             &mut g,
             shard,
@@ -2273,6 +2275,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         request_id_retention_ms: u64,
         now: UtcTimestamp,
     ) -> EngineResult<MaintenanceSummary> {
+        {
+            let inner = self.inner.lock().expect("composed backend poisoned");
+            Self::require_known_shard(&inner, shard)?;
+        }
         let Some(handle) = self.detached_maintenance.as_ref() else {
             let mut inner = self.inner.lock().expect("composed backend poisoned");
             return Self::trim_reclaimable_segments_locked(
@@ -2563,6 +2569,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             .map(|(k, c)| (k.clone(), c.seal_epoch))
             .collect();
         for (shard, seal_epoch) in shards {
+            Self::require_known_shard(&g, &shard)?;
             match g.log.gc_flush_due(&shard, seal_epoch, now_ms) {
                 Ok(positions) if !positions.is_empty() => {
                     Self::gc_distribute(&mut g, &shard, positions)?;
@@ -3728,11 +3735,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         deferred(move || {
-            self.inner
-                .lock()
-                .expect("poisoned")
-                .log
-                .acquire_epoch(shard)
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
+            g.log.acquire_epoch(shard)
         })
     }
 }
@@ -4799,6 +4804,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                 }
                 let mut report = TickReport::default();
                 for (shard, ids) in expired_page.leases {
+                    if !g.known_shards.contains(&shard) {
+                        continue;
+                    }
                     let env = Self::make_envelope(
                         &mut g,
                         self.node_id,
@@ -4833,6 +4841,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     .map_err(|_| EngineError::Unavailable)?;
                 let frontier_missing = {
                     let mut g = self.inner.lock().expect("poisoned");
+                    if !g.known_shards.contains(&shard) {
+                        continue;
+                    }
                     if def.emit_change_records {
                         Self::reap_terminal_items_locked(
                             &mut g,
@@ -5225,11 +5236,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> SnapshotStore for Compose
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
         deferred(move || {
-            self.inner
-                .lock()
-                .expect("poisoned")
-                .log
-                .write_snapshot(shard, position, snapshot)
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
+            g.log.write_snapshot(shard, position, snapshot)
         })
     }
 
@@ -5272,11 +5281,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> SnapshotStore for Compose
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         deferred(move || {
-            self.inner
-                .lock()
-                .expect("poisoned")
-                .log
-                .set_high_water(shard, position)
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
+            g.log.set_high_water(shard, position)
         })
     }
 }
@@ -6060,6 +6067,8 @@ mod ordered_tests {
     #[derive(Clone, Default)]
     struct FakeLogState {
         epoch: u64,
+        high_water: Option<CommandPosition>,
+        snapshots: Vec<(SnapshotRef, ProjectionSnapshot)>,
         next_sequence: u64,
         buffered: Vec<CommandEnvelope>,
         sealed_batches: Vec<usize>,
@@ -6260,14 +6269,20 @@ mod ordered_tests {
         }
 
         fn high_water(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
-            Ok(None)
+            Ok(self
+                .state
+                .lock()
+                .expect("fake log poisoned")
+                .high_water
+                .clone())
         }
 
         fn set_high_water(
             &mut self,
             _shard: &QueueKey,
-            _position: CommandPosition,
+            position: CommandPosition,
         ) -> EngineResult<()> {
+            self.state.get_mut().expect("fake log poisoned").high_water = Some(position);
             Ok(())
         }
 
@@ -6342,21 +6357,44 @@ mod ordered_tests {
             position: CommandPosition,
             snapshot: ProjectionSnapshot,
         ) -> EngineResult<SnapshotRef> {
-            Ok(SnapshotRef {
+            let snapshot_ref = SnapshotRef {
                 queue: shard.clone(),
                 position,
                 ref_id: String::from_utf8_lossy(&snapshot.payload).into_owned(),
-            })
+            };
+            self.state
+                .get_mut()
+                .expect("fake log poisoned")
+                .snapshots
+                .push((snapshot_ref.clone(), snapshot));
+            Ok(snapshot_ref)
         }
 
-        fn latest_snapshot(&self, _shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
-            Ok(None)
+        fn latest_snapshot(&self, shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
+            Ok(self
+                .state
+                .lock()
+                .expect("fake log poisoned")
+                .snapshots
+                .iter()
+                .rev()
+                .find(|(snapshot_ref, _)| &snapshot_ref.queue == shard)
+                .map(|(snapshot_ref, _)| snapshot_ref.clone()))
         }
 
         fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
-            Ok(ProjectionSnapshot {
-                payload: snapshot_ref.ref_id.clone().into_bytes(),
-            })
+            self.state
+                .lock()
+                .expect("fake log poisoned")
+                .snapshots
+                .iter()
+                .find(|(candidate, _)| {
+                    candidate.queue == snapshot_ref.queue
+                        && candidate.position == snapshot_ref.position
+                        && candidate.ref_id == snapshot_ref.ref_id
+                })
+                .map(|(_, snapshot)| snapshot.clone())
+                .ok_or(EngineError::NotFound)
         }
 
         fn supports_group_commit(&self) -> bool {
@@ -7668,11 +7706,26 @@ mod ordered_tests {
     fn restart_backend(
         log: &FakeGroupCommitLog,
     ) -> ComposedBackend<FakeGroupCommitLog, FakeProjection, InProcessControlPlane> {
-        ComposedBackend::new(
+        let backend = ComposedBackend::new(
             log.clone(),
             FakeProjection::default(),
             InProcessControlPlane::new(),
-        )
+        );
+        let recovered_shards = log
+            .state
+            .lock()
+            .expect("fake log poisoned")
+            .entries
+            .iter()
+            .map(|(position, _)| position.queue.clone())
+            .collect::<HashSet<_>>();
+        backend
+            .inner
+            .lock()
+            .expect("composed backend poisoned")
+            .known_shards
+            .extend(recovered_shards);
+        backend
     }
 
     #[test]
@@ -8218,6 +8271,71 @@ mod ordered_tests {
             Err(EngineError::Storage(message))
                 if message.contains("later replay page read failed")
         ));
+
+        let rejected_snapshot_position = CommandPosition::new(shard.clone(), 0, 1);
+        let failed_epoch = futures::executor::block_on(backend.acquire_epoch(&shard));
+        assert!(
+            matches!(failed_epoch, Err(EngineError::NotFound)),
+            "failed create must not let the unpublished handle advance the durable epoch: {failed_epoch:?}"
+        );
+        let failed_high_water = futures::executor::block_on(
+            backend.set_high_water(&shard, rejected_snapshot_position.clone()),
+        );
+        assert!(
+            matches!(failed_high_water, Err(EngineError::NotFound)),
+            "failed create must not let the unpublished handle advance high-water: {failed_high_water:?}"
+        );
+        let failed_snapshot = futures::executor::block_on(backend.write_snapshot(
+            &shard,
+            rejected_snapshot_position,
+            ProjectionSnapshot {
+                payload: b"must-not-publish".to_vec(),
+            },
+        ));
+        assert!(
+            matches!(failed_snapshot, Err(EngineError::NotFound)),
+            "failed create must not let the unpublished handle persist a snapshot: {failed_snapshot:?}"
+        );
+        let failed_emission_sink = RecordingSink::default();
+        let failed_emission =
+            backend.emit_change_record_tail(&shard, &failed_emission_sink, 1, ts(3), None);
+        assert!(
+            matches!(failed_emission, Err(EngineError::NotFound)),
+            "failed create must not emit or advance a cursor for an unpublished shard: {failed_emission:?}"
+        );
+        assert!(
+            failed_emission_sink.batches().is_empty(),
+            "admission must precede external emission"
+        );
+        let failed_reap = backend.reap_terminal_items(&shard, ts(3), 0, false);
+        assert!(
+            matches!(failed_reap, Err(EngineError::NotFound)),
+            "failed create must not reap an unpublished projection: {failed_reap:?}"
+        );
+        let failed_trim = backend.trim_reclaimable_segments(&shard, 0, ts(3));
+        assert!(
+            matches!(failed_trim, Err(EngineError::NotFound)),
+            "failed create must not run log maintenance for an unpublished shard: {failed_trim:?}"
+        );
+        backend.with_log(|log| {
+            let state = log.state.lock().expect("fake log poisoned");
+            assert_eq!(
+                state.epoch, 0,
+                "rejected epoch acquisition changes no metadata"
+            );
+            assert_eq!(
+                state.high_water, None,
+                "rejected high-water update changes no metadata"
+            );
+            assert!(
+                state.snapshots.is_empty(),
+                "rejected snapshot write changes no metadata"
+            );
+            assert!(
+                state.emission_cursor.is_empty(),
+                "rejected emission changes no cursor metadata"
+            );
+        });
 
         let failed_push = futures::executor::block_on(backend.push(
             &shard,
