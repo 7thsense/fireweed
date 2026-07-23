@@ -9,7 +9,7 @@ use pqueue_engine::{
     ActiveScope, AsOfProjectionStore, ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope,
     CommandPosition, DiscoveryGranularity, DurabilityClass, EngineError, EngineResult,
     FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary,
-    PushItem, QueueCounters, QueueKey, QueueMetrics,
+    PushItem, QueueKey, QueueMetrics,
 };
 use pqueue_engine::{
     CommandPage, LogStore, ProjectionSnapshot, ProjectionStore, RichClaimSelection, SnapshotRef,
@@ -261,6 +261,16 @@ impl ProjectionStore for SqliteRelational {
         apply_committed_batch_sql(&mut g, positions, commands)
     }
 
+    fn install_recovery_shard(
+        &mut self,
+        _definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        // The unified relational apply is one SQLite transaction and therefore an atomic installation.
+        self.apply(positions, commands)
+    }
+
     // -- recovery-on-open (ADR-012 P2): the durable cursor records the last absorbed position, so a reopen
     //    can resume replay from the persisted tail while still repopulating the in-process control plane and
     //    id-mint counters from the durable sqlite rows.
@@ -363,9 +373,9 @@ impl ProjectionStore for SqliteRelational {
         discover_active_scopes_sql(&self.lock().conn, shard, granularity, now)
     }
 
-    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+    fn recovery_counter_high_water(&self, shard: &QueueKey) -> EngineResult<Option<ItemId>> {
         let g = self.lock();
-        observe_id_high_water_sql(&g.conn, shard, counters)
+        recovery_id_high_water_sql(&g.conn, shard)
     }
 
     fn eligible_candidates(

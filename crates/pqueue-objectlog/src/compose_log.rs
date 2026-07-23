@@ -20,8 +20,8 @@
 use pqueue_engine::{
     CommandEnvelope, CommandPage, CommandPosition, ComposedBackend, DefinitionCursor,
     DefinitionPage, DetachedLogMaintenance, DetachedRetentionOutcome, DetachedRetentionRequest,
-    DetachedTrimWatermark, DurabilityClass, EngineError, EngineResult, InProcessControlPlane,
-    LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
+    DetachedTrimWatermark, DurabilityClass, EngineError, EngineResult, LogStore,
+    ProjectionSnapshot, QueueKey, SnapshotRef,
 };
 use pqueue_projection::InMemoryProjection;
 
@@ -91,6 +91,7 @@ const APPEND_MAX_LATENCY_MS: u64 = u64::MAX;
 
 /// The segmented object-log command-log axis (ADR-012): the production group-commit substrate over a local
 /// filesystem blob store, surfaced as a [`LogStore`].
+#[derive(Clone)]
 pub struct ObjectLog {
     log: Arc<SegmentedObjectLog<Arc<dyn BlobStore>>>,
     config: SegmentConfig,
@@ -100,6 +101,34 @@ pub struct ObjectLog {
     /// reconnect test runs on it, UNCHANGED). `true` for [`ObjectLog::open_group_commit`] — the composition
     /// then co-buffers concurrent pushes into one sealed segment.
     group_commit: bool,
+}
+
+impl pqueue_engine::ControlPlane for ObjectLog {
+    fn create_queue(
+        &self,
+        definition: pqueue_core::QueueDefinition,
+    ) -> EngineResult<pqueue_engine::CreateQueueOutcome> {
+        self.log.create_definition(&definition)
+    }
+
+    fn queue_definition(&self, key: &QueueKey) -> EngineResult<pqueue_core::QueueDefinition> {
+        self.log.read_definition(key)
+    }
+
+    fn list_queues(
+        &self,
+        tenant: &pqueue_core::TenantId,
+    ) -> EngineResult<Vec<pqueue_core::QueueId>> {
+        let mut queues = self
+            .log
+            .recover_definitions()?
+            .into_iter()
+            .filter(|definition| &definition.tenant_id == tenant)
+            .map(|definition| definition.queue_id)
+            .collect::<Vec<_>>();
+        queues.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(queues)
+    }
 }
 
 impl ObjectLog {
@@ -879,23 +908,18 @@ impl LogStore for ObjectLog {
     }
 }
 
-/// The composed object-log backend: `ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>`
+/// The composed object-log backend: `ComposedBackend<ObjectLog, InMemoryProjection, ObjectLog>`
 /// — the eventual-apply log-replay composition (ADR-012 Phase 1b-i), capability-equivalent to the
 /// monolithic `ObjectLogBackend`.
-pub type ComposedObjectLogBackend =
-    ComposedBackend<ObjectLog, InMemoryProjection, InProcessControlPlane>;
+pub type ComposedObjectLogBackend = ComposedBackend<ObjectLog, InMemoryProjection, ObjectLog>;
 
 /// Assemble a composed object-log backend rooted at `root`. Runs recovery-on-open (ADR-012 P2): a reopen
 /// enumerates the durable queue catalog and rebuilds the in-memory projection by replaying the object log.
 pub fn composed_objectlog_backend(
     root: impl Into<std::path::PathBuf>,
 ) -> EngineResult<ComposedObjectLogBackend> {
-    ComposedBackend::new(
-        ObjectLog::open(root)?,
-        InMemoryProjection::new(),
-        InProcessControlPlane::new(),
-    )
-    .recover()
+    let log = ObjectLog::open(root)?;
+    ComposedBackend::new(log.clone(), InMemoryProjection::new(), log).recover()
 }
 
 /// Assemble a composed object-log backend rooted at `root` with the ack-after-seal GROUP-COMMIT write path
@@ -908,11 +932,8 @@ pub fn composed_objectlog_backend_group_commit(
     root: impl Into<std::path::PathBuf>,
     config: SegmentConfig,
 ) -> EngineResult<ComposedObjectLogBackend> {
-    ComposedBackend::new(
-        ObjectLog::open_group_commit(root, config)?,
-        InMemoryProjection::new(),
-        InProcessControlPlane::new(),
-    )
-    .with_group_commit(true)
-    .recover()
+    let log = ObjectLog::open_group_commit(root, config)?;
+    ComposedBackend::new(log.clone(), InMemoryProjection::new(), log)
+        .with_group_commit(true)
+        .recover()
 }

@@ -947,6 +947,20 @@ pub trait ProjectionStore: Send {
         self.apply(positions, commands)
     }
 
+    /// Install a newly discovered shard from one complete, already-buffered durable replay.
+    ///
+    /// This is the create-loser publication boundary: implementations must either replace the shard from a
+    /// scratch image atomically or use a transactional/infallible recovery apply. Returning an error must
+    /// leave the previously serving image unchanged. This method deliberately has no default: every
+    /// projection family must make its atomicity argument explicit rather than silently inheriting a
+    /// potentially partial `apply_recovery` implementation.
+    fn install_recovery_shard(
+        &mut self,
+        _definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()>;
+
     /// Whether `shard` is in the intake-blocking pause mode. The default projection family does not
     /// track intake blocking and therefore reports `false`.
     fn pause_blocks_intake(&self, _shard: &QueueKey) -> EngineResult<bool> {
@@ -1363,6 +1377,13 @@ pub trait ProjectionStore: Send {
         Ok(None)
     }
 
+    /// Read the durable item-id mint ceiling without publishing it into this composition's live counters.
+    /// Create-loser hydration uses this prepare-only seam so every fallible projection read completes before
+    /// the replacement shard is installed; publication afterward is an infallible [`QueueCounters::observe`].
+    fn recovery_counter_high_water(&self, _shard: &QueueKey) -> EngineResult<Option<ItemId>> {
+        Ok(None)
+    }
+
     /// Cross-validate this projection's durably recorded object-log lineage against the log's actual
     /// `identity` (TD-004 "Async lineage validation") BEFORE the composition advertises this projection's
     /// high-water as a safe replay-skip point. Called once per durable shard during recovery-on-open, after
@@ -1415,7 +1436,10 @@ pub trait ProjectionStore: Send {
     /// durable projection snapshot, so a push after a snapshot-tail reopen never re-mints an existing id.
     /// Default: no-op — the in-memory projection has no persisted snapshot, so its counters are restored by
     /// observing the ids in the replayed log instead.
-    fn restore_counters(&self, _shard: &QueueKey, _counters: &QueueCounters) -> EngineResult<()> {
+    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+        if let Some(item_id) = self.recovery_counter_high_water(shard)? {
+            counters.observe(shard, item_id);
+        }
         Ok(())
     }
 }
@@ -1660,6 +1684,16 @@ pub fn queue_worker_partition(queue: &QueueKey, partitions: usize) -> usize {
 }
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> {
+    /// Reject data-plane work until this handle atomically publishes the shard's serving image. Call while
+    /// holding `inner`, before counters, command ids, caches, force-seals, or projection effects.
+    fn require_known_shard(inner: &Inner<L, P>, shard: &QueueKey) -> EngineResult<()> {
+        if inner.known_shards.contains(shard) {
+            Ok(())
+        } else {
+            Err(EngineError::NotFound)
+        }
+    }
+
     /// Assemble a backend from one of each axis.
     pub fn new(log: L, projection: P, control: C) -> Self {
         let durability = log.durability_class();
@@ -1868,6 +1902,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
     ) -> EngineResult<usize> {
         let cursor = {
             let g = self.inner.lock().expect("composed backend poisoned");
+            Self::require_known_shard(&g, shard)?;
             g.log.emission_cursor(shard)?
         };
         let page = self
@@ -1945,6 +1980,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         emit_change_records: bool,
     ) -> EngineResult<usize> {
         let mut g = self.inner.lock().expect("composed backend poisoned");
+        Self::require_known_shard(&g, shard)?;
         Self::reap_terminal_items_locked(
             &mut g,
             shard,
@@ -2239,6 +2275,10 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         request_id_retention_ms: u64,
         now: UtcTimestamp,
     ) -> EngineResult<MaintenanceSummary> {
+        {
+            let inner = self.inner.lock().expect("composed backend poisoned");
+            Self::require_known_shard(&inner, shard)?;
+        }
         let Some(handle) = self.detached_maintenance.as_ref() else {
             let mut inner = self.inner.lock().expect("composed backend poisoned");
             return Self::trim_reclaimable_segments_locked(
@@ -2529,6 +2569,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
             .map(|(k, c)| (k.clone(), c.seal_epoch))
             .collect();
         for (shard, seal_epoch) in shards {
+            Self::require_known_shard(&g, &shard)?;
             match g.log.gc_flush_due(&shard, seal_epoch, now_ms) {
                 Ok(positions) if !positions.is_empty() => {
                     Self::gc_distribute(&mut g, &shard, positions)?;
@@ -3581,21 +3622,83 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
         let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         queue_serialized(&self.mutation_gate, key.clone(), move || {
             let outcome = self.control.create_queue(definition)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let Inner {
+                log,
+                projection,
+                known_shards,
+                cmd_seq,
+                ..
+            } = &mut *g;
+            log.ensure_shard(&key)?;
+            let newly_known = !known_shards.contains(&key);
             if outcome.created {
-                let mut g = self.inner.lock().expect("poisoned");
-                let Inner {
-                    log,
-                    projection,
-                    known_shards,
-                    ..
-                } = &mut *g;
-                log.ensure_shard(&key)?;
                 projection.ensure_shard(&outcome.definition)?;
-                known_shards.insert(key.clone());
                 // Record the definition in the log's durable catalog so a reopened composition can recover
                 // this queue without a re-`create_queue` (no-op for in-process / unified-relational logs).
                 log.persist_definition(&outcome.definition)?;
+            } else if newly_known {
+                // This handle was opened before another supported handle created the durable queue. The
+                // object-log family is sole-owner for data-plane mutation, so handoff is ordered: commands
+                // committed before this create must be replayed, while concurrent post-create mutation by
+                // the old owner remains outside the contract. Start at a durable projection's checkpoint
+                // (genesis for InMemoryProjection), while keeping this handle's serving image unpublished.
+                let recovered_counter_high_water = projection.recovery_counter_high_water(&key)?;
+                let recorded_high_water = projection.recovery_high_water(&key)?;
+                let floor = log.retention_floor(&key)?;
+                if let Some(floor) = &floor
+                    && !recorded_high_water
+                        .as_ref()
+                        .is_some_and(|position| position.sequence >= floor.sequence)
+                {
+                    return Err(EngineError::Storage(format!(
+                        "create loser projection is behind reclaimed retention floor {}",
+                        floor.sequence
+                    )));
+                }
+                let mut from = max_position(recorded_high_water, floor);
+                let mut positions = Vec::new();
+                let mut commands = Vec::new();
+                let mut observed_item_ids = Vec::new();
+                let mut next_cmd_seq = *cmd_seq;
+                loop {
+                    let page = log.read_from(&key, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
+                    if !page.entries.is_empty() {
+                        for (position, envelope) in page.entries {
+                            observed_item_ids.extend(envelope.item_ids.iter().copied());
+                            if let Some(sequence) = envelope
+                                .command_id
+                                .0
+                                .rsplit('-')
+                                .next()
+                                .and_then(|value| value.parse::<u64>().ok())
+                            {
+                                next_cmd_seq = next_cmd_seq.max(sequence.saturating_add(1));
+                            }
+                            positions.push(position);
+                            commands.push(envelope);
+                        }
+                    }
+                    match page.next {
+                        Some(next) => from = Some(next),
+                        None => break,
+                    }
+                }
+                // No externally visible state changes until every bounded page has been read successfully.
+                // The in-memory object-log projection overrides this seam by building a scratch ProjectionData
+                // and swapping it into place, so even a command-application error cannot leak a partial replay.
+                projection.install_recovery_shard(&outcome.definition, &positions, &commands)?;
+                if let Some(item_id) = recovered_counter_high_water {
+                    self.counters.observe(&key, item_id);
+                }
+                for item_id in observed_item_ids {
+                    self.counters.observe(&key, item_id);
+                }
+                *cmd_seq = next_cmd_seq;
             }
+            // Publish the handle-local shard only after durable catalog persistence or loser replay
+            // succeeds. A failed hydration remains retryable instead of leaving an empty known shard.
+            known_shards.insert(key.clone());
             Ok(outcome)
         })
     }
@@ -3632,11 +3735,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
         shard: &QueueKey,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         deferred(move || {
-            self.inner
-                .lock()
-                .expect("poisoned")
-                .log
-                .acquire_epoch(shard)
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
+            g.log.acquire_epoch(shard)
         })
     }
 }
@@ -3672,11 +3773,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                     validate_entity(schema.as_ref(), item.entity.as_ref())?;
                 }
                 let max_attempts = def.retry_policy.max_attempts;
+                let mut g = self.inner.lock().expect("poisoned");
+                Self::require_known_shard(&g, shard)?;
                 let epoch = expected_epoch.unwrap_or(0);
                 let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
                 let (push_items, ids) =
                     build_push_items(items, epoch, self.node_id, counter_base, max_attempts);
-                let mut g = self.inner.lock().expect("poisoned");
                 g.projection.admit_mutation(shard)?;
                 g.projection.index_validate_push(shard, &push_items)?;
                 if g.projection.pause_blocks_intake(shard)? {
@@ -3735,6 +3837,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
             let max_attempts = def.retry_policy.max_attempts;
             let expires_at = request_expires_at(now, def.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -3824,6 +3927,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         }
         let max_attempts = def.retry_policy.max_attempts;
         let mut g = self.inner.lock().expect("poisoned");
+        Self::require_known_shard(&g, shard)?;
         let epoch = expected_epoch.unwrap_or(0);
         let counter_base = self.counters.reserve(shard, epoch, items.len() as u32);
         let (push_items, ids) =
@@ -3878,6 +3982,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         let fingerprint = commit_body_hash(std::slice::from_ref(&entry))?;
         let item_id = claim_ref.item_id;
         let mut g = self.inner.lock().expect("poisoned");
+        Self::require_known_shard(&g, shard)?;
         if !g.projection.supports_commit_transition() {
             return Err(EngineError::Unavailable);
         }
@@ -3915,6 +4020,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::RequestIdReplayPro
         // post-reopen retry of the same body computes the identical fingerprint → Replay (not Conflict).
         let fingerprint = commit_body_hash(&entries)?;
         let mut g = self.inner.lock().expect("poisoned");
+        Self::require_known_shard(&g, shard)?;
         if !g.projection.supports_commit_transition() {
             return Err(EngineError::Unavailable);
         }
@@ -4054,6 +4160,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ClaimPort for ComposedBac
                 // projection axis' rich-claim selection (BQ-14b/c). A projection without a group/cohort read model
                 // (the log-replay family) refuses the non-item units with `Unavailable` via `select_rich_claim`.
                 let def = self.control.queue_definition(&req.shard)?;
+                // The durable control-plane definition can become visible before this handle finishes
+                // create-loser hydration. Until atomic projection installation publishes `known_shards`, a
+                // claim must fail closed rather than mistake an absent/partial image for an empty queue.
+                if !self
+                    .inner
+                    .lock()
+                    .expect("poisoned")
+                    .known_shards
+                    .contains(&req.shard)
+                {
+                    return Err(EngineError::NotFound);
+                }
                 let unit = if req.compatibility != ClaimCompatibility::default() {
                     validate_claim_compatibility(&req.compatibility, req.max_items as u64, &def)?
                 } else {
@@ -4217,6 +4335,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
                 .transpose()?;
             validate_entity(schema.as_ref(), entity.as_ref())?;
             let max_attempts = def.retry_policy.max_attempts;
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let epoch = expected_epoch.unwrap_or(0);
             let counter_base = self.counters.reserve(shard, epoch, 1);
             let new_item_id = ItemId::mint(epoch, self.node_id, counter_base);
@@ -4234,7 +4354,6 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
                 gate_keys: Vec::new(),
                 entity_document: entity,
             };
-            let mut g = self.inner.lock().expect("poisoned");
             let existing = g.projection.lookup_by_key(shard, client_item_key)?;
             match existing {
                 None => {
@@ -4314,6 +4433,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> FinalizePort for Composed
                 .map_err(|_| EngineError::Unavailable)?;
             let result = (|| {
                 let mut g = self.inner.lock().expect("poisoned");
+                Self::require_known_shard(&g, shard)?;
                 let gc = self.gc_active(&g);
                 g.projection.finalize_validate(shard, &outcomes)?;
                 let item_ids: Vec<ItemId> = outcomes.iter().map(|o| o.item_id).collect();
@@ -4371,6 +4491,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RenewLeasePort for Compos
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -4417,6 +4538,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReassignLeasePort
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -4458,6 +4580,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PurgePort for ComposedBac
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -4531,6 +4654,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
                 .transpose()?;
             validate_entity(schema.as_ref(), entity.as_ref())?;
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             g.projection
                 .update_fields_validate(shard, &item_id, expected_item_version)?;
             g.projection
@@ -4575,6 +4699,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimPort for ComposedB
     ) -> impl std::future::Future<Output = EngineResult<Vec<ItemId>>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let gc = self.gc_active(&g);
             if gc {
                 Self::gc_force_seal(&mut g, shard, ts_to_ms(now))?;
@@ -4679,6 +4804,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                 }
                 let mut report = TickReport::default();
                 for (shard, ids) in expired_page.leases {
+                    if !g.known_shards.contains(&shard) {
+                        continue;
+                    }
                     let env = Self::make_envelope(
                         &mut g,
                         self.node_id,
@@ -4713,6 +4841,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReclaimDriver for Compose
                     .map_err(|_| EngineError::Unavailable)?;
                 let frontier_missing = {
                     let mut g = self.inner.lock().expect("poisoned");
+                    if !g.known_shards.contains(&shard) {
+                        continue;
+                    }
                     if def.emit_change_records {
                         Self::reap_terminal_items_locked(
                             &mut g,
@@ -5105,11 +5236,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> SnapshotStore for Compose
         snapshot: ProjectionSnapshot,
     ) -> impl std::future::Future<Output = EngineResult<SnapshotRef>> + Send {
         deferred(move || {
-            self.inner
-                .lock()
-                .expect("poisoned")
-                .log
-                .write_snapshot(shard, position, snapshot)
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
+            g.log.write_snapshot(shard, position, snapshot)
         })
     }
 
@@ -5152,11 +5281,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> SnapshotStore for Compose
         position: CommandPosition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         deferred(move || {
-            self.inner
-                .lock()
-                .expect("poisoned")
-                .log
-                .set_high_water(shard, position)
+            let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
+            g.log.set_high_water(shard, position)
         })
     }
 }
@@ -5182,6 +5309,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
                 return Err(EngineError::Unavailable);
             }
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             // Same pre-commit gate as a field update: an absent / terminal / superseded / fenced id or a
             // version mismatch rejects and nothing is appended.
             g.projection
@@ -5294,6 +5422,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
     ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
         deferred(move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             g.projection.bounded_mutation(shard, request)
         })
     }
@@ -5325,6 +5454,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
             let fingerprint = claim_by_query_body_hash(&request)?;
             let expires_at = request_expires_at(context.now, definition.request_id_retention_ms);
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             match g
                 .claim_by_query_idempotency
                 .entry(shard.clone())
@@ -5515,6 +5645,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 )
             };
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             if !self.is_atomic() || !g.projection.supports_commit_transition() {
                 return Err(EngineError::Unavailable);
             }
@@ -5876,6 +6007,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&g, shard)?;
             let env = Self::make_envelope(
                 &mut g,
                 self.node_id,
@@ -5935,6 +6067,8 @@ mod ordered_tests {
     #[derive(Clone, Default)]
     struct FakeLogState {
         epoch: u64,
+        high_water: Option<CommandPosition>,
+        snapshots: Vec<(SnapshotRef, ProjectionSnapshot)>,
         next_sequence: u64,
         buffered: Vec<CommandEnvelope>,
         sealed_batches: Vec<usize>,
@@ -5942,6 +6076,8 @@ mod ordered_tests {
         emission_cursor: HashMap<QueueKey, CommandPosition>,
         definitions: BTreeMap<QueueKey, QueueDefinition>,
         cursor_write_failures: u32,
+        read_page_limit: Option<usize>,
+        fail_read_call: Option<usize>,
     }
 
     #[derive(Default)]
@@ -6007,6 +6143,17 @@ mod ordered_tests {
                 .lock()
                 .expect("fake log poisoned")
                 .cursor_write_failures += 1;
+        }
+
+        fn page_reads_at_most(&self, limit: usize) {
+            self.state
+                .lock()
+                .expect("fake log poisoned")
+                .read_page_limit = Some(limit);
+        }
+
+        fn fail_read_call_once(&self, call: usize) {
+            self.state.lock().expect("fake log poisoned").fail_read_call = Some(call);
         }
 
         fn record_definition(&self, definition: &QueueDefinition) {
@@ -6075,8 +6222,14 @@ mod ordered_tests {
             from: Option<CommandPosition>,
             limit: usize,
         ) -> EngineResult<CommandPage> {
-            self.read_calls.fetch_add(1, AtomicOrdering::Relaxed);
-            let state = self.state.lock().expect("fake log poisoned");
+            let call = self.read_calls.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            let mut state = self.state.lock().expect("fake log poisoned");
+            if state.fail_read_call == Some(call) {
+                state.fail_read_call = None;
+                return Err(EngineError::Storage(
+                    "fault-injection: later replay page read failed".into(),
+                ));
+            }
             let start = match from.as_ref() {
                 None => 0,
                 Some(cursor) => state
@@ -6094,7 +6247,10 @@ mod ordered_tests {
                         |idx| idx + 1,
                     ),
             };
-            let page_limit = limit.max(1);
+            let page_limit = state
+                .read_page_limit
+                .map_or(limit, |configured| limit.min(configured))
+                .max(1);
             let entries = state
                 .entries
                 .iter()
@@ -6113,14 +6269,20 @@ mod ordered_tests {
         }
 
         fn high_water(&self, _shard: &QueueKey) -> EngineResult<Option<CommandPosition>> {
-            Ok(None)
+            Ok(self
+                .state
+                .lock()
+                .expect("fake log poisoned")
+                .high_water
+                .clone())
         }
 
         fn set_high_water(
             &mut self,
             _shard: &QueueKey,
-            _position: CommandPosition,
+            position: CommandPosition,
         ) -> EngineResult<()> {
+            self.state.get_mut().expect("fake log poisoned").high_water = Some(position);
             Ok(())
         }
 
@@ -6195,21 +6357,44 @@ mod ordered_tests {
             position: CommandPosition,
             snapshot: ProjectionSnapshot,
         ) -> EngineResult<SnapshotRef> {
-            Ok(SnapshotRef {
+            let snapshot_ref = SnapshotRef {
                 queue: shard.clone(),
                 position,
                 ref_id: String::from_utf8_lossy(&snapshot.payload).into_owned(),
-            })
+            };
+            self.state
+                .get_mut()
+                .expect("fake log poisoned")
+                .snapshots
+                .push((snapshot_ref.clone(), snapshot));
+            Ok(snapshot_ref)
         }
 
-        fn latest_snapshot(&self, _shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
-            Ok(None)
+        fn latest_snapshot(&self, shard: &QueueKey) -> EngineResult<Option<SnapshotRef>> {
+            Ok(self
+                .state
+                .lock()
+                .expect("fake log poisoned")
+                .snapshots
+                .iter()
+                .rev()
+                .find(|(snapshot_ref, _)| &snapshot_ref.queue == shard)
+                .map(|(snapshot_ref, _)| snapshot_ref.clone()))
         }
 
         fn read_snapshot(&self, snapshot_ref: &SnapshotRef) -> EngineResult<ProjectionSnapshot> {
-            Ok(ProjectionSnapshot {
-                payload: snapshot_ref.ref_id.clone().into_bytes(),
-            })
+            self.state
+                .lock()
+                .expect("fake log poisoned")
+                .snapshots
+                .iter()
+                .find(|(candidate, _)| {
+                    candidate.queue == snapshot_ref.queue
+                        && candidate.position == snapshot_ref.position
+                        && candidate.ref_id == snapshot_ref.ref_id
+                })
+                .map(|(_, snapshot)| snapshot.clone())
+                .ok_or(EngineError::NotFound)
         }
 
         fn supports_group_commit(&self) -> bool {
@@ -6383,6 +6568,21 @@ mod ordered_tests {
                     _ => {}
                 }
             }
+            Ok(())
+        }
+
+        fn install_recovery_shard(
+            &mut self,
+            definition: &QueueDefinition,
+            positions: &[CommandPosition],
+            commands: &[CommandEnvelope],
+        ) -> EngineResult<()> {
+            let mut replacement = Self::default();
+            replacement.ensure_shard(definition)?;
+            replacement.apply(positions, commands)?;
+            // Fake apply is infallible after validation; replacing the test state models the production
+            // in-memory projection's scratch-image publication seam.
+            *self = replacement;
             Ok(())
         }
 
@@ -7506,11 +7706,26 @@ mod ordered_tests {
     fn restart_backend(
         log: &FakeGroupCommitLog,
     ) -> ComposedBackend<FakeGroupCommitLog, FakeProjection, InProcessControlPlane> {
-        ComposedBackend::new(
+        let backend = ComposedBackend::new(
             log.clone(),
             FakeProjection::default(),
             InProcessControlPlane::new(),
-        )
+        );
+        let recovered_shards = log
+            .state
+            .lock()
+            .expect("fake log poisoned")
+            .entries
+            .iter()
+            .map(|(position, _)| position.queue.clone())
+            .collect::<HashSet<_>>();
+        backend
+            .inner
+            .lock()
+            .expect("composed backend poisoned")
+            .known_shards
+            .extend(recovered_shards);
+        backend
     }
 
     #[test]
@@ -8033,6 +8248,192 @@ mod ordered_tests {
             2,
             "8,193 retained commands require two pages, not six family-specific reads"
         );
+    }
+
+    #[test]
+    fn create_loser_later_page_failure_retries_without_partial_projection_or_publication() {
+        let shard = queue();
+        let definition = qdef();
+        let log = FakeGroupCommitLog::default();
+        log.page_reads_at_most(1);
+        log.set_entries(
+            &shard,
+            0,
+            vec![push_env("cmp-0-0", 1, ts(1)), push_env("cmp-0-1", 2, ts(2))],
+        );
+        log.fail_read_call_once(2);
+        let control = InProcessControlPlane::new();
+        assert!(control.create_queue(definition.clone()).unwrap().created);
+        let backend = ComposedBackend::new(log, FakeProjection::default(), control);
+
+        assert!(matches!(
+            futures::executor::block_on(backend.create_queue(definition.clone())),
+            Err(EngineError::Storage(message))
+                if message.contains("later replay page read failed")
+        ));
+
+        let rejected_snapshot_position = CommandPosition::new(shard.clone(), 0, 1);
+        let failed_epoch = futures::executor::block_on(backend.acquire_epoch(&shard));
+        assert!(
+            matches!(failed_epoch, Err(EngineError::NotFound)),
+            "failed create must not let the unpublished handle advance the durable epoch: {failed_epoch:?}"
+        );
+        let failed_high_water = futures::executor::block_on(
+            backend.set_high_water(&shard, rejected_snapshot_position.clone()),
+        );
+        assert!(
+            matches!(failed_high_water, Err(EngineError::NotFound)),
+            "failed create must not let the unpublished handle advance high-water: {failed_high_water:?}"
+        );
+        let failed_snapshot = futures::executor::block_on(backend.write_snapshot(
+            &shard,
+            rejected_snapshot_position,
+            ProjectionSnapshot {
+                payload: b"must-not-publish".to_vec(),
+            },
+        ));
+        assert!(
+            matches!(failed_snapshot, Err(EngineError::NotFound)),
+            "failed create must not let the unpublished handle persist a snapshot: {failed_snapshot:?}"
+        );
+        let failed_emission_sink = RecordingSink::default();
+        let failed_emission =
+            backend.emit_change_record_tail(&shard, &failed_emission_sink, 1, ts(3), None);
+        assert!(
+            matches!(failed_emission, Err(EngineError::NotFound)),
+            "failed create must not emit or advance a cursor for an unpublished shard: {failed_emission:?}"
+        );
+        assert!(
+            failed_emission_sink.batches().is_empty(),
+            "admission must precede external emission"
+        );
+        let failed_reap = backend.reap_terminal_items(&shard, ts(3), 0, false);
+        assert!(
+            matches!(failed_reap, Err(EngineError::NotFound)),
+            "failed create must not reap an unpublished projection: {failed_reap:?}"
+        );
+        let failed_trim = backend.trim_reclaimable_segments(&shard, 0, ts(3));
+        assert!(
+            matches!(failed_trim, Err(EngineError::NotFound)),
+            "failed create must not run log maintenance for an unpublished shard: {failed_trim:?}"
+        );
+        backend.with_log(|log| {
+            let state = log.state.lock().expect("fake log poisoned");
+            assert_eq!(
+                state.epoch, 0,
+                "rejected epoch acquisition changes no metadata"
+            );
+            assert_eq!(
+                state.high_water, None,
+                "rejected high-water update changes no metadata"
+            );
+            assert!(
+                state.snapshots.is_empty(),
+                "rejected snapshot write changes no metadata"
+            );
+            assert!(
+                state.emission_cursor.is_empty(),
+                "rejected emission changes no cursor metadata"
+            );
+        });
+
+        let failed_push = futures::executor::block_on(backend.push(
+            &shard,
+            vec![PushSpec::default()],
+            ts(3),
+            None,
+        ));
+        assert!(
+            matches!(failed_push, Err(EngineError::NotFound)),
+            "failed create must reject push before reserving an id or command: {failed_push:?}"
+        );
+        backend.with_projection(|projection| {
+            let state = projection.state.lock().expect("fake projection poisoned");
+            assert!(
+                state.pending.is_empty(),
+                "failed read publishes no eligible items"
+            );
+            assert!(
+                state.apply_batches.is_empty(),
+                "failed read applies no replay prefix"
+            );
+        });
+        backend.with_log(|log| {
+            let state = log.state.lock().expect("fake log poisoned");
+            assert_eq!(state.entries.len(), 2, "failed push appends no command");
+        });
+
+        let failed_claim = futures::executor::block_on(backend.claim(ClaimRequest {
+            eligibility_time: None,
+            shard: shard.clone(),
+            worker_id: WorkerId::new("failed-replay-worker").unwrap(),
+            max_items: 2,
+            lease_token: LeaseToken::new("failed-replay-lease").unwrap(),
+            lease_expires_at: ts(30),
+            now: ts(3),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        }));
+        assert!(
+            matches!(failed_claim, Err(EngineError::NotFound)),
+            "failed create must not expose a data-plane shard: {failed_claim:?}"
+        );
+
+        let retry = futures::executor::block_on(backend.create_queue(definition))
+            .expect("complete replay retries cleanly");
+        assert!(!retry.created);
+        backend.with_projection(|projection| {
+            let state = projection.state.lock().expect("fake projection poisoned");
+            assert_eq!(
+                state.pending,
+                vec![ItemId::from_u64(1), ItemId::from_u64(2)]
+            );
+            assert_eq!(state.apply_batches, vec![vec!["push", "push"]]);
+        });
+        assert_eq!(
+            backend
+                .with_projection(|projection| projection.metrics(&shard).unwrap())
+                .pending,
+            2,
+            "retry exposes each replayed item and metric exactly once"
+        );
+
+        let claimed = futures::executor::block_on(backend.claim(ClaimRequest {
+            eligibility_time: None,
+            shard: shard.clone(),
+            worker_id: WorkerId::new("replay-worker").unwrap(),
+            max_items: 2,
+            lease_token: LeaseToken::new("replay-lease").unwrap(),
+            lease_expires_at: ts(30),
+            now: ts(3),
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        }))
+        .expect("replayed items remain lifecycle-valid");
+        assert_eq!(claimed.items.len(), 2);
+
+        let fresh_ids = futures::executor::block_on(backend.push(
+            &shard,
+            vec![PushSpec::default()],
+            ts(4),
+            None,
+        ))
+        .expect("counter and command sequence publish after successful replay");
+        assert_eq!(
+            fresh_ids,
+            vec![ItemId::from_u64(3)],
+            "failed push must consume neither the next item id nor a projection slot"
+        );
+        assert!(
+            !claimed
+                .items
+                .iter()
+                .any(|item| item.item_id == fresh_ids[0])
+        );
+        backend.with_log(|log| {
+            let state = log.state.lock().expect("fake log poisoned");
+            assert_eq!(state.entries.last().unwrap().1.command_id.0, "cmp-0-3");
+        });
     }
 }
 

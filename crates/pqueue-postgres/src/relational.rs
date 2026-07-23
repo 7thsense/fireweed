@@ -9080,6 +9080,17 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
+    fn install_recovery_shard(
+        &mut self,
+        _definition: &QueueDefinition,
+        positions: &[CommandPosition],
+        commands: &[CommandEnvelope],
+    ) -> EngineResult<()> {
+        // `apply` publishes projection rows and the cursor in one PostgreSQL transaction. Its post-commit
+        // token-cache updates are infallible HashMap operations, so an error cannot expose a partial batch.
+        self.apply(positions, commands)
+    }
+
     // -- recovery-on-open (ADR-012 P2): the DB-authoritative store persists the applied cursor in
     //    `relational_cursor`, so recovery can resume from that durable high-water and only replay the
     //    retained log tail. Recovery also repopulates the in-process control plane and re-seeds the
@@ -9129,19 +9140,18 @@ impl ProjectionStore for PostgresRelational {
         Ok(())
     }
 
-    fn restore_counters(&self, shard: &QueueKey, counters: &QueueCounters) -> EngineResult<()> {
+    fn recovery_counter_high_water(&self, shard: &QueueKey) -> EngineResult<Option<ItemId>> {
         let mut g = self.lock();
         let (t, q) = parts(shard);
         let row = st(g.client.query_opt(
             "SELECT item_id FROM pqueue_id_high_water WHERE tenant_id=$1 AND queue_id=$2",
             &[&t, &q],
         ))?;
-        if let Some(row) = row {
+        row.map(|row| {
             let id: String = row.get(0);
-            let item_id = ItemId::new(id).map_err(|e| EngineError::Storage(e.to_string()))?;
-            counters.observe(shard, item_id);
-        }
-        Ok(())
+            ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))
+        })
+        .transpose()
     }
 
     fn eligible_candidates(

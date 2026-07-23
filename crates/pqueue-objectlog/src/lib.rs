@@ -49,9 +49,11 @@ use std::fs;
 use std::fs::OpenOptions;
 use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use bytes::Bytes;
@@ -450,11 +452,69 @@ impl Inner {
         read_high_water(&self.root, shard)
     }
 
+    /// Install a queue discovered through durable create authority into this handle's derived state.
+    ///
+    /// Object-log handles are sole-owner data-plane handles. The supported handoff is therefore ordered:
+    /// another handle may have durably committed commands before this independently opened handle resolves
+    /// `create_queue`, but it must not keep mutating the shard concurrently. Replaying here makes the losing
+    /// creator authoritative at the instant create returns instead of installing an empty projection.
+    fn hydrate_queue(
+        &mut self,
+        definition: &QueueDefinition,
+        counters: &QueueCounters,
+    ) -> EngineResult<()> {
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        if self.projections.contains_key(&shard) {
+            return Ok(());
+        }
+        let envelopes = self.read_envelopes(&shard)?;
+        let compiled_schema = definition
+            .entity_schema
+            .as_ref()
+            .and_then(|document| document.entity_schema.as_ref())
+            .map(compile_entity_schema)
+            .transpose()?;
+        let mut projection = ProjectionData::new(
+            definition.priority_model,
+            definition.ordering_mode,
+            definition.max_rank_error,
+            definition.recurrence,
+            &definition.secondary_indexes,
+        )
+        .with_typed_indexes(&definition.typed_indexes);
+        let mut observed_item_ids = Vec::new();
+        let mut next_cmd_seq = self.cmd_seq;
+        for (_sequence, _epoch, envelope) in &envelopes {
+            observed_item_ids.extend(envelope.item_ids.iter().copied());
+            if let Some(sequence) = envelope
+                .command_id
+                .0
+                .rsplit('-')
+                .next()
+                .and_then(|value| value.parse::<u64>().ok())
+            {
+                next_cmd_seq = next_cmd_seq.max(sequence.saturating_add(1));
+            }
+            projection.apply_command(&envelope.command)?;
+        }
+        // ProjectionData is private scratch state until every read, schema compile, and command apply has
+        // succeeded. Publishing the maps/counters below is therefore an infallible single phase.
+        if let Some(schema) = compiled_schema {
+            self.schemas.insert(shard.clone(), schema);
+        }
+        self.projections.insert(shard.clone(), projection);
+        for item_id in observed_item_ids {
+            counters.observe(&shard, item_id);
+        }
+        self.cmd_seq = next_cmd_seq;
+        Ok(())
+    }
+
     /// Reconstruct every queue's projection from the durable object log on open (TD-007 §4 replay), and
     /// restore `cmd_seq` past the highest minted `obj-N` so a post-restart id never collides.
     fn rebuild_all(&mut self, counters: &QueueCounters) -> EngineResult<()> {
         if !self.root.exists() {
-            fs::create_dir_all(&self.root).map_err(store)?;
+            create_dir_all_durable(&self.root)?;
             return Ok(());
         }
         let mut max_cmd_seq: Option<u64> = None;
@@ -518,7 +578,7 @@ impl Inner {
 fn read_queue_definitions(root: &Path) -> EngineResult<HashMap<QueueKey, QueueDefinition>> {
     let mut queues = HashMap::new();
     if !root.exists() {
-        fs::create_dir_all(root).map_err(store)?;
+        create_dir_all_durable(root)?;
         return Ok(queues);
     }
     for entry in fs::read_dir(root).map_err(store)? {
@@ -543,9 +603,7 @@ fn create_queue_metadata(
 ) -> EngineResult<CreateQueueOutcome> {
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
     if let Some(existing) = queues.get(&key) {
-        if existing.ordering_mode != definition.ordering_mode
-            || existing.priority_model != definition.priority_model
-        {
+        if existing != &definition {
             return Err(EngineError::QueueDefinitionConflict);
         }
         return Ok(CreateQueueOutcome {
@@ -554,13 +612,98 @@ fn create_queue_metadata(
         });
     }
     let dir = shard_dir(root, &key);
-    fs::create_dir_all(&dir).map_err(store)?;
-    fs::write(dir.join("queue.json"), to_json(&definition)?).map_err(store)?;
-    queues.insert(key, definition.clone());
+    create_dir_all_durable(&dir)?;
+    let queue_file = dir.join("queue.json");
+    let bytes = to_json(&definition)?;
+    let (mut file, temp_file) = open_unique_queue_temp(&dir)?;
+    let temp = TempFileGuard(temp_file);
+    let write_result = (|| {
+        file.write_all(bytes.as_bytes()).map_err(store)?;
+        file.sync_all().map_err(store)?;
+        Ok::<(), EngineError>(())
+    })();
+    drop(file);
+    // Close before propagating a write/sync error so TempFileGuard can remove the file on platforms that
+    // do not permit deleting an open handle.
+    write_result?;
+    let created = match fs::hard_link(&temp.0, &queue_file) {
+        Ok(()) => {
+            sync_directory(&dir)?;
+            true
+        }
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => false,
+        Err(err) => return Err(store(err)),
+    };
+    drop(temp);
+    let stored: QueueDefinition =
+        serde_json::from_str(&fs::read_to_string(&queue_file).map_err(store)?).map_err(store)?;
+    queues.insert(key, stored.clone());
+    if stored != definition {
+        // Cache the durable winner before reporting conflict so an independently opened loser can perform
+        // the documented follow-up definition read without reopening the backend.
+        return Err(EngineError::QueueDefinitionConflict);
+    }
     Ok(CreateQueueOutcome {
-        created: true,
-        definition,
+        created,
+        definition: stored,
     })
+}
+
+static QUEUE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if fs::remove_file(&self.0).is_ok()
+            && let Some(parent) = self.0.parent()
+        {
+            // Best-effort durability for cleanup on early-return paths. The publication itself was already
+            // synced and must not be downgraded merely because cleanup syncing is unavailable.
+            let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+        }
+    }
+}
+
+fn open_unique_queue_temp(dir: &Path) -> EngineResult<(fs::File, PathBuf)> {
+    loop {
+        let attempt = QUEUE_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("queue.json.tmp.{}.{}", std::process::id(), attempt));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(store(error)),
+        }
+    }
+}
+
+fn sync_directory(dir: &Path) -> EngineResult<()> {
+    fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(store)
+}
+
+fn create_dir_all_durable(dir: &Path) -> EngineResult<()> {
+    let mut missing = Vec::new();
+    let mut cursor = dir;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        let Some(parent) = cursor.parent() else {
+            break;
+        };
+        cursor = parent;
+    }
+    fs::create_dir_all(dir).map_err(store)?;
+    for directory in missing.iter().rev() {
+        if let Some(parent) = directory.parent() {
+            sync_directory(parent)?;
+        }
+        sync_directory(directory)?;
+    }
+    if missing.is_empty() {
+        sync_directory(dir)?;
+    }
+    Ok(())
 }
 
 fn read_envelopes_from_root(
@@ -1297,35 +1440,23 @@ impl ControlPlaneStore for ObjectLogBackend {
         let result = (|| {
             let mut g = self.inner.lock().expect("poisoned");
             let root = g.root.clone();
-            let outcome = create_queue_metadata(&root, &mut g.queues, definition)?;
-            let shard = QueueKey::new(
-                outcome.definition.tenant_id.clone(),
-                outcome.definition.queue_id.clone(),
-            );
-            let compiled_schema = outcome
-                .definition
-                .entity_schema
-                .as_ref()
-                .and_then(|esd| esd.entity_schema.as_ref())
-                .map(compile_entity_schema)
-                .transpose()?;
-            if outcome.created {
-                g.projections.insert(
-                    shard.clone(),
-                    ProjectionData::new(
-                        outcome.definition.priority_model,
-                        outcome.definition.ordering_mode,
-                        outcome.definition.max_rank_error,
-                        outcome.definition.recurrence,
-                        &outcome.definition.secondary_indexes,
-                    )
-                    .with_typed_indexes(&outcome.definition.typed_indexes),
-                );
+            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            match create_queue_metadata(&root, &mut g.queues, definition) {
+                Ok(outcome) => {
+                    g.hydrate_queue(&outcome.definition, &self.counters)?;
+                    Ok(outcome)
+                }
+                Err(EngineError::QueueDefinitionConflict) => {
+                    let stored = g
+                        .queues
+                        .get(&key)
+                        .cloned()
+                        .expect("durable conflict winner was cached");
+                    g.hydrate_queue(&stored, &self.counters)?;
+                    Err(EngineError::QueueDefinitionConflict)
+                }
+                Err(error) => Err(error),
             }
-            if let Some(cs) = compiled_schema {
-                g.schemas.insert(shard, cs);
-            }
-            Ok(outcome)
         })();
         std::future::ready(result)
     }
