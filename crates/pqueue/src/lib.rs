@@ -220,6 +220,31 @@ impl Default for EmbeddedRecoveryPolicy {
     }
 }
 
+fn object_log_namespace(namespace: &str) -> String {
+    namespace
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+use sha2::{Digest, Sha256};
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+fn derived_postgres_schema_name(namespace: &str) -> String {
+    const PREFIX: &str = "pq_";
+    const HASH_BYTES: usize = 30;
+
+    let digest = Sha256::digest(namespace.as_bytes());
+    let mut schema = String::with_capacity(PREFIX.len() + HASH_BYTES * 2);
+    schema.push_str(PREFIX);
+    for byte in digest.iter().take(HASH_BYTES) {
+        schema.push_str(&format!("{byte:02x}"));
+    }
+    schema
+}
+
 /// Fully owned public configuration for an embedded authoritative-log plus disposable-projection pair.
 /// Concrete adapter types remain private and credential-bearing fields are redacted from `Debug`.
 ///
@@ -972,12 +997,7 @@ fn open_embedded_object_log(
             )?)
         }
     };
-    let namespace = config
-        .namespace
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let namespace = object_log_namespace(&config.namespace);
     let store: Arc<dyn BlobStore> = Arc::new(NamespacedBlobStore::new(raw, &namespace)?);
     if authoritative {
         pqueue_objectlog::ObjectLog::open_group_commit_authoritative_with_blob_store(
@@ -2752,7 +2772,10 @@ pub fn open_embedded(
     }
     let projection = match &config.projection {
         EmbeddedProjectionConfig::Postgres { url } => {
-            pqueue_postgres::PostgresRelational::connect_in_schema(&url.0, &config.namespace)?
+            pqueue_postgres::PostgresRelational::connect_in_schema(
+                &url.0,
+                &derived_postgres_schema_name(&config.namespace),
+            )?
         }
         EmbeddedProjectionConfig::Sqlite { .. } => return Err(EngineError::Unavailable),
     };
@@ -3117,6 +3140,40 @@ mod tests {
             }),
         }];
         definition
+    }
+
+    #[cfg(all(feature = "objectlog", feature = "postgres"))]
+    #[test]
+    fn embedded_postgres_schema_name_is_legal_bounded_and_deterministic() {
+        let namespaces = vec![
+            "short".to_string(),
+            "punctuation-heavy:-/namespace.with spaces".to_string(),
+            "ümlaut/雪/namespace:with:unicode".to_string(),
+            "a".repeat(256),
+        ];
+        let mut seen = HashSet::new();
+
+        for namespace in namespaces {
+            let schema = super::derived_postgres_schema_name(&namespace);
+            assert!(schema.len() <= 63, "{schema}");
+            assert!(
+                schema
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            );
+            assert!(schema.starts_with("pq_"));
+            assert!(
+                seen.insert(schema.clone()),
+                "schema derivation collided for {namespace:?}"
+            );
+            assert_eq!(schema, super::derived_postgres_schema_name(&namespace));
+        }
+    }
+
+    #[cfg(feature = "objectlog")]
+    #[test]
+    fn embedded_object_log_namespace_encoding_stays_hex_bytes() {
+        assert_eq!(super::object_log_namespace("a-b:/é"), "612d623a2fc3a9");
     }
 
     fn query_request(request_id: &str) -> ClaimByQueryRequest {
