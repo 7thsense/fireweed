@@ -17,6 +17,7 @@ use pqueue::{
 };
 use pqueue_engine::DurabilityClass;
 use pqueue_memory::ManualClock;
+use pqueue_objectlog::segmented::S3BlobStore;
 
 fn unique_fixture(name: &str) -> (PathBuf, String) {
     let nonce = SystemTime::now()
@@ -27,6 +28,14 @@ fn unique_fixture(name: &str) -> (PathBuf, String) {
         std::env::temp_dir().join(format!("pqueue-{name}-{nonce}")),
         format!("pqueue_{name}_{nonce}"),
     )
+}
+
+fn unique_bucket(tag: &str) -> String {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("pqueue-{tag}-{}", nonce % 1_000_000_000)
 }
 
 fn config(root: &Path, schema: &str, url: &str) -> EmbeddedDurabilityConfig {
@@ -295,6 +304,72 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
 
     drop_schema(&url, &schema);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
+    let endpoint = match std::env::var("PQUEUE_S3_TEST_URL") {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!(
+                "SKIP public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection: PQUEUE_S3_TEST_URL is unset"
+            );
+            return;
+        }
+    };
+    let bucket = std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| unique_bucket("pg"));
+    let access = std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let secret = std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let region = std::env::var("PQUEUE_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let pg_url = std::env::var("PQUEUE_PG_TEST_URL")
+        .expect("PQUEUE_PG_TEST_URL must be set when exercising the postgres projection");
+    let allow_insecure_http = endpoint.starts_with("http://");
+
+    S3BlobStore::new(&endpoint, &bucket, &access, &secret, &region)
+        .unwrap()
+        .create_bucket()
+        .unwrap();
+
+    let namespace = format!(
+        "snorri-s3-v1:prefix_len:32:object-log/{}:{}:{}",
+        "illegal-namespace".repeat(3),
+        "with punctuation:-/",
+        "with unicode snowman ☃ and more text to exceed sixty-three bytes"
+    );
+    let durability = EmbeddedDurabilityConfig {
+        object_log: EmbeddedObjectLogConfig::S3Compatible {
+            endpoint,
+            bucket,
+            region,
+            access_key_id: EmbeddedSecret::new(access),
+            secret_access_key: EmbeddedSecret::new(secret),
+            allow_insecure_http,
+        },
+        projection: EmbeddedProjectionConfig::Postgres {
+            url: EmbeddedSecret::new(pg_url),
+        },
+        response_barrier: EmbeddedResponseBarrier::Strict,
+        segments: EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        namespace,
+        recovery: EmbeddedRecoveryPolicy::default(),
+    };
+    let clock = Arc::new(ManualClock::at(1_000));
+
+    {
+        let pq = pqueue::open_embedded(durability.clone(), clock.clone()).unwrap();
+        let key = queue();
+        block_on(pq.create_queue(definition())).unwrap();
+        block_on(pq.push(&key, item(10))).unwrap();
+        block_on(pq.push(&key, item(20))).unwrap();
+        assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
+    }
+
+    {
+        let pq = pqueue::open_embedded(durability, clock).unwrap();
+        let key = queue();
+        assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
+        assert_eq!(block_on(pq.peek(&key, 10)).unwrap().len(), 2);
+    }
 }
 
 /// ADR-017 classifies an object log plus an independent Postgres projection as
