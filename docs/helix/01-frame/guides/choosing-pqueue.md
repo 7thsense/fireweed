@@ -51,9 +51,10 @@ a compatibility or performance claim about FOQS or pqueue.
   order, offsets, retention, and replay are the main contract.
 - Workloads where consumers can process sequential batches and do not need
   arbitrary priority, per-item leases, or item-level delayed retry.
-- Transport or scheduler problems such as downstream rate tokens, worker-runtime
-  placement, load balancing, or quota enforcement. Keep those policies in the
-  caller or adjacent scheduler/router layer.
+- Transport or scheduler problems such as downstream API rate tokens,
+  downstream quotas, worker-runtime placement, or load balancing. Keep those
+  policies in the caller or adjacent scheduler/router layer; pqueue's own
+  deployment and tenant capacity controls are a separate product concern.
 
 ## Change Log Versus Stream Consumption
 
