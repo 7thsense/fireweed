@@ -28,6 +28,27 @@ under load, not a host-performance bar, and remains release-significant.
 Versioned files in this directory describe already-cut releases. This file
 defines the gate applied to future tags.
 
+## Public version sources
+
+Before changing version values for a release, inventory every public version
+source from the repository root:
+
+```bash
+bash scripts/release/list-public-version-sources.sh
+```
+
+The command reports the Cargo workspace version, README artifact coordinates,
+Helm chart `version` and `appVersion`, Helm packaging inputs and evidence names,
+and existing files under `docs/releases`. ADR-020 sets `v0.20.0` as the first
+Fireweed-branded release. Cargo and published artifact coordinates are
+release-synchronized to that target. The chart file's development defaults are
+independently versioned, while `package-helm-chart.sh` overrides both chart
+versions with the release version when it builds the published package.
+
+Historical release-note files remain immutable. Add `docs/releases/v0.20.0.md`
+when that release is cut; do not rename earlier notes or artifacts. Any new
+public version source must be added to the inventory command before release.
+
 ## Exact-revision composite staging
 
 `scripts/release/build-governed-evidence-bundle.sh` is the local source of
