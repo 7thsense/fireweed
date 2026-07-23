@@ -1337,19 +1337,20 @@ impl ControlPlaneStore for ObjectLogBackend {
                 .and_then(|esd| esd.entity_schema.as_ref())
                 .map(compile_entity_schema)
                 .transpose()?;
-            if outcome.created {
-                g.projections.insert(
-                    shard.clone(),
-                    ProjectionData::new(
-                        outcome.definition.priority_model,
-                        outcome.definition.ordering_mode,
-                        outcome.definition.max_rank_error,
-                        outcome.definition.recurrence,
-                        &outcome.definition.secondary_indexes,
-                    )
-                    .with_typed_indexes(&outcome.definition.typed_indexes),
-                );
-            }
+            // A handle opened before another handle wins queue creation has no local projection for
+            // the newly durable queue. Hydrate that compatible loser from the authoritative stored
+            // definition, while preserving an existing projection (and its items) when create_queue is
+            // called again on an already-active handle.
+            g.projections.entry(shard.clone()).or_insert_with(|| {
+                ProjectionData::new(
+                    outcome.definition.priority_model,
+                    outcome.definition.ordering_mode,
+                    outcome.definition.max_rank_error,
+                    outcome.definition.recurrence,
+                    &outcome.definition.secondary_indexes,
+                )
+                .with_typed_indexes(&outcome.definition.typed_indexes)
+            });
             if let Some(cs) = compiled_schema {
                 g.schemas.insert(shard, cs);
             }

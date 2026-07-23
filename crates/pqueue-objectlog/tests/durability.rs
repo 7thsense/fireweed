@@ -320,6 +320,62 @@ fn local_object_log_rejects_incompatible_non_placement_definition() {
 }
 
 #[tokio::test]
+async fn object_log_backend_compatible_race_loser_can_push_claim_and_reopen() {
+    let root = tmp_root("backend-compatible-create-race-immediate-use");
+    let _ = std::fs::remove_dir_all(&root);
+    let barrier = Arc::new(Barrier::new(2));
+    let backends = [
+        Arc::new(ObjectLogBackend::open(&root).expect("open first contender")),
+        Arc::new(ObjectLogBackend::open(&root).expect("open second contender")),
+    ];
+    let handles = backends
+        .iter()
+        .cloned()
+        .map(|backend| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                futures::executor::block_on(backend.create_queue(qdef()))
+            })
+        })
+        .collect::<Vec<_>>();
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("contender thread"))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("compatible race outcomes");
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+    assert!(outcomes.iter().all(|outcome| outcome.definition == qdef()));
+    let loser_index = outcomes
+        .iter()
+        .position(|outcome| !outcome.created)
+        .expect("one compatible loser");
+    let loser = &backends[loser_index];
+
+    loser
+        .push(
+            &qkey(),
+            vec![PushSpec::default()],
+            UtcTimestamp::new(1, 0).unwrap(),
+            None,
+        )
+        .await
+        .expect("loser push");
+    let claimed = loser
+        .claim(claim_req(10, 30, 10))
+        .await
+        .expect("loser claim");
+    assert_eq!(claimed.items.len(), 1);
+
+    drop(backends);
+    let reopened = ObjectLogBackend::open(&root).expect("reopen after loser use");
+    assert_eq!(reopened.queue_definition(&qkey()).await.unwrap(), qdef());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
     let root = tmp_root("composed-compatible-loser-immediate-use");
     let _ = std::fs::remove_dir_all(&root);
