@@ -18,13 +18,13 @@ One resolved package ships notice material:
 
 - `shuttle 0.8.1` includes `NOTICE` and `THIRD-PARTY`. It is a transitive
   dependency of `turso_core 0.7.0`, reached through the workspace's
-  `pqueue-turso` package. The upstream notice identifies Amazon as Shuttle's
+  `fireweed-turso` package. The upstream notice identifies Amazon as Shuttle's
   copyright holder and identifies code derived from Tokio, Loom, and the Rust
   standard library.
 - `webpki-roots 1.0.8` contains Mozilla root-certificate data derived from the
   Common CA Database under `CDLA-Permissive-2.0`. Section 2.1 requires the
   agreement text to accompany shared data. It is a runtime dependency of
-  `pqueue-objectlog` and therefore of the server distribution.
+  `fireweed-objectlog` and therefore of the server distribution.
 - `cfg_block 0.1.1` uses an Apache-2.0 `license-file` rather than a manifest
   license expression. Its Trevor Gross copyright notice is preserved in
   `NOTICE`. `cargo deny` reports this packaging shape as `no-license-field`.

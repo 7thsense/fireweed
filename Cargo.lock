@@ -963,6 +963,261 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "fireweed"
+version = "0.20.0"
+dependencies = [
+ "axon-esf",
+ "bytes",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-memory",
+ "fireweed-objectlog",
+ "fireweed-postgres",
+ "fireweed-release",
+ "fireweed-sqlite",
+ "futures",
+ "postgres",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+]
+
+[[package]]
+name = "fireweed-conformance"
+version = "0.20.0"
+dependencies = [
+ "bytes",
+ "fireweed",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-memory",
+ "fireweed-objectlog",
+ "fireweed-postgres",
+ "fireweed-release",
+ "fireweed-sqlite",
+ "futures",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fireweed-core"
+version = "0.20.0"
+dependencies = [
+ "axon-esf",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fireweed-engine"
+version = "0.20.0"
+dependencies = [
+ "axon-esf",
+ "bytes",
+ "fireweed-conformance",
+ "fireweed-core",
+ "fireweed-projection",
+ "futures",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "fireweed-loadgen"
+version = "0.20.0"
+dependencies = [
+ "fireweed-release",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fireweed-memory"
+version = "0.20.0"
+dependencies = [
+ "axon-esf",
+ "bytes",
+ "fireweed-conformance",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-projection",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "fireweed-objectlog"
+version = "0.20.0"
+dependencies = [
+ "bytes",
+ "crc32c",
+ "fireweed-conformance",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-projection",
+ "fireweed-release",
+ "fireweed-sim-support",
+ "fireweed-sqlite",
+ "fireweed-turso",
+ "futures",
+ "getrandom 0.3.4",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "webpki-roots",
+]
+
+[[package]]
+name = "fireweed-postgres"
+version = "0.20.0"
+dependencies = [
+ "axon-esf",
+ "bytes",
+ "fireweed",
+ "fireweed-conformance",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-objectlog",
+ "fireweed-projection",
+ "futures",
+ "native-tls",
+ "postgres",
+ "postgres-native-tls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "fireweed-projection"
+version = "0.20.0"
+dependencies = [
+ "axon-esf",
+ "bytes",
+ "fireweed-core",
+ "fireweed-engine",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fireweed-relational"
+version = "0.20.0"
+dependencies = [
+ "bytes",
+ "fireweed-core",
+ "fireweed-engine",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "fireweed-release"
+version = "0.20.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
+name = "fireweed-resp"
+version = "0.20.0"
+dependencies = [
+ "bytes",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-memory",
+ "fireweed-sqlite",
+ "redis",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "fireweed-server"
+version = "0.20.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "fireweed",
+ "fireweed-conformance",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-memory",
+ "fireweed-objectlog",
+ "fireweed-postgres",
+ "fireweed-projection",
+ "fireweed-release",
+ "fireweed-resp",
+ "fireweed-sqlite",
+ "fireweed-turso",
+ "fjord-broker",
+ "futures",
+ "heimq",
+ "heimq-broker",
+ "heimq-protocol",
+ "postgres",
+ "redis",
+ "rskafka",
+ "rusqlite",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "fireweed-sim-support"
+version = "0.20.0"
+
+[[package]]
+name = "fireweed-sqlite"
+version = "0.20.0"
+dependencies = [
+ "axon-esf",
+ "bytes",
+ "fireweed-conformance",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-memory",
+ "fireweed-projection",
+ "fireweed-relational",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+]
+
+[[package]]
+name = "fireweed-turso"
+version = "0.20.0"
+dependencies = [
+ "bytes",
+ "fireweed-conformance",
+ "fireweed-core",
+ "fireweed-engine",
+ "fireweed-projection",
+ "fireweed-relational",
+ "fireweed-sqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "turso",
+]
+
+[[package]]
 name = "fjord-broker"
 version = "0.1.3"
 source = "git+https://github.com/7thsense/fjord.git?tag=v0.1.3#4a1d562955fe6997483dc595245d0abf1d5e6fce"
@@ -2567,261 +2822,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
-]
-
-[[package]]
-name = "pqueue"
-version = "0.20.0"
-dependencies = [
- "axon-esf",
- "bytes",
- "futures",
- "postgres",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-memory",
- "pqueue-objectlog",
- "pqueue-postgres",
- "pqueue-release",
- "pqueue-sqlite",
- "rusqlite",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
-]
-
-[[package]]
-name = "pqueue-conformance"
-version = "0.20.0"
-dependencies = [
- "bytes",
- "futures",
- "pqueue",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-memory",
- "pqueue-objectlog",
- "pqueue-postgres",
- "pqueue-release",
- "pqueue-sqlite",
- "rusqlite",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "pqueue-core"
-version = "0.20.0"
-dependencies = [
- "axon-esf",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pqueue-engine"
-version = "0.20.0"
-dependencies = [
- "axon-esf",
- "bytes",
- "futures",
- "getrandom 0.3.4",
- "pqueue-conformance",
- "pqueue-core",
- "pqueue-projection",
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "pqueue-loadgen"
-version = "0.20.0"
-dependencies = [
- "pqueue-release",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pqueue-memory"
-version = "0.20.0"
-dependencies = [
- "axon-esf",
- "bytes",
- "pqueue-conformance",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-projection",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "pqueue-objectlog"
-version = "0.20.0"
-dependencies = [
- "bytes",
- "crc32c",
- "futures",
- "getrandom 0.3.4",
- "pqueue-conformance",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-projection",
- "pqueue-release",
- "pqueue-sim-support",
- "pqueue-sqlite",
- "pqueue-turso",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "webpki-roots",
-]
-
-[[package]]
-name = "pqueue-postgres"
-version = "0.20.0"
-dependencies = [
- "axon-esf",
- "bytes",
- "futures",
- "native-tls",
- "postgres",
- "postgres-native-tls",
- "pqueue",
- "pqueue-conformance",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-objectlog",
- "pqueue-projection",
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "pqueue-projection"
-version = "0.20.0"
-dependencies = [
- "axon-esf",
- "bytes",
- "pqueue-core",
- "pqueue-engine",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "pqueue-relational"
-version = "0.20.0"
-dependencies = [
- "bytes",
- "pqueue-core",
- "pqueue-engine",
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "pqueue-release"
-version = "0.20.0"
-dependencies = [
- "serde",
- "serde_json",
- "sha2 0.11.0",
-]
-
-[[package]]
-name = "pqueue-resp"
-version = "0.20.0"
-dependencies = [
- "bytes",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-memory",
- "pqueue-sqlite",
- "redis",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "pqueue-server"
-version = "0.20.0"
-dependencies = [
- "bytes",
- "chrono",
- "fjord-broker",
- "futures",
- "heimq",
- "heimq-broker",
- "heimq-protocol",
- "postgres",
- "pqueue",
- "pqueue-conformance",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-memory",
- "pqueue-objectlog",
- "pqueue-postgres",
- "pqueue-projection",
- "pqueue-release",
- "pqueue-resp",
- "pqueue-sqlite",
- "pqueue-turso",
- "redis",
- "rskafka",
- "rusqlite",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "pqueue-sim-support"
-version = "0.20.0"
-
-[[package]]
-name = "pqueue-sqlite"
-version = "0.20.0"
-dependencies = [
- "axon-esf",
- "bytes",
- "pqueue-conformance",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-memory",
- "pqueue-projection",
- "pqueue-relational",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
-]
-
-[[package]]
-name = "pqueue-turso"
-version = "0.20.0"
-dependencies = [
- "bytes",
- "pqueue-conformance",
- "pqueue-core",
- "pqueue-engine",
- "pqueue-projection",
- "pqueue-relational",
- "pqueue-sqlite",
- "serde_json",
- "tempfile",
- "tokio",
- "turso",
 ]
 
 [[package]]
