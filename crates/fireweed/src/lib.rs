@@ -299,6 +299,237 @@ mod active_scope_selector_unit_tests {
     }
 }
 
+/// Caller-owned, non-durable queue configuration that can be resolved for any [`QueueKey`].
+///
+/// The prototype's tenant and queue identifiers are deliberately discarded. The pinned creation policy
+/// is applied by [`QueueTemplate::resolve`] before any backend call, while the optional name and revision
+/// are diagnostics only and do not participate in template equality.
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use fireweed::{
+///     CreateQueue, QueueCreationPolicy, QueueId, QueueKey, QueueTemplate, SystemClock, TenantId,
+/// };
+/// # fn prototype() -> CreateQueue { unimplemented!() }
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let template = QueueTemplate::new(prototype(), QueueCreationPolicy::default())
+///     .with_name("email-jobs")
+///     .with_revision("v2");
+/// let queue = QueueKey::new(TenantId::new("acme")?, QueueId::new("outbound")?);
+/// let pqueue = fireweed::open_memory(Arc::new(SystemClock));
+/// let ensured = pqueue.ensure_queue(&queue, &template).await?;
+/// assert_eq!(ensured.definition.queue_id, queue.queue_id);
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct QueueTemplate {
+    specification: KeylessQueueSpecification,
+    policy: QueueCreationPolicy,
+    template_name: Option<String>,
+    template_revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct KeylessQueueSpecification {
+    priority_model: PriorityModel,
+    ordering_mode: OrderingMode,
+    max_rank_error: u32,
+    progress_bound_ms: u64,
+    eligibility_policy: EligibilityPolicy,
+    cohort_policy: CohortPolicy,
+    recurrence: RecurrencePolicy,
+    request_id_retention_ms: u64,
+    client_item_key_retention_ms: u64,
+    terminal_retention_ms: u64,
+    max_lease_duration_ms: u64,
+    retry_policy: RetryPolicy,
+    max_push_batch_size: u64,
+    max_claim_batch_size: u64,
+    max_eligible_group_size: Option<u64>,
+    secondary_indexes: Vec<IndexSpec>,
+    entity_schema: Option<EntitySchemaDocument>,
+    typed_indexes: Vec<QueueIndex>,
+    emit_change_records: bool,
+}
+
+impl QueueTemplate {
+    /// Build a template from a complete create request and a caller-pinned creation policy.
+    ///
+    /// The prototype identifiers are ignored; [`Self::resolve`] always injects the supplied key.
+    pub fn new(prototype: CreateQueue, policy: QueueCreationPolicy) -> Self {
+        let CreateQueue {
+            tenant_id: _,
+            queue_id: _,
+            priority_model,
+            ordering_mode,
+            max_rank_error,
+            progress_bound_ms,
+            eligibility_policy,
+            cohort_policy,
+            recurrence,
+            request_id_retention_ms,
+            client_item_key_retention_ms,
+            terminal_retention_ms,
+            max_lease_duration_ms,
+            retry_policy,
+            max_push_batch_size,
+            max_claim_batch_size,
+            max_eligible_group_size,
+            secondary_indexes,
+            entity_schema,
+            typed_indexes,
+            emit_change_records,
+        } = prototype;
+        Self {
+            specification: KeylessQueueSpecification {
+                priority_model,
+                ordering_mode,
+                max_rank_error,
+                progress_bound_ms,
+                eligibility_policy,
+                cohort_policy,
+                recurrence,
+                request_id_retention_ms,
+                client_item_key_retention_ms,
+                terminal_retention_ms,
+                max_lease_duration_ms,
+                retry_policy,
+                max_push_batch_size,
+                max_claim_batch_size,
+                max_eligible_group_size,
+                secondary_indexes,
+                entity_schema,
+                typed_indexes,
+                emit_change_records,
+            },
+            policy,
+            template_name: None,
+            template_revision: None,
+        }
+    }
+
+    /// Attach a non-durable diagnostic name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.template_name = Some(name.into());
+        self
+    }
+
+    /// Attach a non-durable diagnostic revision.
+    pub fn with_revision(mut self, revision: impl Into<String>) -> Self {
+        self.template_revision = Some(revision.into());
+        self
+    }
+
+    /// Resolve this template for `key`, validating with the pinned creation policy.
+    pub fn resolve(&self, key: &QueueKey) -> Result<QueueDefinition, CreateQueueError> {
+        let KeylessQueueSpecification {
+            priority_model,
+            ordering_mode,
+            max_rank_error,
+            progress_bound_ms,
+            eligibility_policy,
+            cohort_policy,
+            recurrence,
+            request_id_retention_ms,
+            client_item_key_retention_ms,
+            terminal_retention_ms,
+            max_lease_duration_ms,
+            retry_policy,
+            max_push_batch_size,
+            max_claim_batch_size,
+            max_eligible_group_size,
+            secondary_indexes,
+            entity_schema,
+            typed_indexes,
+            emit_change_records,
+        } = self.specification.clone();
+        CreateQueue {
+            tenant_id: key.tenant_id.clone(),
+            queue_id: key.queue_id.clone(),
+            priority_model,
+            ordering_mode,
+            max_rank_error,
+            progress_bound_ms,
+            eligibility_policy,
+            cohort_policy,
+            recurrence,
+            request_id_retention_ms,
+            client_item_key_retention_ms,
+            terminal_retention_ms,
+            max_lease_duration_ms,
+            retry_policy,
+            max_push_batch_size,
+            max_claim_batch_size,
+            max_eligible_group_size,
+            secondary_indexes,
+            entity_schema,
+            typed_indexes,
+            emit_change_records,
+        }
+        .validate(&self.policy)
+    }
+}
+
+impl PartialEq for QueueTemplate {
+    fn eq(&self, other: &Self) -> bool {
+        self.specification == other.specification && self.policy == other.policy
+    }
+}
+
+/// Successful result of [`Pqueue::ensure_queue`]. Template diagnostics are not persisted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnsureQueueOutcome {
+    pub created: bool,
+    pub definition: QueueDefinition,
+    pub template_name: Option<String>,
+    pub template_revision: Option<String>,
+}
+
+/// Typed, façade-local failure from [`Pqueue::ensure_queue`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnsureQueueError {
+    Validation {
+        error: CreateQueueError,
+        template_name: Option<String>,
+        template_revision: Option<String>,
+    },
+    Backend {
+        error: EngineError,
+        template_name: Option<String>,
+        template_revision: Option<String>,
+    },
+    DefinitionConflict {
+        created: bool,
+        desired: Box<QueueDefinition>,
+        stored: Box<QueueDefinition>,
+        template_name: Option<String>,
+        template_revision: Option<String>,
+    },
+}
+
+impl fmt::Display for EnsureQueueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation { error, .. } => {
+                write!(f, "queue template validation failed: {error}")
+            }
+            Self::Backend { error, .. } => write!(f, "queue ensure backend failed: {error}"),
+            Self::DefinitionConflict { .. } => f.write_str("queue definition conflict"),
+        }
+    }
+}
+
+impl std::error::Error for EnsureQueueError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validation { error, .. } => Some(error),
+            Self::Backend { error, .. } => Some(error),
+            Self::DefinitionConflict { .. } => None,
+        }
+    }
+}
+
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
 /// Tests inject a controllable clock instead (e.g. `fireweed_memory::ManualClock`). Provided here so a
 /// consumer depending on `pqueue` alone has a ready clock without naming `fireweed-engine`.
@@ -2135,6 +2366,71 @@ impl<B: LibBackend> Pqueue<B> {
     /// routing helpers.
     pub async fn queue_definition(&self, queue: &QueueKey) -> EngineResult<QueueDefinition> {
         self.backend.queue_definition(queue).await
+    }
+
+    /// Atomically create a queue from `template`, or prove that its stored definition is an exact match.
+    ///
+    /// This operation delegates create-or-read arbitration to the backend and compares the entire returned
+    /// effective definition. It is never called implicitly by data-plane operations.
+    pub async fn ensure_queue(
+        &self,
+        queue: &QueueKey,
+        template: &QueueTemplate,
+    ) -> Result<EnsureQueueOutcome, EnsureQueueError> {
+        let template_name = template.template_name.clone();
+        let template_revision = template.template_revision.clone();
+        let desired = template
+            .resolve(queue)
+            .map_err(|error| EnsureQueueError::Validation {
+                error,
+                template_name: template_name.clone(),
+                template_revision: template_revision.clone(),
+            })?;
+
+        let outcome = match self.backend.create_queue(desired.clone()).await {
+            Ok(outcome) => outcome,
+            Err(EngineError::QueueDefinitionConflict) => {
+                let stored = self
+                    .backend
+                    .queue_definition(queue)
+                    .await
+                    .map_err(|error| EnsureQueueError::Backend {
+                        error,
+                        template_name: template_name.clone(),
+                        template_revision: template_revision.clone(),
+                    })?;
+                return Err(EnsureQueueError::DefinitionConflict {
+                    created: false,
+                    desired: Box::new(desired),
+                    stored: Box::new(stored),
+                    template_name,
+                    template_revision,
+                });
+            }
+            Err(error) => {
+                return Err(EnsureQueueError::Backend {
+                    error,
+                    template_name,
+                    template_revision,
+                });
+            }
+        };
+
+        if desired != outcome.definition {
+            return Err(EnsureQueueError::DefinitionConflict {
+                created: outcome.created,
+                desired: Box::new(desired),
+                stored: Box::new(outcome.definition),
+                template_name,
+                template_revision,
+            });
+        }
+        Ok(EnsureQueueOutcome {
+            created: outcome.created,
+            definition: outcome.definition,
+            template_name,
+            template_revision,
+        })
     }
 
     /// Enqueue one new item (append). Routes through `PushPort`, so the backend assigns a unique,
