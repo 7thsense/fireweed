@@ -210,6 +210,11 @@ async fn retention_floor_fail_closed_and_recovery_impl(root: &Path) {
     // Tick at t=10_000s: cutoff = 10_000_000 - 3_600_000 - 5_000 = 6_395_000ms.
     // Seq 0..3 (committed 10_000ms) expired; seq 4..7 (committed 10_000_000ms) retained.
     backend.tick(ts(10_000)).await.unwrap();
+    // A tick performs one bounded maintenance page. It may durably publish the
+    // floor while leaving an eligible segment manifested for a continuation
+    // pass; reads of that still-manifested boundary remain valid by design.
+    // Finish the deletion pass before asserting deleted-prefix fail-closed.
+    trim_until_quiescent(&backend, 3_600_000, ts(10_000));
     let floor = floor_seq(&backend).expect("floor advanced after trim");
     assert_eq!(floor, 3, "retention floor advanced through seq 3");
 
