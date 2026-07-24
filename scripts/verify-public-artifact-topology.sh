@@ -87,8 +87,8 @@ for current, target, package_class, registry, order, features, _ in rows:
     elif order != "-":
         raise SystemExit(f"non-publishable package has a publish order: {current}")
 
-if publishable != ["pqueue"]:
-    raise SystemExit("ADR-009 requires pqueue to be the sole publishable current package")
+if publishable != ["fireweed"]:
+    raise SystemExit("ADR-009 requires fireweed to be the sole publishable package")
 if sorted(orders) != list(range(1, len(orders) + 1)):
     raise SystemExit("publish order must be unique and contiguous from 1")
 

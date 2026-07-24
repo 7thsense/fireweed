@@ -1,0 +1,60 @@
+[package]
+name = "fireweed-sqlite"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Driven adapter: sqlite. Durable command LOG in sqlite (rusqlite); the priority-ordered projection is
+# the shared `fireweed-projection` materialization, rebuilt from the log. Depends on the domain
+# (engine/core) + the shared projection — the correct hexagonal direction.
+[dependencies]
+fireweed-core = { path = "../fireweed-core" }
+fireweed-engine = { path = "../fireweed-engine" }
+fireweed-projection = { path = "../fireweed-projection" }
+fireweed-relational = { path = "../fireweed-relational" }
+axon-esf.workspace = true
+rusqlite = { version = "0.32", features = ["bundled", "hooks", "trace"] }
+serde = "1"
+serde_json = "1"
+bytes = "1"
+# Lease-token hashing for the relational projection (hash-only at rest; TD-004 §security / TD-002 parity).
+sha2 = "0.11"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+# Runs the shared backend-conformance suite against the sqlite backend.
+fireweed-conformance = { path = "../fireweed-conformance" }
+# BQ-13: the in-memory log-replay family representative, for the head-to-head two-family parity test.
+fireweed-memory = { path = "../fireweed-memory" }
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+
+[[test]]
+name = "durability"
+path = "tests/durability.rs"
+
+# BQ-11a/b/c: the relational projection family's core conformance + lifecycle round-trip + group/retention.
+[[test]]
+name = "relational_conformance"
+path = "tests/relational_conformance.rs"
+
+# BQ-11d: the relational-reconnect conformance class against the DB-authoritative relational backend.
+[[test]]
+name = "relational_reconnect"
+path = "tests/relational_reconnect.rs"
+
+# Projection-only replay/apply seam used by the object-log + SQLite composite runtime.
+[[test]]
+name = "sqlite_projection_tests"
+path = "tests/sqlite_projection_tests.rs"
+
+# BQ-13: head-to-head CORE parity — the in-memory log-replay family vs the relational family.
+[[test]]
+name = "cross_family_parity"
+path = "tests/cross_family_parity.rs"
