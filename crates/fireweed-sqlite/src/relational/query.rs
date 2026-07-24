@@ -599,27 +599,25 @@ pub(crate) fn peek_page_sql(
     Ok(out)
 }
 
-/// BQ-14e active-scope discovery: roll up `pqueue_group_summary` into ranked [`ActiveScope`]s. Each group
-/// that currently holds eligible work (`oldest_eligible_at IS NOT NULL`) becomes one source scope, ordered
-/// owner-local oldest-first (smallest `oldest_eligible_at` = most-aged group, group-key tiebreak for
-/// determinism); `eligible_item_count` carries through as the eligible signal. [`project_scopes`] then
-/// collapses to the requested granularity (Group = per-group detail in the oldest-first order; Queue = a
-/// single rollup row for the queue — see [`project_scopes`] arithmetic).
+/// B-011 exact active-scope discovery. Keyed and ungrouped scopes are aggregated from the same live
+/// `pqueue_items` source with the claim eligibility predicate (pending, not superseded, due at `now`, and
+/// not blocked by a current gate). This makes a time-only `not_before` crossing visible without a write and
+/// represents all ungrouped items as one `group_key=None` scope. The partial
+/// `pqueue_items_active_scope_idx` bounds the source scan to one queue's pending, non-superseded rows;
+/// gate anti-joins use the membership/state primary keys. The cost is O(live pending rows in the addressed
+/// queue), rather than the old O(stored keyed summaries), in exchange for exact read-time eligibility.
 ///
 /// `progress_bound_risk_count` is reported as `None` ("no signal"), NOT `Some(0)`: the summary's
 /// `at_risk_count` is a hardcoded `0` placeholder while the progress-guard/at-risk derivation is deferred
 /// (see `refresh_group_summaries`), and the [`ActiveScope`] contract reserves `None` for an uncomputed
 /// signal vs `Some(0)` for a measured zero. When at-risk becomes live, map it to `Some` here.
 ///
-/// PAUSE (intentional divergence from the claim path): discovery reports a group's INTRINSIC eligibility
+/// PAUSE (intentional divergence from the claim path): discovery reports a scope's INTRINSIC eligibility
 /// and does NOT short-circuit on `queue_paused` (unlike `select_eligible_sql`/group selection). An operator
 /// hunting starvation wants to see work that has built up *because* a queue is paused; the summary itself
 /// is pause-agnostic, so discovery mirrors it. (A read of a queue that does not exist yields an empty list,
 /// not `NotFound` — a discovery read of an unknown queue simply has no active scopes.)
 ///
-/// KNOWN LIMITATION: read-only discovery does not run the mutating due-refresh used by group-aware claims.
-/// A group made eligible ONLY by time passing can keep `oldest_eligible_at = NULL` until its next mutation
-/// or a background due-sweep refresh, so discovery can UNDER-report time-triggered starvation.
 pub(crate) fn discover_active_scopes_sql(
     conn: &Connection,
     shard: &QueueKey,
@@ -629,14 +627,20 @@ pub(crate) fn discover_active_scopes_sql(
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
     let mut stmt = st(conn.prepare(
-        "SELECT group_key, oldest_eligible_at, eligible_item_count \
-         FROM pqueue_group_summary \
-         WHERE tenant_id=?1 AND queue_id=?2 AND oldest_eligible_at IS NOT NULL \
-         ORDER BY oldest_eligible_at ASC, group_key ASC",
+        "SELECT i.group_key, MIN(i.eligible_since) AS oldest_eligible_at, COUNT(*) \
+         FROM pqueue_items i \
+         WHERE i.tenant_id=?1 AND i.queue_id=?2 AND i.lifecycle_state='Pending' \
+         AND i.superseded=0 AND i.eligible_since IS NOT NULL \
+         AND (i.not_before IS NULL OR i.not_before<=?3) \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+           ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+           WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+         GROUP BY i.group_key \
+         ORDER BY oldest_eligible_at ASC, i.group_key IS NOT NULL ASC, i.group_key ASC",
     ))?;
-    let rows = st(stmt.query_map(params![t, q], |row| {
+    let rows = st(stmt.query_map(params![t, q, now_n], |row| {
         Ok((
-            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, i64>(2)?,
         ))
@@ -648,7 +652,7 @@ pub(crate) fn discover_active_scopes_sql(
         let age_ms = now_n.saturating_sub(oldest_eligible_at).max(0) as u64 / 1_000_000;
         source.push(ActiveScope {
             queue_id: q.clone(),
-            group_key: Some(group_key),
+            group_key,
             oldest_eligible_age_ms: age_ms,
             eligible_count: Some(eligible as u64),
             // Deferred at-risk derivation → no signal (not a measured zero). See the doc above.

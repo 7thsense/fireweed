@@ -83,6 +83,14 @@ pub use fireweed_engine::{
     QueueKey, QueueMetrics, ScheduleUpdate, SideRecord, UpsertOutcome,
 };
 
+/// An active-scope result stamped with the exact queue and granularity used for discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveScopeDiscovery {
+    pub queue: QueueKey,
+    pub granularity: DiscoveryGranularity,
+    pub scopes: Vec<ActiveScope>,
+}
+
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
 /// Tests inject a controllable clock instead (e.g. `fireweed_memory::ManualClock`). Provided here so a
 /// consumer depending on `pqueue` alone has a ready clock without naming `fireweed-engine`.
@@ -2531,6 +2539,21 @@ impl<B: LibBackend> Pqueue<B> {
         self.backend
             .discover_active_scopes(queue, granularity, now)
             .await
+    }
+
+    /// Discover active scopes while retaining the exact request coordinates alongside the unchanged
+    /// backend result. This accessor does not filter or re-rank [`Self::discover_active_scopes`].
+    pub async fn discover_active_scopes_stamped(
+        &self,
+        queue: &QueueKey,
+        granularity: DiscoveryGranularity,
+    ) -> EngineResult<ActiveScopeDiscovery> {
+        let scopes = self.discover_active_scopes(queue, granularity).await?;
+        Ok(ActiveScopeDiscovery {
+            queue: queue.clone(),
+            granularity,
+            scopes,
+        })
     }
 
     /// Discover eligible scopes in the backend's authoritative oldest-eligible-first order. This is a
