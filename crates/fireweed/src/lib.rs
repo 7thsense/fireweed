@@ -51,7 +51,7 @@ use fireweed_engine::{
     IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
     PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort,
     RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
-    acquire_and_fence, validate_api001_reserved_write_fields,
+    acquire_and_fence, validate_api001_reserved_write_fields, validate_claim_compatibility,
 };
 
 // ---------------------------------------------------------------------------
@@ -1232,6 +1232,46 @@ pub struct ClaimAt {
     pub compatibility: ClaimCompatibility,
 }
 
+const MAX_MULTI_QUEUE_CLAIM_TARGETS: usize = 16;
+const MAX_MULTI_QUEUE_CLAIM_ITEMS: usize = 1024;
+
+/// One independently committed queue claim in [`Pqueue::claim_across_queues`].
+#[derive(Debug, Clone)]
+pub struct MultiQueueClaimTarget {
+    /// Queue to claim from.
+    pub queue: QueueKey,
+    /// Claim parameters. `lease_time` must be unset so the facade can use one common instant.
+    pub claim: ClaimAt,
+}
+
+/// Caller-selected safety limits for [`Pqueue::claim_across_queues`].
+///
+/// The defaults are the largest accepted values. Callers may lower either positive limit, but cannot
+/// raise the fixed ceilings of 16 queues and 1024 aggregate requested items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultiQueueClaimLimits {
+    pub max_targets: usize,
+    pub max_total_items: usize,
+}
+
+impl Default for MultiQueueClaimLimits {
+    fn default() -> Self {
+        Self {
+            max_targets: MAX_MULTI_QUEUE_CLAIM_TARGETS,
+            max_total_items: MAX_MULTI_QUEUE_CLAIM_ITEMS,
+        }
+    }
+}
+
+/// The result of one target in [`Pqueue::claim_across_queues`].
+///
+/// Runtime failures are retained beside their queue instead of failing or truncating the outer call.
+#[derive(Debug)]
+pub struct MultiQueueClaimResult {
+    pub queue: QueueKey,
+    pub result: EngineResult<Claimed>,
+}
+
 impl ClaimAt {
     /// A claim of up to `max` items leased for `lease_ms`, with both times defaulted (identical to
     /// [`Pqueue::claim`] until an explicit time is set).
@@ -2062,6 +2102,137 @@ impl<B: LibBackend> Pqueue<B> {
         };
         let r = self.backend.claim(req).await;
         self.note(queue, r)
+    }
+
+    /// Claim independently from several queues after a shared, no-effect preflight.
+    ///
+    /// Structural and queue-definition errors fail the outer result before ownership is acquired or any
+    /// claim is submitted. Coordinated ownership is then acquired in lexical `(tenant_id, queue_id)` order,
+    /// while returned entries remain correlated in caller input order. Every target uses one common lease
+    /// instant; an unset eligibility instant resolves to that same snapshot.
+    ///
+    /// This operation is deliberately **not atomic across queues**. Once dispatch starts, every target runs
+    /// independently and its success or failure appears in [`MultiQueueClaimResult::result`]. Dropping the
+    /// outer future cancels waiting, not committed work: in particular, an admitted durable backend call may
+    /// still complete. For a single-queue atomic transition that consumes several existing claims, use
+    /// [`Pqueue::commit_multi_claim`] instead.
+    pub async fn claim_across_queues(
+        &self,
+        targets: Vec<MultiQueueClaimTarget>,
+        limits: MultiQueueClaimLimits,
+    ) -> EngineResult<Vec<MultiQueueClaimResult>> {
+        if targets.is_empty() {
+            return Err(EngineError::Invalid(
+                "multi-queue claim targets must not be empty",
+            ));
+        }
+        if limits.max_targets == 0 {
+            return Err(EngineError::Invalid(
+                "multi-queue claim max_targets must be positive",
+            ));
+        }
+        if limits.max_total_items == 0 {
+            return Err(EngineError::Invalid(
+                "multi-queue claim max_total_items must be positive",
+            ));
+        }
+        if limits.max_targets > MAX_MULTI_QUEUE_CLAIM_TARGETS {
+            return Err(EngineError::Invalid(
+                "multi-queue claim max_targets exceeds fixed ceiling",
+            ));
+        }
+        if limits.max_total_items > MAX_MULTI_QUEUE_CLAIM_ITEMS {
+            return Err(EngineError::Invalid(
+                "multi-queue claim max_total_items exceeds fixed ceiling",
+            ));
+        }
+        if targets.len() > MAX_MULTI_QUEUE_CLAIM_TARGETS {
+            return Err(EngineError::Invalid(
+                "multi-queue claim target count exceeds fixed ceiling",
+            ));
+        }
+        if targets.len() > limits.max_targets {
+            return Err(EngineError::Invalid(
+                "multi-queue claim target count exceeds caller limit",
+            ));
+        }
+
+        let mut queues = HashSet::with_capacity(targets.len());
+        let mut total_items = 0usize;
+        for target in &targets {
+            if target.claim.max == 0 {
+                return Err(EngineError::Invalid(
+                    "multi-queue claim target max must be positive",
+                ));
+            }
+            if !queues.insert(target.queue.clone()) {
+                return Err(EngineError::Invalid(
+                    "multi-queue claim contains a duplicate queue",
+                ));
+            }
+            if target.claim.lease_time.is_some() {
+                return Err(EngineError::Invalid(
+                    "multi-queue claim target lease_time must be unset",
+                ));
+            }
+            total_items = total_items
+                .checked_add(target.claim.max)
+                .ok_or(EngineError::Invalid(
+                    "multi-queue claim aggregate items exceed fixed ceiling",
+                ))?;
+        }
+        if total_items > MAX_MULTI_QUEUE_CLAIM_ITEMS {
+            return Err(EngineError::Invalid(
+                "multi-queue claim aggregate items exceed fixed ceiling",
+            ));
+        }
+        if total_items > limits.max_total_items {
+            return Err(EngineError::Invalid(
+                "multi-queue claim aggregate items exceed caller limit",
+            ));
+        }
+
+        // Load every definition before validating any target. This keeps missing-definition and
+        // compatibility failures entirely ahead of coordinated ownership acquisition.
+        let mut definitions = Vec::with_capacity(targets.len());
+        for target in &targets {
+            definitions.push(self.backend.queue_definition(&target.queue).await?);
+        }
+        for (target, definition) in targets.iter().zip(&definitions) {
+            if target.claim.max > definition.max_claim_batch_size as usize {
+                return Err(EngineError::BatchTooLarge);
+            }
+            validate_claim_compatibility(
+                &target.claim.compatibility,
+                target.claim.max as u64,
+                definition,
+            )?;
+        }
+
+        let common_time = self.clock.now();
+        let mut ownership_order: Vec<&QueueKey> =
+            targets.iter().map(|target| &target.queue).collect();
+        ownership_order.sort_by(|left, right| {
+            left.tenant_id
+                .as_str()
+                .cmp(right.tenant_id.as_str())
+                .then_with(|| left.queue_id.as_str().cmp(right.queue_id.as_str()))
+        });
+        for queue in ownership_order {
+            self.session_epoch_at(queue, common_time).await?;
+        }
+
+        let claims = targets.into_iter().map(|target| async move {
+            let queue = target.queue;
+            let mut claim = target.claim;
+            claim.lease_time = Some(common_time);
+            if claim.eligibility_time.is_none() {
+                claim.eligibility_time = Some(common_time);
+            }
+            let result = self.claim_response_at(&queue, claim).await;
+            MultiQueueClaimResult { queue, result }
+        });
+        Ok(futures::future::join_all(claims).await)
     }
 
     /// Complete (ack) the given leased items. All-or-nothing (a fenced/superseded/non-leased id rejects
