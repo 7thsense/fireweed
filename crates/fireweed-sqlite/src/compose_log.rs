@@ -11,8 +11,8 @@
 
 use fireweed_core::QueueDefinition;
 use fireweed_engine::{
-    CommandEnvelope, CommandPage, CommandPosition, DefinitionCursor, DefinitionPage, EngineError,
-    EngineResult, LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
+    CommandEnvelope, CommandPage, CommandPosition, CreateQueueOutcome, DefinitionCursor,
+    DefinitionPage, EngineError, EngineResult, LogStore, ProjectionSnapshot, QueueKey, SnapshotRef,
     definition_page_from_storage_rows,
 };
 use std::fmt::Write as _;
@@ -161,6 +161,39 @@ impl SqliteLog {
             )
             .optional())?;
         Ok(epoch.ok_or(EngineError::NotFound)? as u64)
+    }
+
+    fn create_or_read_definition_row(
+        &mut self,
+        definition: &QueueDefinition,
+    ) -> EngineResult<CreateQueueOutcome> {
+        let (tenant, queue) = parts(&QueueKey::new(
+            definition.tenant_id.clone(),
+            definition.queue_id.clone(),
+        ));
+        let encoded = to_json(definition)?;
+        // Take the writer slot before testing absence. Racing connections serialize at this transaction, so
+        // exactly one inserts and every loser reads the same committed winner without a check-then-write gap.
+        let tx = st(self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate))?;
+        let created = st(tx.execute(
+            "INSERT INTO queue_defs(tenant,queue,definition) VALUES(?1,?2,?3) \
+             ON CONFLICT(tenant,queue) DO NOTHING",
+            params![tenant, queue, encoded],
+        ))? == 1;
+        let stored_json: String = st(tx.query_row(
+            "SELECT definition FROM queue_defs WHERE tenant=?1 AND queue=?2",
+            params![tenant, queue],
+            |row| row.get(0),
+        ))?;
+        st(tx.commit())?;
+        let stored = serde_json::from_str(&stored_json)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        Ok(CreateQueueOutcome {
+            created,
+            definition: stored,
+        })
     }
 }
 
@@ -506,16 +539,18 @@ impl LogStore for SqliteLog {
     }
 
     fn persist_definition(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
-        let (t, q) = parts(&QueueKey::new(
-            definition.tenant_id.clone(),
-            definition.queue_id.clone(),
-        ));
-        st(self.conn.execute(
-            "INSERT INTO queue_defs(tenant,queue,definition) VALUES(?1,?2,?3) \
-             ON CONFLICT(tenant,queue) DO UPDATE SET definition=excluded.definition",
-            params![t, q, to_json(definition)?],
-        ))?;
+        let outcome = self.create_or_read_definition_row(definition)?;
+        if outcome.definition != *definition {
+            return Err(EngineError::QueueDefinitionConflict);
+        }
         Ok(())
+    }
+
+    fn create_or_read_definition(
+        &mut self,
+        definition: &QueueDefinition,
+    ) -> EngineResult<Option<CreateQueueOutcome>> {
+        self.create_or_read_definition_row(definition).map(Some)
     }
 
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
