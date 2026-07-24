@@ -26,11 +26,11 @@ name = "backend-accessor"
 path = "src/backend_accessor.rs"
 
 [[bin]]
-name = "legacy-pqueue"
+name = "legacy-generic-facade"
 path = "src/legacy_pqueue.rs"
 
 [[bin]]
-name = "legacy-embedded-pqueue"
+name = "legacy-embedded-facade"
 path = "src/legacy_embedded_pqueue.rs"
 
 [[bin]]
@@ -42,7 +42,7 @@ name = "legacy-embedded-handle"
 path = "src/legacy_embedded_handle.rs"
 
 [[bin]]
-name = "legacy-pqueue-new"
+name = "legacy-generic-constructor"
 path = "src/legacy_pqueue_new.rs"
 
 [[bin]]

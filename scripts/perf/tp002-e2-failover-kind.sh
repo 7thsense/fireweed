@@ -303,7 +303,7 @@ sleep 2
 PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
 PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" \
 PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
-  cargo test -p pqueue-server --test objectlog_shared_ownership \
+  cargo test -p fireweed-server --test objectlog_shared_ownership \
   stale_append_paused_before_authority_cannot_survive_handoff -- --nocapture \
   2>&1 | tee "${RUN_DIR}/stale-handoff.log" || {
     if grep -Fq 'E2_FAILOVER_INFRASTRUCTURE_INDETERMINATE' "${RUN_DIR}/stale-handoff.log"; then
@@ -315,7 +315,7 @@ PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
   }
 PQUEUE_PG_TEST_URL="postgres://pqueue:pqueue@127.0.0.1:${PG_PORT}/pqueue?sslmode=disable" \
 PQUEUE_S3_TEST_ENDPOINT="http://127.0.0.1:${S3_PORT}" PQUEUE_S3_TEST_BUCKET="pqueue-e2" \
-  cargo test -p pqueue-server --test objectlog_shared_ownership \
+  cargo test -p fireweed-server --test objectlog_shared_ownership \
   greater_epoch_owner_hydrates_snapshot_tail_before_serving -- --nocapture 2>&1 | tee "${RUN_DIR}/snapshot-tail.log"
 grep -Fq 'greater_epoch_owner_hydrates_snapshot_tail_before_serving ... ok' "${RUN_DIR}/snapshot-tail.log" || \
   die "snapshot+tail takeover seam did not pass"
@@ -344,5 +344,5 @@ row = {
 }
 with open(sys.argv[1], "w") as f: json.dump(row, f, indent=2); f.write("\n")
 PY
-cargo run -p pqueue-release --bin pqueue-verify-e2-failover -- "${OUT}"
+cargo run -p fireweed-release --bin fireweed-verify-e2-failover -- "${OUT}"
 echo "TP-002 E2 PASS: ${OUT}"

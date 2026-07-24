@@ -75,11 +75,11 @@ expect_rejected_all() {
 expect_rejected raw-port 'trait `PushPort` is private'
 expect_rejected internal-crate 'use of unresolved module or unlinked crate `fireweed_engine`'
 expect_rejected backend-accessor 'no method named `backend`'
-expect_rejected legacy-pqueue 'no `Pqueue` in the root' 'struct `Pqueue` is private'
-expect_rejected legacy-embedded-pqueue 'no `EmbeddedPqueue` in the root' 'struct `EmbeddedPqueue` is private'
+expect_rejected legacy-generic-facade 'no `Pqueue` in the root' 'struct `Pqueue` is private'
+expect_rejected legacy-embedded-facade 'no `EmbeddedPqueue` in the root' 'struct `EmbeddedPqueue` is private'
 expect_rejected legacy-lib-backend 'no `LibBackend` in the root' 'trait `LibBackend` is private'
 expect_rejected legacy-embedded-handle 'no `EmbeddedHandle` in the root' 'struct `EmbeddedHandle` is private'
-expect_rejected legacy-pqueue-new 'no `Pqueue` in the root' 'struct `Pqueue` is private'
+expect_rejected legacy-generic-constructor 'no `Pqueue` in the root' 'struct `Pqueue` is private'
 expect_rejected_all legacy-embedded-config \
     'EmbeddedDurabilityConfig' \
     'EmbeddedObjectLogConfig' \

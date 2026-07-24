@@ -51,7 +51,7 @@ set +e
 PQUEUE_E3_SOURCE_REVISION="$SOURCE_REVISION" \
 PQUEUE_E3_RECORDED_AT="$PQUEUE_E3_RECORDED_AT" \
 PQUEUE_E3_TRANSACTION_EVIDENCE_OUT="$PQUEUE_E3_TRANSACTION_EVIDENCE_OUT" \
-cargo test -p pqueue-conformance --release --test external_transaction_contract_matrix_tests \
+cargo test -p fireweed-conformance --release --test external_transaction_contract_matrix_tests \
   e3_governed_transaction_evidence_matrix -- --nocapture
 TXN_STATUS=$?
 if [ "$TXN_STATUS" -ne 0 ]; then
@@ -76,7 +76,7 @@ PQUEUE_S3_TEST_ENDPOINT="$PQUEUE_S3_TEST_ENDPOINT" \
 PQUEUE_S3_TEST_BUCKET=${PQUEUE_S3_TEST_BUCKET:-pqueue-test} \
 PQUEUE_S3_TEST_ACCESS_KEY=${PQUEUE_S3_TEST_ACCESS_KEY:-minioadmin} \
 PQUEUE_S3_TEST_SECRET_KEY=${PQUEUE_S3_TEST_SECRET_KEY:-minioadmin} \
-cargo test -p pqueue-server --release --test performance_object_log_e3_live_tests -- --nocapture
+cargo test -p fireweed-server --release --test performance_object_log_e3_live_tests -- --nocapture
 TEST_STATUS=$?
 set -e
 

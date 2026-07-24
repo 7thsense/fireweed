@@ -399,8 +399,9 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         .create_bucket()
         .unwrap();
 
+    let (_, run_nonce) = unique_fixture("public_s3_objectlog_postgres");
     let namespace = format!(
-        "snorri-s3-v1:prefix_len:32:object-log/{}:{}:{}",
+        "snorri-s3-v1:prefix_len:32:object-log/{}:{}:{}:{run_nonce}",
         "illegal-namespace".repeat(3),
         "with punctuation:-/",
         "with unicode snowman ☃ and more text to exceed sixty-three bytes"
@@ -415,11 +416,11 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
             allow_insecure_http,
         },
         projection: ProjectionConfig::Postgres {
-            url: ConfigSecret::new(pg_url),
+            url: ConfigSecret::new(pg_url.clone()),
         },
         response_barrier: ResponseBarrier::Strict,
         segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
-        namespace,
+        namespace: namespace.clone(),
         recovery: RecoveryPolicy::default(),
     };
     let clock = Arc::new(ManualClock::at(1_000));
@@ -465,6 +466,8 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         let sqlite_caps = pq.commit_capabilities(&queue()).unwrap();
         assert_eq!(postgres_caps, sqlite_caps);
     }
+
+    drop_schema(&pg_url, &namespace);
 }
 
 #[tokio::test(flavor = "current_thread")]
