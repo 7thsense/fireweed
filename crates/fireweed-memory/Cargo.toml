@@ -1,0 +1,26 @@
+[package]
+name = "fireweed-memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Driven adapter: in-memory reference backend (atomic durability class). Depends on the
+# domain (engine + core) only — the correct hexagonal direction.
+[dependencies]
+fireweed-core = { path = "../fireweed-core" }
+fireweed-engine = { path = "../fireweed-engine" }
+fireweed-projection = { path = "../fireweed-projection" }
+axon-esf.workspace = true
+bytes = "1"
+# Canonical serialization for the request-id body fingerprint (mirrors the relational backend, which
+# hashes the same serialized push specs). Used only by the request-id idempotency path.
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+# The shared backend-conformance harness runs its port-level suite against MemoryBackend.
+fireweed-conformance = { path = "../fireweed-conformance" }

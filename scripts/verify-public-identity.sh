@@ -61,6 +61,22 @@ identity_patterns = {
         r"(?:https://)?github\.com/telepathdata/7thsense-pqueue(?:\.git)?|7thsense-pqueue"
     ),
 }
+rust_crate_suffixes = (
+    "bench|conformance|core|engine|loadgen|memory|objectlog|postgres|"
+    "projection|relational|release|resp|server|sim_support|sqlite|turso"
+)
+old_rust_identifier = re.compile(rf"\bpqueue_(?:{rust_crate_suffixes})\b|\bpqueue::")
+old_cargo_coordinate = re.compile(
+    r"\bpqueue(?:-(?:bench|conformance|core|engine|loadgen|memory|objectlog|"
+    r"postgres|projection|relational|release|resp|server|sim-support|sqlite|turso))?\b"
+)
+old_rust_binary = re.compile(
+    r"\bpqueue-(?:service|postgres-migrate|build-e3-contract|"
+    r"build-evidence-attestation|cost-model|verify-density-evidence|"
+    r"verify-e0-e1-evidence|verify-e2-failover|verify-e2-scale-evidence|"
+    r"verify-e3-contract|verify-evidence-attestation|verify-ledger|"
+    r"verify-transaction-evidence)\b"
+)
 text_suffixes = {
     ".c",
     ".css",
@@ -136,6 +152,7 @@ def is_probably_text(path: Path) -> bool:
 
 allowlist = load_allowlist(allowlist_path)
 violations = []
+rust_namespace_violations = []
 checked_files = 0
 matches = 0
 
@@ -150,7 +167,26 @@ for rel in tracked_files():
     except UnicodeDecodeError:
         continue
     checked_files += 1
+    if re.search(r"^(?:crates/pqueue(?:-[^/]+)?|tools/turso-compat-probe)(?:/|$)", rel):
+        rust_namespace_violations.append((rel, 0, "old Cargo crate path", rel))
     for line_no, line in enumerate(lines, start=1):
+        if (rel == "Cargo.toml" or rel == "Cargo.lock" or rel.endswith("/Cargo.toml") or rel.endswith("/Cargo.lock")):
+            found = old_cargo_coordinate.search(line)
+            if found:
+                rust_namespace_violations.append(
+                    (rel, line_no, "old Cargo package/dependency coordinate", found.group(0))
+                )
+        if rel.endswith(".rs"):
+            found = old_rust_identifier.search(line)
+            if found:
+                rust_namespace_violations.append(
+                    (rel, line_no, "old Rust crate identifier", found.group(0))
+                )
+            found = old_rust_binary.search(line)
+            if found:
+                rust_namespace_violations.append(
+                    (rel, line_no, "old Rust-owned binary coordinate", found.group(0))
+                )
         for identity_class, pattern in identity_patterns.items():
             for found in pattern.finditer(line):
                 token = found.group(0)
@@ -162,6 +198,15 @@ for rel in tracked_files():
                         break
                 if approved_by is None:
                     violations.append((rel, line_no, identity_class, token, line.strip()))
+
+if rust_namespace_violations:
+    print("unapproved Cargo or Rust namespace residue found:", file=sys.stderr)
+    for rel, line_no, identity_class, token in rust_namespace_violations[:200]:
+        print(f"{rel}:{line_no}: {identity_class}: {token}", file=sys.stderr)
+    remaining = len(rust_namespace_violations) - 200
+    if remaining > 0:
+        print(f"... {remaining} additional violation(s) omitted", file=sys.stderr)
+    sys.exit(1)
 
 if violations:
     print("unapproved public identity residue found:", file=sys.stderr)

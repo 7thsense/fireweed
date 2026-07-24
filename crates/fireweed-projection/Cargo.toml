@@ -1,0 +1,21 @@
+[package]
+name = "fireweed-projection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# The priority-ordered projection state machine + per-shard log, as a pure in-memory `Shard` with no
+# I/O. Driven adapters (memory/sqlite/postgres) provide PERSISTENCE of this shared core rather than each
+# re-implementing the apply/eligibility/lease domain logic. Depends only on the domain (engine + core).
+[dependencies]
+axon-esf.workspace = true
+fireweed-core = { path = "../fireweed-core" }
+fireweed-engine = { path = "../fireweed-engine" }
+bytes = "1"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+rustc-hash = "2"

@@ -33,32 +33,33 @@ its implementation package becoming a public Rust API.
 The `Current package` column is the machine key consumed by
 `scripts/verify-public-artifact-topology.sh`. Every package returned in the
 root workspace by `cargo metadata --no-deps --format-version 1` must occur
-exactly once between the inventory markers.
+exactly once between the inventory markers. After the core rename, current and
+target package names are intentionally identical.
 
 <!-- markdownlint-disable MD013 -->
 <!-- workspace-package-inventory:start -->
 | Current package | Target package | Class | Registry | Publish order | Feature policy | Rationale |
 | --- | --- | --- | --- | ---: | --- | --- |
-| pqueue | fireweed | publishable | crates.io | 1 | default = memory, SQLite, object log; minimal = no default features; supported focused builds = sqlite or objectlog; memory is development-only; postgres is deferred | The sole supported Rust facade and constructor surface. |
-| pqueue-core | fireweed-core | repository-only | - | - | no public feature contract | Domain types are exposed only through the facade. |
-| pqueue-engine | fireweed-engine | repository-only | - | - | no public feature contract | Raw ports and coordination internals must not become an external construction surface. |
-| pqueue-projection | fireweed-projection | repository-only | - | - | no public feature contract | Shared projection implementation, supported only through shipped profiles. |
-| pqueue-relational | fireweed-relational | repository-only | - | - | no public feature contract | Driver-neutral relational implementation shared by internal adapters. |
-| pqueue-memory | fireweed-memory | repository-only | - | - | always built for the default facade; development-only durability | Reference adapter used by the facade, tests, and local evaluation. |
-| pqueue-sqlite | fireweed-sqlite | repository-only | - | - | facade feature sqlite | Internal adapter for supported SQLite profiles. |
-| pqueue-objectlog | fireweed-objectlog | repository-only | - | - | facade feature objectlog | Internal adapter for supported object-log profiles. |
-| pqueue-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres; tls implies postgres; both deferred | Wired adapter outside the preview support boundary. |
-| pqueue-resp | fireweed-resp | repository-only | - | - | no independent features; shipped through the service | Supported protocol adapter, not a standalone Cargo API. |
-| pqueue-server | fireweed-server | repository-only | - | - | default env-config; postgres, tls, external-kafka, and turso-projection remain opt-in | Composition package for the shipped service binary and container. |
-| pqueue-turso | fireweed-turso | experimental | - | - | local only; no default features | Feature-gated evaluation adapter with no compatibility promise. |
-| pqueue-conformance | fireweed-conformance | private | - | - | test-only | Maintainer backend contract suite. |
-| pqueue-release | fireweed-release | private | - | - | release tooling only | Maintainer verification-ledger and evidence tools. |
-| pqueue-loadgen | fireweed-loadgen | private | - | - | evidence workload only | In-cluster release-evidence generator, not an operator command. |
-| pqueue-sim-support | fireweed-sim-support | private | - | - | test-only | Deterministic simulation support with no product API. |
+| fireweed | fireweed | publishable | crates.io | 1 | default = memory, SQLite, object log; minimal = no default features; supported focused builds = sqlite or objectlog; memory is development-only; postgres is deferred | The sole supported Rust facade and constructor surface. |
+| fireweed-core | fireweed-core | repository-only | - | - | no public feature contract | Domain types are exposed only through the facade. |
+| fireweed-engine | fireweed-engine | repository-only | - | - | no public feature contract | Raw ports and coordination internals must not become an external construction surface. |
+| fireweed-projection | fireweed-projection | repository-only | - | - | no public feature contract | Shared projection implementation, supported only through shipped profiles. |
+| fireweed-relational | fireweed-relational | repository-only | - | - | no public feature contract | Driver-neutral relational implementation shared by internal adapters. |
+| fireweed-memory | fireweed-memory | repository-only | - | - | always built for the default facade; development-only durability | Reference adapter used by the facade, tests, and local evaluation. |
+| fireweed-sqlite | fireweed-sqlite | repository-only | - | - | facade feature sqlite | Internal adapter for supported SQLite profiles. |
+| fireweed-objectlog | fireweed-objectlog | repository-only | - | - | facade feature objectlog | Internal adapter for supported object-log profiles. |
+| fireweed-postgres | fireweed-postgres | repository-only | - | - | facade feature postgres; tls implies postgres; both deferred | Wired adapter outside the preview support boundary. |
+| fireweed-resp | fireweed-resp | repository-only | - | - | no independent features; shipped through the service | Supported protocol adapter, not a standalone Cargo API. |
+| fireweed-server | fireweed-server | repository-only | - | - | default env-config; postgres, tls, external-kafka, and turso-projection remain opt-in | Composition package for the shipped service binary and container. |
+| fireweed-turso | fireweed-turso | experimental | - | - | local only; no default features | Feature-gated evaluation adapter with no compatibility promise. |
+| fireweed-conformance | fireweed-conformance | private | - | - | test-only | Maintainer backend contract suite. |
+| fireweed-release | fireweed-release | private | - | - | release tooling only | Maintainer verification-ledger and evidence tools. |
+| fireweed-loadgen | fireweed-loadgen | private | - | - | evidence workload only | In-cluster release-evidence generator, not an operator command. |
+| fireweed-sim-support | fireweed-sim-support | private | - | - | test-only | Deterministic simulation support with no product API. |
 <!-- workspace-package-inventory:end -->
 <!-- markdownlint-enable MD013 -->
 
-The independent `pqueue-bench` workspace and the Turso compatibility probe do
+The independent `fireweed-bench` workspace and the Turso compatibility probe do
 not appear in this table because they are not root workspace members. Their
 target names are `fireweed-bench` and `fireweed-turso-compat-probe`; both are
 private evidence tools and are never registry publications.
@@ -68,7 +69,7 @@ private evidence tools and are never registry publications.
 The only public registry operation is publishing `fireweed` to crates.io, so
 its publication order is `1`. No other workspace package has a registry order.
 
-The current `pqueue` manifest still depends on unversioned workspace paths.
+The current `fireweed` manifest still depends on unversioned workspace paths.
 Renaming those dependencies without making them registry-resolvable would make
 a crates.io package unusable. Before the first publish, the separate packaging
 implementation must make the uploaded `fireweed` package self-contained or

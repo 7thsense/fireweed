@@ -1,0 +1,49 @@
+# Release-evidence tooling: the verification-ledger row schema (TP-001/TP-002/TP-003), a JSONL emitter that
+# evidence suites use (as a dev-dependency) to record measured release evidence, and the `fireweed-verify-ledger`
+# binary the CI gate runs to strict-validate a ledger and assert required E0-E3 evidence is present. This
+# rebuilds the subsystem removed with fireweed-service in the hexagonal migration (BQ-43).
+[package]
+name = "fireweed-release"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fireweed-verify-ledger"
+path = "src/bin/fireweed-verify-ledger.rs"
+
+[[bin]]
+name = "fireweed-verify-evidence-attestation"
+path = "src/bin/fireweed-verify-evidence-attestation.rs"
+
+[[bin]]
+name = "fireweed-verify-transaction-evidence"
+path = "src/bin/fireweed-verify-transaction-evidence.rs"
+
+[[bin]]
+name = "fireweed-verify-e2-failover"
+path = "src/bin/fireweed-verify-e2-failover.rs"
+
+[[bin]]
+name = "fireweed-verify-e3-contract"
+path = "src/bin/fireweed-verify-e3-contract.rs"
+
+[[bin]]
+name = "fireweed-build-e3-contract"
+path = "src/bin/fireweed-build-e3-contract.rs"
+
+# Cost-model evidence: computes $/billion-commands for object_log_sqlite_projection (from REAL E3 measured
+# segment/object counts + cited S3 prices) vs the postgres_native high-volume baseline, and emits the ADR-001
+# cost-evidence artifact + the E3 cost-model ledger row (bead fireweed-1cd90d1c).
+[[bin]]
+name = "fireweed-cost-model"
+path = "src/bin/fireweed-cost-model.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"

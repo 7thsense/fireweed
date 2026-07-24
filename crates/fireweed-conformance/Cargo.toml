@@ -1,0 +1,31 @@
+[package]
+name = "fireweed-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+# Backend-conformance harness: the behavioral no-stub suite (plan §6), parameterized over any backend
+# that implements the engine ports, so every driven adapter (memory/sqlite/postgres/objectlog) runs the
+# SAME tests. Depends only on the domain (engine + core) — the correct hexagonal direction; adapters
+# depend on THIS as a dev-dependency.
+[dependencies]
+fireweed-core = { path = "../fireweed-core" }
+fireweed-engine = { path = "../fireweed-engine" }
+bytes = "1"
+serde_json = "1"
+
+[dev-dependencies]
+fireweed = { path = "../fireweed", features = ["objectlog", "sqlite"] }
+fireweed-memory = { path = "../fireweed-memory" }
+fireweed-objectlog = { path = "../fireweed-objectlog" }
+fireweed-sqlite = { path = "../fireweed-sqlite" }
+fireweed-postgres = { path = "../fireweed-postgres" }
+fireweed-release = { path = "../fireweed-release" }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+futures = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
