@@ -3,7 +3,7 @@ ddx:
   id: tp-fireweed-facade-and-snorri-acceptance
   depends_on:
     - api-fireweed-rust-facade
-    - adr-public-namespace-and-compatibility
+    - adr-020-public-namespace-and-compatibility
   status: accepted
 ---
 

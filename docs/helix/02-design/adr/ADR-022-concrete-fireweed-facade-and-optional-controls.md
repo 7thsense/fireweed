@@ -4,7 +4,7 @@ ddx:
   depends_on:
     - api-native-client-interface
     - adr-engine-enforced-coordination-and-encapsulated-library-surface
-    - adr-public-namespace-and-compatibility
+    - adr-020-public-namespace-and-compatibility
   status: accepted
 ---
 
