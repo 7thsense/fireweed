@@ -48,14 +48,14 @@ pub use fireweed_core::{
     ClaimByQueryRequest, ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy,
     CompoundIndexDef, CompoundIndexField, CreateQueue, CreateQueueError, CreateQueueErrorKind,
     DecimalValue, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, EligibilityPolicy,
-    FilterOp, GateKeyPolicy, GroupByField, GroupKey, GroupedAggregateRequest,
-    GroupedAggregateResponse, IdentifierError, IndexDeclaration, IndexSpec, IndexType, ItemId,
-    LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, MutationOutcome, MutationResult,
-    OrderField, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueryCapabilityFlags, QueryCursor, QueryFilter,
-    QueryRequestError, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex, RangeScanRequest,
-    RangeScanResponse, RangeScanRow, RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy,
-    SortDirection, TenantId, TimeBucket, TimestampError, TypedValue, UtcTimestamp,
+    EntitySchemaDocument, FilterOp, GateKeyPolicy, GroupByField, GroupKey, GroupedAggregateRequest,
+    GroupedAggregateResponse, IdentifierError, IndexDeclaration, IndexDef, IndexSpec, IndexType,
+    ItemId, LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, MutationOutcome,
+    MutationResult, OrderField, OrderingMode, OwnerId, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryCapabilityFlags, QueryCursor,
+    QueryFilter, QueryRequestError, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex,
+    RangeScanRequest, RangeScanResponse, RangeScanRow, RecurrenceMode, RecurrencePolicy, RequestId,
+    RetryPolicy, SortDirection, TenantId, TimeBucket, TimestampError, TypedValue, UtcTimestamp,
 };
 pub use fireweed_engine::{
     ActiveScope, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest,
@@ -1558,6 +1558,7 @@ fn apply_owned_renewal_outcomes(
 impl<B: LibBackend> Pqueue<B> {
     /// Low-level backend-injection constructor for a **sole-owner** handle. Hidden from the published
     /// surface (ADR-009 §4a / L6): external clients build via [`open_memory`]/[`open_sqlite`]/
+    /// [`open_sqlite_relational`]/
     /// [`open_objectlog`], which construct the backend internally so a port-bearing handle is never named.
     /// First-party crates/tests that inject a concrete backend use this.
     #[doc(hidden)]
@@ -2803,14 +2804,33 @@ pub fn open_memory(clock: Arc<dyn Clock>) -> Pqueue<impl LibBackend> {
     Pqueue::new(Arc::new(fireweed_memory::composed_memory_backend()), clock)
 }
 
-/// Open a **sole-owner**, sqlite-backed pqueue (durable log + projection rebuilt from the log) at `path`.
-/// Requires the `sqlite` feature (default).
+/// Open a **sole-owner**, sqlite-backed pqueue (durable log + in-memory projection rebuilt from the log) at
+/// `path`. This log-replay family does not maintain relational active-scope summaries, so
+/// [`Pqueue::discover_active_scopes`] returns [`EngineError::Unavailable`]. Use
+/// [`open_sqlite_relational`] when durable relational discovery is required. Requires the `sqlite` feature
+/// (default).
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite(
     path: &str,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Pqueue<impl LibBackend + use<>>> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
+    Ok(Pqueue::new(
+        Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
+        clock,
+    ))
+}
+
+/// Open a **sole-owner**, relational SQLite pqueue at `path`. Unlike [`open_sqlite`], this constructor keeps
+/// its authoritative projection in relational tables and supports [`Pqueue::discover_active_scopes`],
+/// including per-group discovery. Queue creation is atomic across independently opened handles and returns
+/// the definition decoded from the durable `queues` catalog. Requires the `sqlite` feature (default).
+#[cfg(feature = "sqlite")]
+pub fn open_sqlite_relational(
+    path: &str,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Pqueue<impl LibBackend + use<>>> {
+    let backend = Arc::new(fireweed_sqlite::composed_sqlite_relational(path)?);
     Ok(Pqueue::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
