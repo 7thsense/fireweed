@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local deployment release gate for pqueue.
+# Local deployment release gate for Fireweed Queue.
 #
 # This gate composes the existing source/release checks with deployment checks.
 # The only tolerated local skip is the disposable kind storage matrix when the
@@ -8,7 +8,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CHART_DIR="${REPO_ROOT}/charts/pqueue"
+CHART_DIR="${REPO_ROOT}/charts/fireweed-queue"
 PROOF_DIR="${PQUEUE_DEPLOYMENT_PROOF_DIR:-${REPO_ROOT}/target/deployment-release-gate}"
 PACKAGE_DIR="${PQUEUE_RELEASE_DIST:-${PROOF_DIR}/release-dist}"
 PROOF_JSON="${PROOF_DIR}/deployment-proof.json"
@@ -211,8 +211,8 @@ for row in read_tsv(os.environ["DEPLOYMENT_PROOF_SUPPORT_LOG"]):
             "exists": path.is_file(),
         })
 
-chart_package = package_dir / f"pqueue-{chart_version}.tgz"
-chart_evidence = package_dir / "pqueue-helm-chart.txt"
+chart_package = package_dir / f"fireweed-queue-{chart_version}.tgz"
+chart_evidence = package_dir / "fireweed-queue-helm-chart.txt"
 checksums = package_dir / "SHA256SUMS"
 for path, description in [
     (chart_package, "Helm chart package"),
@@ -239,8 +239,8 @@ if os.environ.get("PQUEUE_IMAGE_EVIDENCE_FILE"):
     image_evidence_candidates.append(Path(os.environ["PQUEUE_IMAGE_EVIDENCE_FILE"]))
 else:
     if os.environ.get("PQUEUE_RELEASE_DIST"):
-        image_evidence_candidates.append(Path(os.environ["PQUEUE_RELEASE_DIST"]) / "pqueue-service-image.txt")
-    image_evidence_candidates.append(package_dir / "pqueue-service-image.txt")
+        image_evidence_candidates.append(Path(os.environ["PQUEUE_RELEASE_DIST"]) / "fireweed-service-image.txt")
+    image_evidence_candidates.append(package_dir / "fireweed-service-image.txt")
 
 image_file = {}
 image_file_path = None
@@ -274,7 +274,7 @@ else:
     status = "failed"
 
 proof = {
-    "schema": "pqueue.deployment_proof.v1",
+    "schema": "fireweed.deployment_proof.v1",
     "status": status,
     "exit_status": exit_code,
     "commit_sha": os.environ["DEPLOYMENT_PROOF_COMMIT"],
@@ -290,7 +290,7 @@ proof = {
         "digest": image_digest,
         "coordinate": image_coordinate,
         "source": image_source,
-        "unavailable_reason": "" if image_tag != "unavailable" or image_digest != "unavailable" else "no PQUEUE_IMAGE_* environment values or pqueue-service-image.txt release artifact were available",
+        "unavailable_reason": "" if image_tag != "unavailable" or image_digest != "unavailable" else "no PQUEUE_IMAGE_* environment values or fireweed-service-image.txt release artifact were available",
     },
     "storage_combinations": storage_combinations,
     "performance_evidence": {
@@ -450,17 +450,17 @@ run_non_cluster_gates() {
     local version
     version="$(chart_version)"
     if [[ -z "${version}" ]]; then
-        err "could not read chart version from charts/pqueue/Chart.yaml"
+        err "could not read chart version from charts/fireweed-queue/Chart.yaml"
         exit 1
     fi
     local package_output="${PROOF_DIR}/package-helm-chart.out"
     run_cmd_capture "${package_output}" bash scripts/release/package-helm-chart.sh \
         --version "${version}" \
         --destination "${PACKAGE_DIR}" \
-        --chart-dir charts/pqueue
+        --chart-dir charts/fireweed-queue
     record_supporting_artifact "${package_output}" "chart packaging command output"
-    record_supporting_artifact "${PACKAGE_DIR}/pqueue-${version}.tgz" "Helm chart package"
-    record_supporting_artifact "${PACKAGE_DIR}/pqueue-helm-chart.txt" "Helm chart evidence"
+    record_supporting_artifact "${PACKAGE_DIR}/fireweed-queue-${version}.tgz" "Helm chart package"
+    record_supporting_artifact "${PACKAGE_DIR}/fireweed-queue-helm-chart.txt" "Helm chart evidence"
     record_supporting_artifact "${PACKAGE_DIR}/SHA256SUMS" "release distribution checksums"
 
     run_step "validate docs/microsite" validate_docs_microsite
@@ -478,18 +478,18 @@ free_kind_build_space() {
 prepare_kind_image_context() {
     echo "=== deployment release gate: prepare kind image context ==="
     free_kind_build_space
-    run_cmd rustup run 1.92.0 cargo build --release --bin pqueue-verify-ledger
-    run_cmd rustup run 1.92.0 cargo build --release --bin pqueue-service
+    run_cmd rustup run 1.92.0 cargo build --release --bin fireweed-verify-ledger
+    run_cmd rustup run 1.92.0 cargo build --release --bin fireweed-service
 
     rm -rf "${KIND_IMAGE_CONTEXT}"
     mkdir -p "${KIND_IMAGE_CONTEXT}"
-    cp "${REPO_ROOT}/target/release/pqueue-service" "${KIND_IMAGE_CONTEXT}/"
-    cp "${REPO_ROOT}/target/release/pqueue-verify-ledger" "${KIND_IMAGE_CONTEXT}/"
+    cp "${REPO_ROOT}/target/release/fireweed-service" "${KIND_IMAGE_CONTEXT}/"
+    cp "${REPO_ROOT}/target/release/fireweed-verify-ledger" "${KIND_IMAGE_CONTEXT}/"
     cp "${REPO_ROOT}/Dockerfile.prebuilt" "${KIND_IMAGE_DOCKERFILE}"
-    chmod 0755 "${KIND_IMAGE_CONTEXT}/pqueue-service" "${KIND_IMAGE_CONTEXT}/pqueue-verify-ledger"
+    chmod 0755 "${KIND_IMAGE_CONTEXT}/fireweed-service" "${KIND_IMAGE_CONTEXT}/fireweed-verify-ledger"
 
-    record_supporting_artifact "${KIND_IMAGE_CONTEXT}/pqueue-service" "kind smoke prebuilt pqueue-service binary"
-    record_supporting_artifact "${KIND_IMAGE_CONTEXT}/pqueue-verify-ledger" "kind smoke prebuilt pqueue-verify-ledger binary"
+    record_supporting_artifact "${KIND_IMAGE_CONTEXT}/fireweed-service" "kind smoke prebuilt fireweed-service binary"
+    record_supporting_artifact "${KIND_IMAGE_CONTEXT}/fireweed-verify-ledger" "kind smoke prebuilt fireweed-verify-ledger binary"
     record_supporting_artifact "${KIND_IMAGE_DOCKERFILE}" "kind smoke prebuilt Dockerfile"
 }
 

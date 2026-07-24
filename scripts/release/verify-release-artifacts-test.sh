@@ -6,31 +6,31 @@ DIST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pqueue-release-artifacts-test.XXXXXX")"
 trap 'rm -rf "${DIST_DIR}"' EXIT
 
 VERSION="0.0.0-test"
-touch "${DIST_DIR}/pqueue-${VERSION}-x86_64-linux.tar.gz"
-touch "${DIST_DIR}/pqueue-${VERSION}.tgz"
-touch "${DIST_DIR}/pqueue-helm-chart.txt"
-cat > "${DIST_DIR}/pqueue-service-image.txt" <<EOF
+touch "${DIST_DIR}/fireweed-${VERSION}-x86_64-linux.tar.gz"
+touch "${DIST_DIR}/fireweed-queue-${VERSION}.tgz"
+touch "${DIST_DIR}/fireweed-queue-helm-chart.txt"
+cat > "${DIST_DIR}/fireweed-service-image.txt" <<EOF
 version=${VERSION}
 digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
 source_commit=test-commit
-version_coordinate=ghcr.io/example/pqueue-service:${VERSION}
-digest_coordinate=ghcr.io/example/pqueue-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
+version_coordinate=ghcr.io/example/fireweed-service:${VERSION}
+digest_coordinate=ghcr.io/example/fireweed-service@sha256:0000000000000000000000000000000000000000000000000000000000000000
 EOF
 cat > "${DIST_DIR}/deployment-proof.json" <<EOF
 {
-  "schema": "pqueue.deployment_proof.v1",
+  "schema": "fireweed.deployment_proof.v1",
   "status": "passed",
   "exit_status": 0,
   "commit_sha": "test-commit",
   "chart": {
     "version": "${VERSION}",
-    "package": "target/release-dist/pqueue-${VERSION}.tgz",
+    "package": "target/release-dist/fireweed-queue-${VERSION}.tgz",
     "package_exists": true
   },
   "image": {
-    "tag": "ghcr.io/example/pqueue-service:${VERSION}",
+    "tag": "ghcr.io/example/fireweed-service:${VERSION}",
     "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "coordinate": "ghcr.io/example/pqueue-service@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    "coordinate": "ghcr.io/example/fireweed-service@sha256:0000000000000000000000000000000000000000000000000000000000000000"
   }
 }
 EOF
@@ -50,7 +50,7 @@ bash "${SCRIPT_DIR}/verify-release-artifacts.sh" \
 
 VALID_PROOF_JSON="$(<"${DIST_DIR}/deployment-proof.json")"
 VALID_PROOF_MD="$(<"${DIST_DIR}/deployment-proof.md")"
-VALID_IMAGE_EVIDENCE="$(<"${DIST_DIR}/pqueue-service-image.txt")"
+VALID_IMAGE_EVIDENCE="$(<"${DIST_DIR}/fireweed-service-image.txt")"
 
 rm "${DIST_DIR}/deployment-proof.json"
 if bash "${SCRIPT_DIR}/verify-release-artifacts.sh" \
@@ -78,7 +78,7 @@ grep -F "missing required release artifact: ${DIST_DIR}/deployment-proof.md" \
 
 printf '%s\n' "${VALID_PROOF_MD}" > "${DIST_DIR}/deployment-proof.md"
 git_like_json="${DIST_DIR}/deployment-proof.json"
-printf '{"schema":"pqueue.deployment_proof.v1","status":"failed"}\n' > "${git_like_json}"
+printf '{"schema":"fireweed.deployment_proof.v1","status":"failed"}\n' > "${git_like_json}"
 bash "${SCRIPT_DIR}/write-checksums.sh" "${DIST_DIR}"
 if bash "${SCRIPT_DIR}/verify-release-artifacts.sh" \
   --version "${VERSION}" \
@@ -90,10 +90,10 @@ fi
 grep -F "deployment proof status must be passed" "${DIST_DIR}/invalid-proof.out"
 
 printf '%s\n' "${VALID_PROOF_JSON}" > "${DIST_DIR}/deployment-proof.json"
-printf '%s\n' "${VALID_IMAGE_EVIDENCE}" > "${DIST_DIR}/pqueue-service-image.txt"
+printf '%s\n' "${VALID_IMAGE_EVIDENCE}" > "${DIST_DIR}/fireweed-service-image.txt"
 sed -i \
-  's#digest_coordinate=.*#digest_coordinate=ghcr.io/example/pqueue-service@sha256:1111111111111111111111111111111111111111111111111111111111111111#' \
-  "${DIST_DIR}/pqueue-service-image.txt"
+  's#digest_coordinate=.*#digest_coordinate=ghcr.io/example/fireweed-service@sha256:1111111111111111111111111111111111111111111111111111111111111111#' \
+  "${DIST_DIR}/fireweed-service-image.txt"
 bash "${SCRIPT_DIR}/write-checksums.sh" "${DIST_DIR}"
 if bash "${SCRIPT_DIR}/verify-release-artifacts.sh" \
   --version "${VERSION}" \

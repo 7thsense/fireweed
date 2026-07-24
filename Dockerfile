@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Reproducible container image for the pqueue API-001 service. The image runs the
+# Reproducible container image for the Fireweed API-001 service. The image runs the
 # production service binary directly and does not rely on local source mounts.
 #
 # Toolchain is pinned to the ADR-003 / workspace `rust-version` (1.92). See
@@ -17,12 +17,12 @@ COPY . .
 
 # Optional cargo features for the service binary. The default image ships no extra features; pass
 # `--build-arg CARGO_FEATURES=tls` (or `postgres,tls`) to build the Lakebase / cloud-postgres TLS runtime:
-#   docker build --build-arg CARGO_FEATURES=tls -t pqueue:tls .
+#   docker build --build-arg CARGO_FEATURES=tls -t fireweed-service:tls .
 # The `tls` feature implies `postgres`, so it wires `Backend::PostgresNative` over native-tls.
 ARG CARGO_FEATURES=""
 
-RUN cargo build --release -p pqueue-release --bin pqueue-verify-ledger \
- && cargo build --release -p pqueue-server --bin pqueue-service \
+RUN cargo build --release -p fireweed-release --bin fireweed-verify-ledger \
+ && cargo build --release -p fireweed-server --bin fireweed-service \
         ${CARGO_FEATURES:+--features "$CARGO_FEATURES"}
 
 # ---- runtime ----
@@ -36,12 +36,12 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Run as a non-root system user.
-RUN useradd --system --uid 10001 --user-group --no-create-home pqueue
+RUN useradd --system --uid 10001 --user-group --no-create-home fireweed
 
-COPY --from=builder /build/target/release/pqueue-service /usr/local/bin/pqueue-service
-COPY --from=builder /build/target/release/pqueue-verify-ledger /usr/local/bin/pqueue-verify-ledger
+COPY --from=builder /build/target/release/fireweed-service /usr/local/bin/fireweed-service
+COPY --from=builder /build/target/release/fireweed-verify-ledger /usr/local/bin/fireweed-verify-ledger
 
-USER pqueue
+USER fireweed
 
 # Default runtime configuration; override per deployment via Helm values.
 ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
@@ -51,4 +51,4 @@ ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
 # RESP service listens here.
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/pqueue-service"]
+ENTRYPOINT ["/usr/local/bin/fireweed-service"]

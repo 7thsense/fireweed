@@ -1,6 +1,6 @@
 # kind Helm integration harness
 
-`scripts/ci/kind-helm-test.sh` installs the pqueue Helm chart into a disposable
+`scripts/ci/kind-helm-test.sh` installs the Fireweed Queue Helm chart into a disposable
 `kind` cluster and exercises the RESP runtime.
 
 Use storage axes:
@@ -21,7 +21,7 @@ recoverable from the durable object log across a rollout restart even if the
 checkpoint lags. Other chart axis combinations are documented in the
 deployment-readiness matrix.
 
-The harness builds `pqueue:ci`, creates a kind cluster, loads the image, installs
+The harness builds `fireweed-service:ci`, creates a kind cluster, loads the image, installs
 the chart with the matching CI values, waits for rollout, checks RESP `PING`,
 `XADD`, and `XREADGROUP`, restarts the Deployment, and verifies the queue is
 readable after restart. Thus the `objectlog/hybrid` and

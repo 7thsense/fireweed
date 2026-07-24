@@ -1,21 +1,21 @@
-# pqueue Helm Chart
+# Fireweed Queue Helm Chart
 
-This chart deploys the `pqueue-service` RESP runtime. Storage is configured with
+This chart deploys the `fireweed-service` RESP runtime. Storage is configured with
 separate log and projection axes.
 
 ## Fireweed Queue preview version policy
 
-`pqueue` is the Helm chart compatibility alias for Fireweed Queue during the
-ADR-020 namespace migration. This source chart keeps an independent version
+`fireweed-queue` is the authoritative chart coordinate under ADR-020. This
+source chart keeps an independent version
 and `appVersion` for development packages. For the Fireweed Queue v0.20.0
 public preview, `scripts/release/package-helm-chart.sh --version 0.20.0`
-overrides both values and produces `pqueue-0.20.0.tgz` plus
-`pqueue-helm-chart.txt` release evidence.
+overrides both values and produces `fireweed-queue-0.20.0.tgz` plus
+`fireweed-queue-helm-chart.txt` release evidence.
 
-The `charts/pqueue` path, `pqueue` chart name, rendered Kubernetes names, and
-`pqueue-*` package/evidence names remain compatibility aliases in this release.
-Renaming those coordinates belongs to the separate chart namespace migration;
-this version policy does not rename runtime or persisted identifiers.
+The legacy chart path, chart name, rendered Kubernetes names, and package or
+evidence names are not published as aliases. The
+operator guide documents the resource-recreation boundary. Runtime environment
+aliases and persisted identifiers remain governed separately.
 
 ## Storage Axes
 
@@ -38,7 +38,7 @@ experimental `PQUEUE_PROJECTION_BACKEND=hybrid-strict` env/direct-config path,
 but it is not chart-selectable or production-supported. Helm schema validation
 must reject attempts to set `storage.projection.backend=hybrid-strict`.
 
-The current `pqueue-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
+The current `fireweed-server` binary wires `memory/inmemory`, `sqlite/inmemory`,
 `objectlog/inmemory`, `objectlog/sqlite`, `objectlog/hybrid`, and
 `objectlog/hybrid-async` unconditionally. `objectlog/turso` is available in
 builds with the `turso-projection` feature. `postgres/inmemory` is also wired — the sync postgres client runs only on Tokio's blocking-thread pool
@@ -120,7 +120,7 @@ installing this profile.
 
 ## Lakebase Postgres Native Profile
 
-`charts/pqueue/ci/lakebase-postgres-values.yaml` is the static render profile for
+`charts/fireweed-queue/ci/lakebase-postgres-values.yaml` is the static render profile for
 Databricks Lakebase with the postgres log axis selected (`projection.backend:
 inmemory` — the only wired postgres combination: durable via the DSN log with a
 fast in-memory projection apply). It renders Secret references, but it does not

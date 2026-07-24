@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "title": "pqueue Helm chart values",
+  "title": "Fireweed Queue Helm chart values",
   "type": "object",
   "additionalProperties": false,
   "required": [

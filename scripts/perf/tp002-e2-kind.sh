@@ -9,7 +9,7 @@
 # (2) a LEAN, SEPARATED, IN-CLUSTER load Job with a BOUNDED CPU limit driving pod->pod over Service ClusterIP
 # (immune to this sandbox's host->pod sustained-loopback signal-16 kill).
 #
-# For each owner count K in {2,4,8}: deploy K independent pqueue-service Deployments+Services (segmented
+# For each owner count K in {2,4,8}: deploy K independent fireweed-service Deployments+Services (segmented
 # object_log_sqlite_projection, distinct PQUEUE_NODE_ID, DISJOINT PQUEUE_BOOTSTRAP_QUEUES, emptyDir
 # medium=Memory tmpfs), run a load Job that drives the workload + proves one-owner-per-queue, collect the
 # measured RESULT json. Three full sweeps; each sweep folds its 2/4/8 results into one E2 ledger row
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 CLUSTER=${CLUSTER:-pqueue-e2}
-IMAGE=${IMAGE:-pqueue:e2}
+IMAGE=${IMAGE:-fireweed-service:e2}
 SERVER_CPU_LIMIT=${SERVER_CPU_LIMIT:-1300m}
 SERVER_CPU_REQUEST=${SERVER_CPU_REQUEST:-1000m}
 LOADGEN_CPU_LIMIT=${LOADGEN_CPU_LIMIT:-2000m}
@@ -37,7 +37,7 @@ SKIP_BUILD=${SKIP_BUILD:-0}
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORKDIR=$(mktemp -d)
 LEDGER_OUT=${LEDGER_OUT:-$WORKDIR/tp002-e2-multinode-kind.jsonl}
-LOADGEN_BIN=${LOADGEN_BIN:-$REPO_ROOT/target/release/pqueue-loadgen}
+LOADGEN_BIN=${LOADGEN_BIN:-$REPO_ROOT/target/release/fireweed-loadgen}
 CORES=$(nproc)
 NODE_IMAGE=""
 
@@ -45,8 +45,8 @@ log() { printf '\n=== %s ===\n' "$*" >&2; }
 
 build_loadgen_host() {
   if [[ ! -x "$LOADGEN_BIN" ]]; then
-    log "building host pqueue-loadgen (for emit-row)"
-    (cd "$REPO_ROOT" && cargo build --release -p pqueue-loadgen --bin pqueue-loadgen >&2)
+    log "building host fireweed-loadgen (for emit-row)"
+    (cd "$REPO_ROOT" && cargo build --release -p fireweed-loadgen --bin fireweed-loadgen >&2)
   fi
 }
 
@@ -175,7 +175,7 @@ spec:
           image: ${IMAGE}
           imagePullPolicy: Never
           command:
-            - /usr/local/bin/pqueue-loadgen
+            - /usr/local/bin/fireweed-loadgen
             - run
             - --spec-file
             - /spec/spec.json

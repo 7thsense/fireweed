@@ -13,7 +13,7 @@ services:
       timeout: 5s
       retries: 30
     volumes:
-      - pqueue-postgres-data:/var/lib/postgresql/data
+      - fireweed-postgres-data:/var/lib/postgresql/data
 
 volumes:
-  pqueue-postgres-data:
+  fireweed-postgres-data:

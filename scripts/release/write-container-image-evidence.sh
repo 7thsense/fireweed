@@ -7,7 +7,7 @@ VERSION_TAG=""
 SHA_TAG=""
 DIGEST=""
 COMMIT=""
-OUTPUT="target/release-dist/pqueue-service-image.txt"
+OUTPUT="target/release-dist/fireweed-service-image.txt"
 DOCKERFILE="Dockerfile"
 
 while [[ "$#" -gt 0 ]]; do
@@ -39,7 +39,7 @@ fi
 mkdir -p "$(dirname "$OUTPUT")"
 
 cat > "$OUTPUT" <<EOF
-artifact=pqueue-service-container-image
+artifact=fireweed-service-container-image
 image=${IMAGE}
 version=${VERSION}
 version_tag=${VERSION_TAG}

@@ -10,14 +10,14 @@ FROM ubuntu:24.04
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --user-group --no-create-home pqueue
+    && useradd --system --uid 10001 --user-group --no-create-home fireweed
 
-COPY pqueue-service /usr/local/bin/pqueue-service
-COPY pqueue-verify-ledger /usr/local/bin/pqueue-verify-ledger
+COPY fireweed-service /usr/local/bin/fireweed-service
+COPY fireweed-verify-ledger /usr/local/bin/fireweed-verify-ledger
 
-RUN chmod 0755 /usr/local/bin/pqueue-service /usr/local/bin/pqueue-verify-ledger
+RUN chmod 0755 /usr/local/bin/fireweed-service /usr/local/bin/fireweed-verify-ledger
 
-USER pqueue
+USER fireweed
 
 ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
     PQUEUE_LOG_BACKEND=objectlog \
@@ -25,4 +25,4 @@ ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
 
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/pqueue-service"]
+ENTRYPOINT ["/usr/local/bin/fireweed-service"]

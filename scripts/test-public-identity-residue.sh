@@ -30,7 +30,7 @@ expect_rejects() {
 }
 
 mkdir -p "$tmp_dir/src" "$tmp_dir/docs/helix/history" "$tmp_dir/docs/deployment" \
-    "$tmp_dir/crates/fireweed-core/src"
+    "$tmp_dir/crates/fireweed-core/src" "$tmp_dir/charts/fireweed-queue/templates"
 
 cat >"$tmp_dir/src/lowercase.md" <<'EOF'
 The pqueue CLI is the public command.
@@ -64,6 +64,11 @@ EOF
 # namespace layer still rejects old Rust imports and Cargo package names there.
 expect_rejects "crates/fireweed-core/src/lib.rs" "rust-namespace"
 expect_rejects "crates/fireweed-core/Cargo.toml" "cargo-namespace"
+
+cat >"$tmp_dir/charts/fireweed-queue/templates/deployment.yaml" <<'EOF'
+app.kubernetes.io/name: pqueue
+EOF
+expect_rejects "charts/fireweed-queue/templates/deployment.yaml" "deployment-namespace"
 
 cat >"$tmp_dir/docs/helix/history/queueyard.md" <<'EOF'
 Queueyard remains in naming-analysis history for audit traceability.

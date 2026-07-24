@@ -1,4 +1,4 @@
-# CI runtime values: objectlog log with a durable SQLite projection.
+# Fireweed Queue CI runtime values: objectlog log with a durable SQLite projection.
 storage:
   log:
     backend: objectlog

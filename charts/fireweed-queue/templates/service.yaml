@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "pqueue.fullname" . }}
+  name: {{ include "fireweed-queue.fullname" . }}
   labels:
-    {{- include "pqueue.labels" . | nindent 4 }}
+    {{- include "fireweed-queue.labels" . | nindent 4 }}
   {{- with .Values.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -16,4 +16,4 @@ spec:
       targetPort: resp
       protocol: TCP
   selector:
-    {{- include "pqueue.selectorLabels" . | nindent 4 }}
+    {{- include "fireweed-queue.selectorLabels" . | nindent 4 }}
