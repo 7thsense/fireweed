@@ -1,9 +1,9 @@
-# Static render values: postgres log with in-memory projection axis selected.
+# Fireweed Queue static render values: postgres log with in-memory projection axis selected.
 storage:
   log:
     backend: postgres
     postgres:
-      existingSecret: pqueue-postgres-log
+      existingSecret: fireweed-postgres-log
       databaseUrlKey: database-url
   projection:
     backend: inmemory

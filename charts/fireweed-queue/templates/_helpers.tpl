@@ -1,14 +1,14 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "pqueue.name" -}}
+{{- define "fireweed-queue.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 Create a default fully qualified app name.
 */}}
-{{- define "pqueue.fullname" -}}
+{{- define "fireweed-queue.fullname" -}}
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -24,33 +24,33 @@ Create a default fully qualified app name.
 {{/*
 Create chart name and version as used by the chart label.
 */}}
-{{- define "pqueue.chart" -}}
+{{- define "fireweed-queue.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
 Common labels.
 */}}
-{{- define "pqueue.labels" -}}
-helm.sh/chart: {{ include "pqueue.chart" . }}
-{{ include "pqueue.selectorLabels" . }}
+{{- define "fireweed-queue.labels" -}}
+helm.sh/chart: {{ include "fireweed-queue.chart" . }}
+{{ include "fireweed-queue.selectorLabels" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{/*
 Selector labels.
 */}}
-{{- define "pqueue.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "pqueue.name" . }}
+{{- define "fireweed-queue.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "fireweed-queue.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
 Create the name of the service account to use.
 */}}
-{{- define "pqueue.serviceAccountName" -}}
+{{- define "fireweed-queue.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
-{{- default (include "pqueue.fullname" .) .Values.serviceAccount.name -}}
+{{- default (include "fireweed-queue.fullname" .) .Values.serviceAccount.name -}}
 {{- else -}}
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
@@ -59,22 +59,22 @@ Create the name of the service account to use.
 {{/*
 Select the image tag.
 */}}
-{{- define "pqueue.imageTag" -}}
+{{- define "fireweed-queue.imageTag" -}}
 {{- default .Chart.AppVersion .Values.image.tag -}}
 {{- end -}}
 
 {{/*
 Name of the storage persistent volume claim.
 */}}
-{{- define "pqueue.storagePvcName" -}}
-{{- default (printf "%s-storage" (include "pqueue.fullname" .)) .Values.persistence.existingClaim -}}
+{{- define "fireweed-queue.storagePvcName" -}}
+{{- default (printf "%s-storage" (include "fireweed-queue.fullname" .)) .Values.persistence.existingClaim -}}
 {{- end -}}
 
 {{/*
 Fail closed when a multi-replica deployment is not using the replica-safe shared
 S3/Postgres profile. Local object-log storage stays single-replica only.
 */}}
-{{- define "pqueue.validateReplicaProfile" -}}
+{{- define "fireweed-queue.validateReplicaProfile" -}}
 {{- $replicas := int .Values.replicaCount -}}
 {{- $shared := and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3") (eq .Values.storage.controlPlane.backend "postgres") (eq .Values.storage.projection.backend "sqlite") -}}
 {{- if gt $replicas 1 -}}

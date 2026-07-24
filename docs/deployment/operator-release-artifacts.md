@@ -1,24 +1,24 @@
 # Operator Release Artifacts
 
-This is the operator-facing location for obtaining and verifying pqueue release
-artifacts. Replace `OWNER`, `REPO`, and `v0.9.0` with the release repository and
+This is the operator-facing location for obtaining and verifying Fireweed release
+artifacts. Replace `OWNER`, `REPO`, and `v0.20.0` with the release repository and
 tag you are installing from.
 
 The current release workflow publishes:
 
 | Artifact | Coordinate |
 |----------|------------|
-| Container image | `ghcr.io/OWNER/pqueue-service:<version>` and `ghcr.io/OWNER/pqueue-service:sha-<commit>` |
-| Container image digest evidence | GitHub Release asset `pqueue-service-image.txt` |
-| Helm chart package | GitHub Release asset `pqueue-<version>.tgz` |
-| Helm chart evidence | GitHub Release asset `pqueue-helm-chart.txt` |
-| Binary archives | GitHub Release assets `pqueue-<version>-<target-triple>.tar.gz` |
+| Container image | `ghcr.io/OWNER/fireweed-service:<version>` and `ghcr.io/OWNER/fireweed-service:sha-<commit>` |
+| Container image digest evidence | GitHub Release asset `fireweed-service-image.txt` |
+| Helm chart package | GitHub Release asset `fireweed-queue-<version>.tgz` |
+| Helm chart evidence | GitHub Release asset `fireweed-queue-helm-chart.txt` |
+| Binary archives | GitHub Release assets `fireweed-<version>-<target-triple>.tar.gz` |
 | Deployment proof | GitHub Release assets `deployment-proof.json` and `deployment-proof.md` |
 | Checksums | GitHub Release asset `SHA256SUMS` |
 
-For example, release tag `v0.9.0` uses version `0.9.0`, so the chart package is
-`pqueue-0.9.0.tgz` and binary archives are named like
-`pqueue-0.9.0-x86_64-linux.tar.gz`. The `v0.9.0` workflow publishes the Helm
+For example, release tag `v0.20.0` uses version `0.20.0`, so the chart package is
+`fireweed-queue-0.20.0.tgz` and binary archives are named like
+`fireweed-0.20.0-x86_64-linux.tar.gz`. The `v0.20.0` workflow publishes the Helm
 chart as a GitHub Release package asset; it does not publish an OCI chart.
 
 ## Download
@@ -27,18 +27,18 @@ With the GitHub CLI:
 
 ```sh
 OWNER=<github-owner>
-REPO=pqueue
-TAG=v0.9.0
+REPO=fireweed
+TAG=v0.20.0
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 
 mkdir -p "$DIST_DIR"
 gh release download "$TAG" \
   --repo "${OWNER}/${REPO}" \
-  --pattern "pqueue-${VERSION}-*.tar.gz" \
-  --pattern "pqueue-${VERSION}.tgz" \
-  --pattern "pqueue-service-image.txt" \
-  --pattern "pqueue-helm-chart.txt" \
+  --pattern "fireweed-${VERSION}-*.tar.gz" \
+  --pattern "fireweed-queue-${VERSION}.tgz" \
+  --pattern "fireweed-service-image.txt" \
+  --pattern "fireweed-queue-helm-chart.txt" \
   --pattern "deployment-proof.json" \
   --pattern "deployment-proof.md" \
   --pattern "SHA256SUMS" \
@@ -48,7 +48,7 @@ gh release download "$TAG" \
 Without `gh`, download the same assets from:
 
 ```text
-https://github.com/OWNER/REPO/releases/tag/v0.9.0
+https://github.com/OWNER/REPO/releases/tag/v0.20.0
 ```
 
 ## Verify Checksums
@@ -79,13 +79,13 @@ bash scripts/release/verify-release-artifacts.sh \
 ## Verify Container Image Digest
 
 The release workflow writes the pushed image digest to
-`pqueue-service-image.txt`. Verify the tag still resolves to that digest before
+`fireweed-service-image.txt`. Verify the tag still resolves to that digest before
 deployment:
 
 ```sh
 IMAGE_OWNER="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
-IMAGE="ghcr.io/${IMAGE_OWNER}/pqueue-service"
-DIGEST="$(awk -F= '$1 == "digest" { print $2 }' "${DIST_DIR}/pqueue-service-image.txt")"
+IMAGE="ghcr.io/${IMAGE_OWNER}/fireweed-service"
+DIGEST="$(awk -F= '$1 == "digest" { print $2 }' "${DIST_DIR}/fireweed-service-image.txt")"
 REMOTE_DIGEST="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" | awk '/Digest:/ { print $2; exit }')"
 
 test "$REMOTE_DIGEST" = "$DIGEST"
@@ -95,10 +95,10 @@ docker pull "${IMAGE}@${DIGEST}"
 Deploy by digest where possible:
 
 ```text
-ghcr.io/<lowercase-owner>/pqueue-service@sha256:<digest>
+ghcr.io/<lowercase-owner>/fireweed-service@sha256:<digest>
 ```
 
-`pqueue-service-image.txt` also records `version_coordinate`, `sha_coordinate`,
+`fireweed-service-image.txt` also records `version_coordinate`, `sha_coordinate`,
 and `digest_coordinate` for audit trails.
 
 ## Deployment Release Proof

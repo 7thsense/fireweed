@@ -1,7 +1,7 @@
-# pqueue Container Image and Runtime Configuration Contract
+# Fireweed Container Image and Runtime Configuration Contract
 
-The release image entrypoint is `pqueue-service`, the RESP server built from
-`crates/pqueue-server`.
+The release image entrypoint is `fireweed-service`, the RESP server built from
+`crates/fireweed-server`.
 
 ## Environment
 
@@ -69,7 +69,7 @@ provider injects the postgres user/password at connect instead of the DSN passwo
 Build the TLS image with the documented build arg:
 
 ```sh
-docker build --build-arg CARGO_FEATURES=tls -t pqueue:tls .
+docker build --build-arg CARGO_FEATURES=tls -t fireweed-service:tls .
 ```
 
 (or `PQUEUE_FEATURES=tls scripts/release/package-binaries.sh` for the binary tarball).

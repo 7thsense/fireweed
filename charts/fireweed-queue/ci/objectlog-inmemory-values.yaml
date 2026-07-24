@@ -1,0 +1,8 @@
+# Fireweed Queue CI runtime values: objectlog log with the currently wired in-memory projection.
+storage:
+  log:
+    backend: objectlog
+  projection:
+    backend: inmemory
+image:
+  tag: ci

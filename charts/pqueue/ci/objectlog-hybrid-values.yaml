@@ -1,8 +1,0 @@
-# Live kind CI values: objectlog log with hybrid durable-SQLite-plus-hot-memory projection.
-storage:
-  log:
-    backend: objectlog
-  projection:
-    backend: hybrid
-image:
-  tag: ci

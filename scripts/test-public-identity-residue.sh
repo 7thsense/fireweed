@@ -31,7 +31,7 @@ expect_rejects() {
 
 mkdir -p "$tmp_dir/src" "$tmp_dir/docs/helix/history" "$tmp_dir/docs/deployment" \
     "$tmp_dir/crates/fireweed-core/src" "$tmp_dir/crates/fireweed-server" \
-    "$tmp_dir/crates/fireweed-release/src"
+    "$tmp_dir/crates/fireweed-release/src" "$tmp_dir/charts/fireweed-queue/templates"
 
 cat >"$tmp_dir/src/lowercase.md" <<'EOF'
 The pqueue CLI is the public command.
@@ -92,6 +92,11 @@ fn compatible() {
         .or_else(|_| std::env::var("PQUEUE_LEDGER_DIR"));
 }
 EOF
+
+cat >"$tmp_dir/charts/fireweed-queue/templates/deployment.yaml" <<'EOF'
+app.kubernetes.io/name: pqueue
+EOF
+expect_rejects "charts/fireweed-queue/templates/deployment.yaml" "deployment-namespace"
 
 cat >"$tmp_dir/docs/helix/history/queueyard.md" <<'EOF'
 Queueyard remains in naming-analysis history for audit traceability.

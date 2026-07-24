@@ -16,8 +16,8 @@ esac
 
 TARGET_TRIPLE="${ARCH}-${OS}"
 DIST_DIR="target/release-dist"
-STAGE_DIR="target/release-package/pqueue-${VERSION}-${TARGET_TRIPLE}"
-ARCHIVE="${DIST_DIR}/pqueue-${VERSION}-${TARGET_TRIPLE}.tar.gz"
+STAGE_DIR="target/release-package/fireweed-${VERSION}-${TARGET_TRIPLE}"
+ARCHIVE="${DIST_DIR}/fireweed-${VERSION}-${TARGET_TRIPLE}.tar.gz"
 
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" "$DIST_DIR"
@@ -27,24 +27,24 @@ mkdir -p "$STAGE_DIR" "$DIST_DIR"
 PQUEUE_FEATURES="${PQUEUE_FEATURES:-}"
 SERVICE_FEATURE_ARGS=()
 if [[ -n "$PQUEUE_FEATURES" ]]; then
-    SERVICE_FEATURE_ARGS=(-p pqueue-server --features "$PQUEUE_FEATURES")
+    SERVICE_FEATURE_ARGS=(-p fireweed-server --features "$PQUEUE_FEATURES")
 fi
 
-rustup run 1.92.0 cargo build --release --bin pqueue-verify-ledger
-rustup run 1.92.0 cargo build --release --bin pqueue-service "${SERVICE_FEATURE_ARGS[@]}"
+rustup run 1.92.0 cargo build --release --bin fireweed-verify-ledger
+rustup run 1.92.0 cargo build --release --bin fireweed-service "${SERVICE_FEATURE_ARGS[@]}"
 
-cp "target/release/pqueue-service" "$STAGE_DIR/"
-cp "target/release/pqueue-verify-ledger" "$STAGE_DIR/"
+cp "target/release/fireweed-service" "$STAGE_DIR/"
+cp "target/release/fireweed-verify-ledger" "$STAGE_DIR/"
 cat > "$STAGE_DIR/MANIFEST.txt" <<EOF
-pqueue ${VERSION}
+Fireweed ${VERSION}
 target=${TARGET_TRIPLE}
 
 Binaries:
-- pqueue-service: RESP service runtime and container entrypoint.
-- pqueue-verify-ledger: validates pqueue verification ledger JSONL files.
+- fireweed-service: RESP service runtime and container entrypoint.
+- fireweed-verify-ledger: validates Fireweed verification ledger JSONL files.
 
 Build command:
-rustup run 1.92.0 cargo build --release --bin pqueue-service --bin pqueue-verify-ledger
+rustup run 1.92.0 cargo build --release --bin fireweed-service --bin fireweed-verify-ledger
   (set PQUEUE_FEATURES=tls for the Lakebase / cloud-postgres native-tls service build)
 EOF
 

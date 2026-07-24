@@ -4,7 +4,7 @@ set -euo pipefail
 VERSION=""
 TAG=""
 DIST_DIR="target/release-dist"
-CHART_DIR="charts/pqueue"
+CHART_DIR="charts/fireweed-queue"
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
@@ -53,17 +53,17 @@ fi
 
 package_name="$(basename "$package_path")"
 package_sha256="$(sha256_of "$package_path")"
-evidence_path="${DIST_DIR}/pqueue-helm-chart.txt"
+evidence_path="${DIST_DIR}/fireweed-queue-helm-chart.txt"
 
 cat > "$evidence_path" <<EOF
-artifact=pqueue-helm-chart
-chart=pqueue
+artifact=fireweed-queue-helm-chart
+chart=fireweed-queue
 product=Fireweed Queue
 version=${VERSION}
 app_version=${VERSION}
 version_policy=release-synchronized
 source_version_policy=independent source defaults
-compatibility_alias=pqueue chart, package, and evidence coordinates retained under ADR-020
+rename_policy=Fireweed chart, package, and evidence coordinates are authoritative under ADR-020
 package=${package_name}
 package_sha256=${package_sha256}
 source_chart=${CHART_DIR}

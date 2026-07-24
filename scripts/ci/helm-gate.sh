@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic static validation gate for the pqueue Helm chart.
+# Deterministic static validation gate for the Fireweed Queue Helm chart.
 #
 # This gate is suitable for local development and GitHub Actions. It catches
 # chart schema / template / Kubernetes API errors BEFORE the (expensive) kind
@@ -23,7 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CHART_DIR="${REPO_ROOT}/charts/pqueue"
+CHART_DIR="${REPO_ROOT}/charts/fireweed-queue"
 CACHE_DIR="${REPO_ROOT}/target/helm-gate/bin"
 PACKAGE_DIR="${REPO_ROOT}/target/helm-gate/release-dist"
 
@@ -41,7 +41,7 @@ declare -A KUBECONFORM_SHA256=(
     [darwin-arm64]="cbb47d938a8d18eb5f79cb33663b2cecdee0c8ac0bf562ebcfca903df5f0802f"
 )
 
-# Storage combinations to validate. Each maps to a CI values file under charts/pqueue/ci/.
+# Storage combinations to validate. Each maps to a CI values file under charts/fireweed-queue/ci/.
 COMBINATIONS=(objectlog-inmemory objectlog-sqlite objectlog-hybrid objectlog-hybrid-async shared-s3-postgres-control-plane postgres-inmemory postgres-sqlite postgres-postgres lakebase-postgres)
 
 err() { echo "helm-gate: $*" >&2; }
@@ -241,7 +241,7 @@ assert_shared_s3_postgres_control_plane_contract() {
     assert_contains "$rendered" 'PQUEUE_PROJECTION_BACKEND: "sqlite"' "sqlite projection axis"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_STORE: "s3"' "shared object-log store selection"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_ENDPOINT: "https://s3.example.com"' "S3 endpoint"
-    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_BUCKET: "pqueue-shared"' "S3 bucket"
+    assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_BUCKET: "fireweed-shared"' "S3 bucket"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_REGION: "us-east-1"' "S3 region"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_CREDENTIAL_SOURCE: "static"' "S3 credential source"
     assert_contains "$rendered" 'PQUEUE_OBJECT_LOG_S3_ALLOW_INSECURE_HTTP: "false"' "S3 TLS setting"
@@ -295,8 +295,8 @@ assert_lakebase_postgres_contract() {
     assert_contains "$rendered" 'name: PQUEUE_DATABRICKS_DATABASE_INSTANCE_NAME' "Databricks instance Secret env"
     assert_contains "$rendered" 'name: DATABRICKS_CLIENT_ID' "Databricks service principal client id"
     assert_contains "$rendered" 'name: DATABRICKS_CLIENT_SECRET' "Databricks service principal client secret"
-    assert_contains "$rendered" 'name: "pqueue-lakebase-dsn"' "Lakebase DSN Secret"
-    assert_contains "$rendered" 'name: "pqueue-lakebase-oauth"' "Lakebase OAuth Secret"
+    assert_contains "$rendered" 'name: "fireweed-lakebase-dsn"' "Lakebase DSN Secret"
+    assert_contains "$rendered" 'name: "fireweed-lakebase-oauth"' "Lakebase OAuth Secret"
     assert_not_contains "$rendered" 'password=' "inline Lakebase password"
     assert_no_fixture_credentials "$rendered" "Lakebase rendered manifest"
 }
@@ -304,7 +304,7 @@ assert_lakebase_postgres_contract() {
 assert_generated_bootstrap_contract() {
     local rendered
     rendered="$(mktemp)"
-    helm template pqueue-density "$CHART_DIR" \
+    helm template fireweed-density "$CHART_DIR" \
         --set bootstrap.generated.count=1001 \
         --set bootstrap.generated.tenant=density \
         --set bootstrap.generated.prefix=q >"$rendered"
@@ -320,7 +320,7 @@ assert_hybrid_strict_schema_exclusion() {
     local output
     output="$(mktemp)"
 
-    if helm template pqueue-hybrid-strict "$CHART_DIR" \
+    if helm template fireweed-hybrid-strict "$CHART_DIR" \
         --set storage.log.backend=objectlog \
         --set storage.projection.backend=hybrid-strict >"$output" 2>&1; then
         err "objectlog/hybrid-strict unexpectedly rendered; the profile is runtime-only and must remain outside the chart schema"
@@ -385,7 +385,7 @@ main() {
     echo "--- local profile fail-closed contract ---"
     local scaled_local
     scaled_local="$(mktemp)"
-    if helm template pqueue-local-scaled "$CHART_DIR" --values "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" --set replicaCount=2 >"$scaled_local" 2>&1; then
+    if helm template fireweed-local-scaled "$CHART_DIR" --values "${CHART_DIR}/ci/objectlog-sqlite-values.yaml" --set replicaCount=2 >"$scaled_local" 2>&1; then
         err "scaled local objectlog/sqlite profile unexpectedly rendered"
         cat "$scaled_local" >&2
         rm -f "$scaled_local"
@@ -412,7 +412,7 @@ main() {
         # schema set; reading from stdin keeps the render deterministic.
         local rendered
         rendered="$(mktemp)"
-        helm template "pqueue-${combination}" "$CHART_DIR" --values "$values" >"$rendered"
+        helm template "fireweed-${combination}" "$CHART_DIR" --values "$values" >"$rendered"
         assert_combination_contract "$combination" "$rendered"
         "$KUBECONFORM_BIN" \
                 -strict \

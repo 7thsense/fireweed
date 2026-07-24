@@ -193,16 +193,16 @@ jobs:
         run: |
           rm -rf target/release-image
           mkdir -p target/release-image
-          cp target/release/pqueue-service target/release/pqueue-verify-ledger target/release-image/
+          cp target/release/fireweed-service target/release/fireweed-verify-ledger target/release-image/
           cp Dockerfile.prebuilt target/release-image/Dockerfile
-          chmod 0755 target/release-image/pqueue-service target/release-image/pqueue-verify-ledger
+          chmod 0755 target/release-image/fireweed-service target/release-image/fireweed-verify-ledger
 
       - name: Resolve container image coordinates
         id: container
         shell: bash
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          image="ghcr.io/${owner}/pqueue-service"
+          image="ghcr.io/${owner}/fireweed-service"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
           echo "version_tag=${image}:${{ steps.release.outputs.version }}" >> "$GITHUB_OUTPUT"
           echo "sha_tag=${image}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
@@ -217,7 +217,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Build and push pqueue service image
+      - name: Build and push Fireweed service image
         id: container-build
         uses: docker/build-push-action@v7
         with:
@@ -244,14 +244,14 @@ jobs:
             --digest "$DIGEST" \
             --commit "$GITHUB_SHA" \
             --dockerfile Dockerfile.prebuilt \
-            --output target/release-dist/pqueue-service-image.txt
+            --output target/release-dist/fireweed-service-image.txt
           bash scripts/release/write-checksums.sh target/release-dist
 
       - name: Finalize deployment proof
         env:
           PQUEUE_RELEASE_VERSION: ${{ steps.release.outputs.version }}
           PQUEUE_RELEASE_DIST: target/release-dist
-          PQUEUE_IMAGE_EVIDENCE_FILE: target/release-dist/pqueue-service-image.txt
+          PQUEUE_IMAGE_EVIDENCE_FILE: target/release-dist/fireweed-service-image.txt
         run: |
           bash scripts/ci/deployment-release-gate.sh --finalize-proof
           install -m 0644 \

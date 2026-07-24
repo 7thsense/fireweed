@@ -321,16 +321,16 @@
                 <span>checksums + image digest</span>
               </div>
               <pre><code>OWNER=&lt;github-owner&gt;
-REPO=pqueue
-TAG=v0.2.5
+REPO=fireweed
+TAG=v0.20.0
 VERSION="${TAG#v}"
 DIST_DIR="release-${TAG}"
 
 gh release download "$TAG" --repo "${OWNER}/${REPO}" \
-  --pattern "pqueue-${VERSION}-*.tar.gz" \
-  --pattern "pqueue-${VERSION}.tgz" \
-  --pattern "pqueue-service-image.txt" \
-  --pattern "pqueue-helm-chart.txt" \
+  --pattern "fireweed-${VERSION}-*.tar.gz" \
+  --pattern "fireweed-queue-${VERSION}.tgz" \
+  --pattern "fireweed-service-image.txt" \
+  --pattern "fireweed-queue-helm-chart.txt" \
   --pattern "SHA256SUMS" \
   --dir "$DIST_DIR"
 
@@ -341,13 +341,13 @@ gh release download "$TAG" --repo "${OWNER}/${REPO}" \
                 <span>helm install</span>
                 <span>sqlite</span>
               </div>
-              <pre><code>NAMESPACE=pqueue
-RELEASE=pqueue
-IMAGE="ghcr.io/${OWNER}/pqueue-service"
+              <pre><code>NAMESPACE=fireweed
+RELEASE=fireweed
+IMAGE="ghcr.io/${OWNER}/fireweed-service"
 
 kubectl create namespace "$NAMESPACE"
 
-helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
+helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${VERSION}.tgz" \
   --namespace "$NAMESPACE" \
   --set image.repository="$IMAGE" \
   --set image.tag="$VERSION" \
@@ -434,7 +434,7 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
                 stroke="#161616"
               />
               <text x="48" y="62">Helm release</text>
-              <text x="48" y="84" class="thin">charts/pqueue</text>
+              <text x="48" y="84" class="thin">charts/fireweed-queue</text>
               <path d="M180 65 H285" stroke="#161616" stroke-width="3" />
               <path
                 d="M275 55 L295 65 L275 75"
@@ -451,7 +451,7 @@ bash scripts/ci/kind-helm-test.sh --log-backend objectlog --projection-backend i
                 fill="#dcefe4"
                 stroke="#146c43"
               />
-              <text x="322" y="62">pqueue-service</text>
+              <text x="322" y="62">fireweed-service</text>
               <text x="322" y="84" class="thin">RESP TCP</text>
               <path d="M465 65 H575" stroke="#161616" stroke-width="3" />
               <path

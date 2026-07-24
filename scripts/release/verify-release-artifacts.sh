@@ -43,24 +43,24 @@ checksum_has_artifact() {
 }
 
 shopt -s nullglob
-binary_archives=("${DIST_DIR}/pqueue-${VERSION}-"*.tar.gz)
-chart_packages=("${DIST_DIR}/pqueue-${VERSION}.tgz")
+binary_archives=("${DIST_DIR}/fireweed-${VERSION}-"*.tar.gz)
+chart_packages=("${DIST_DIR}/fireweed-queue-${VERSION}.tgz")
 shopt -u nullglob
 
-[[ "${#binary_archives[@]}" -gt 0 ]] || fail "missing binary archive matching ${DIST_DIR}/pqueue-${VERSION}-*.tar.gz"
-[[ "${#chart_packages[@]}" -gt 0 ]] || fail "missing Helm chart package matching ${DIST_DIR}/pqueue-${VERSION}.tgz"
+[[ "${#binary_archives[@]}" -gt 0 ]] || fail "missing binary archive matching ${DIST_DIR}/fireweed-${VERSION}-*.tar.gz"
+[[ "${#chart_packages[@]}" -gt 0 ]] || fail "missing Helm chart package matching ${DIST_DIR}/fireweed-queue-${VERSION}.tgz"
 
-require_file "${DIST_DIR}/pqueue-helm-chart.txt"
-require_file "${DIST_DIR}/pqueue-service-image.txt"
+require_file "${DIST_DIR}/fireweed-queue-helm-chart.txt"
+require_file "${DIST_DIR}/fireweed-service-image.txt"
 require_file "${DIST_DIR}/deployment-proof.json"
 require_file "${DIST_DIR}/deployment-proof.md"
 require_file "${DIST_DIR}/SHA256SUMS"
 
-grep -Eq '^digest=sha256:[0-9a-fA-F]{64}$' "${DIST_DIR}/pqueue-service-image.txt" \
+grep -Eq '^digest=sha256:[0-9a-fA-F]{64}$' "${DIST_DIR}/fireweed-service-image.txt" \
     || fail "image evidence must contain a sha256 digest"
 
 python3 - "${DIST_DIR}/deployment-proof.json" "${DIST_DIR}/deployment-proof.md" \
-    "${DIST_DIR}/pqueue-service-image.txt" "${VERSION}" "${COMMIT}" <<'PY'
+    "${DIST_DIR}/fireweed-service-image.txt" "${VERSION}" "${COMMIT}" <<'PY'
 import json
 import pathlib
 import re
@@ -81,14 +81,14 @@ for line in image_path.read_text(encoding="utf-8").splitlines():
         image[key] = value
 
 errors = []
-if proof.get("schema") != "pqueue.deployment_proof.v1":
+if proof.get("schema") != "fireweed.deployment_proof.v1":
     errors.append("unexpected deployment proof schema")
 if proof.get("status") != "passed" or proof.get("exit_status") != 0:
     errors.append("deployment proof status must be passed with exit_status 0")
 if proof.get("chart", {}).get("version") != version:
     errors.append(f"deployment proof chart version must equal {version}")
 package = pathlib.Path(proof.get("chart", {}).get("package", "unavailable")).name
-if package != f"pqueue-{version}.tgz" or not proof.get("chart", {}).get("package_exists"):
+if package != f"fireweed-queue-{version}.tgz" or not proof.get("chart", {}).get("package_exists"):
     errors.append("deployment proof chart package is missing or mismatched")
 digest = image.get("digest", "")
 if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):

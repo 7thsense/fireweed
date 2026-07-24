@@ -1,18 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "pqueue.fullname" . }}
+  name: {{ include "fireweed-queue.fullname" . }}
   labels:
-    {{- include "pqueue.labels" . | nindent 4 }}
+    {{- include "fireweed-queue.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "pqueue.selectorLabels" . | nindent 6 }}
+      {{- include "fireweed-queue.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "pqueue.selectorLabels" . | nindent 8 }}
+        {{- include "fireweed-queue.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -21,8 +21,8 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      {{- include "pqueue.validateReplicaProfile" . }}
-      serviceAccountName: {{ include "pqueue.serviceAccountName" . }}
+      {{- include "fireweed-queue.validateReplicaProfile" . }}
+      serviceAccountName: {{ include "fireweed-queue.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -30,8 +30,8 @@ spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
-        - name: pqueue
-          image: "{{ .Values.image.repository }}:{{ include "pqueue.imageTag" . }}"
+        - name: fireweed
+          image: "{{ .Values.image.repository }}:{{ include "fireweed-queue.imageTag" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
@@ -41,7 +41,7 @@ spec:
               protocol: TCP
           envFrom:
             - configMapRef:
-                name: {{ include "pqueue.fullname" . }}-config
+                name: {{ include "fireweed-queue.fullname" . }}-config
           {{- if or (gt (int .Values.replicaCount) 1) (and (eq .Values.storage.log.backend "objectlog") (eq .Values.storage.log.objectLog.store "s3")) (eq .Values.storage.log.backend "postgres") (eq .Values.storage.projection.backend "postgres") .Values.storage.lakebase.enabled (eq .Values.storage.controlPlane.backend "postgres") }}
           env:
             {{- if gt (int .Values.replicaCount) 1 }}
@@ -79,7 +79,7 @@ spec:
             {{- end }}
             {{- if eq .Values.storage.projection.backend "postgres" }}
             {{- /* Relational-projection DSN: consumed by the postgres/postgres combo
-                   (ComposedBackend<PostgresLog, PostgresRelational, ..>, crates/pqueue-server/src/lib.rs).
+                   (ComposedBackend<PostgresLog, PostgresRelational, ..>, crates/fireweed-server/src/lib.rs).
                    The Lakebase profile uses projection=inmemory, so this never renders there. */}}
             - name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL
               valueFrom:
@@ -159,7 +159,7 @@ spec:
         - name: storage
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ include "pqueue.storagePvcName" . }}
+            claimName: {{ include "fireweed-queue.storagePvcName" . }}
           {{- else }}
           emptyDir: {}
           {{- end }}
