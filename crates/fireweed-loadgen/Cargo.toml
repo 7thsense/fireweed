@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 
 # In-cluster RESP load generator for the TP-002 E2 multi-node kind harness (ADR-008: the queue is the unit
 # of sharding). `run` drives the segmented object_log_sqlite_projection workload (pipelined XADD ingest,
