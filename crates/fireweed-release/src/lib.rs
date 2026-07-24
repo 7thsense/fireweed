@@ -683,16 +683,18 @@ impl LedgerRow {
 }
 
 /// The ledger file an evidence suite writes its row to: `<dir>/<suite>.jsonl`, where `<dir>` is
-/// `$PQUEUE_LEDGER_DIR` if set (the CI gate points every suite at one collection dir), else
+/// `$FIREWEED_LEDGER_DIR` if set (or its v0.20.0 `$PQUEUE_LEDGER_DIR` compatibility alias), else
 /// `<repo>/target/pqueue-ledger` derived from the caller's `manifest_dir` (pass `env!("CARGO_MANIFEST_DIR")`
 /// so this resolves to the repo-root `target/` regardless of which workspace the suite runs in).
 ///
-/// NOTE: this `PQUEUE_LEDGER_DIR` read is the ONE intentional library `std::env` access in the workspace. It
+/// NOTE: this ledger-directory read is the ONE intentional library `std::env` access in the workspace. It
 /// is CI / test-evidence tooling (where validation suites drop their JSONL ledger rows), NOT server runtime
 /// configuration — so it is exempt from the "no env reads in library runtime code" rule. The runtime
 /// `Config` populator (`fireweed_server::Config::from_env`) is the only env→config path for the server itself.
 pub fn ledger_path(manifest_dir: &str, suite: &str) -> std::path::PathBuf {
-    let dir = match std::env::var("PQUEUE_LEDGER_DIR") {
+    let dir = match std::env::var("FIREWEED_LEDGER_DIR")
+        .or_else(|_| std::env::var("PQUEUE_LEDGER_DIR"))
+    {
         Ok(d) if !d.trim().is_empty() => {
             let path = std::path::PathBuf::from(d);
             if path.is_absolute() {
@@ -5021,6 +5023,13 @@ mod tests {
             ledger_path("/repo/crates/x", "suite_a"),
             std::path::PathBuf::from("/repo/crates/x/../../docs/perf/evidence/suite_a.jsonl")
         );
+        unsafe { std::env::set_var("FIREWEED_LEDGER_DIR", "/tmp/fireweed-ledger") };
+        assert_eq!(
+            ledger_path("/repo/crates/x", "suite_a"),
+            std::path::PathBuf::from("/tmp/fireweed-ledger/suite_a.jsonl"),
+            "the authoritative Fireweed name must win over its compatibility alias"
+        );
+        unsafe { std::env::remove_var("FIREWEED_LEDGER_DIR") };
         unsafe { std::env::remove_var("PQUEUE_LEDGER_DIR") };
         assert_eq!(
             ledger_path("/repo/crates/x", "suite_a"),

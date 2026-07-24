@@ -20,6 +20,10 @@ path = "src/lib.rs"
 name = "fireweed-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "pqueue-bench"
+path = "src/main.rs"
+
 # At-scale performance harness (TP-002 E0/E1/E3 substantiation): drives the four durable-log backends —
 # the realized "log store" axis; the projection is the single shared `fireweed-projection` materialization —
 # through ingest / claim+ack / recovery / queue-density workloads and reports throughput vs the E0 floor

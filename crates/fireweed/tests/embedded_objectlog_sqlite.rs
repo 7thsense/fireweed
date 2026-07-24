@@ -24,6 +24,11 @@ use fireweed_objectlog::segmented::S3BlobStore;
 use futures::executor::block_on;
 use rusqlite::{Connection, params};
 
+fn runtime_env(suffix: &str) -> Result<String, std::env::VarError> {
+    std::env::var(format!("FIREWEED_{suffix}"))
+        .or_else(|_| std::env::var(format!("PQUEUE_{suffix}")))
+}
+
 fn nonce() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -897,17 +902,17 @@ fn public_objectlog_sqlite_namespaces_isolate_shared_object_root() {
 
 #[test]
 fn public_s3_sqlite_delete_and_rehydrate() {
-    let endpoint = match std::env::var("PQUEUE_S3_TEST_URL") {
+    let endpoint = match runtime_env("S3_TEST_URL") {
         Ok(value) => value,
         Err(_) => {
             eprintln!("SKIP public_s3_sqlite_delete_and_rehydrate: PQUEUE_S3_TEST_URL is unset");
             return;
         }
     };
-    let bucket = std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into());
-    let access = std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let secret = std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let region = std::env::var("PQUEUE_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| "pqueue-test".into());
+    let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let secret = runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let region = runtime_env("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
     S3BlobStore::new(&endpoint, &bucket, &access, &secret, &region)
         .unwrap()
         .create_bucket()

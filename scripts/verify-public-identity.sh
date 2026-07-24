@@ -77,6 +77,18 @@ old_rust_binary = re.compile(
     r"verify-e3-contract|verify-evidence-attestation|verify-ledger|"
     r"verify-transaction-evidence)\b"
 )
+compatibility_binary_alias = re.compile(
+    r'^name\s*=\s*"pqueue-(?:bench|service|loadgen|postgres-migrate|build-e3-contract|'
+    r'build-evidence-attestation|cost-model|verify-density-evidence|verify-e0-e1-evidence|'
+    r'verify-e2-failover|verify-e2-scale-evidence|verify-e3-contract|'
+    r'verify-evidence-attestation|verify-ledger|verify-transaction-evidence)"$'
+)
+runtime_env_files = re.compile(
+    r"^(?:crates/fireweed-server/src/(?:bin/fireweed-service|lib)\.rs|"
+    r"crates/fireweed-postgres/src/bin/fireweed-postgres-migrate\.rs|"
+    r"crates/fireweed-release/src/lib\.rs|crates/fireweed-bench/src/main\.rs)$"
+)
+legacy_process_env_read = re.compile(r'env::var(?:_os)?\("PQUEUE_([A-Z0-9_]+)"\)')
 old_deployment_coordinate = re.compile(
     r"charts/pqueue|\bpqueue-service\b|\bpqueue-helm-chart\b|"
     r"\bpqueue-[0-9][A-Za-z0-9.+-]*\.tgz\b|"
@@ -194,9 +206,13 @@ for rel in tracked_files():
     except UnicodeDecodeError:
         continue
     checked_files += 1
+    cargo_section = ""
     if re.search(r"^(?:crates/pqueue(?:-[^/]+)?|tools/turso-compat-probe)(?:/|$)", rel):
         rust_namespace_violations.append((rel, 0, "old Cargo crate path", rel))
     for line_no, line in enumerate(lines, start=1):
+        stripped = line.strip()
+        if (rel == "Cargo.toml" or rel.endswith("/Cargo.toml")) and stripped.startswith("["):
+            cargo_section = stripped
         found = old_deployment_coordinate.search(line) if is_deployment_surface(rel) else None
         if found:
             deployment_namespace_violations.append(
@@ -204,10 +220,22 @@ for rel in tracked_files():
             )
         if (rel == "Cargo.toml" or rel == "Cargo.lock" or rel.endswith("/Cargo.toml") or rel.endswith("/Cargo.lock")):
             found = old_cargo_coordinate.search(line)
-            if found:
+            governed_binary_alias = (
+                rel.endswith("Cargo.toml")
+                and cargo_section == "[[bin]]"
+                and compatibility_binary_alias.fullmatch(stripped)
+            )
+            if found and not governed_binary_alias:
                 rust_namespace_violations.append(
                     (rel, line_no, "old Cargo package/dependency coordinate", found.group(0))
                 )
+        if runtime_env_files.search(rel):
+            for legacy_read in legacy_process_env_read.finditer(line):
+                primary = f'FIREWEED_{legacy_read.group(1)}'
+                if primary not in "\n".join(lines):
+                    rust_namespace_violations.append(
+                        (rel, line_no, "legacy runtime env read without Fireweed primary", legacy_read.group(0))
+                    )
         if rel.endswith(".rs"):
             found = old_rust_identifier.search(line)
             if found:
@@ -215,7 +243,12 @@ for rel in tracked_files():
                     (rel, line_no, "old Rust crate identifier", found.group(0))
                 )
             found = old_rust_binary.search(line)
-            if found:
+            governed_runtime_alias_test = (
+                rel == "crates/fireweed-server/tests/env_config.rs"
+                and found
+                and found.group(0) == "pqueue-service"
+            )
+            if found and not governed_runtime_alias_test:
                 rust_namespace_violations.append(
                     (rel, line_no, "old Rust-owned binary coordinate", found.group(0))
                 )
