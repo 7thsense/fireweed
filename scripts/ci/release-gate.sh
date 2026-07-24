@@ -57,6 +57,10 @@ ${CARGO} fmt --all --check
 echo "--- clippy ---"
 ${CARGO} clippy --workspace --all-targets -- -D warnings
 
+echo "--- public crate encapsulation ---"
+bash "${REPO_ROOT}/scripts/verify-public-artifact-topology.sh"
+bash "${REPO_ROOT}/scripts/verify-public-crate-boundary.sh"
+
 echo "--- exact Postgres TP-003 transaction evidence fixtures ---"
 ${CARGO} test -p fireweed-release --test transaction_evidence_tests -- --nocapture
 

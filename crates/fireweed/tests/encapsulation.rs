@@ -2,8 +2,9 @@
 //!
 //! Two guarantees:
 //! 1. `open_*` builds a usable `Pqueue` WITHOUT the client ever naming a concrete backend or a port.
-//! 2. A source-scan guard fails the build if `pqueue` ever re-exports a port trait or a backend accessor —
-//!    so a client of the published crate cannot reach `PushPort`/`ClaimPort`/`FinalizePort` via `pqueue`.
+//! 2. A local source-scan guard catches accidental port re-exports and backend accessors quickly.
+//!    `scripts/verify-public-crate-boundary.sh` separately compiles a downstream crate and proves that
+//!    ports, internal crates, and the wrapped backend are unreachable through the supported dependency.
 
 use std::sync::Arc;
 
@@ -296,9 +297,10 @@ async fn open_sqlite_owned_path_reopens_after_all_handles_drop() {
     std::fs::remove_file(path).unwrap();
 }
 
-/// GUARD (ADR-009 L6): `pqueue` must not re-export a port trait on its public surface, and must not expose
+/// FAST LOCAL GUARD (ADR-009 L6): `fireweed` must not re-export a port trait on its public surface, or expose
 /// a backend accessor — either would let a client reach a raw port and bypass coordination/fencing. This
-/// scans the library source so a regression (an accidental `pub use ...Port`) fails the build.
+/// scans the library source so an accidental `pub use ...Port` regression fails the crate test. The
+/// downstream compile-fail gate is authoritative for reachability from a consumer crate.
 #[test]
 fn public_surface_exposes_no_port_or_backend() {
     let src = include_str!("../src/lib.rs");
@@ -315,7 +317,7 @@ fn public_surface_exposes_no_port_or_backend() {
             for tok in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
                 assert!(
                     !tok.ends_with("Port"),
-                    "pqueue must not re-export the port trait `{tok}` on its public surface — clients must \
+                    "fireweed must not re-export the port trait `{tok}` on its public surface — clients must \
                      use `Pqueue`, never the raw ports (ADR-009 L6 / B3)"
                 );
             }

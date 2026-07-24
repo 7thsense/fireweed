@@ -1,0 +1,26 @@
+[package]
+name = "fireweed-public-crate-boundary"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+fireweed = { path = "../../../../crates/fireweed", default-features = false, features = ["memory"] }
+
+[[bin]]
+name = "supported"
+path = "src/supported.rs"
+
+[[bin]]
+name = "raw-port"
+path = "src/raw_port.rs"
+
+[[bin]]
+name = "internal-crate"
+path = "src/internal_crate.rs"
+
+[[bin]]
+name = "backend-accessor"
+path = "src/backend_accessor.rs"
