@@ -17,7 +17,7 @@ remain authoritative for those behaviors.
 
 **Goals**: exact API-005 signature/export closure; concrete-handle parity;
 Snorri compilation and semantic acceptance against the same Fireweed revision;
-package and registry-consumption evidence for the release candidate
+tagged GitHub-source consumption evidence for the release candidate
 **Out of scope**: new backend guarantees, performance qualification, non-Cargo
 release artifacts, and runtime-hardening work not exposed by API-005
 **Traceability source**: ADR-022 and API-005
@@ -28,7 +28,7 @@ release artifacts, and runtime-hardening work not exposed by API-005
 | Fireweed integration | At least one successful call from every queue-operation family on `Fireweed` | P0 |
 | Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
 | Garage integration | SQLite and PostgreSQL projection lifecycle plus retry/idempotency run against Garage on `eldir` without skips | P0 |
-| Registry consumption | Snorri resolves the packaged/published `fireweed` facade rather than a workspace-internal crate | P0 |
+| Published-source consumption | Snorri resolves the tagged public `telepathdata/fireweed` repository rather than a workspace-internal crate | P0 |
 | Existing backend suites | No regression in the selected profile's current semantic tests | P0 |
 
 ## Test data
@@ -81,10 +81,12 @@ cargo check -p fireweed --no-default-features --features objectlog
 cargo test -p fireweed --all-features
 scripts/verify-public-crate-boundary.sh
 scripts/verify-public-artifact-topology.sh
-cargo package -p fireweed
-cargo publish -p fireweed --dry-run
 git diff --check
 ```
+
+Crates.io package closure is a separate follow-up. The v0.20 GitHub release
+MUST NOT publish repository-only internal crates merely to make the facade's
+current path dependencies registry-resolvable.
 
 Environment-gated PostgreSQL tests remain explicitly reported rather than
 silently counted as passing when no database is available.
@@ -103,11 +105,11 @@ deletes its `Plain`/`Embedded` handle enum.
 Before running any Snorri command, the acceptance record MUST prove dependency
 identity. Pre-release testing uses a path dependency on
 `../fireweed/crates/fireweed` or an exact Fireweed commit revision. Release
-testing uses the v0.20 tag, and post-publication testing uses the exact
-published `fireweed` version from crates.io. `cargo tree` and `Cargo.lock`
-evidence MUST show package `fireweed` at the intended path, revision, or
-registry version; the old `7thsense-pqueue` source is a hard failure even if
-compilation succeeds from cache.
+testing uses the exact v0.20 tag from the public `telepathdata/fireweed`
+repository. `cargo tree` and `Cargo.lock` evidence MUST show package `fireweed`
+at the intended path, revision, or tagged git source; the old
+`7thsense-pqueue` source is a hard failure even if compilation succeeds from
+cache.
 
 Compile each feature profile independently before `--all-features`:
 
@@ -166,7 +168,7 @@ passing evidence.
 | API-005 projection control | Fireweed + Snorri object-log integration | Borrowed control verify/delete/rebuild and reassignment tests |
 | API-005 opaque composition | Contract compile | Construction selects composition; the live facade cannot disclose it |
 | Garage durability acceptance | Snorri on `eldir` | All three named Garage tests execute without skips and pass |
-| Published facade consumption | Package + downstream integration | Package/dry-run succeeds; post-publication lockfile resolves exact crates.io version |
+| Published facade consumption | GitHub release + downstream integration | Public tag/release exists; post-publication lockfile resolves the exact `telepathdata/fireweed` tag |
 
 ## Infrastructure and implementation order
 
@@ -177,8 +179,8 @@ passing evidence.
 4. Migrate Snorri against the exact local commit and run independent feature
    checks before semantic tests.
 5. Run the no-skip Garage matrix on `eldir` against the release candidate.
-6. Repeat dependency identity and the full Snorri gates against the release tag
-   and then the published crates.io version.
+6. Publish the GitHub tag/release, then repeat dependency identity and the full
+   Snorri gates against that public tag.
 
 Local developer runs may report PostgreSQL rows as `not run` when the URL is
 absent. Release acceptance requires both Garage and PostgreSQL on `eldir`; no
@@ -201,7 +203,7 @@ build work, not accepted test evidence.
 ## Build handoff
 
 **Priority**: contract fixtures → forwarding closure → Fireweed matrix → Snorri
-matrix → `eldir` Garage matrix → package/dry-run → tag → registry repeat
+matrix → `eldir` Garage matrix → public GitHub tag/release → tagged-source repeat
 **Blocking gate**: every P0 row above passes against one recorded Fireweed
 revision with zero phantom test claims and no unreviewed supported-API removal.
 
