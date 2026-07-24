@@ -32,7 +32,7 @@ fireweed-objectlog = { path = "../fireweed-objectlog" }
 fireweed-projection = { path = "../fireweed-projection" }
 fjord = { git = "https://github.com/7thsense/fjord.git", tag = "v0.1.3", package = "fjord-broker" }
 heimq = { git = "https://github.com/easel/heimq", tag = "v0.1.2" }
-heimq-broker = { git = "https://github.com/easel/heimq", tag = "v0.1.2" }
+heimq-broker = { git = "https://github.com/easel/heimq", tag = "v0.1.6" }
 # Pure-Rust Kafka v2 record-batch codec, imported as `heimq_protocol`: heimq's VENDORED fork of
 # kafka-protocol 0.15.1 that bounds Array/CompactArray decode allocation (fixes the OOM DoS). Used to
 # encode change records for the in-process log append path, matching the version the embedded fjord/heimq
