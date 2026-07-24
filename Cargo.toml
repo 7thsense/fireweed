@@ -40,4 +40,4 @@ homepage = "https://github.com/telepathdata/fireweed"
 # Multi-line TOML string keeps the repo name on a separate line from the host prefix so the
 # ADR-011 AC path-dep check (rg for path=.*axon etc.) does not false-positive on the git URL.
 axon-esf = { version = "0.3.2", git = """https://github.com/DocumentDrivenDX/\
-axon""", tag = "v0.3.2" }
+axon""", tag = "v0.4.2" }
