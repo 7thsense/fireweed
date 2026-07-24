@@ -66,6 +66,14 @@ impl LogStore for SqliteRelational {
         Ok(())
     }
 
+    fn create_or_read_definition(
+        &mut self,
+        definition: &QueueDefinition,
+    ) -> EngineResult<Option<fireweed_engine::CreateQueueOutcome>> {
+        let mut g = self.lock();
+        create_queue_sql(&mut g, definition.clone()).map(Some)
+    }
+
     fn current_epoch(&self, shard: &QueueKey) -> EngineResult<u64> {
         let g = self.lock();
         let (t, q) = parts(shard);
