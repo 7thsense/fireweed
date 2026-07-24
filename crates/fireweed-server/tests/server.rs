@@ -1021,6 +1021,86 @@ async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_
     let _ = std::fs::remove_file(&projection_path);
 }
 
+#[cfg(feature = "turso-projection")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn object_log_turso_create_loser_can_push_claim_and_reopen() {
+    let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-create-race");
+    let config = SegmentConfig::new(1, 5).unwrap();
+    let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
+    let left = ObjectLogTursoBackend::open_with_blob_store(store.clone(), &projection_path, config)
+        .await
+        .unwrap();
+    let right =
+        ObjectLogTursoBackend::open_with_blob_store(store.clone(), &projection_path, config)
+            .await
+            .unwrap();
+    let definition = qdef();
+
+    let (left_outcome, right_outcome) = tokio::join!(
+        left.create_queue(definition.clone()),
+        right.create_queue(definition.clone())
+    );
+    let left_outcome = left_outcome.unwrap();
+    let right_outcome = right_outcome.unwrap();
+    assert_eq!(
+        usize::from(left_outcome.created) + usize::from(right_outcome.created),
+        1
+    );
+    assert_eq!(left_outcome.definition, definition);
+    assert_eq!(right_outcome.definition, definition);
+
+    let loser = if left_outcome.created { &right } else { &left };
+    let ids = loser
+        .push(&qkey(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap();
+    let claimed = loser
+        .claim(ClaimRequest {
+            eligibility_time: None,
+            shard: qkey(),
+            worker_id: WorkerId::new("turso-create-loser").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("turso-create-loser-lease").unwrap(),
+            lease_expires_at: ts(30),
+            now: ts(1),
+            compatibility: Default::default(),
+            expected_epoch: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(claimed.items[0].item_id, ids[0]);
+    drop(left);
+    drop(right);
+
+    let reopened = ObjectLogTursoBackend::open_with_blob_store(store, &projection_path, config)
+        .await
+        .unwrap();
+    let reopened_outcome = reopened.create_queue(definition.clone()).await.unwrap();
+    assert!(!reopened_outcome.created);
+    assert_eq!(reopened_outcome.definition, definition);
+    assert_eq!(
+        reopened.queue_definition(&qkey()).await.unwrap(),
+        definition
+    );
+    assert_eq!(
+        fireweed_engine::AsyncProjectionStore::item_state(
+            reopened.projection().as_ref(),
+            qkey(),
+            ids[0],
+        )
+        .await
+        .unwrap(),
+        Some(fireweed_core::ItemState::Leased)
+    );
+
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(&object_root);
+    let _ = std::fs::remove_file(&projection_path);
+    let _ = std::fs::remove_file(format!("{}-wal", projection_path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", projection_path.display()));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen() {
     // The composed objectlog-LOG + sqlite-PROJECTION backend (the segmented object log is the composed

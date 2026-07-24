@@ -11,12 +11,12 @@ use fireweed_core::{
 use fireweed_engine::{
     AsyncProjectionStore, ClaimCommand, ClaimCompatibility, ClaimUnit, CohortClaimCommand,
     CohortExpiredCommand, CohortFinalizeCommand, CohortRenewLeaseCommand, CommandChecksum,
-    CommandEnvelope, CommandId, CommandPosition, FenceLeaseCommand, FinalizeCommand, FinalizeKind,
-    FinalizeOutcome, FinalizeTarget, GroupBatching, IdempotencyDecision, LeaseExpiredCommand,
-    PauseQueueCommand, PayloadUpdate, ProjectionStore, PurgeItemsCommand, PushCommand,
-    PushFingerprint, PushItem, QueueCommand, QueueKey, ReassignLeaseCommand, RenewLeaseCommand,
-    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand, UnfenceLeaseCommand,
-    UpdateFieldsCommand, WriteSideRecordsCommand,
+    CommandEnvelope, CommandId, CommandPosition, EngineError, FenceLeaseCommand, FinalizeCommand,
+    FinalizeKind, FinalizeOutcome, FinalizeTarget, GroupBatching, IdempotencyDecision,
+    LeaseExpiredCommand, PauseQueueCommand, PayloadUpdate, ProjectionStore, PurgeItemsCommand,
+    PushCommand, PushFingerprint, PushItem, QueueCommand, QueueKey, ReassignLeaseCommand,
+    RenewLeaseCommand, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand,
+    UnfenceLeaseCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
 };
 
 fn indexed_item(item_id: ItemId, key: &str, email: &str) -> PushItem {
@@ -1475,6 +1475,41 @@ fn definition() -> QueueDefinition {
     }
 }
 
+fn rich_create_definition() -> QueueDefinition {
+    let mut definition = definition();
+    definition.priority_model = PriorityModel {
+        kind: PriorityModelKind::Text,
+        direction: PriorityDirection::Descending,
+        tie_breaker: PriorityTieBreaker::ClientItemKey,
+    };
+    definition.ordering_mode = OrderingMode::BoundedRelaxed;
+    definition.max_rank_error = 7;
+    definition.progress_bound_ms = 12_345;
+    definition.eligibility_policy.gate_keys = fireweed_core::GateKeyPolicy::Dynamic;
+    definition.eligibility_policy.max_gate_keys_per_item = Some(4);
+    definition.eligibility_policy.max_gates_per_request = Some(9);
+    definition.cohort_policy = Some(CohortPolicy {
+        enabled: true,
+        completion_bound_ms: Some(30_000),
+        on_incomplete: Some(fireweed_core::CohortOnIncomplete::ExpireCohort),
+        max_cohort_size: Some(12),
+    });
+    definition.recurrence = fireweed_core::RecurrencePolicy {
+        mode: fireweed_core::RecurrenceMode::Recurring,
+        until: Some(timestamp(8_000)),
+    };
+    definition.request_id_retention_ms = 71_000;
+    definition.client_item_key_retention_ms = 72_000;
+    definition.terminal_retention_ms = 73_000;
+    definition.max_lease_duration_ms = 74_000;
+    definition.retry_policy = RetryPolicy { max_attempts: 11 };
+    definition.max_push_batch_size = 17;
+    definition.max_claim_batch_size = 13;
+    definition.max_eligible_group_size = Some(8);
+    definition.emit_change_records = true;
+    definition
+}
+
 fn envelope(id: &str, command: QueueCommand, item_ids: Vec<ItemId>, now: i64) -> CommandEnvelope {
     CommandEnvelope {
         command_id: CommandId::new(id),
@@ -2840,6 +2875,92 @@ async fn ensure_shard_rejects_missing_or_negative_cursor_state() {
         AsyncProjectionStore::ensure_shard(&store, definition).await,
         Err(fireweed_engine::EngineError::Storage(_))
     ));
+}
+
+#[tokio::test]
+async fn turso_create_returns_authoritative_rich_definition() {
+    let store = TursoRelational::in_memory().await.expect("Turso");
+    let definition = rich_create_definition();
+
+    let outcome = store
+        .create_or_read_queue(definition.clone())
+        .await
+        .unwrap();
+
+    assert!(outcome.created);
+    assert_eq!(outcome.definition, definition);
+    let rows = store
+        .query(
+            "SELECT definition FROM queues WHERE tenant=?1 AND queue=?2",
+            vec!["tenant".into(), "queue".into()],
+        )
+        .await
+        .unwrap();
+    let encoded = match &rows[0].values[0] {
+        Value::Text(encoded) => encoded,
+        value => panic!("unexpected durable definition value: {value:?}"),
+    };
+    let durable: QueueDefinition = serde_json::from_str(encoded).unwrap();
+    assert_eq!(durable, definition);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turso_concurrent_compatible_create_has_one_winner_no_overwrite() {
+    let dir = tempdir().unwrap();
+    let config = TursoConfig::local(dir.path().join("compatible-create.db"));
+    let first = TursoRelational::open(config.clone()).await.unwrap();
+    let second = TursoRelational::open(config).await.unwrap();
+    let definition = rich_create_definition();
+
+    let (first_outcome, second_outcome) = tokio::join!(
+        first.create_or_read_queue(definition.clone()),
+        second.create_or_read_queue(definition.clone())
+    );
+    let outcomes = [first_outcome.unwrap(), second_outcome.unwrap()];
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+    assert!(
+        outcomes
+            .iter()
+            .all(|outcome| outcome.definition == definition)
+    );
+    let durable = first
+        .create_or_read_queue(definition.clone())
+        .await
+        .unwrap();
+    assert!(!durable.created);
+    assert_eq!(durable.definition, definition);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turso_concurrent_incompatible_create_conflicts_and_preserves_winner() {
+    let dir = tempdir().unwrap();
+    let config = TursoConfig::local(dir.path().join("incompatible-create.db"));
+    let first = TursoRelational::open(config.clone()).await.unwrap();
+    let second = TursoRelational::open(config).await.unwrap();
+    let first_definition = rich_create_definition();
+    let mut second_definition = first_definition.clone();
+    second_definition.progress_bound_ms += 1;
+    second_definition.max_claim_batch_size += 1;
+
+    let (first_outcome, second_outcome) = tokio::join!(
+        first.create_or_read_queue(first_definition.clone()),
+        second.create_or_read_queue(second_definition.clone())
+    );
+    let (winner, loser_store) = match (first_outcome, second_outcome) {
+        (Ok(outcome), Err(EngineError::QueueDefinitionConflict)) => (outcome, &second),
+        (Err(EngineError::QueueDefinitionConflict), Ok(outcome)) => (outcome, &first),
+        (first, second) => panic!("expected one winner and one conflict: {first:?}, {second:?}"),
+    };
+    assert!(winner.created);
+    assert!(winner.definition == first_definition || winner.definition == second_definition);
+    assert_eq!(
+        loser_store
+            .create_or_read_queue(winner.definition.clone())
+            .await
+            .unwrap()
+            .definition,
+        winner.definition
+    );
 }
 
 #[tokio::test]
