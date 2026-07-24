@@ -941,8 +941,8 @@ pub trait CommitTransitionPort: Send + Sync {
 /// Capability descriptors for the authoritative vectorized claimed-work commit (Snorri StateStore boundary,
 /// epic pqueue-2201fd37 acceptance, ADR-009). A consumer (Snorri) reads these BEFORE activation and rejects a
 /// backend that does not advertise the guarantees it needs — every bool defaults to `false` (the safe default
-/// for an eventual-apply backend that cannot offer one atomic transition boundary). Memory + sqlite-relational
-/// advertise the capabilities they actually implement; objectlog/postgres keep the all-false default.
+/// for an eventual-apply backend that cannot offer one atomic transition boundary). Backends and composed
+/// log/projection pairs advertise the capabilities they actually implement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitCapabilities {
     /// Each commit entry's writes (side records + instance fence + lifecycle + finalize) commit atomically.

@@ -26,6 +26,7 @@ fireweed-memory = { path = "../fireweed-memory", optional = true }
 fireweed-sqlite = { path = "../fireweed-sqlite", optional = true }
 fireweed-objectlog = { path = "../fireweed-objectlog", optional = true }
 fireweed-postgres = { path = "../fireweed-postgres", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
 
 [features]
 # Default pulls the embeddable adapters so `cargo build`/`cargo test` behave as before; a consumer who
@@ -35,7 +36,7 @@ default = ["memory", "sqlite", "objectlog"]
 memory = ["dep:fireweed-memory"]
 sqlite = ["dep:fireweed-sqlite"]
 objectlog = ["dep:fireweed-objectlog"]
-postgres = ["dep:fireweed-postgres"]
+postgres = ["dep:fireweed-postgres", "dep:tokio"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }
