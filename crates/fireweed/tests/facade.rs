@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use bytes::Bytes;
 use fireweed::{
-    ClaimAt, ClaimRef, CommitEntry, CommitRequest, ControlPlaneConfig, EngineError, FinalizeKind,
-    GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, OwnerId, PayloadUpdate, Pqueue,
-    RequestId, UtcTimestamp,
+    ClaimAt, ClaimRef, CommitEntry, CommitRequest, ControlPlaneConfig, DiscoveryGranularity,
+    EngineError, FinalizeKind, GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, OwnerId,
+    PayloadUpdate, Pqueue, RequestId, UtcTimestamp,
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
@@ -151,6 +151,145 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
     let again = pq.claim(&q, 1, 30_000).await.unwrap();
     assert_eq!(again.len(), 1, "retried item is claimable again");
     assert!(again[0].attempt_count > 1, "redelivery bumps attempt_count");
+}
+
+#[tokio::test]
+async fn lifecycle_aliases_preserve_batch_state_and_structured_errors() {
+    let clock = Arc::new(ManualClock::at(0));
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock);
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+
+    let leased_id = pq.push(&q, at(10)).await.unwrap();
+    let pending_id = pq.push(&q, at(20)).await.unwrap();
+    assert_eq!(pq.claim(&q, 1, 30_000).await.unwrap()[0].item_id, leased_id);
+
+    let alias_error = pq.complete(&q, [leased_id, pending_id]).await.unwrap_err();
+    let existing_error = pq.ack(&q, [leased_id, pending_id]).await.unwrap_err();
+    assert_eq!(alias_error, existing_error);
+    let unchanged = pq.metrics(&q).await.unwrap();
+    assert_eq!(
+        (unchanged.pending, unchanged.leased, unchanged.complete),
+        (1, 1, 0)
+    );
+
+    pq.complete(&q, [leased_id]).await.unwrap();
+    let released = pq.claim(&q, 1, 30_000).await.unwrap();
+    assert_eq!(released[0].item_id, pending_id);
+    pq.release(&q, [pending_id]).await.unwrap();
+    let after_release = pq.metrics(&q).await.unwrap();
+    assert_eq!(
+        (
+            after_release.pending,
+            after_release.leased,
+            after_release.complete
+        ),
+        (1, 0, 1)
+    );
+}
+
+#[tokio::test]
+async fn retry_aliases_match_absolute_relative_and_exhaustion_behavior() {
+    let clock = Arc::new(ManualClock::at(100));
+    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
+    let q = qkey();
+    let mut definition = qdef();
+    definition.retry_policy.max_attempts = 2;
+    pq.create_queue(definition).await.unwrap();
+
+    for priority in [10, 20, 30, 40] {
+        pq.push(&q, at(priority)).await.unwrap();
+    }
+    let claimed = pq.claim(&q, 4, 30_000).await.unwrap();
+    pq.retry(&q, [claimed[0].item_id], Some(ts(110)))
+        .await
+        .unwrap();
+    pq.nack(
+        &q,
+        [claimed[1].item_id],
+        Nack::Retry {
+            not_before: Some(ts(110)),
+        },
+    )
+    .await
+    .unwrap();
+    pq.retry_after(&q, [claimed[2].item_id], 20_000)
+        .await
+        .unwrap();
+    pq.nack_retry_after(&q, [claimed[3].item_id], 20_000)
+        .await
+        .unwrap();
+
+    clock.set(109);
+    assert!(pq.claim(&q, 4, 30_000).await.unwrap().is_empty());
+    clock.set(110);
+    let absolute = pq.claim(&q, 4, 30_000).await.unwrap();
+    assert_eq!(absolute.len(), 2);
+    assert_eq!(
+        absolute.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+        vec![claimed[0].item_id, claimed[1].item_id,]
+    );
+    pq.retry(&q, absolute.iter().map(|item| item.item_id), None)
+        .await
+        .unwrap();
+    let exhausted = pq.metrics(&q).await.unwrap();
+    assert_eq!(
+        exhausted.failed, 2,
+        "retry exhaustion matches nack retry semantics"
+    );
+
+    clock.set(119);
+    assert!(pq.claim(&q, 4, 30_000).await.unwrap().is_empty());
+    clock.set(120);
+    let relative = pq.claim(&q, 4, 30_000).await.unwrap();
+    assert_eq!(relative.len(), 2);
+    assert_eq!(
+        relative.iter().map(|item| item.item_id).collect::<Vec<_>>(),
+        vec![claimed[2].item_id, claimed[3].item_id,]
+    );
+}
+
+#[tokio::test]
+async fn discover_alias_preserves_exact_scope_order() {
+    let clock = Arc::new(ManualClock::at(0));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "fireweed-facade-discover-alias-{}-{nonce}.db",
+        std::process::id()
+    ));
+    let backend = Arc::new(SqliteRelationalBackend::open(path.to_str().unwrap()).unwrap());
+    let pq = Pqueue::new(backend, clock.clone());
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+
+    let mut old = at(10);
+    old.group_key = Some(GroupKey::new("old").unwrap());
+    pq.push(&q, old).await.unwrap();
+    clock.set(10);
+    let mut new = at(20);
+    new.group_key = Some(GroupKey::new("new").unwrap());
+    pq.push(&q, new).await.unwrap();
+    clock.set(20);
+
+    let existing = pq
+        .discover_active_scopes(&q, DiscoveryGranularity::Group)
+        .await
+        .unwrap();
+    let alias = pq.discover(&q, DiscoveryGranularity::Group).await.unwrap();
+    assert_eq!(alias, existing);
+    assert_eq!(
+        alias
+            .iter()
+            .map(|scope| scope.group_key.clone())
+            .collect::<Vec<_>>(),
+        vec![Some("old".to_string()), Some("new".to_string())]
+    );
+
+    drop(pq);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]

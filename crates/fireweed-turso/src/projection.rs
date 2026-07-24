@@ -12,10 +12,10 @@ use fireweed_core::{
 };
 use fireweed_engine::{
     AsyncProjectionStore, ClaimCompatibility, ClaimUnit, ClaimedItem, CohortLeaseTarget,
-    CommandEnvelope, CommandPosition, EngineError, EngineResult, FinalizeKind, FinalizeTarget,
-    IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage,
-    PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics, RenewTarget,
-    RequestOutcome, RichClaimSelection, TerminalEmissionMetrics,
+    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, FinalizeKind,
+    FinalizeTarget, IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate,
+    PendingPage, PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics,
+    RenewTarget, RequestOutcome, RichClaimSelection, TerminalEmissionMetrics,
 };
 use fireweed_relational::{
     async_projection as sql, elig_sort, fields_from_json, fields_to_json, lease_hash,
@@ -103,7 +103,7 @@ async fn one_row(
 async fn ensure_shard_owned(
     writer: Arc<Mutex<Connection>>,
     definition: QueueDefinition,
-) -> EngineResult<()> {
+) -> EngineResult<CreateQueueOutcome> {
     let mut connection = writer.lock().await;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -111,40 +111,10 @@ async fn ensure_shard_owned(
         .map_err(storage)?;
     let tenant = definition.tenant_id.as_str().to_string();
     let queue = definition.queue_id.as_str().to_string();
-    if let Some(row) = one_row(
-        &transaction,
-        sql::SELECT_QUEUE_DEFINITION,
-        vec![tenant.clone().into(), queue.clone().into()],
-    )
-    .await?
-    {
-        let existing: QueueDefinition = serde_json::from_str(&text(&row[0])?).map_err(storage)?;
-        if existing.ordering_mode != definition.ordering_mode
-            || existing.priority_model != definition.priority_model
-        {
-            transaction.rollback().await.map_err(storage)?;
-            return Err(EngineError::QueueDefinitionConflict);
-        }
-        let cursor = one_row(
-            &transaction,
-            sql::SELECT_CURSOR_STATE,
-            vec![tenant.clone().into(), queue.clone().into()],
-        )
-        .await?
-        .ok_or_else(|| storage("queue exists without its relational cursor"))?;
-        for (index, name) in ["next_seq", "next_item_seq", "assignment_epoch"]
-            .into_iter()
-            .enumerate()
-        {
-            nonnegative_u64(integer(&cursor[index])?, name)?;
-        }
-        transaction.commit().await.map_err(storage)?;
-        return Ok(());
-    }
     let encoded = serde_json::to_string(&definition).map_err(storage)?;
-    transaction
+    let created = transaction
         .execute(
-            sql::INSERT_QUEUE,
+            sql::INSERT_QUEUE_IF_ABSENT,
             vec![
                 Value::Text(tenant.clone()),
                 Value::Text(queue.clone()),
@@ -152,15 +122,47 @@ async fn ensure_shard_owned(
             ],
         )
         .await
-        .map_err(storage)?;
-    transaction
-        .execute(
-            sql::INSERT_CURSOR,
-            vec![Value::Text(tenant), Value::Text(queue)],
-        )
-        .await
-        .map_err(storage)?;
-    transaction.commit().await.map_err(storage)
+        .map_err(storage)?
+        == 1;
+    let row = one_row(
+        &transaction,
+        sql::SELECT_QUEUE_DEFINITION,
+        vec![tenant.clone().into(), queue.clone().into()],
+    )
+    .await?
+    .ok_or_else(|| storage("queue insert-or-read returned no durable definition"))?;
+    let stored: QueueDefinition = serde_json::from_str(&text(&row[0])?).map_err(storage)?;
+    if stored != definition {
+        transaction.rollback().await.map_err(storage)?;
+        return Err(EngineError::QueueDefinitionConflict);
+    }
+    if created {
+        transaction
+            .execute(
+                sql::INSERT_CURSOR_IF_ABSENT,
+                vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+            )
+            .await
+            .map_err(storage)?;
+    }
+    let cursor = one_row(
+        &transaction,
+        sql::SELECT_CURSOR_STATE,
+        vec![tenant.into(), queue.into()],
+    )
+    .await?
+    .ok_or_else(|| storage("queue exists without its relational cursor"))?;
+    for (index, name) in ["next_seq", "next_item_seq", "assignment_epoch"]
+        .into_iter()
+        .enumerate()
+    {
+        nonnegative_u64(integer(&cursor[index])?, name)?;
+    }
+    transaction.commit().await.map_err(storage)?;
+    Ok(CreateQueueOutcome {
+        created,
+        definition: stored,
+    })
 }
 
 fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
@@ -2678,6 +2680,14 @@ async fn apply_owned(
 }
 
 impl TursoRelational {
+    /// Atomically create the queue or return its exact durable definition.
+    pub async fn create_or_read_queue(
+        &self,
+        definition: QueueDefinition,
+    ) -> EngineResult<CreateQueueOutcome> {
+        ensure_shard_owned(Arc::clone(&self.writer), definition).await
+    }
+
     pub(crate) async fn purge_items_validate(
         &self,
         shard: &QueueKey,
@@ -2993,7 +3003,10 @@ impl AsyncProjectionStore for TursoRelational {
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<()>> + Send {
         let writer = self.writer.clone();
-        async move { ensure_shard_owned(writer, definition).await }
+        async move {
+            ensure_shard_owned(writer, definition).await?;
+            Ok(())
+        }
     }
 
     fn admit_mutation(
