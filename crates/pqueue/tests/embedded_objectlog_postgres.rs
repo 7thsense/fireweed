@@ -98,6 +98,17 @@ fn item(priority: i64) -> NewItem {
     }
 }
 
+fn assert_authoritative_commit_capabilities(caps: &pqueue::CommitCapabilities) {
+    assert!(caps.atomic_transition_commit);
+    assert!(caps.vectorized_commit);
+    assert!(caps.lease_validation);
+    assert!(caps.retained_commit_idempotency);
+    assert!(caps.non_work_side_records);
+    assert!(caps.authoritative_recovery_reads);
+    assert!(caps.delayed_awaits_timers);
+    assert_eq!(caps.durability_class, DurabilityClass::Atomic);
+}
+
 fn object_count(root: &Path) -> usize {
     fn visit(path: &Path, count: &mut usize) {
         let Ok(entries) = fs::read_dir(path) else {
@@ -172,12 +183,7 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     assert_eq!(expected.pending, 2);
     assert_eq!(block_on(pq.peek(&key, 10)).unwrap().len(), 2);
     let caps = pq.commit_capabilities(&key).unwrap();
-    assert_eq!(
-        caps,
-        Default::default(),
-        "an object log and an independent Postgres projection cannot honestly advertise one atomic append+apply boundary"
-    );
-    assert_eq!(caps.durability_class, DurabilityClass::EventualApply);
+    assert_authoritative_commit_capabilities(&caps);
     assert_eq!(
         block_on(pq.verify_projection())
             .unwrap()
@@ -308,11 +314,18 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
 
 #[test]
 fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
-    let endpoint = match std::env::var("PQUEUE_S3_TEST_URL") {
+    let endpoint = match std::env::var("PQUEUE_S3_TEST_URL")
+        .or_else(|_| std::env::var("PQUEUE_S3_TEST_ENDPOINT"))
+    {
         Ok(value) => value,
         Err(_) => {
+            if std::env::var_os("CI").is_some() {
+                panic!(
+                    "CI must set PQUEUE_S3_TEST_URL or PQUEUE_S3_TEST_ENDPOINT; S3+Postgres coverage cannot be skipped"
+                );
+            }
             eprintln!(
-                "SKIP public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection: PQUEUE_S3_TEST_URL is unset"
+                "SKIP public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection: PQUEUE_S3_TEST_URL and PQUEUE_S3_TEST_ENDPOINT are unset"
             );
             return;
         }
@@ -355,29 +368,78 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
     };
     let clock = Arc::new(ManualClock::at(1_000));
 
-    {
+    let postgres_caps = {
         let pq = pqueue::open_embedded(durability.clone(), clock.clone()).unwrap();
         let key = queue();
         block_on(pq.create_queue(definition())).unwrap();
         block_on(pq.push(&key, item(10))).unwrap();
         block_on(pq.push(&key, item(20))).unwrap();
         assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
-    }
+        let caps = pq.commit_capabilities(&key).unwrap();
+        assert_authoritative_commit_capabilities(&caps);
+        caps
+    };
 
     {
-        let pq = pqueue::open_embedded(durability, clock).unwrap();
+        let pq = pqueue::open_embedded(durability.clone(), clock.clone()).unwrap();
         let key = queue();
         assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
         assert_eq!(block_on(pq.peek(&key, 10)).unwrap().len(), 2);
     }
+
+    #[cfg(feature = "sqlite")]
+    {
+        let (_, sqlite_projection) = unique_fixture("s3_sqlite_capability_parity");
+        let mut sqlite_durability = durability;
+        sqlite_durability.projection = EmbeddedProjectionConfig::Sqlite {
+            path: std::env::temp_dir().join(format!("{sqlite_projection}.sqlite")),
+        };
+        let pq = pqueue::open_embedded_sqlite(sqlite_durability, clock).unwrap();
+        let sqlite_caps = pq.commit_capabilities(&queue()).unwrap();
+        assert_eq!(postgres_caps, sqlite_caps);
+    }
 }
 
-/// ADR-017 classifies an object log plus an independent Postgres projection as
-/// SeparateReplayCommit/EventualApply. US-009 may promote rich transition commits only after that profile
-/// has an authoritative transition protocol; keeping the complete proof ignored makes the missing behavior
-/// explicit without falsely advertising an atomic append+apply boundary in this release.
+#[tokio::test(flavor = "current_thread")]
+async fn synchronous_open_inside_tokio_returns_typed_error() {
+    let (root, schema) = unique_fixture("tokio_sync_open");
+    let error = match pqueue::open_embedded(
+        config(&root, &schema, "postgres://127.0.0.1:1/postgres"),
+        Arc::new(ManualClock::at(1_000)),
+    ) {
+        Ok(_) => panic!("the synchronous constructor must reject an ambient Tokio runtime"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error,
+        EngineError::Invalid(
+            "open_embedded cannot run inside a Tokio runtime; use open_embedded_async"
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn asynchronous_open_is_safe_inside_tokio() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!("SKIP asynchronous_open_is_safe_inside_tokio: PQUEUE_PG_TEST_URL is unset");
+        return;
+    };
+    let (root, schema) = unique_fixture("tokio_async_open");
+    let pq = pqueue::open_embedded_async(
+        config(&root, &schema, &url),
+        Arc::new(ManualClock::at(1_000)),
+    )
+    .await
+    .unwrap();
+    drop(pq);
+    drop_schema(&url, &schema);
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Full recovery proof for the authoritative rich-transition protocol. It remains ignored by default because
+/// it requires a live PostgreSQL instance; CI exercises the shorter S3/Postgres capability and reopen proof.
 #[test]
-#[ignore = "US-009 promotion proof: ADR-017 SeparateReplayCommit has no authoritative rich-transition boundary yet"]
+#[ignore = "US-009 recovery proof requires PQUEUE_PG_TEST_URL"]
 fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
     let url = std::env::var("PQUEUE_PG_TEST_URL")
         .expect("US-009 promotion proof requires PQUEUE_PG_TEST_URL");
@@ -387,7 +449,7 @@ fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
     let pq = pqueue::open_embedded(durability.clone(), clock.clone()).unwrap();
     let key = queue();
     block_on(pq.create_queue(definition())).unwrap();
-    assert_eq!(pq.commit_capabilities(&key).unwrap(), Default::default());
+    assert_authoritative_commit_capabilities(&pq.commit_capabilities(&key).unwrap());
 
     block_on(pq.push(&key, item(10))).unwrap();
     let claim = block_on(pq.claim(&key, 1, 30_000)).unwrap().remove(0);

@@ -522,7 +522,7 @@ type ObjectLogPostgresBackend = pqueue_engine::ComposedBackend<
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 struct ObjectLogPostgresLifecycle {
-    backend: Arc<ObjectLogPostgresBackend>,
+    backend: Option<Arc<ObjectLogPostgresBackend>>,
     executor: blocking_backend::OwnedBlockingExecutor,
     max_tail_commands: u64,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -667,7 +667,11 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
     }
 
     fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {
-        let backend = Arc::clone(&self.backend);
+        let backend = Arc::clone(
+            self.backend
+                .as_ref()
+                .expect("embedded postgres lifecycle is active"),
+        );
         Box::pin(
             self.executor
                 .run(move || Self::verify_backend(backend.as_ref())),
@@ -675,14 +679,22 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
     }
 
     fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()> {
-        let backend = Arc::clone(&self.backend);
+        let backend = Arc::clone(
+            self.backend
+                .as_ref()
+                .expect("embedded postgres lifecycle is active"),
+        );
         Box::pin(self.executor.run(move || {
             backend.with_projection(pqueue_postgres::PostgresRelational::delete_projection)
         }))
     }
 
     fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration> {
-        let backend = Arc::clone(&self.backend);
+        let backend = Arc::clone(
+            self.backend
+                .as_ref()
+                .expect("embedded postgres lifecycle is active"),
+        );
         let max_tail_commands = self.max_tail_commands;
         Box::pin(
             self.executor
@@ -694,6 +706,18 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
         self.stop.store(true, Ordering::Release);
         if let Some(flusher) = self.flusher.lock().expect("flusher poisoned").take() {
             let _ = flusher.join();
+        }
+        if let Some(backend) = self.backend.take() {
+            // `postgres::Client::drop` drives its private runtime. Keep the final
+            // backend drop off any ambient Tokio runtime just as construction is.
+            let _ = std::thread::Builder::new()
+                .name("pqueue-embedded-postgres-drop".to_owned())
+                .spawn(move || drop(backend))
+                .and_then(|thread| {
+                    thread
+                        .join()
+                        .map_err(|_| std::io::Error::other("postgres drop thread panicked"))
+                });
         }
     }
 }
@@ -2194,9 +2218,9 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// The backend's authoritative-commit capability descriptors (epic pqueue-2201fd37, ADR-009). A consumer
     /// (Snorri) reads these BEFORE activation and rejects a backend that does not advertise the guarantees it
-    /// needs (e.g. `atomic_transition_commit`). Memory + sqlite-relational advertise the real capabilities;
-    /// objectlog/postgres keep the all-false default. `queue` is accepted for signature stability — the
-    /// capability set is backend-wide.
+    /// needs (e.g. `atomic_transition_commit`). The composed embedded backends derive these descriptors from
+    /// the authoritative object log and the projection's transition support. `queue` is accepted for
+    /// signature stability — the capability set is backend-wide.
     pub fn commit_capabilities(&self, _queue: &QueueKey) -> EngineResult<CommitCapabilities> {
         Ok(self.backend.commit_capabilities())
     }
@@ -2818,6 +2842,35 @@ pub fn open_embedded(
     config: EmbeddedDurabilityConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(EngineError::Invalid(
+            "open_embedded cannot run inside a Tokio runtime; use open_embedded_async",
+        ));
+    }
+    open_embedded_postgres_blocking(config, clock)
+}
+
+/// Async-safe variant of [`open_embedded`] for callers already running on Tokio.
+///
+/// PostgreSQL connection setup and teardown are kept on ordinary OS threads because the synchronous
+/// PostgreSQL client owns a private runtime.
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+pub async fn open_embedded_async(
+    config: EmbeddedDurabilityConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
+    tokio::task::spawn_blocking(move || open_embedded_postgres_blocking(config, clock))
+        .await
+        .map_err(|error| {
+            EngineError::Storage(format!("embedded postgres open task failed: {error}"))
+        })?
+}
+
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+fn open_embedded_postgres_blocking(
+    config: EmbeddedDurabilityConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<EmbeddedPqueue<blocking_backend::BlockingLibBackend<ObjectLogPostgresBackend>>> {
     use pqueue_engine::{ComposedBackend, InProcessControlPlane};
 
     config.validate()?;
@@ -2873,7 +2926,7 @@ pub fn open_embedded(
         inner: Arc::new(EmbeddedHandleInner {
             _config: config.clone(),
             lifecycle: Box::new(ObjectLogPostgresLifecycle {
-                backend: Arc::clone(&backend),
+                backend: Some(Arc::clone(&backend)),
                 executor: lifecycle_executor,
                 max_tail_commands: config.recovery.max_tail_commands,
                 stop,
