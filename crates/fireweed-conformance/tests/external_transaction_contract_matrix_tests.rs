@@ -3278,14 +3278,15 @@ const SWEEP_BASE_MS: i64 = 1000;
 /// cooperatively via `yield_now` — on the current-thread test runtime a task awaiting a co-buffered push
 /// parks until this flusher seals it, exactly the flusher-bounded ack path. Returns a stop flag + handle;
 /// set the flag and await the handle to retire it before dropping/reopening the backend.
-fn spawn_latency_flusher<P>(
-    backend: Arc<ComposedBackend<ObjectLog, P, InProcessControlPlane>>,
+fn spawn_latency_flusher<P, C>(
+    backend: Arc<ComposedBackend<ObjectLog, P, C>>,
     bound_ms: u64,
 ) -> (Arc<AtomicBool>, tokio::task::JoinHandle<()>)
 where
     // `Send` (not `Sync`) suffices: `ComposedBackend` holds the projection behind a `Mutex`, so the backend is
     // `Sync` even for a `!Sync` projection like `HybridProjectionStore` (rusqlite `Connection` is `!Sync`).
     P: ProjectionStore + Send + 'static,
+    C: fireweed_engine::ControlPlane + 'static,
 {
     let stop = Arc::new(AtomicBool::new(false));
     let interval = (bound_ms / 4).max(1) as i64;
@@ -4287,10 +4288,11 @@ async fn ac_txn_7_latency_sweep_scenario() -> AcOutcome {
 /// as though it had exercised this profile/bound cell. `AfterApplyBeforeResponse` is request-id-bearing and
 /// force-sealed, so the configured latency bound is an actual configuration input but not an ack-timing
 /// claim. Recovery must reconstruct exactly one visible item through the selected projection.
-async fn e3_ac_txn_4_exact_cell<P, F>(profile: &str, bound_ms: u64, open: F) -> AcOutcome
+async fn e3_ac_txn_4_exact_cell<P, C, F>(profile: &str, bound_ms: u64, open: F) -> AcOutcome
 where
     P: ProjectionStore + Send + 'static,
-    F: Fn() -> Result<ComposedBackend<ObjectLog, P, InProcessControlPlane>, String>,
+    C: fireweed_engine::ControlPlane + 'static,
+    F: Fn() -> Result<ComposedBackend<ObjectLog, P, C>, String>,
 {
     let shard = fireweed_conformance::shard();
     let backend = open()?;
@@ -4382,7 +4384,7 @@ async fn e3_ac_txn_4_cell(profile: &str, bound_ms: u64) -> AcOutcome {
 /// Execute AC-TXN-7 for one exact profile/bound cell. This deliberately returns only observations made by
 /// this execution: a genuine latency-window push, a force-seal control on the same projection class, and
 /// request-id replay on both. Wall time is diagnostic provenance, never a host-performance gate.
-async fn e3_ac_txn_7_exact_cell<P, FL, FF>(
+async fn e3_ac_txn_7_exact_cell<P, C, FL, FF>(
     profile: &str,
     bound_ms: u64,
     open_latency: FL,
@@ -4390,8 +4392,9 @@ async fn e3_ac_txn_7_exact_cell<P, FL, FF>(
 ) -> AcOutcome
 where
     P: ProjectionStore + Send + 'static,
-    FL: Fn() -> Result<ComposedBackend<ObjectLog, P, InProcessControlPlane>, String>,
-    FF: Fn() -> Result<ComposedBackend<ObjectLog, P, InProcessControlPlane>, String>,
+    C: fireweed_engine::ControlPlane + 'static,
+    FL: Fn() -> Result<ComposedBackend<ObjectLog, P, C>, String>,
+    FF: Fn() -> Result<ComposedBackend<ObjectLog, P, C>, String>,
 {
     let shard = fireweed_conformance::shard();
     let latency = Arc::new(open_latency()?);

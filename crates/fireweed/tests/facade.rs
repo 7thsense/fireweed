@@ -3,11 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 use bytes::Bytes;
 use fireweed::{
-    ClaimAt, ClaimRef, CommitEntry, CommitRequest, EngineError, FinalizeKind, GateKeyPolicy,
-    GroupKey, MetadataValue, Nack, NewItem, PayloadUpdate, Pqueue, RequestId, UtcTimestamp,
+    ClaimAt, ClaimRef, CommitEntry, CommitRequest, ControlPlaneConfig, EngineError, FinalizeKind,
+    GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, OwnerId, PayloadUpdate, Pqueue,
+    RequestId, UtcTimestamp,
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
@@ -56,6 +58,38 @@ fn at(priority: i64) -> NewItem {
     NewItem {
         priority: Some(PriorityValue::Int64(priority)),
         ..Default::default()
+    }
+}
+
+fn ts(seconds: i64) -> UtcTimestamp {
+    UtcTimestamp::new(seconds, 0).unwrap()
+}
+
+struct GuardedClock {
+    seconds: AtomicI64,
+    panic_on_read: AtomicBool,
+}
+
+impl GuardedClock {
+    fn at(seconds: i64) -> Self {
+        Self {
+            seconds: AtomicI64::new(seconds),
+            panic_on_read: AtomicBool::new(false),
+        }
+    }
+
+    fn reject_reads(&self) {
+        self.panic_on_read.store(true, Ordering::SeqCst);
+    }
+}
+
+impl fireweed::Clock for GuardedClock {
+    fn now(&self) -> UtcTimestamp {
+        assert!(
+            !self.panic_on_read.load(Ordering::SeqCst),
+            "reclaim_expired_at must not read the handle clock"
+        );
+        ts(self.seconds.load(Ordering::SeqCst))
     }
 }
 
@@ -620,7 +654,7 @@ async fn update_fields_unavailable_over_objectlog() {
 /// FAC-2: `reclaim_expired` is the host-driven, per-queue lease sweep — expired leases return to Pending
 /// (claimable again), the reclaimed ids are returned, and it is idempotent.
 #[tokio::test]
-async fn reclaim_expired_recovers_leased_over_memory() {
+async fn reclaim_expired_convenience_uses_handle_clock() {
     let clock = Arc::new(ManualClock::at(0));
     let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
@@ -643,6 +677,82 @@ async fn reclaim_expired_recovers_leased_over_memory() {
     assert!(pq.reclaim_expired(&q, None).await.unwrap().is_empty());
     // And the item is claimable again.
     assert_eq!(pq.claim(&q, 1, 30_000).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn reclaim_expired_at_honors_caller_time_without_reading_handle_clock() {
+    let clock = Arc::new(GuardedClock::at(0));
+    let backend = Arc::new(composed_memory_backend());
+    let setup = Pqueue::new(backend.clone(), clock.clone());
+    let q = qkey();
+    setup.create_queue(qdef()).await.unwrap();
+    let id = setup.push(&q, at(5)).await.unwrap();
+    let claimed = setup
+        .claim_at(
+            &q,
+            ClaimAt::new(1, 10_000)
+                .eligibility_time(ts(10))
+                .lease_time(ts(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    let control_plane: Arc<dyn fireweed_engine::QueueControlPlane> = Arc::new(
+        fireweed_engine::InMemoryControlPlane::new(ControlPlaneConfig::default()),
+    );
+    let pq = Pqueue::with_control_plane_in_process(
+        backend,
+        clock.clone(),
+        OwnerId::new("reclaim-owner").unwrap(),
+        control_plane,
+    );
+    clock.reject_reads();
+    assert!(
+        pq.reclaim_expired_at(&q, None, ts(19))
+            .await
+            .unwrap()
+            .is_empty(),
+        "a caller time before lease expiry must not reclaim"
+    );
+    assert_eq!(
+        pq.reclaim_expired_at(&q, None, ts(21)).await.unwrap(),
+        vec![id],
+        "a caller time after lease expiry must reclaim"
+    );
+}
+
+#[tokio::test]
+async fn reclaim_expired_at_is_deterministic_under_divergent_frozen_clocks() {
+    let left_clock = Arc::new(ManualClock::at(0));
+    let right_clock = Arc::new(ManualClock::at(0));
+    let left = Pqueue::new(Arc::new(composed_memory_backend()), left_clock.clone());
+    let right = Pqueue::new(Arc::new(composed_memory_backend()), right_clock.clone());
+    let q = qkey();
+
+    for pq in [&left, &right] {
+        pq.create_queue(qdef()).await.unwrap();
+        pq.push(&q, at(5)).await.unwrap();
+        pq.claim_at(
+            &q,
+            ClaimAt::new(1, 10_000)
+                .eligibility_time(ts(10))
+                .lease_time(ts(10)),
+        )
+        .await
+        .unwrap();
+    }
+
+    left_clock.set(-1_000);
+    right_clock.set(1_000_000);
+    let left_result = left.reclaim_expired_at(&q, None, ts(21)).await.unwrap();
+    let right_result = right.reclaim_expired_at(&q, None, ts(21)).await.unwrap();
+
+    assert_eq!(left_result, right_result);
+    assert_eq!(
+        left.metrics(&q).await.unwrap(),
+        right.metrics(&q).await.unwrap()
+    );
 }
 
 // ---------------------------------------------------------------------------

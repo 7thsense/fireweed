@@ -1623,6 +1623,24 @@ impl<B: LibBackend> Pqueue<B> {
     /// added in a later step). A superseded owner keeps its cached (now-stale) epoch, so its next data-plane
     /// op self-fences `EpochFenced` — fail-closed on the data path independent of the control-plane loop.
     async fn session_epoch(&self, queue: &QueueKey) -> EngineResult<Option<u64>> {
+        self.session_epoch_with_time(queue, None).await
+    }
+
+    /// Resolve the fence epoch using a caller-supplied operational time when ownership must be
+    /// established. A cached session needs no time and is returned unchanged.
+    async fn session_epoch_at(
+        &self,
+        queue: &QueueKey,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<u64>> {
+        self.session_epoch_with_time(queue, Some(now)).await
+    }
+
+    async fn session_epoch_with_time(
+        &self,
+        queue: &QueueKey,
+        now: Option<UtcTimestamp>,
+    ) -> EngineResult<Option<u64>> {
         let Coordination::Owner {
             owner_id,
             control_plane,
@@ -1636,7 +1654,7 @@ impl<B: LibBackend> Pqueue<B> {
         if let Some(s) = sessions.lock().expect("poisoned").get(queue) {
             return Ok(Some(s.fence_epoch));
         }
-        let now = self.clock.now();
+        let now = now.unwrap_or_else(|| self.clock.now());
         let outcome = if let Some(runtime) = control_plane_runtime {
             runtime
                 .establish(queue.clone(), owner_id.clone(), now)
@@ -2547,6 +2565,21 @@ impl<B: LibBackend> Pqueue<B> {
     ) -> EngineResult<Vec<ItemId>> {
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
+        let r = self.backend.reclaim_expired(queue, limit, now, epoch).await;
+        self.note(queue, r)
+    }
+
+    /// [`Pqueue::reclaim_expired`] at a caller-supplied time. This is the deterministic/logical-time
+    /// variant for embedders that carry operation time with each request: `now` is forwarded to the
+    /// backend without consulting this handle's [`Clock`]. Reclamation semantics, batching, and owner
+    /// fencing are otherwise identical to [`Pqueue::reclaim_expired`].
+    pub async fn reclaim_expired_at(
+        &self,
+        queue: &QueueKey,
+        limit: Option<usize>,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ItemId>> {
+        let epoch = self.session_epoch_at(queue, now).await?;
         let r = self.backend.reclaim_expired(queue, limit, now, epoch).await;
         self.note(queue, r)
     }
