@@ -201,11 +201,19 @@ impl ControlPlaneStore for ObjectLogTursoBackend {
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
-            let outcome =
-                AsyncControlPlane::create_queue(self.control.as_ref(), definition.clone()).await?;
-            let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+            let outcome = self.projection.create_or_read_queue(definition).await?;
+            let authoritative = outcome.definition.clone();
+            let control_outcome =
+                AsyncControlPlane::create_queue(self.control.as_ref(), authoritative.clone())
+                    .await?;
+            if control_outcome.definition != authoritative {
+                return Err(EngineError::QueueDefinitionConflict);
+            }
+            let shard = QueueKey::new(
+                authoritative.tenant_id.clone(),
+                authoritative.queue_id.clone(),
+            );
             AsyncLogStore::ensure_shard(self.log.as_ref(), shard.clone()).await?;
-            AsyncProjectionStore::ensure_shard(self.projection.as_ref(), definition).await?;
             self.committer.recover_projection(shard).await?;
             Ok(outcome)
         }
