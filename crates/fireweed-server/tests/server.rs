@@ -81,6 +81,24 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
+// These integration tests each run an object-log server, projection maintenance, and background
+// flushers. Running the whole group concurrently can starve those bounded-latency maintenance loops
+// long enough for the Redis test client's 500 ms response deadline to fire. Production does not impose
+// that client deadline, so serialize this resource-heavy group while retaining normal parallelism for
+// the rest of the server target.
+static OBJECTLOG_SERVER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn redis_test_connection(addr: std::net::SocketAddr) -> redis::aio::MultiplexedConnection {
+    let client =
+        redis::Client::open(format!("redis://{addr}")).expect("valid local Redis test endpoint");
+    client
+        .get_multiplexed_async_connection_with_config(
+            &redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(5))),
+        )
+        .await
+        .expect("connect to local Redis test endpoint")
+}
+
 fn qkey() -> QueueKey {
     QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
 }
@@ -844,6 +862,7 @@ async fn terminal_emission_metrics_reach_server_surface() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("olsqlite");
     let first_id = {
         let server = start(Config::new(
@@ -855,8 +874,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
         ))
         .await
         .unwrap();
-        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
         let produced: String = redis::cmd("XADD")
             .arg("t1:q1")
             .arg("*")
@@ -903,8 +921,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
     ))
     .await
     .unwrap();
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = redis_test_connection(server.addr()).await;
     let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
         .arg("GROUP")
         .arg("g")
@@ -940,6 +957,7 @@ async fn objectlog_sqlite_runtime_reopens_rebuilds_and_keeps_item_ids_advancing(
 #[cfg(feature = "turso-projection")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_log() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-profile");
     let config = SegmentConfig::new(1, 5).unwrap();
     let item_id = {
@@ -1024,6 +1042,7 @@ async fn objectlog_turso_profile_rebuilds_deleted_projection_from_authoritative_
 #[cfg(feature = "turso-projection")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn object_log_turso_create_loser_can_push_claim_and_reopen() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-turso-create-race");
     let config = SegmentConfig::new(1, 5).unwrap();
     let store = Arc::new(LocalFsBlobStore::open(&object_root).unwrap());
@@ -1103,6 +1122,7 @@ async fn object_log_turso_create_loser_can_push_claim_and_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     // The composed objectlog-LOG + sqlite-PROJECTION backend (the segmented object log is the composed
     // `ObjectLog` axis); a push acks only after its segment seals (durable) AND applies to the projection.
     let (object_root, projection_path) = tmp_runtime_paths("segolsqlite");
@@ -1116,8 +1136,7 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
         ))
         .await
         .unwrap();
-        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
         // Push acks only after its segment seals (durable) AND applies to the projection.
         let produced: String = redis::cmd("XADD")
             .arg("t1:q1")
@@ -1162,8 +1181,7 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
     ))
     .await
     .unwrap();
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = redis_test_connection(server.addr()).await;
     let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
         .arg("GROUP")
         .arg("g")
@@ -1197,6 +1215,7 @@ async fn segmented_objectlog_sqlite_push_claim_finalize_and_recovers_on_reopen()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid");
     let first_id = {
         let mut config = Config::new(
@@ -1211,8 +1230,7 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
             SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
         );
         let server = start(config).await.unwrap();
-        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
 
         let produced: String = redis::cmd("XADD")
             .arg("t1:q1")
@@ -1254,8 +1272,7 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
     ))
     .await
     .unwrap();
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = redis_test_connection(server.addr()).await;
     let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
         .arg("GROUP")
         .arg("g")
@@ -1289,6 +1306,7 @@ async fn objectlog_hybrid_push_claim_finalize_and_recovers_on_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     // The `objectlog/hybrid-async` runtime profile end to end: it selects the object-log + hybrid substrate
     // (manifest commit + synchronous in-memory apply/render is the success barrier; the SQLite image is an
     // asynchronous checkpoint), carries the async-apply thresholds, and recovers acked state on reopen.
@@ -1310,8 +1328,7 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
             fireweed_server::HybridAsyncThresholds::new(4096, 8 * 1024 * 1024, 64, 30_000, 5)
                 .expect("valid hybrid-async thresholds");
         let server = start(config).await.unwrap();
-        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
 
         let produced: String = redis::cmd("XADD")
             .arg("t1:q1")
@@ -1353,8 +1370,7 @@ async fn objectlog_hybrid_async_push_claim_finalize_and_recovers_on_reopen() {
     ))
     .await
     .unwrap();
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = redis_test_connection(server.addr()).await;
     let empty: Option<StreamReadReply> = redis::cmd("XREADGROUP")
         .arg("GROUP")
         .arg("g")
@@ -1415,6 +1431,7 @@ fn objectlog_hybrid_async_config(
 /// leased item stays in-flight, not re-queued to pending).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_loses() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) =
         tmp_runtime_paths("objectlog-hybrid-async-chaos-mid-lease");
     let leased_id = {
@@ -1424,8 +1441,7 @@ async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_los
         ))
         .await
         .unwrap();
-        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
         let _: String = redis::cmd("XADD")
             .arg("t1:q1")
             .arg("*")
@@ -1456,8 +1472,7 @@ async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_los
     ))
     .await
     .unwrap();
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = redis_test_connection(server.addr()).await;
 
     // The recovered lease is still valid, so a fresh read does NOT redeliver it (no duplicate lease).
     let redelivered: Option<StreamReadReply> = redis::cmd("XREADGROUP")
@@ -1513,6 +1528,7 @@ async fn objectlog_hybrid_async_chaos_crash_mid_lease_neither_redelivers_nor_los
 /// nothing duplicated).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) =
         tmp_runtime_paths("objectlog-hybrid-async-chaos-disk-loss");
     {
@@ -1522,8 +1538,7 @@ async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
         ))
         .await
         .unwrap();
-        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
         let first: String = redis::cmd("XADD")
             .arg("t1:q1")
             .arg("*")
@@ -1553,8 +1568,7 @@ async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
     ))
     .await
     .unwrap();
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = redis_test_connection(server.addr()).await;
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
         .arg("GROUP")
         .arg("g")
@@ -1579,6 +1593,7 @@ async fn objectlog_hybrid_async_chaos_disk_loss_replays_retained_object_log() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-disk-loss");
     {
         let mut config = Config::new(
@@ -1593,8 +1608,7 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
             SegmentConfig::new(1024 * 1024, 5).expect("valid segment config"),
         );
         let server = start(config).await.unwrap();
-        let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-        let mut con = client.get_multiplexed_async_connection().await.unwrap();
+        let mut con = redis_test_connection(server.addr()).await;
         let first: String = redis::cmd("XADD")
             .arg("t1:q1")
             .arg("*")
@@ -1625,8 +1639,7 @@ async fn objectlog_hybrid_disk_loss_replays_retained_object_log() {
     ))
     .await
     .unwrap();
-    let client = redis::Client::open(format!("redis://{}", server.addr())).unwrap();
-    let mut con = client.get_multiplexed_async_connection().await.unwrap();
+    let mut con = redis_test_connection(server.addr()).await;
     let reply: StreamReadReply = redis::cmd("XREADGROUP")
         .arg("GROUP")
         .arg("g")
@@ -1713,6 +1726,7 @@ async fn change_record_sink_rejected_without_durable_cursor_store() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-force-seal");
     let backend = Arc::new(open_direct_objectlog_hybrid(&object_root, &projection_path));
     backend.create_queue(qdef()).await.unwrap();
@@ -1797,6 +1811,7 @@ async fn objectlog_hybrid_force_seals_before_claim_and_fences_stale_epoch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn objectlog_hybrid_request_id_replays_after_reopen() {
+    let _guard = OBJECTLOG_SERVER_TEST_LOCK.lock().await;
     let (object_root, projection_path) = tmp_runtime_paths("objectlog-hybrid-request-id");
     let request_id = RequestId::new("hybrid-request-1").unwrap();
     let body = vec![PushSpec {
