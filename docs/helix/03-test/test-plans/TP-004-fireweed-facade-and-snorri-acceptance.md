@@ -129,7 +129,7 @@ documented test database variable is available and are otherwise recorded as
 not run.
 
 ```sh
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory pqueue_memory_state_store_conformance_executes -- --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory,conformance pqueue_memory_state_store_conformance_executes -- --exact --nocapture
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features sqlite sqlite_public_facade_commits_authoritative_transition -- --nocapture
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features sqlite hot_projection_sqlite_visibility_business_cases -- --nocapture
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,sqlite objectlog_sqlite_delete_and_rehydrate -- --nocapture
@@ -137,6 +137,10 @@ cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-fe
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features postgres postgres_public_facade_is_env_gated_and_capability_checked -- --nocapture
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,postgres objectlog_postgres_delete_and_rehydrate -- --nocapture
 ```
+
+Each targeted command MUST report at least one executed test. A successful
+process with `running 0 tests` is a failed gate, including when a feature gate
+or a non-exact filter silently excludes the named test.
 
 The release acceptance record additionally runs the real S3-compatible matrix
 on host `eldir`, where Garage and PostgreSQL are provisioned. Working SSH
