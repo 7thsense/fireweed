@@ -14,8 +14,13 @@ pub mod async_projection {
         "SELECT definition FROM queues WHERE tenant=?1 AND queue=?2";
     pub const INSERT_QUEUE: &str =
         "INSERT INTO queues(tenant,queue,definition,paused) VALUES(?1,?2,?3,0)";
+    pub const INSERT_QUEUE_IF_ABSENT: &str = "INSERT INTO queues(tenant,queue,definition,paused) \
+        VALUES(?1,?2,?3,0) ON CONFLICT(tenant,queue) DO NOTHING";
     pub const INSERT_CURSOR: &str = "INSERT INTO relational_cursor(tenant,queue,next_seq,\
         next_item_seq,assignment_epoch) VALUES(?1,?2,0,0,0)";
+    pub const INSERT_CURSOR_IF_ABSENT: &str = "INSERT INTO relational_cursor(tenant,queue,next_seq,\
+        next_item_seq,assignment_epoch) VALUES(?1,?2,0,0,0) \
+        ON CONFLICT(tenant,queue) DO NOTHING";
     pub const SELECT_CURSOR: &str = "SELECT next_seq,assignment_epoch FROM relational_cursor \
         WHERE tenant=?1 AND queue=?2";
     pub const SELECT_CURSOR_STATE: &str = "SELECT next_seq,next_item_seq,assignment_epoch FROM relational_cursor \

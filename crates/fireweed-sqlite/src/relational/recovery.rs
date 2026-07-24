@@ -9,7 +9,7 @@ use fireweed_engine::{
     QueueCounters, QueueKey, RequestOutcome, compile_entity_schema, push_items_fingerprint_sha256,
 };
 use fireweed_projection::{ProjectionImage, ProjectionImageItem};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::*;
 
@@ -453,41 +453,48 @@ pub(crate) fn create_queue_sql(
     definition: QueueDefinition,
 ) -> EngineResult<CreateQueueOutcome> {
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    if let Some(existing) = g.queues.get(&key) {
-        if existing.ordering_mode != definition.ordering_mode
-            || existing.priority_model != definition.priority_model
-        {
-            return Err(EngineError::QueueDefinitionConflict);
-        }
-        return Ok(CreateQueueOutcome {
-            created: false,
-            definition: existing.clone(),
-        });
+    let (t, q) = parts(&key);
+    let def_json = to_json(&definition)?;
+    let tx = st(g
+        .conn
+        .transaction_with_behavior(TransactionBehavior::Immediate))?;
+    let created = st(tx.execute(
+        fireweed_relational::async_projection::INSERT_QUEUE_IF_ABSENT,
+        params![t, q, def_json],
+    ))? == 1;
+    let stored_json: String = st(tx.query_row(
+        fireweed_relational::async_projection::SELECT_QUEUE_DEFINITION,
+        params![t, q],
+        |row| row.get(0),
+    ))?;
+    let stored: QueueDefinition = serde_json::from_str(&stored_json)
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    if stored != definition {
+        return Err(EngineError::QueueDefinitionConflict);
     }
-    // Compile the entity schema once at create time (ADR-011).
-    let compiled_schema = definition
+    // Validate/compile the authoritative schema before commit so a newly inserted invalid definition
+    // rolls back instead of becoming a durable queue that this handle cannot publish.
+    let compiled_schema = stored
         .entity_schema
         .as_ref()
         .and_then(|esd| esd.entity_schema.as_ref())
         .map(compile_entity_schema)
         .transpose()?;
-    let (t, q) = parts(&key);
-    let def_json = to_json(&definition)?;
-    st(g.conn.execute(
-        "INSERT INTO queues(tenant,queue,definition,paused) VALUES(?1,?2,?3,0)",
-        params![t, q, def_json],
-    ))?;
-    st(g.conn.execute(
-        "INSERT INTO relational_cursor(tenant,queue,next_seq,next_item_seq) VALUES(?1,?2,0,0)",
+    st(tx.execute(
+        fireweed_relational::async_projection::INSERT_CURSOR_IF_ABSENT,
         params![t, q],
     ))?;
+    st(tx.commit())?;
+
+    // Publish only the authoritative durable definition after commit. A handle opened before another
+    // process creates the queue has an empty cache; create-or-read must populate it for immediate use.
     if let Some(cs) = compiled_schema {
         g.schemas.insert(key.clone(), cs);
     }
-    g.queues.insert(key, definition.clone());
+    g.queues.insert(key, stored.clone());
     Ok(CreateQueueOutcome {
-        created: true,
-        definition,
+        created,
+        definition: stored,
     })
 }
 
