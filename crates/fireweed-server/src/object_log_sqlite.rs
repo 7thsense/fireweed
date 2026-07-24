@@ -684,7 +684,8 @@ impl ControlPlaneStore for ObjectLogSqliteBackend {
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
             let _guard = self.op_lock.lock().await;
-            let outcome = self.log.create_queue(definition.clone())?;
+            let outcome = self.log.create_queue(definition)?;
+            let definition = outcome.definition.clone();
             self.projection
                 .create_queue_projection(definition.clone())?;
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -1896,10 +1897,11 @@ impl ControlPlaneStore for SegmentedObjectLogSqliteBackend {
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
+            let outcome = self.log.create_definition(&definition)?;
+            let definition = outcome.definition.clone();
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             self.log.create_queue(&definition)?;
-            let outcome = self
-                .projection
+            self.projection
                 .create_queue_projection(definition.clone())?;
             self.queues
                 .lock()
@@ -3103,6 +3105,8 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
         definition: QueueDefinition,
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         async move {
+            let outcome = self.log.create_definition(&definition)?;
+            let definition = outcome.definition.clone();
             let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
             self.log.create_queue(&definition)?;
             let proj = Arc::new(Mutex::new(
@@ -3138,10 +3142,7 @@ impl ControlPlaneStore for SegmentedObjectLogInMemoryBackend {
                 .lock()
                 .expect("inmemory recovery stats poisoned")
                 .insert(key, recovery_stats);
-            Ok(CreateQueueOutcome {
-                created: true,
-                definition,
-            })
+            Ok(outcome)
         }
     }
 
@@ -3781,8 +3782,10 @@ mod sp06_handoff_profile_tests;
 mod recovery_tests {
     use super::*;
     use fireweed_core::{
-        EligibilityPolicy, EntitySchemaDocument, OrderingMode, PriorityDirection, PriorityModel,
-        PriorityModelKind, PriorityTieBreaker, RecurrencePolicy, RequestId, RetryPolicy,
+        CohortOnIncomplete, CohortPolicy, EligibilityPolicy, EntitySchemaDocument, GateKeyPolicy,
+        IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue, OrderingMode,
+        PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueIndex,
+        RecurrenceMode, RecurrencePolicy, RequestId, RetryPolicy, WorkerId,
     };
     use fireweed_engine::{
         ControlPlaneStore, EngineError, ProjectionRead, PushPort, ReclaimDriver,
@@ -3871,8 +3874,11 @@ mod recovery_tests {
             self.path.join("object-log")
         }
         fn projection(&self) -> String {
+            self.projection_named("projection")
+        }
+        fn projection_named(&self, name: &str) -> String {
             self.path
-                .join("projection.db")
+                .join(format!("{name}.db"))
                 .to_str()
                 .expect("utf8 temp path")
                 .to_string()
@@ -3929,6 +3935,347 @@ mod recovery_tests {
             .unwrap(),
         );
         def
+    }
+
+    fn rich_queue_def(tenant: &str, queue: &str) -> QueueDefinition {
+        let mut definition = queue_def(tenant, queue);
+        definition.priority_model = PriorityModel {
+            kind: PriorityModelKind::Text,
+            direction: PriorityDirection::Descending,
+            tie_breaker: PriorityTieBreaker::ClientItemKey,
+        };
+        definition.ordering_mode = OrderingMode::BoundedRelaxed;
+        definition.max_rank_error = 7;
+        definition.progress_bound_ms = 12_345;
+        definition.eligibility_policy = EligibilityPolicy {
+            metadata_blockers: BTreeMap::from([(
+                "blocked".to_string(),
+                vec![MetadataValue::String("yes".to_string())],
+            )]),
+            gate_keys: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: Some(3),
+            max_gates_per_request: Some(5),
+        };
+        definition.cohort_policy = Some(CohortPolicy {
+            enabled: true,
+            completion_bound_ms: Some(9_000),
+            on_incomplete: Some(CohortOnIncomplete::ExpireCohort),
+            max_cohort_size: Some(8),
+        });
+        definition.recurrence = RecurrencePolicy {
+            mode: RecurrenceMode::Recurring,
+            until: Some(UtcTimestamp::new(4_242, 123_000_000).unwrap()),
+        };
+        definition.request_id_retention_ms = 11_000;
+        definition.client_item_key_retention_ms = 12_000;
+        definition.terminal_retention_ms = 13_000;
+        definition.max_lease_duration_ms = 14_000;
+        definition.retry_policy = RetryPolicy { max_attempts: 9 };
+        definition.max_push_batch_size = 17;
+        definition.max_claim_batch_size = 19;
+        definition.max_eligible_group_size = Some(23);
+        definition.secondary_indexes = vec![IndexSpec {
+            name: "by_customer".to_string(),
+            fields: vec!["customer".to_string(), "region".to_string()],
+            unique: true,
+        }];
+        definition.entity_schema = Some(
+            serde_json::from_value::<EntitySchemaDocument>(json!({
+                "entity_schema": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": {
+                        "status": {"type": "string"},
+                        "attempt": {"type": "integer"}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        definition.typed_indexes = vec![QueueIndex {
+            name: "by_status".to_string(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "status".to_string(),
+                index_type: IndexType::String,
+                unique: false,
+            }),
+        }];
+        definition.emit_change_records = false;
+        definition
+    }
+
+    fn assert_rich_definition(actual: &QueueDefinition, expected: &QueueDefinition) {
+        assert_eq!(actual.tenant_id, expected.tenant_id);
+        assert_eq!(actual.queue_id, expected.queue_id);
+        assert_eq!(actual.priority_model, expected.priority_model);
+        assert_eq!(actual.ordering_mode, expected.ordering_mode);
+        assert_eq!(actual.max_rank_error, expected.max_rank_error);
+        assert_eq!(actual.progress_bound_ms, expected.progress_bound_ms);
+        assert_eq!(actual.eligibility_policy, expected.eligibility_policy);
+        assert_eq!(actual.cohort_policy, expected.cohort_policy);
+        assert_eq!(actual.recurrence, expected.recurrence);
+        assert_eq!(
+            actual.request_id_retention_ms,
+            expected.request_id_retention_ms
+        );
+        assert_eq!(
+            actual.client_item_key_retention_ms,
+            expected.client_item_key_retention_ms
+        );
+        assert_eq!(actual.terminal_retention_ms, expected.terminal_retention_ms);
+        assert_eq!(actual.max_lease_duration_ms, expected.max_lease_duration_ms);
+        assert_eq!(actual.retry_policy, expected.retry_policy);
+        assert_eq!(actual.max_push_batch_size, expected.max_push_batch_size);
+        assert_eq!(actual.max_claim_batch_size, expected.max_claim_batch_size);
+        assert_eq!(
+            actual.max_eligible_group_size,
+            expected.max_eligible_group_size
+        );
+        assert_eq!(actual.secondary_indexes, expected.secondary_indexes);
+        assert_eq!(actual.entity_schema, expected.entity_schema);
+        assert_eq!(actual.typed_indexes, expected.typed_indexes);
+        assert_eq!(actual.emit_change_records, expected.emit_change_records);
+    }
+
+    fn claim_request(shard: &QueueKey) -> ClaimRequest {
+        ClaimRequest {
+            shard: shard.clone(),
+            worker_id: WorkerId::new("race-worker").unwrap(),
+            max_items: 1,
+            lease_token: LeaseToken::new("race-lease").unwrap(),
+            lease_expires_at: UtcTimestamp::new(ts().seconds + 60, 0).unwrap(),
+            now: ts(),
+            eligibility_time: None,
+            compatibility: ClaimCompatibility::default(),
+            expected_epoch: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn object_log_sqlite_create_returns_authoritative_rich_definition() {
+        let tmp = TmpDir::new("object-log-sqlite-rich-definition");
+        let definition = rich_queue_def("rich-tenant", "rich-queue");
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let backend = ObjectLogSqliteBackend::open(tmp.object_root(), &tmp.projection()).unwrap();
+
+        let outcome = backend.create_queue(definition.clone()).await.unwrap();
+
+        assert!(outcome.created);
+        assert_rich_definition(&outcome.definition, &definition);
+        assert_rich_definition(&backend.queue_definition(&key).await.unwrap(), &definition);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn segmented_object_log_sqlite_compatible_create_race_uses_durable_winner() {
+        let tmp = TmpDir::new("segmented-sqlite-compatible-race");
+        let definition = rich_queue_def("race-tenant", "compatible");
+        let backends = [
+            Arc::new(
+                SegmentedObjectLogSqliteBackend::open(
+                    tmp.object_root(),
+                    &tmp.projection_named("first"),
+                    seal_each_config(),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                SegmentedObjectLogSqliteBackend::open(
+                    tmp.object_root(),
+                    &tmp.projection_named("second"),
+                    seal_each_config(),
+                )
+                .unwrap(),
+            ),
+        ];
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles = backends
+            .iter()
+            .cloned()
+            .map(|backend| {
+                let barrier = Arc::clone(&barrier);
+                let definition = definition.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    futures::executor::block_on(backend.create_queue(definition))
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<EngineResult<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.definition == definition)
+        );
+        assert_eq!(
+            backends[0]
+                .log
+                .read_definition(&QueueKey::new(
+                    definition.tenant_id.clone(),
+                    definition.queue_id.clone()
+                ))
+                .unwrap(),
+            definition
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn segmented_object_log_sqlite_incompatible_create_conflicts_without_overwrite() {
+        let tmp = TmpDir::new("segmented-sqlite-incompatible-race");
+        let first = rich_queue_def("race-tenant", "incompatible");
+        let mut second = first.clone();
+        second.priority_model.direction = PriorityDirection::Ascending;
+        let definitions = [first, second];
+        let backends = [
+            Arc::new(
+                SegmentedObjectLogSqliteBackend::open(
+                    tmp.object_root(),
+                    &tmp.projection_named("first"),
+                    seal_each_config(),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                SegmentedObjectLogSqliteBackend::open(
+                    tmp.object_root(),
+                    &tmp.projection_named("second"),
+                    seal_each_config(),
+                )
+                .unwrap(),
+            ),
+        ];
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles = backends
+            .iter()
+            .cloned()
+            .zip(definitions.iter().cloned())
+            .map(|(backend, definition)| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    futures::executor::block_on(backend.create_queue(definition))
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Err(EngineError::QueueDefinitionConflict)))
+                .count(),
+            1
+        );
+        let winner = &outcomes
+            .iter()
+            .find_map(|outcome| outcome.as_ref().ok())
+            .unwrap()
+            .definition;
+        let key = QueueKey::new(winner.tenant_id.clone(), winner.queue_id.clone());
+        assert_eq!(backends[0].log.read_definition(&key).unwrap(), *winner);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn segmented_object_log_sqlite_loser_can_push_claim_and_reopen() {
+        let tmp = TmpDir::new("segmented-sqlite-loser-use");
+        let definition = queue_def("race-tenant", "loser-use");
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let projection_paths = [
+            tmp.projection_named("first"),
+            tmp.projection_named("second"),
+        ];
+        let backends = [
+            Arc::new(
+                SegmentedObjectLogSqliteBackend::open(
+                    tmp.object_root(),
+                    &projection_paths[0],
+                    seal_each_config(),
+                )
+                .unwrap(),
+            ),
+            Arc::new(
+                SegmentedObjectLogSqliteBackend::open(
+                    tmp.object_root(),
+                    &projection_paths[1],
+                    seal_each_config(),
+                )
+                .unwrap(),
+            ),
+        ];
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles = backends
+            .iter()
+            .cloned()
+            .map(|backend| {
+                let barrier = Arc::clone(&barrier);
+                let definition = definition.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    futures::executor::block_on(backend.create_queue(definition))
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<EngineResult<Vec<_>>>()
+            .unwrap();
+        let loser_index = outcomes
+            .iter()
+            .position(|outcome| !outcome.created)
+            .expect("one durable create loser");
+
+        backends[loser_index]
+            .push(&key, vec![spec("loser-push")], ts(), None)
+            .await
+            .unwrap();
+        let claimed = backends[loser_index]
+            .claim(claim_request(&key))
+            .await
+            .unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        drop(backends);
+
+        let reopened = SegmentedObjectLogSqliteBackend::open(
+            tmp.object_root(),
+            &projection_paths[loser_index],
+            seal_each_config(),
+        )
+        .unwrap();
+        let reopened_outcome = reopened.create_queue(definition.clone()).await.unwrap();
+        assert!(!reopened_outcome.created);
+        assert_eq!(reopened.queue_definition(&key).await.unwrap(), definition);
+    }
+
+    #[tokio::test]
+    async fn segmented_object_log_inmemory_create_uses_durable_outcome() {
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryBlobStore::new());
+        let definition = rich_queue_def("inmemory-tenant", "durable-outcome");
+        let first = SegmentedObjectLogInMemoryBackend::open_with_blob_store(
+            Arc::clone(&store),
+            seal_each_config(),
+        )
+        .unwrap();
+        let second =
+            SegmentedObjectLogInMemoryBackend::open_with_blob_store(store, seal_each_config())
+                .unwrap();
+
+        let created = first.create_queue(definition.clone()).await.unwrap();
+        let existing = second.create_queue(definition.clone()).await.unwrap();
+
+        assert!(created.created);
+        assert!(!existing.created);
+        assert_rich_definition(&created.definition, &definition);
+        assert_rich_definition(&existing.definition, &definition);
     }
 
     fn spec(payload: &str) -> PushSpec {

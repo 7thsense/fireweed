@@ -220,6 +220,7 @@ impl Default for EmbeddedRecoveryPolicy {
     }
 }
 
+#[cfg(any(feature = "objectlog", test))]
 fn object_log_namespace(namespace: &str) -> String {
     namespace
         .as_bytes()
