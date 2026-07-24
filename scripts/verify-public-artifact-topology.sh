@@ -10,6 +10,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tomllib
 
 repo_root = pathlib.Path(sys.argv[1])
 document = pathlib.Path(sys.argv[2])
@@ -60,6 +61,10 @@ workspace_names = {
     package["name"] for package in metadata["packages"]
     if package["id"] in workspace_ids
 }
+workspace_packages = {
+    package["name"]: package for package in metadata["packages"]
+    if package["id"] in workspace_ids
+}
 documented_names = set(current_names)
 omitted = sorted(workspace_names - documented_names)
 unknown = sorted(documented_names - workspace_names)
@@ -84,8 +89,33 @@ for current, target, package_class, registry, order, features, _ in rows:
             orders.append(int(order))
         except ValueError as error:
             raise SystemExit(f"invalid publish order for {current}: {order}") from error
+        package = workspace_packages[current]
+        required = {
+            "description": package["description"],
+            "license": package["license"],
+            "repository": package["repository"],
+            "readme": package["readme"],
+            "keywords": package["keywords"],
+            "categories": package["categories"],
+        }
+        missing = sorted(field for field, value in required.items() if not value)
+        if not package["homepage"] and not package["documentation"]:
+            missing.append("homepage-or-documentation")
+        manifest = tomllib.loads(pathlib.Path(package["manifest_path"]).read_text(encoding="utf-8"))
+        package_manifest = manifest.get("package", {})
+        if not package_manifest.get("include") and not package_manifest.get("exclude"):
+            missing.append("include-or-exclude")
+        if package["publish"] == []:
+            missing.append("publish-enabled")
+        if missing:
+            raise SystemExit(
+                f"publishable package has incomplete registry metadata: {current}: "
+                + ", ".join(missing)
+            )
     elif order != "-":
         raise SystemExit(f"non-publishable package has a publish order: {current}")
+    elif workspace_packages[current]["publish"] != []:
+        raise SystemExit(f"non-publishable package must set publish=false: {current}")
 
 if publishable != ["fireweed"]:
     raise SystemExit("ADR-009 requires fireweed to be the sole publishable package")

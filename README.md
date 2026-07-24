@@ -1,78 +1,124 @@
 # Fireweed Queue
 
-## Documentation
+Fireweed Queue is a priority work queue for Rust applications and Redis clients,
+with leased delivery, retries, scheduling, and durable storage compositions.
 
-- [Operator microsite](docs/operator/index.html) is a static, openable
-  first-screen console for install commands, storage backend choice, release
-  artifact links, and production-readiness status.
-- [Operator deployment guide](docs/deployment/operator-guide.md) covers
-  `helm install`, upgrade, uninstall, values, log and projection storage axes,
-  object-log storage, `kind` smoke tests, release
-  artifacts, troubleshooting, and known production gaps.
-- [Operator release artifacts](docs/deployment/operator-release-artifacts.md)
-  states where to obtain published images, Helm chart packages, binary
-  archives, checksums, and the commands to verify them before deployment.
-- [Production deployment readiness](docs/helix/04-build/DEPLOYMENT-READINESS.md)
-  defines the Helm, kind, storage-axis, and object-log release-readiness
-  contract.
-- [Container image and runtime config contract](docs/deployment/container-runtime-contract.md)
-  defines the `fireweed-service` image entrypoint, environment/config keys, health
-  endpoint/port, and storage backend settings consumed by Helm.
-- [Choosing pqueue instead of a stream](docs/helix/01-frame/guides/choosing-pqueue.md)
-  explains when to use pqueue's mutable-priority leased work queue model instead
-  of an immutable sequential stream.
-- [Scheduler and router boundary](docs/helix/01-frame/guides/scheduler-router-boundary.md)
-  explains how to keep downstream capacity admission outside pqueue while using
-  pqueue leases and `max_items` correctly.
+## Overview
 
-## Release Artifacts
+Use Fireweed when work must be selected by priority or eligibility rather than
+read once in append order. Workers claim a bounded batch under a lease, then
+complete, retry, release, or fail its items. Queue definitions can add delayed
+eligibility, gates, groups, cohorts, typed fields, and secondary indexes.
 
-Fireweed Queue's first public-preview release is `v0.20.0`. The workspace
-packages are release-synchronized at `0.20.0`. The Fireweed package, binary,
-image, and chart names below are authoritative; old deployment coordinates are
-not published as aliases. The Helm chart's source defaults use independent
-versioning, while release packaging
-overrides its chart and application versions to `0.20.0`.
+Fireweed has two public entry points:
 
-The `v0.20.0` release provides:
+- the `fireweed` Rust library facade for embedding a queue in an application;
+- the `fireweed-service` RESP server, which supports the tested Redis Streams
+  worker path (`XADD`, `XREADGROUP`, `XACK`, and related commands).
 
-- container image `ghcr.io/<owner>/fireweed-service:0.20.0` plus
-  `ghcr.io/<owner>/fireweed-service:sha-<commit>`;
-- Helm chart package `fireweed-queue-0.20.0.tgz`;
-- binary archives `fireweed-0.20.0-<target-triple>.tar.gz`;
-- `SHA256SUMS`;
-- release evidence files `fireweed-service-image.txt` and
-  `fireweed-queue-helm-chart.txt`.
+## Status
 
-Operators should download the GitHub Release assets, verify `SHA256SUMS`, and
-compare the image tag digest against `fireweed-service-image.txt` before
-deployment. See
-[operator release artifacts](docs/deployment/operator-release-artifacts.md) for
-the exact commands.
+Fireweed Queue `v0.20.0` is a public preview. The Fireweed package, binary,
+container image, and Helm chart names are the public coordinates; `pqueue`
+names remain only where the
+[namespace policy](docs/helix/02-design/adr/ADR-020-public-namespace-and-compatibility.md)
+marks them as compatibility, persistence, wire, or historical identifiers.
 
-For local development, build and smoke-check the service image:
+The preview includes the embedded Rust API, the RESP service, local development
+backends, and documented object-log/Postgres deployment compositions. Public
+preview does not mean that every compiled storage pairing is production-ready.
+Before deploying, review the
+[deployment readiness contract](docs/helix/04-build/DEPLOYMENT-READINESS.md),
+run the applicable smoke and recovery checks, and plan capacity, credentials,
+monitoring, backups, and failure recovery for your environment. The memory
+configuration used below is disposable and development-only.
+
+## Quickstart
+
+### Prerequisites
+
+- Git;
+- [rustup](https://rustup.rs/) (the repository selects Rust 1.92.0 from
+  `rust-toolchain.toml`);
+- a C toolchain and CMake for native crypto dependencies; and
+- `redis-cli` for this RESP example.
+
+Clone the repository. In the first terminal, start a single-process,
+in-memory service with the default example queue made explicit:
 
 ```sh
-docker build -t fireweed-service:dev .
-docker run --rm fireweed-service:dev --help
+git clone https://github.com/telepathdata/fireweed.git
+cd fireweed
+
+FIREWEED_LISTEN_ADDR=127.0.0.1:8080 \
+FIREWEED_LOG_BACKEND=memory \
+FIREWEED_PROJECTION_BACKEND=inmemory \
+FIREWEED_BOOTSTRAP_QUEUES=t1:q1 \
+cargo run -p fireweed-server --bin fireweed-service
 ```
 
-See the
-[container runtime config contract](docs/deployment/container-runtime-contract.md)
-for the full environment, health-probe, and storage backend contract.
+The service prints `fireweed-service 0.20.0 listening on 127.0.0.1:8080` after
+the queue is ready. In a second terminal, push, claim, and complete one item:
 
-## License
+```sh
+redis-cli -p 8080 PING
 
-Fireweed Queue is licensed under either the
-[Apache License, Version 2.0](LICENSE-APACHE) or the [MIT license](LICENSE-MIT),
-at your option (`MIT OR Apache-2.0`). See [CONTRIBUTING.md](CONTRIBUTING.md) for
-the project's issues-only contribution policy.
+ITEM_ID="$(redis-cli --raw -p 8080 \
+  XADD t1:q1 '*' priority 10 payload send-email)"
+printf 'pushed %s\n' "$ITEM_ID"
 
-## Building from source
+redis-cli --raw -p 8080 \
+  XREADGROUP GROUP workers worker-1 COUNT 1 STREAMS t1:q1 '>'
 
-The workspace pins its toolchain in `rust-toolchain.toml` — **Rust 1.92.0**
-(with `clippy` and `rustfmt`). With `rustup` installed, the pinned toolchain is
-selected automatically; a clean build needs no extra system libraries:
+redis-cli -p 8080 XACK t1:q1 workers "$ITEM_ID"
+redis-cli -p 8080 XLEN t1:q1
+```
+
+`PING` returns `PONG`; `XREADGROUP` returns the same item ID and its fields;
+`XACK` returns `1`; and the final `XLEN` returns `0`. Stop the development
+service with `Ctrl-C`.
+
+To smoke-test the Fireweed binary without starting a listener:
+
+```sh
+cargo run -p fireweed-server --bin fireweed-service -- --help
+```
+
+## Architecture
+
+Fireweed separates queue semantics from storage and transport:
+
+| Layer | Responsibility |
+| --- | --- |
+| Rust facade / RESP front | Embedded API or Redis-compatible worker commands |
+| Engine | Queue validation, leases, lifecycle transitions, idempotency, and fencing |
+| Control plane | Queue definitions, ownership, and multi-replica coordination |
+| Command log | Authoritative accepted history |
+| Projection | Rebuildable item, eligibility, lease, and query state |
+
+Log and projection storage are independent axes. Local development can use
+memory or SQLite. Durable deployments can compose an object log or Postgres log
+with the projections documented in the operator guide. Unsupported pairings
+fail at startup instead of silently selecting another backend.
+
+## Documentation
+
+- [Choosing a priority queue instead of a stream](docs/helix/01-frame/guides/choosing-pqueue.md)
+  explains the workload boundary.
+- [Rust facade source and crate documentation](crates/fireweed/src/lib.rs)
+  covers embedded construction and worker lifecycle verbs.
+- [Container runtime contract](docs/deployment/container-runtime-contract.md)
+  lists runtime settings, storage profiles, and retained compatibility names.
+- [Operator deployment guide](docs/deployment/operator-guide.md) covers Helm,
+  storage axes, upgrades, and verification.
+- [Release artifact verification](docs/deployment/operator-release-artifacts.md)
+  covers images, charts, archives, and checksums.
+- [Operator microsite](docs/operator/index.html) provides an openable deployment
+  reference.
+- [v0.20.0 release notes](docs/releases/v0.20.0.md) describe the Fireweed rename
+  and compatibility boundary.
+
+For source development, the standard local gates are:
 
 ```sh
 cargo build --workspace
@@ -80,16 +126,36 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Notes:
+Some Postgres, S3, Kubernetes, and release-evidence checks need explicitly
+provisioned services; their linked guides name the required environment.
 
-- `cargo build --workspace` builds with the pinned 1.92.0 toolchain and requires
-  **no libcurl/librdkafka** — the change-log surface produces in-process to the
-  embedded fjord broker (ADR-014); the optional external-Kafka producer is a
-  pure-Rust (`rskafka`) path behind the default-off `external-kafka` feature.
-- Some transitive dependencies (via `heimq`) build native crypto through
-  `aws-lc-sys`, which needs a C toolchain and **cmake** available on `PATH`.
-- The workspace depends on the sibling projects `fjord`, `heimq`, and
-  `object-log`; CI checks them out alongside the repo (see
-  `.github/workflows/ci.yml`).
-- Postgres and S3/object-log integration tests are env-gated
-  (`PQUEUE_PG_TEST_URL`, `PQUEUE_S3_TEST_*`) and skip loudly when unset.
+## Contributing
+
+Issues are welcome for bugs, feature requests, documentation problems, usage
+questions, and compatibility reports. Search existing documentation and issues
+first, then include the Fireweed version, storage configuration, expected
+result, actual result, and a minimal reproduction.
+
+Pull requests, patches, and other code contributions are not accepted. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the issues-only policy and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project discussions.
+
+## Security
+
+Do not report vulnerabilities, exploits, secrets, or sensitive logs in a public
+issue. Follow [SECURITY.md](SECURITY.md) to use GitHub private vulnerability
+reporting. Security response is best-effort and does not include a guaranteed
+timeline or bug bounty.
+
+## Support
+
+Support is provided through public issues on a best-effort basis, without an
+SLA, guaranteed response, or promise of a fix. Read [SUPPORT.md](SUPPORT.md) for
+the reporting checklist and support boundary. Security reports must use the
+private channel above.
+
+## License
+
+Fireweed Queue is available under either the
+[Apache License, Version 2.0](LICENSE-APACHE) or the [MIT license](LICENSE-MIT),
+at your option (`MIT OR Apache-2.0`).
