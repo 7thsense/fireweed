@@ -93,7 +93,7 @@ enabled only by the density Deployment's explicit
 `PQUEUE_RUNTIME_RESOURCE_METRICS_PATH`. The focused validator is:
 
 ```sh
-cargo run -p pqueue-release --bin pqueue-verify-density-evidence -- \
+cargo run -p fireweed-release --bin fireweed-verify-density-evidence -- \
   target/pqueue-ledger/tp002-e2-density-kind.jsonl
 ```
 

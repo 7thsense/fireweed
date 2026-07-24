@@ -410,6 +410,6 @@ rustup run 1.92.0 cargo run --locked --quiet -p fireweed-loadgen -- density-emit
   --revision "$REVISION" --image-digest "$IMAGE_DIGEST" \
   --topology "$TOPOLOGY" --hardware "$HARDWARE" --out "$LEDGER_OUT"
 assert_source_unchanged
-rustup run 1.92.0 cargo run --locked --quiet -p pqueue-release --bin pqueue-verify-density-evidence -- "$LEDGER_OUT"
+rustup run 1.92.0 cargo run --locked --quiet -p fireweed-release --bin fireweed-verify-density-evidence -- "$LEDGER_OUT"
 assert_source_unchanged
 printf 'LEDGER_OUT=%s\n' "$LEDGER_OUT"
