@@ -99,6 +99,13 @@ repair the discovery source before B-007 depends on it:
   before keyed (`Some`) groups; keyed values then use their stable key order. This tie-break refines
   deterministic representation only; oldest-first age remains the primary rank.
 
+The relational implementation uses a partial `pqueue_items_active_scope_idx` over pending,
+non-superseded rows keyed by `(tenant_id, queue_id, group_key, eligible_since, not_before, item_id)`, plus
+the existing item-gate and gate-state primary keys for the eligibility anti-join. Discovery now aggregates
+the addressed queue's live pending rows at read time: O(live pending rows in that queue), rather than the
+former O(stored keyed summary rows). This bounded queue-local cost is the deliberate price of exact
+ungrouped, gate-current, and time-crossing visibility; discovery performs no summary refresh or write.
+
 B-011 proves ungrouped-only, grouped/ungrouped mixed, time-only crossing, stale keyed summary mixed with
 live ungrouped work, no eligible work, and equal-age `None`-before-`Some` behavior in SQLite-relational and
 PostgreSQL-relational projections. It also proves that the stamped accessor preserves queue, granularity,
