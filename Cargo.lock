@@ -1167,7 +1167,7 @@ dependencies = [
  "futures",
  "heimq",
  "heimq-broker",
- "heimq-protocol",
+ "heimq-protocol 0.15.1 (git+https://github.com/easel/heimq?tag=v0.1.6)",
  "postgres",
  "redis",
  "rskafka",
@@ -1581,7 +1581,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "heimq-broker",
- "heimq-protocol",
+ "heimq-protocol 0.15.1 (git+https://github.com/easel/heimq?tag=v0.1.2)",
  "heimq-wire",
  "lz4",
  "memmap2",
@@ -1627,6 +1627,19 @@ dependencies = [
  "snap",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "heimq-protocol"
+version = "0.15.1"
+source = "git+https://github.com/easel/heimq?tag=v0.1.6#be7c1c631c313f5519754fbd81aba4d77ace5c7b"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "crc",
+ "crc32c",
+ "indexmap",
+ "uuid",
 ]
 
 [[package]]
