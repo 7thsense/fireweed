@@ -1266,8 +1266,19 @@ impl SegmentedObjectLogSqliteBackend {
         projection_path: &str,
         config: SegmentConfig,
     ) -> EngineResult<Self> {
-        let log = Arc::new(SegmentedObjectLog::open(store, config));
         let projection = Arc::new(SqliteProjectionStore::open(projection_path)?);
+        Self::open_with_blob_store_and_projection(store, projection, config)
+    }
+
+    /// Assemble one pool member over a projection handle shared by the fixed server backend pool. SQLite
+    /// permits one writer at a time; sharing the store makes that serialization explicit in-process instead
+    /// of letting independent connections race into `SQLITE_BUSY` during concurrent multi-queue writes.
+    pub(crate) fn open_with_blob_store_and_projection(
+        store: Arc<dyn BlobStore>,
+        projection: Arc<SqliteProjectionStore>,
+        config: SegmentConfig,
+    ) -> EngineResult<Self> {
+        let log = Arc::new(SegmentedObjectLog::open(store, config));
         // Poll near the latency cap so a buffered-but-quiet segment seals within ~max_latency_ms.
         let flush_ms = (config.max_latency_ms / 4).max(1);
         Ok(Self {
@@ -3849,6 +3860,61 @@ mod recovery_tests {
         assert_eq!(page[1].1, QUEUES - 1);
         assert_eq!(page[2].1, 0);
         assert_eq!(page[3].1, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn fixed_backend_pool_shares_one_sqlite_writer_across_queues() {
+        const MEMBERS: usize = 8;
+        const PUSHES: usize = 50;
+        let store: Arc<dyn BlobStore> = Arc::new(InMemoryBlobStore::new());
+        let projection = Arc::new(SqliteProjectionStore::in_memory().unwrap());
+        let mut members = Vec::new();
+        for index in 0..MEMBERS {
+            let backend = Arc::new(
+                SegmentedObjectLogSqliteBackend::open_with_blob_store_and_projection(
+                    Arc::clone(&store),
+                    Arc::clone(&projection),
+                    seal_each_config(),
+                )
+                .unwrap()
+                .with_worker_partition(index, MEMBERS),
+            );
+            let definition = queue_def("pool", &format!("q-{index}"));
+            backend.create_queue(definition).await.unwrap();
+            members.push(backend);
+        }
+
+        let pushes: Vec<_> = members
+            .iter()
+            .enumerate()
+            .map(|(index, backend)| {
+                let backend = Arc::clone(backend);
+                let shard = QueueKey::new(
+                    TenantId::new("pool").unwrap(),
+                    QueueId::new(format!("q-{index}")).unwrap(),
+                );
+                tokio::spawn(async move {
+                    for push in 0..PUSHES {
+                        backend
+                            .push(
+                                &shard,
+                                vec![spec(&format!("pool-{index}-{push}"))],
+                                ts(),
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    assert_eq!(
+                        backend.metrics(&shard).await.unwrap().pending,
+                        PUSHES as u64
+                    );
+                })
+            })
+            .collect();
+        for push in pushes {
+            push.await.unwrap();
+        }
     }
 
     /// A unique scratch directory under the system temp dir, removed on drop.

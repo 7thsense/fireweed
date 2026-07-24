@@ -2284,11 +2284,12 @@ pub async fn start(config: Config) -> EngineResult<Server> {
             let backends = tokio::task::spawn_blocking(move || {
                 let segment_config = spec.segment_config();
                 let store = spec.open_blob_store()?;
+                let projection = Arc::new(fireweed_sqlite::SqliteProjectionStore::open(&p)?);
                 (0..8)
                     .map(|index| {
-                        SegmentedObjectLogSqliteBackend::open_with_blob_store(
+                        SegmentedObjectLogSqliteBackend::open_with_blob_store_and_projection(
                             Arc::clone(&store),
-                            &p,
+                            Arc::clone(&projection),
                             segment_config,
                         )
                         .map(|backend| {
