@@ -378,6 +378,9 @@ type EmbeddedLifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = EngineResult<T
 
 trait EmbeddedLifecycle: Send + Sync {
     fn capabilities(&self) -> EmbeddedLifecycleCapabilities;
+    fn buffered_group_commit_commands(&self) -> Option<usize> {
+        None
+    }
     fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification>;
     fn delete_projection(&self) -> EmbeddedLifecycleFuture<'_, ()>;
     fn rehydrate_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedRehydration>;
@@ -435,6 +438,14 @@ impl EmbeddedHandle {
         self.inner.lifecycle.capabilities()
     }
 
+    /// Number of accepted commands waiting for a group-commit seal, when the embedded composition
+    /// exposes that observation. This is a diagnostic synchronization seam, not a durability barrier;
+    /// lifecycle operations remain responsible for quiescing accepted writes.
+    #[doc(hidden)]
+    pub fn buffered_group_commit_commands(&self) -> Option<usize> {
+        self.inner.lifecycle.buffered_group_commit_commands()
+    }
+
     pub async fn verify_projection(&self) -> EngineResult<EmbeddedProjectionVerification> {
         if !self.lifecycle_capabilities().verify_projection {
             return Err(EngineError::Unavailable);
@@ -469,6 +480,12 @@ pub struct EmbeddedPqueue<B> {
 impl<B> EmbeddedPqueue<B> {
     pub fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
         self.lifecycle.lifecycle_capabilities()
+    }
+
+    /// See [`EmbeddedHandle::buffered_group_commit_commands`].
+    #[doc(hidden)]
+    pub fn buffered_group_commit_commands(&self) -> Option<usize> {
+        self.lifecycle.buffered_group_commit_commands()
     }
 
     pub async fn verify_projection(&self) -> EngineResult<EmbeddedProjectionVerification> {
@@ -924,6 +941,10 @@ impl EmbeddedLifecycle for ObjectLogSqliteLifecycle {
             delete_projection: true,
             rehydrate_projection: true,
         }
+    }
+
+    fn buffered_group_commit_commands(&self) -> Option<usize> {
+        Some(self.backend.buffered_group_commit_commands())
     }
 
     fn verify_projection(&self) -> EmbeddedLifecycleFuture<'_, EmbeddedProjectionVerification> {

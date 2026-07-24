@@ -830,13 +830,10 @@ fn public_objectlog_sqlite_lifecycle_seals_already_buffered_writes_before_reset(
 
     let writer = Arc::clone(&pq);
     let writer_key = key.clone();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let thread = std::thread::spawn(move || {
-        started_tx.send(()).unwrap();
-        block_on(writer.push(&writer_key, item(7)))
-    });
-    started_rx.recv().unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(25));
+    let thread = std::thread::spawn(move || block_on(writer.push(&writer_key, item(7))));
+    while pq.buffered_group_commit_commands() != Some(1) {
+        std::thread::yield_now();
+    }
 
     block_on(pq.delete_projection()).unwrap();
     assert!(
