@@ -95,3 +95,21 @@ cost row. Rows record requests per billion, bytes per billion, USD per billion,
 the exact source revision, and the governed price-bundle revision used for the
 `postgres_native` comparison. The semantic verifier recomputes these values and
 rejects missing counters or stale price provenance.
+
+## Acceptance mapping
+
+The release path is fail-closed before a new ledger is accepted:
+
+1. The cost builder emits all eight profile/bound rows from recorder request and byte counters, including
+   aggregate and per-operation requests/bytes/USD per billion plus exact price and source revisions.
+2. The optimizer consumes those measured densities and the fixed `postgres_native` price/workload bundle;
+   elapsed host speed is capacity context only.
+3. Recovery fingerprints canonical complete live state and authoritative order, requires exact 10M counts,
+   monotonic production replay progress, bounded queues/pages, and successful production segment/record/frame
+   checksum validation for both snapshot-tail and genesis replay.
+4. Each bound requires five seeded, alternating, same-run recorder-control blocks with matching complete-state
+   fingerprints and median degradation no greater than 1.02.
+5. Semantic validators reject smoke rows, incomplete matrices, missing or altered counters, stale provenance,
+   non-exact/checksum-unverified recovery, quiet-host deferral, and host-speed gates.
+6. Focused tests, formatting, and warning-denied clippy are the code gates. The only remaining evidence gate is
+   the coordinated live 10M MinIO run and validation of its generated release ledger; PREPARED is not PASS.
