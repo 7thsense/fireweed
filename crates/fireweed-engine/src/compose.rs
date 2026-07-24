@@ -554,6 +554,17 @@ pub trait LogStore: Send {
         Ok(())
     }
 
+    /// Atomically create or read a durable queue definition when the log catalog, rather than the control
+    /// plane, is authoritative across independently opened handles. `None` keeps the existing control-plane
+    /// outcome; durable catalog adapters return the decoded stored winner and whether this call inserted it.
+    fn create_or_read_definition(
+        &mut self,
+        definition: &QueueDefinition,
+    ) -> EngineResult<Option<CreateQueueOutcome>> {
+        self.persist_definition(definition)?;
+        Ok(None)
+    }
+
     /// Enumerate the durable queue definitions this log persists, for recovery-on-open (ADR-012 P2). Default:
     /// empty — a reopened in-process log is a fresh process with nothing to recover.
     fn recover_definitions(&self) -> EngineResult<Vec<QueueDefinition>> {
@@ -1456,6 +1467,12 @@ pub trait ControlPlane: Send + Sync {
     fn create_queue(&self, definition: QueueDefinition) -> EngineResult<CreateQueueOutcome>;
     fn queue_definition(&self, key: &QueueKey) -> EngineResult<QueueDefinition>;
     fn list_queues(&self, tenant: &TenantId) -> EngineResult<Vec<QueueId>>;
+
+    /// Install a definition already selected by a separate durable authority. Control planes that are
+    /// themselves authoritative never call this seam; the in-process cache uses it for durable log catalogs.
+    fn cache_authoritative_definition(&self, _definition: QueueDefinition) -> EngineResult<()> {
+        Ok(())
+    }
 }
 
 /// The in-process reference control plane: queue definitions in a `Mutex<HashMap>`. Used by the composed
@@ -1512,6 +1529,15 @@ impl ControlPlane for InProcessControlPlane {
             .filter(|k| k.tenant_id.as_str() == tenant.as_str())
             .map(|k| k.queue_id.clone())
             .collect())
+    }
+
+    fn cache_authoritative_definition(&self, definition: QueueDefinition) -> EngineResult<()> {
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        self.queues
+            .lock()
+            .expect("poisoned")
+            .insert(key, definition);
+        Ok(())
     }
 }
 
@@ -3621,7 +3647,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
     ) -> impl std::future::Future<Output = EngineResult<CreateQueueOutcome>> + Send {
         let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
         queue_serialized(&self.mutation_gate, key.clone(), move || {
-            let outcome = self.control.create_queue(definition)?;
+            let mut outcome = self.control.create_queue(definition)?;
             let mut g = self.inner.lock().expect("poisoned");
             let Inner {
                 log,
@@ -3633,10 +3659,23 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ControlPlaneStore
             log.ensure_shard(&key)?;
             let newly_known = !known_shards.contains(&key);
             if outcome.created {
-                projection.ensure_shard(&outcome.definition)?;
                 // Record the definition in the log's durable catalog so a reopened composition can recover
                 // this queue without a re-`create_queue` (no-op for in-process / unified-relational logs).
-                log.persist_definition(&outcome.definition)?;
+                // A durable create-or-read catalog may replace the handle-local result with the decoded
+                // cross-handle winner. Cache that winner before reporting either success or exact-definition
+                // conflict so a losing handle never keeps serving its submitted loser definition.
+                if let Some(durable) = log.create_or_read_definition(&outcome.definition)? {
+                    let matches_submitted = durable.definition == outcome.definition;
+                    self.control
+                        .cache_authoritative_definition(durable.definition.clone())?;
+                    outcome = durable;
+                    if !matches_submitted {
+                        return Err(EngineError::QueueDefinitionConflict);
+                    }
+                }
+            }
+            if outcome.created {
+                projection.ensure_shard(&outcome.definition)?;
             } else if newly_known {
                 // This handle was opened before another supported handle created the durable queue. The
                 // object-log family is sole-owner for data-plane mutation, so handoff is ordered: commands
