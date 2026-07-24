@@ -514,8 +514,12 @@ mod tests {
 
     #[test]
     fn historical_valid_envelope_frame_goldens_decode() {
-        let command =
+        let mut command =
             fireweed_conformance::envelope(fireweed_engine::QueueCommand::ResumeQueue, vec![]);
+        // This fixture captures a frame written before conformance envelopes began using
+        // per-process command IDs. Keep the historical identity explicit so the golden
+        // continues to prove that old durable frames decode byte-for-byte.
+        command.command_id = fireweed_engine::CommandId::new("c");
         let record = serde_json::to_vec(&command).unwrap();
         let v2 = decode_hex(
             "505153470207000000000000000b0000000000000001000000b40000007b22636f6d6d616e645f6964223a2263222c22726571756573745f6964223a6e756c6c2c22726571756573745f66696e6765727072696e74223a6e756c6c2c22726571756573745f6f7574636f6d65223a6e756c6c2c226974656d5f696473223a5b5d2c22636f6d6d616e64223a22526573756d655175657565222c22636865636b73756d223a302c22637265617465645f6174223a7b227365636f6e6473223a302c226e616e6f7365636f6e6473223a307d7d",
