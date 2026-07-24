@@ -1,6 +1,7 @@
 //! The single OPTIONAL environment-variable populator for [`Config`] (feature `env-config`).
 //!
-//! This is the ONE place that knows the documented `PQUEUE_*` / `DATABRICKS_*` env NAMES and maps them onto
+//! This is the ONE place that knows the documented `FIREWEED_*`, compatibility `PQUEUE_*`, and retained
+//! `DATABRICKS_*` env names and maps them onto
 //! the typed [`Config`]. It is a PURE function over a caller-supplied `BTreeMap<String, String>` — it never
 //! touches the process environment. The bin (`fireweed-service`) is the only caller that reads the live process
 //! env (`std::env::vars().collect()`); a pure-library embedder builds [`Config`] directly and, by compiling
@@ -40,11 +41,31 @@ impl ConfigError {
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        // Parser internals retain their pre-rename canonical keys so the compatibility path cannot drift
+        // from the established behavior. Public diagnostics always point operators at the authoritative
+        // Fireweed spelling.
+        f.write_str(&self.0.replace("PQUEUE_", "FIREWEED_"))
     }
 }
 
 impl std::error::Error for ConfigError {}
+
+const FIREWEED_ENV_PREFIX: &str = "FIREWEED_";
+const PQUEUE_ENV_PREFIX: &str = "PQUEUE_";
+
+/// Normalize the public Fireweed namespace onto the established parser keys. The old `PQUEUE_*` names are
+/// accepted as v0.20.0 compatibility aliases; when both spellings are present, the authoritative
+/// `FIREWEED_*` value wins deterministically. Persisted paths and protocol identifiers are values, not keys,
+/// and are deliberately untouched.
+fn normalize_runtime_env(env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut normalized = env.clone();
+    for (key, value) in env {
+        if let Some(suffix) = key.strip_prefix(FIREWEED_ENV_PREFIX) {
+            normalized.insert(format!("{PQUEUE_ENV_PREFIX}{suffix}"), value.clone());
+        }
+    }
+    normalized
+}
 
 /// Value of `key` if present (set-but-empty maps to `""`, mirroring `std::env::var(..).ok()`), else `default`.
 fn env_or(env: &BTreeMap<String, String>, key: &str, default: &str) -> String {
@@ -723,11 +744,14 @@ fn embedded_fjord_config(env: &BTreeMap<String, String>) -> EmbeddedFjordConfig 
 }
 
 impl Config {
-    /// The SINGLE optional env-var populator: map the documented `PQUEUE_*` / `DATABRICKS_*` env names in
-    /// `env` onto a typed [`Config`]. PURE over the supplied map — it does NOT read the process environment
+    /// The SINGLE optional env-var populator: map authoritative `FIREWEED_*`, compatibility `PQUEUE_*`, and
+    /// retained `DATABRICKS_*` env names in `env` onto a typed [`Config`]. PURE over the supplied map — it
+    /// does NOT read the process environment
     /// (the bin's `main` collects `std::env::vars()` and passes the map in). Available only with the
     /// `env-config` feature (default-on for the bin); a library embedder can drop it via `default-features = false`.
     pub fn from_env(env: &BTreeMap<String, String>) -> Result<Config, ConfigError> {
+        let env = normalize_runtime_env(env);
+        let env = &env;
         let segments = segment_config(env)?;
         let replicas = replica_count(env)?;
         let node_id = resolve_node_id(&env_or(env, "PQUEUE_NODE_ID", "0"));
@@ -863,7 +887,7 @@ mod tests {
                 Err(error) => error,
                 Ok(_) => panic!("invalid postgres pool size must fail closed"),
             };
-            assert!(error.to_string().contains("PQUEUE_POSTGRES_POOL_SIZE"));
+            assert!(error.to_string().contains("FIREWEED_POSTGRES_POOL_SIZE"));
         }
     }
 
@@ -966,7 +990,7 @@ mod tests {
             assert!(
                 error
                     .to_string()
-                    .contains("PQUEUE_RUNTIME_RESOURCE_METRICS_PATH"),
+                    .contains("FIREWEED_RUNTIME_RESOURCE_METRICS_PATH"),
                 "{error}"
             );
         }

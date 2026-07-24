@@ -72,7 +72,9 @@ impl Config {
         ];
         let mut shape_names: Option<Vec<String>> = None;
         let mut queues = 1000usize;
-        let mut pg_url = std::env::var("PQUEUE_PG_TEST_URL").ok();
+        let mut pg_url = std::env::var("FIREWEED_PG_TEST_URL")
+            .or_else(|_| std::env::var("PQUEUE_PG_TEST_URL"))
+            .ok();
 
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
@@ -349,7 +351,7 @@ async fn run_objectlog(cfg: &Config) {
 async fn run_postgres(cfg: &Config) {
     let Some(url) = cfg.pg_url.clone() else {
         println!(
-            "{:<20} (SKIPPED — set --pg-url or PQUEUE_PG_TEST_URL to a live DB)",
+            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB; PQUEUE_PG_TEST_URL is a compatibility alias)",
             "postgres"
         );
         return;
@@ -394,7 +396,7 @@ async fn run_postgres(cfg: &Config) {
 async fn run_postgres_relational(cfg: &Config) {
     let Some(url) = cfg.pg_url.clone() else {
         println!(
-            "{:<20} (SKIPPED — set --pg-url or PQUEUE_PG_TEST_URL to a live DB)",
+            "{:<20} (SKIPPED — set --pg-url or FIREWEED_PG_TEST_URL to a live DB; PQUEUE_PG_TEST_URL is a compatibility alias)",
             "postgres_relational"
         );
         return;

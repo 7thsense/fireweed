@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "fireweed-postgres-migrate"
 path = "src/bin/fireweed-postgres-migrate.rs"
 
+[[bin]]
+name = "pqueue-postgres-migrate"
+path = "src/bin/fireweed-postgres-migrate.rs"
+
 # Driven adapter: postgres (atomic durability class). Durable command LOG in postgres tables; the
 # priority-ordered projection is the shared `fireweed-projection` materialization, rebuilt from the log.
 # Mirrors `fireweed-sqlite` exactly — same template, same guarantees — over the SYNC `postgres` client.

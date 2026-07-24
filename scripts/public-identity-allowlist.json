@@ -8,9 +8,9 @@
       "class": "temporary compatibility",
       "path_pattern": "^(crates/fireweed(?:-[^/]+)?/.*|tools/fireweed-turso-compat-probe/.*)$",
       "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "Renamed Rust crates still contain ADR-020-governed PQUEUE_* configuration aliases, persisted pqueue_* identifiers, RESP pqueue tokens, and historical bead references; the dedicated Cargo/Rust namespace check rejects old package, import, path, and Rust-owned binary coordinates independently.",
+      "reason": "Renamed Rust crates still contain ADR-020-governed PQUEUE_* configuration aliases, persisted pqueue_* identifiers, RESP pqueue tokens, and historical bead references; the dedicated namespace checks reject old packages/imports while permitting only declared [[bin]] compatibility aliases and requiring Fireweed-primary process environment reads.",
       "owner_surface": "Rust runtime compatibility, persistence/wire identifiers, and audit references",
-      "removal_condition": "Remove after the configuration, protocol, and persisted-data owners retire the remaining pqueue and PQUEUE compatibility identifiers and historical references no longer require scanning."
+      "removal_condition": "Remove after v0.20.0 consumers migrate from the declared binary and PQUEUE_* aliases and the configuration, protocol, persisted-data, and audit owners retire the remaining governed identifiers."
     },
     {
       "id": "helm-runtime-compatibility",

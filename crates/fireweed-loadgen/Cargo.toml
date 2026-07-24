@@ -14,6 +14,10 @@ license.workspace = true
 name = "fireweed-loadgen"
 path = "src/main.rs"
 
+[[bin]]
+name = "pqueue-loadgen"
+path = "src/main.rs"
+
 [dependencies]
 fireweed-release = { path = "../fireweed-release" }
 serde = { version = "1", features = ["derive"] }

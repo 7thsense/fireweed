@@ -37,7 +37,11 @@ fn main() {
         return;
     }
     if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
-        println!("{HELP}\n\n{OBJECT_LOG_HELP}\n\n{RUNTIME_RESOURCE_HELP}");
+        let help = format!("{HELP}\n\n{OBJECT_LOG_HELP}\n\n{RUNTIME_RESOURCE_HELP}")
+            .replace("PQUEUE_", "FIREWEED_");
+        println!(
+            "{help}\n\nCompatibility: matching PQUEUE_* environment variables remain accepted as v0.20.0 aliases; FIREWEED_* wins when both are set. Persisted /var/lib/pqueue paths remain unchanged."
+        );
         return;
     }
 
