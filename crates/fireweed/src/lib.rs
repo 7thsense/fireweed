@@ -91,6 +91,214 @@ pub struct ActiveScopeDiscovery {
     pub scopes: Vec<ActiveScope>,
 }
 
+/// A caller-attested, unfiltered leading prefix of one queue's group-granularity active-scope
+/// discovery. Attestation validates the facts carried by [`ActiveScopeDiscovery`]—the granularity,
+/// queue identity, non-empty input, and oldest-first age order—but cannot prove that the caller did
+/// not filter or skip a leading scope before constructing the stamped input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OldestFirstScopePrefix {
+    discovery: ActiveScopeDiscovery,
+}
+
+impl OldestFirstScopePrefix {
+    /// Attest that `discovery` is an unfiltered leading prefix of the unchanged result returned by
+    /// [`Pqueue::discover_active_scopes_stamped`]. The caller owns the unfiltered-prefix assertion;
+    /// this method validates every property that can be checked locally.
+    pub fn attest(discovery: ActiveScopeDiscovery) -> EngineResult<Self> {
+        if discovery.granularity != DiscoveryGranularity::Group {
+            return Err(EngineError::Invalid(
+                "active-scope dispersion requires Group granularity",
+            ));
+        }
+        if discovery.scopes.is_empty() {
+            return Err(EngineError::Invalid(
+                "active-scope prefix must not be empty",
+            ));
+        }
+        if discovery
+            .scopes
+            .iter()
+            .any(|scope| scope.queue_id != discovery.queue.queue_id.as_str())
+        {
+            return Err(EngineError::Invalid(
+                "active-scope prefix queue_id does not match its discovery stamp",
+            ));
+        }
+        if discovery
+            .scopes
+            .windows(2)
+            .any(|pair| pair[0].oldest_eligible_age_ms < pair[1].oldest_eligible_age_ms)
+        {
+            return Err(EngineError::Invalid(
+                "active-scope prefix must be ordered oldest eligible first",
+            ));
+        }
+        Ok(Self { discovery })
+    }
+
+    /// Exact queue coordinate stamped by discovery.
+    pub fn queue(&self) -> &QueueKey {
+        &self.discovery.queue
+    }
+
+    /// Unchanged source-order descriptors covered by the caller's leading-prefix attestation.
+    pub fn scopes(&self) -> &[ActiveScope] {
+        &self.discovery.scopes
+    }
+}
+
+/// Advisory selection from an [`OldestFirstScopePrefix`]. `scope` is borrowed directly from the
+/// unchanged source prefix; selection does not reorder or synthesize descriptors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveScopeSelection<'a> {
+    pub index: usize,
+    pub scope: &'a ActiveScope,
+    /// Whether `scope.group_key` can be passed as an exact group claim filter. Ungrouped work remains
+    /// selectable, but requires an ordinary unfiltered claim or another supported filter.
+    pub group_filter_available: bool,
+    /// Whether the oldest source scope was forced by the queue's progress-bound urgency rule.
+    pub urgency_forced: bool,
+}
+
+/// Select one advisory group scope without changing backend discovery order.
+///
+/// Selection is deterministic for the same prefix and routing coordinates. Away from urgency it uses
+/// SHA-256 rendezvous scores, length-framed over routing key, tenant, queue, and optional group identity,
+/// and considers only the leading `candidate_window`. When the oldest scope's observed age plus stale-
+/// input skew and urgency guard reaches `progress_bound_ms`, source index zero always wins. The helper
+/// owns no scheduler state and makes no fairness or progress promise if callers stop polling, supply a
+/// filtered/non-leading prefix, or ignore the advisory result.
+pub fn select_active_scope_from_prefix<'a>(
+    prefix: &'a OldestFirstScopePrefix,
+    queue: &QueueKey,
+    routing_key: &[u8],
+    candidate_window: usize,
+    progress_bound_ms: u64,
+    observed_age_skew_ms: u64,
+    urgency_guard_ms: u64,
+) -> EngineResult<ActiveScopeSelection<'a>> {
+    if prefix.queue() != queue {
+        return Err(EngineError::Invalid(
+            "active-scope prefix queue does not match selector queue",
+        ));
+    }
+    if candidate_window == 0 {
+        return Err(EngineError::Invalid(
+            "active-scope candidate_window must be greater than zero",
+        ));
+    }
+    if progress_bound_ms == 0 {
+        return Err(EngineError::Invalid(
+            "active-scope progress_bound_ms must be greater than zero",
+        ));
+    }
+    if prefix
+        .scopes()
+        .iter()
+        .any(|scope| scope.queue_id != queue.queue_id.as_str())
+    {
+        return Err(EngineError::Invalid(
+            "active-scope prefix queue_id does not match selector queue",
+        ));
+    }
+
+    let oldest = &prefix.scopes()[0];
+    let urgency_forced = oldest
+        .oldest_eligible_age_ms
+        .saturating_add(observed_age_skew_ms)
+        .saturating_add(urgency_guard_ms)
+        >= progress_bound_ms;
+    let index = if urgency_forced {
+        0
+    } else {
+        let window = candidate_window.min(prefix.scopes().len());
+        prefix.scopes()[..window]
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, scope)| active_scope_routing_score(routing_key, queue, scope))
+            .map(|(index, _)| index)
+            .expect("attested prefixes are non-empty")
+    };
+    let scope = &prefix.scopes()[index];
+    Ok(ActiveScopeSelection {
+        index,
+        scope,
+        group_filter_available: scope.group_key.is_some(),
+        urgency_forced,
+    })
+}
+
+fn active_scope_routing_score(
+    routing_key: &[u8],
+    queue: &QueueKey,
+    scope: &ActiveScope,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    fn frame(hasher: &mut Sha256, value: &[u8]) {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"fireweed-active-scope-dispersion-v1");
+    frame(&mut hasher, routing_key);
+    frame(&mut hasher, queue.tenant_id.as_str().as_bytes());
+    frame(&mut hasher, queue.queue_id.as_str().as_bytes());
+    match scope.group_key.as_deref() {
+        Some(group) => {
+            hasher.update([1]);
+            frame(&mut hasher, group.as_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    hasher.finalize().into()
+}
+
+#[cfg(test)]
+mod active_scope_selector_unit_tests {
+    use super::*;
+
+    fn queue(tenant: &str, queue: &str) -> QueueKey {
+        QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
+    }
+
+    fn scope(queue: &str, group: Option<&str>) -> ActiveScope {
+        ActiveScope {
+            queue_id: queue.to_string(),
+            group_key: group.map(str::to_string),
+            oldest_eligible_age_ms: 1,
+            eligible_count: Some(1),
+            progress_bound_risk_count: Some(0),
+        }
+    }
+
+    #[test]
+    fn routing_score_length_frames_every_identity_component() {
+        let abc = queue("a", "bc");
+        let ab_c = queue("ab", "c");
+        assert_ne!(
+            active_scope_routing_score(b"route", &abc, &scope("bc", Some("d"))),
+            active_scope_routing_score(b"route", &ab_c, &scope("c", Some("d")))
+        );
+
+        let c_d = queue("c", "d");
+        let bc_d = queue("bc", "d");
+        assert_ne!(
+            active_scope_routing_score(b"ab", &c_d, &scope("d", Some("e"))),
+            active_scope_routing_score(b"a", &bc_d, &scope("d", Some("e")))
+        );
+        assert_ne!(
+            active_scope_routing_score(b"route", &abc, &scope("bc", None)),
+            active_scope_routing_score(b"route", &abc, &scope("bc", Some("")))
+        );
+        assert_ne!(
+            active_scope_routing_score(b"route", &abc, &scope("bc", Some("d"))),
+            active_scope_routing_score(b"route", &abc, &scope("bc", Some("de")))
+        );
+    }
+}
+
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
 /// Tests inject a controllable clock instead (e.g. `fireweed_memory::ManualClock`). Provided here so a
 /// consumer depending on `pqueue` alone has a ready clock without naming `fireweed-engine`.
@@ -1920,6 +2128,13 @@ impl<B: LibBackend> Pqueue<B> {
         definition: QueueDefinition,
     ) -> EngineResult<CreateQueueOutcome> {
         self.backend.create_queue(definition).await
+    }
+
+    /// Read the queue's persisted definition without retaining the result of queue creation. This is
+    /// read-only and is useful to obtain queue-local policy such as `progress_bound_ms` for advisory
+    /// routing helpers.
+    pub async fn queue_definition(&self, queue: &QueueKey) -> EngineResult<QueueDefinition> {
+        self.backend.queue_definition(queue).await
     }
 
     /// Enqueue one new item (append). Routes through `PushPort`, so the backend assigns a unique,
