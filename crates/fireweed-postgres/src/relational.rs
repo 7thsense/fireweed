@@ -651,6 +651,12 @@ const GROUP_SUMMARY_INDEX_MIGRATIONS: &[(&str, &str)] = &[
            AND not_before IS NOT NULL",
     ),
     (
+        "pqueue_items_active_scope_idx",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_items_active_scope_idx \
+         ON pqueue_items (tenant_id,queue_id,group_key,eligible_since,not_before,item_id) \
+         WHERE lifecycle_state='Pending' AND superseded=false",
+    ),
+    (
         "pqueue_group_summary_claim_rank_idx",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS pqueue_group_summary_claim_rank_idx \
          ON pqueue_group_summary \
@@ -2355,6 +2361,7 @@ fn promote_due_group_summary_chunk_in_tx(
     Ok(complete)
 }
 
+#[cfg(test)]
 fn promote_due_group_summary_chunk(
     client: &mut Client,
     shard: &QueueKey,
@@ -3824,46 +3831,45 @@ fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult
     Ok(out)
 }
 
-/// BQ-14e active-scope discovery: roll up `pqueue_group_summary` into ranked [`ActiveScope`]s (mirror of
-/// the sqlite backend — see that helper for the full contract). Each group holding eligible work
-/// (`oldest_eligible_at IS NOT NULL`) becomes one source scope, owner-local oldest-first (group-key
-/// tiebreak); [`project_scopes`] collapses to the requested granularity.
+/// B-011 exact active-scope discovery, mirrored by SQLite. Keyed and ungrouped scopes come from one
+/// read-only aggregate over live pending items, including time-only due crossings and current gate state.
+/// `pqueue_items_active_scope_idx` bounds the scan to the addressed queue's pending, non-superseded rows;
+/// the cost is O(live pending rows in that queue), replacing the summary-only O(keyed groups) lookup.
 ///
 /// `progress_bound_risk_count` is `None` ("no signal"), not `Some(0)`: the summary's `at_risk_count` is a
 /// deferred `0` placeholder (see `refresh_group_summary`), and the [`ActiveScope`] contract reserves `None`
 /// for an uncomputed signal. Discovery does NOT short-circuit on `queue_paused` (reports intrinsic
 /// eligibility — an operator wants to see pause-induced buildup; a read of an unknown queue → empty list).
-/// KNOWN LIMITATION (shared with group-claim, tracked pqueue-64351bdd): `oldest_eligible_at` is the
-/// mutation-time value, lagged across a pure `not_before` crossing — discovery can UNDER-report
-/// time-triggered starvation until the group's next mutation / a due-sweep refresh.
+const ACTIVE_SCOPE_DISCOVERY_SQL: &str = "SELECT i.group_key, MIN(i.eligible_since) AS oldest_eligible_at, COUNT(*)::bigint \
+     FROM pqueue_items i \
+     WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.lifecycle_state='Pending' \
+     AND i.superseded=false AND i.eligible_since IS NOT NULL \
+     AND (i.not_before IS NULL OR i.not_before<=$3) \
+     AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+       ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+       WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+     GROUP BY i.group_key \
+     ORDER BY oldest_eligible_at ASC, (i.group_key IS NOT NULL) ASC, i.group_key ASC";
+
 fn discover_active_scopes_sql(
     client: &mut Client,
     shard: &QueueKey,
     granularity: DiscoveryGranularity,
     now: UtcTimestamp,
 ) -> EngineResult<Vec<ActiveScope>> {
-    if !promote_due_group_summary_chunk(client, shard, now)? {
-        return Err(EngineError::Unavailable);
-    }
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
-    let rows = st(client.query(
-        "SELECT group_key, oldest_eligible_at, eligible_item_count \
-         FROM pqueue_group_summary \
-         WHERE tenant_id=$1 AND queue_id=$2 AND oldest_eligible_at IS NOT NULL \
-         ORDER BY oldest_eligible_at ASC, group_key ASC",
-        &[&t, &q],
-    ))?;
+    let rows = st(client.query(ACTIVE_SCOPE_DISCOVERY_SQL, &[&t, &q, &now_n]))?;
     let mut source = Vec::with_capacity(rows.len());
     for row in rows {
-        let group_key: String = row.get(0);
+        let group_key: Option<String> = row.get(0);
         let oldest_eligible_at: i64 = row.get(1);
         let eligible: i64 = row.get(2);
         // Age from `now`; a future summary timestamp (clock skew) clamps to 0.
         let age_ms = now_n.saturating_sub(oldest_eligible_at).max(0) as u64 / 1_000_000;
         source.push(ActiveScope {
             queue_id: q.clone(),
-            group_key: Some(group_key),
+            group_key,
             oldest_eligible_age_ms: age_ms,
             eligible_count: Some(eligible as u64),
             // Deferred at-risk derivation → no signal (not a measured zero).
@@ -9691,6 +9697,19 @@ mod sql_shape_tests {
     }
 
     #[test]
+    fn active_scope_discovery_is_live_read_only_and_null_stable() {
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("FROM pqueue_items i"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("i.not_before<=$3"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("pqueue_item_gates"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("pqueue_gate_state"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("GROUP BY i.group_key"));
+        assert!(ACTIVE_SCOPE_DISCOVERY_SQL.contains("(i.group_key IS NOT NULL) ASC"));
+        assert!(!ACTIVE_SCOPE_DISCOVERY_SQL.contains("pqueue_group_summary"));
+        assert!(!ACTIVE_SCOPE_DISCOVERY_SQL.contains("UPDATE"));
+        assert!(!ACTIVE_SCOPE_DISCOVERY_SQL.contains("INSERT"));
+    }
+
+    #[test]
     fn group_claim_is_one_set_based_bounded_statement() {
         let source = include_str!("relational.rs");
         let claim_fn = source
@@ -12179,13 +12198,13 @@ mod gated_group_summary_tests {
         assert_eq!(block_on(b.metrics(&shard())).unwrap().leased, 3);
     }
 
-    /// BQ-14e: discover_active_scopes rolls up pqueue_group_summary, ranks oldest-first, reports deferred
-    /// at-risk as None, and drops fully-leased groups (env-gated; LOUD-skips without a DB).
+    /// B-011: discovery reads keyed and ungrouped live items, ranks oldest-first, observes time-only due
+    /// crossings, reports deferred at-risk as None, and drops fully-leased scopes (env-gated; LOUD skip).
     #[test]
-    fn discover_active_scopes_rolls_up_group_summary() {
+    fn discover_active_scopes_reads_live_items() {
         let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
             eprintln!(
-                "POSTGRES RELATIONAL SKIPPED (discover_active_scopes_rolls_up_group_summary) — set PQUEUE_PG_TEST_URL"
+                "POSTGRES RELATIONAL SKIPPED (discover_active_scopes_reads_live_items) — set PQUEUE_PG_TEST_URL"
             );
             return;
         };
@@ -12207,22 +12226,43 @@ mod gated_group_summary_tests {
         };
         let b = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
         block_on(b.create_queue(def)).unwrap();
-        // g1 eligible since t=10 (2 items), g2 since t=20 (1 item).
-        block_on(b.push(&shard(), vec![g2(10, "g1"), g2(11, "g1")], ts(10), None)).unwrap();
+        // Ungrouped and g1 tie at t=10; g2 is younger. g3 is written into a stale (not-yet-due)
+        // keyed summary and must appear from the live source after time crosses 500 with no mutation.
+        block_on(b.push(
+            &shard(),
+            vec![PushSpec::default(), g2(10, "g1"), g2(11, "g1")],
+            ts(10),
+            None,
+        ))
+        .unwrap();
         block_on(b.push(&shard(), vec![g2(20, "g2")], ts(20), None)).unwrap();
+        let mut due = g2(30, "g3");
+        due.not_before = Some(ts(500));
+        block_on(b.push(&shard(), vec![due], ts(20), None)).unwrap();
+        let before_due =
+            block_on(b.discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(400)))
+                .unwrap();
+        assert!(
+            before_due
+                .iter()
+                .all(|scope| scope.group_key.as_deref() != Some("g3")),
+            "not-yet-due work is absent"
+        );
 
-        // Group granularity: oldest-first (g1 then g2), per-group eligible counts, at-risk None.
+        // Group granularity: oldest-first, with equal-age None before Some and the time-only crossing.
         let scopes =
             block_on(b.discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000)))
                 .unwrap();
-        let order: Vec<&str> = scopes
-            .iter()
-            .map(|s| s.group_key.as_deref().unwrap())
-            .collect();
-        assert_eq!(order, vec!["g1", "g2"], "ranked most-aged first");
+        let order: Vec<Option<&str>> = scopes.iter().map(|s| s.group_key.as_deref()).collect();
+        assert_eq!(
+            order,
+            vec![None, Some("g1"), Some("g2"), Some("g3")],
+            "ranked most-aged first with None before Some on ties"
+        );
         assert_eq!(scopes[0].oldest_eligible_age_ms, 990_000);
-        assert_eq!(scopes[0].eligible_count, Some(2));
-        assert_eq!(scopes[1].eligible_count, Some(1));
+        assert_eq!(scopes[0].eligible_count, Some(1));
+        assert_eq!(scopes[1].eligible_count, Some(2));
+        assert_eq!(scopes[3].oldest_eligible_age_ms, 500_000);
         assert!(
             scopes.iter().all(|s| s.progress_bound_risk_count.is_none()),
             "deferred at-risk is None"
@@ -12235,7 +12275,7 @@ mod gated_group_summary_tests {
         assert_eq!(rolled.len(), 1);
         assert_eq!(rolled[0].group_key, None);
         assert_eq!(rolled[0].oldest_eligible_age_ms, 990_000);
-        assert_eq!(rolled[0].eligible_count, Some(3));
+        assert_eq!(rolled[0].eligible_count, Some(5));
 
         // Leasing g1's whole group drops it from discovery (no eligible work left).
         let req = ClaimRequest {
@@ -12250,15 +12290,18 @@ mod gated_group_summary_tests {
         let after =
             block_on(b.discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000)))
                 .unwrap();
-        let after_order: Vec<&str> = after
-            .iter()
-            .map(|s| s.group_key.as_deref().unwrap())
-            .collect();
+        let after_order: Vec<Option<&str>> = after.iter().map(|s| s.group_key.as_deref()).collect();
         assert_eq!(
             after_order,
-            vec!["g2"],
-            "fully-leased g1 is no longer active"
+            vec![None, Some("g2"), Some("g3")],
+            "fully-leased g1 is gone while ungrouped and live keyed scopes remain"
         );
+
+        block_on(b.claim(claim_req(10, 1500, 1000))).unwrap();
+        let no_work =
+            block_on(b.discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(1000)))
+                .unwrap();
+        assert!(no_work.is_empty(), "no eligible work produces no scopes");
     }
 }
 

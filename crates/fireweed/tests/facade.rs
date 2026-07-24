@@ -293,6 +293,49 @@ async fn discover_alias_preserves_exact_scope_order() {
 }
 
 #[tokio::test]
+async fn stamped_discovery_preserves_ungrouped_order_through_relational_constructor() {
+    let clock = Arc::new(ManualClock::at(10));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "fireweed-facade-stamped-discovery-{}-{nonce}.db",
+        std::process::id()
+    ));
+    let pq = fireweed::open_sqlite_relational(path.to_str().unwrap(), clock).unwrap();
+    let q = qkey();
+    pq.create_queue(qdef()).await.unwrap();
+    let ungrouped = at(10);
+    let mut keyed = at(20);
+    keyed.group_key = Some(GroupKey::new("keyed").unwrap());
+    pq.push_batch(&q, vec![ungrouped, keyed]).await.unwrap();
+
+    let existing = pq
+        .discover_active_scopes(&q, DiscoveryGranularity::Group)
+        .await
+        .unwrap();
+    let stamped = pq
+        .discover_active_scopes_stamped(&q, DiscoveryGranularity::Group)
+        .await
+        .unwrap();
+    assert_eq!(stamped.queue, q);
+    assert_eq!(stamped.granularity, DiscoveryGranularity::Group);
+    assert_eq!(stamped.scopes, existing);
+    assert_eq!(
+        stamped
+            .scopes
+            .iter()
+            .map(|scope| scope.group_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some("keyed")]
+    );
+
+    drop(pq);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn request_id_push_replays_over_sqlite_relational_facade() {
     let clock = Arc::new(ManualClock::at(0));
     let path = std::env::temp_dir()

@@ -17,15 +17,18 @@ a named negative assertion that requires Helm to reject that value at
 `/storage/projection/backend` with the exact allowed enum; an unrelated render
 failure cannot satisfy the assertion.
 
-`hybrid` is the projection value for the normative `objectlog/hybrid` contract:
-the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid`, uses
-`PQUEUE_SQLITE_PROJECTION_PATH`, applies SQLite first and then memory, and must
+The chart deployment owner still renders `PQUEUE_*` environment names as temporary
+v0.20.0 runtime aliases; removal is tied to migrating the chart templates and static
+assertions to authoritative `FIREWEED_*` names. `hybrid` is the projection value for
+the normative `objectlog/hybrid` contract: the runtime renders the compatibility
+alias `PQUEUE_PROJECTION_BACKEND=hybrid`, uses `PQUEUE_SQLITE_PROJECTION_PATH`, applies
+SQLite first and then memory, and must
 fail closed for unsupported non-objectlog pairings until they are implemented and
 tested.
 
 `hybrid-async` is the projection value for the `objectlog/hybrid-async` profile:
-the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid-async`, the same
-`PQUEUE_SQLITE_PROJECTION_PATH`, and the async-apply threshold env
+the runtime renders the compatibility alias `PQUEUE_PROJECTION_BACKEND=hybrid-async`,
+the same `PQUEUE_SQLITE_PROJECTION_PATH`, and the async-apply threshold env
 `PQUEUE_HYBRID_ASYNC_*` from `storage.projection.hybridAsync`. The chart schema
 constrains every threshold to `>= 1`; a checked-in CI values profile,
 `charts/fireweed-queue/ci/objectlog-hybrid-async-values.yaml`, renders the combination and
@@ -39,8 +42,9 @@ SQLite path and persistent volume mount plus all five fail-closed controls:
 axis pairs with `hybrid-async`; other pairings fail closed at startup.
 
 `shared-s3-postgres-control-plane` is the replica-safe shared profile. It
-renders `PQUEUE_OBJECT_LOG_S3_*`, `PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL`,
-and `PQUEUE_ADVERTISE_ADDR` from the pod IP, uses `replicaCount=3`, and keeps
+renders compatibility aliases `PQUEUE_OBJECT_LOG_S3_*`,
+`PQUEUE_POSTGRES_CONTROL_PLANE_DATABASE_URL`, and `PQUEUE_ADVERTISE_ADDR` from the pod
+IP, uses `replicaCount=3`, and keeps
 SQLite projections pod-local via `emptyDir` rather than a shared RWO PVC.
 The chart fails closed if a local object-log profile is scaled beyond one
 replica.

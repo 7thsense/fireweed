@@ -2,7 +2,7 @@
 # nightly-gate.sh — wraps the release gate (smoke lane) plus deferral linting.
 #
 # The pre-migration nightly also ran a concurrency-registry check over
-# crates/pqueue-storage/concurrency_registry.toml; that crate AND its registry
+# the retired storage crate's concurrency_registry.toml; that crate and registry
 # were deleted in the Phase-6 hexagonal migration, so the check is dropped (the
 # per-queue ownership model under ADR-008 has no intra-queue shard concurrency
 # registry to verify).

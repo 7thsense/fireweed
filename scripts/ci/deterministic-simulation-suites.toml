@@ -3,4 +3,4 @@
 # host-performance benchmark. Expected warm target-dir use is below 1 GiB and wall time below five minutes.
 [[suites]]
 name = "objectlog_deterministic_storage_simulation"
-command = ["cargo", "test", "-p", "pqueue-objectlog", "--test", "deterministic_storage_simulation", "--quiet"]
+command = ["cargo", "test", "-p", "fireweed-objectlog", "--test", "deterministic_storage_simulation", "--quiet"]

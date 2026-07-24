@@ -9,8 +9,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 CHART_DIR="${REPO_ROOT}/charts/fireweed-queue"
-PROOF_DIR="${PQUEUE_DEPLOYMENT_PROOF_DIR:-${REPO_ROOT}/target/deployment-release-gate}"
-PACKAGE_DIR="${PQUEUE_RELEASE_DIST:-${PROOF_DIR}/release-dist}"
+PROOF_DIR="${FIREWEED_DEPLOYMENT_PROOF_DIR:-${REPO_ROOT}/target/deployment-release-gate}"
+PACKAGE_DIR="${FIREWEED_RELEASE_DIST:-${PROOF_DIR}/release-dist}"
 PROOF_JSON="${PROOF_DIR}/deployment-proof.json"
 PROOF_MD="${PROOF_DIR}/deployment-proof.md"
 COMMAND_LOG="${PROOF_DIR}/commands.tsv"
@@ -113,8 +113,8 @@ run_step() {
 }
 
 chart_version() {
-    if [[ -n "${PQUEUE_RELEASE_VERSION:-}" ]]; then
-        printf '%s\n' "${PQUEUE_RELEASE_VERSION}"
+    if [[ -n "${FIREWEED_RELEASE_VERSION:-}" ]]; then
+        printf '%s\n' "${FIREWEED_RELEASE_VERSION}"
         return
     fi
     awk -F': *' '$1 == "version" { print $2; exit }' "${CHART_DIR}/Chart.yaml"
@@ -235,11 +235,11 @@ def parse_kv(path):
     return data
 
 image_evidence_candidates = []
-if os.environ.get("PQUEUE_IMAGE_EVIDENCE_FILE"):
-    image_evidence_candidates.append(Path(os.environ["PQUEUE_IMAGE_EVIDENCE_FILE"]))
+if os.environ.get("FIREWEED_IMAGE_EVIDENCE_FILE"):
+    image_evidence_candidates.append(Path(os.environ["FIREWEED_IMAGE_EVIDENCE_FILE"]))
 else:
-    if os.environ.get("PQUEUE_RELEASE_DIST"):
-        image_evidence_candidates.append(Path(os.environ["PQUEUE_RELEASE_DIST"]) / "fireweed-service-image.txt")
+    if os.environ.get("FIREWEED_RELEASE_DIST"):
+        image_evidence_candidates.append(Path(os.environ["FIREWEED_RELEASE_DIST"]) / "fireweed-service-image.txt")
     image_evidence_candidates.append(package_dir / "fireweed-service-image.txt")
 
 image_file = {}
@@ -251,18 +251,18 @@ for candidate in image_evidence_candidates:
         break
 
 image_tag = (
-    os.environ.get("PQUEUE_IMAGE_TAG")
+    os.environ.get("FIREWEED_IMAGE_TAG")
     or image_file.get("version_coordinate")
     or image_file.get("sha_coordinate")
     or "unavailable"
 )
-image_digest = os.environ.get("PQUEUE_IMAGE_DIGEST") or image_file.get("digest") or "unavailable"
+image_digest = os.environ.get("FIREWEED_IMAGE_DIGEST") or image_file.get("digest") or "unavailable"
 image_coordinate = (
-    os.environ.get("PQUEUE_IMAGE_COORDINATE")
+    os.environ.get("FIREWEED_IMAGE_COORDINATE")
     or image_file.get("digest_coordinate")
     or image_tag
 )
-image_source = "environment" if os.environ.get("PQUEUE_IMAGE_TAG") or os.environ.get("PQUEUE_IMAGE_DIGEST") or os.environ.get("PQUEUE_IMAGE_COORDINATE") else "unavailable"
+image_source = "environment" if os.environ.get("FIREWEED_IMAGE_TAG") or os.environ.get("FIREWEED_IMAGE_DIGEST") or os.environ.get("FIREWEED_IMAGE_COORDINATE") else "unavailable"
 if image_file_path is not None:
     image_source = rel(image_file_path)
 
@@ -279,7 +279,7 @@ proof = {
     "exit_status": exit_code,
     "commit_sha": os.environ["DEPLOYMENT_PROOF_COMMIT"],
     "chart": {
-        "name": "pqueue",
+        "name": "fireweed-queue",
         "version": chart_version,
         "package": rel(chart_package) if chart_package.is_file() else "unavailable",
         "package_exists": chart_package.is_file(),
@@ -290,7 +290,7 @@ proof = {
         "digest": image_digest,
         "coordinate": image_coordinate,
         "source": image_source,
-        "unavailable_reason": "" if image_tag != "unavailable" or image_digest != "unavailable" else "no PQUEUE_IMAGE_* environment values or fireweed-service-image.txt release artifact were available",
+        "unavailable_reason": "" if image_tag != "unavailable" or image_digest != "unavailable" else "no FIREWEED_IMAGE_* environment values or fireweed-service-image.txt release artifact were available",
     },
     "storage_combinations": storage_combinations,
     "performance_evidence": {
@@ -319,7 +319,7 @@ lines = [
     f"- status: `{status}`",
     f"- exit status: `{exit_code}`",
     f"- commit: `{proof['commit_sha']}`",
-    f"- chart: `pqueue` `{chart_version}`",
+    f"- chart: `fireweed-queue` `{chart_version}`",
     f"- image tag: `{image_tag}`",
     f"- image digest: `{image_digest}`",
     f"- E2 smoke status: `{e2_smoke_status}`",

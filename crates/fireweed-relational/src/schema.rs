@@ -54,6 +54,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS pqueue_items_active_key
 CREATE INDEX IF NOT EXISTS pqueue_items_group_due_idx
     ON pqueue_items (tenant_id, queue_id, lifecycle_state, group_key, not_before, priority_sort, created_seq)
     WHERE group_key IS NOT NULL AND superseded = 0;
+-- B-011 exact read-only active-scope discovery. Unlike the group-summary indexes, this deliberately
+-- includes NULL group keys and covers the live eligibility-age aggregate without a resident-table scan.
+CREATE INDEX IF NOT EXISTS pqueue_items_active_scope_idx
+    ON pqueue_items (tenant_id, queue_id, group_key, eligible_since, not_before, item_id)
+    WHERE lifecycle_state = 'Pending' AND superseded = 0;
 CREATE INDEX IF NOT EXISTS pqueue_items_expired_lease_idx
     ON pqueue_items (tenant_id, queue_id, lease_expires_at, item_id)
     WHERE lifecycle_state = 'Leased' AND cohort_size IS NULL AND fenced = 0 AND superseded = 0;

@@ -80,18 +80,18 @@ run_cargo() {
 }
 
 echo "--- governed TP-002 semantic release manifest ---"
-run_cargo run -p pqueue-release --bin pqueue-verify-ledger -- \
+run_cargo run -p fireweed-release --bin fireweed-verify-ledger -- \
     --manifest "${manifest}" \
     --require-evidence E0,E1,E2,E3
 
 echo "--- governed E3 contract ---"
-run_cargo run -p pqueue-release --bin pqueue-verify-e3-contract -- \
+run_cargo run -p fireweed-release --bin fireweed-verify-e3-contract -- \
     --manifest "${e3_contract}" \
     --expected-revision "${expected_revision}"
 
 if [[ "${mode}" == "exact-tag" ]]; then
     echo "--- exact-tag governed evidence attestation ---"
-    run_cargo run -p pqueue-release --bin pqueue-verify-evidence-attestation -- \
+    run_cargo run -p fireweed-release --bin fireweed-verify-evidence-attestation -- \
         --manifest "${attestation}" \
         --repo-root "${REPO_ROOT}" \
         --tag "${tag}" \

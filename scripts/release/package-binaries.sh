@@ -22,12 +22,12 @@ ARCHIVE="${DIST_DIR}/fireweed-${VERSION}-${TARGET_TRIPLE}.tar.gz"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR" "$DIST_DIR"
 
-# Optional cargo features for the service binary (e.g. PQUEUE_FEATURES=tls for the Lakebase /
+# Optional cargo features for the service binary (e.g. FIREWEED_FEATURES=tls for the Lakebase /
 # cloud-postgres native-tls runtime). Empty by default — the stock release ships no extra features.
-PQUEUE_FEATURES="${PQUEUE_FEATURES:-}"
+FIREWEED_FEATURES="${FIREWEED_FEATURES:-}"
 SERVICE_FEATURE_ARGS=()
-if [[ -n "$PQUEUE_FEATURES" ]]; then
-    SERVICE_FEATURE_ARGS=(-p fireweed-server --features "$PQUEUE_FEATURES")
+if [[ -n "$FIREWEED_FEATURES" ]]; then
+    SERVICE_FEATURE_ARGS=(-p fireweed-server --features "$FIREWEED_FEATURES")
 fi
 
 rustup run 1.92.0 cargo build --release --bin fireweed-verify-ledger
@@ -45,7 +45,7 @@ Binaries:
 
 Build command:
 rustup run 1.92.0 cargo build --release --bin fireweed-service --bin fireweed-verify-ledger
-  (set PQUEUE_FEATURES=tls for the Lakebase / cloud-postgres native-tls service build)
+  (set FIREWEED_FEATURES=tls for the Lakebase / cloud-postgres native-tls service build)
 EOF
 
 tar -C "$(dirname "$STAGE_DIR")" -czf "$ARCHIVE" "$(basename "$STAGE_DIR")"

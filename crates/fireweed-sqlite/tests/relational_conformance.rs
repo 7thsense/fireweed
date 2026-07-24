@@ -1722,6 +1722,58 @@ async fn discover_group_granularity_ranks_oldest_first() {
     );
 }
 
+/// B-011: discovery derives keyed and ungrouped scopes from live items. This covers the nullable
+/// descriptor, a stale keyed summary whose deferred item crosses due without a write, mixed input, and
+/// deterministic equal-age `None`-before-`Some` ordering.
+#[tokio::test]
+async fn discover_live_items_includes_ungrouped_and_time_only_crossings() {
+    let b = make();
+    b.create_queue(qdef_groups(5)).await.unwrap();
+    let mut ungrouped = spec(10);
+    ungrouped.not_before = None;
+    let keyed = gspec(11, "keyed");
+    let mut due = gspec(12, "due");
+    due.not_before = Some(ts(50));
+    let mut future = gspec(13, "future");
+    future.not_before = Some(ts(200));
+    b.push(&shard(), vec![ungrouped, keyed, due, future], ts(10), None)
+        .await
+        .unwrap();
+
+    let before = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(40))
+        .await
+        .unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .map(|scope| scope.group_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some("keyed")],
+        "equal-age ungrouped work sorts before keyed work; deferred groups remain absent"
+    );
+
+    let after = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(100))
+        .await
+        .unwrap();
+    assert_eq!(
+        after
+            .iter()
+            .map(|scope| scope.group_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![None, Some("keyed"), Some("due")]
+    );
+    assert_eq!(after[0].eligible_count, Some(1));
+    assert_eq!(after[2].oldest_eligible_age_ms, 50_000);
+    assert!(
+        after
+            .iter()
+            .all(|scope| scope.group_key.as_deref() != Some("future")),
+        "not-yet-eligible work is not an active scope"
+    );
+}
+
 /// PAUSE divergence (intentional): discovery reports INTRINSIC eligibility — a paused queue still surfaces
 /// its active scopes (so an operator sees pause-induced buildup), even though a claim on it leases nothing.
 #[tokio::test]

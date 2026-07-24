@@ -30,7 +30,7 @@ jobs:
           --health-retries 10
     defaults:
       run:
-        working-directory: pqueue
+        working-directory: fireweed
     steps:
       # Reclaim ~25 GB of preinstalled tooling (dotnet/android/ghc) the Rust build never uses, so the
       # full-workspace test link has disk headroom (see the debuginfo note above).
@@ -40,10 +40,10 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
           df -h /
 
-      - name: Checkout pqueue
+      - name: Checkout Fireweed
         uses: actions/checkout@v5
         with:
-          path: pqueue
+          path: fireweed
 
       # No dependency pre-checkouts needed: cargo resolves every git dependency itself, and all of them —
       # fjord (github.com/7thsense/fjord), heimq, and axon — are public, so they clone anonymously over
@@ -64,7 +64,7 @@ jobs:
       - name: Postgres conformance proof
         env:
           PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
-        run: cargo +1.92.0 test -p pqueue-postgres --test conformance push_then_select_eligible_in_priority_order -- --nocapture
+        run: cargo +1.92.0 test -p fireweed-postgres --test conformance push_then_select_eligible_in_priority_order -- --nocapture
 
       - name: Exact Postgres TP-003 storage-pair proof
         env:
@@ -73,16 +73,16 @@ jobs:
           matrix_evidence=docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl
           parity_evidence=docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
           rm -f "$matrix_evidence" "$parity_evidence"
-          cargo +1.92.0 test -p pqueue-conformance \
+          cargo +1.92.0 test -p fireweed-conformance \
             --test external_transaction_contract_matrix_tests \
             ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture
-          cargo +1.92.0 test -p pqueue-conformance \
+          cargo +1.92.0 test -p fireweed-conformance \
             --test external_transaction_contract_matrix_tests \
             ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture
           test -s "$matrix_evidence"
           test -s "$parity_evidence"
-          cargo +1.92.0 run -p pqueue-release \
-            --bin pqueue-verify-transaction-evidence -- \
+          cargo +1.92.0 run -p fireweed-release \
+            --bin fireweed-verify-transaction-evidence -- \
             --evidence "$matrix_evidence" \
             --evidence "$parity_evidence"
 
@@ -147,7 +147,7 @@ jobs:
             log_backend: postgres
             projection_backend: postgres
     steps:
-      - name: Checkout pqueue
+      - name: Checkout Fireweed
         uses: actions/checkout@v5
 
       - name: Install Helm

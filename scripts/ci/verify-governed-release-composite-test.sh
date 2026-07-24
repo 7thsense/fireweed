@@ -34,7 +34,7 @@ json.dump({"schema_version":1,"source_revision":sys.argv[2],"authorities":{"e0":
 PY
 export COMMANDS="$CASE/commands"
 PATH="$CASE/bin:$PATH" bash "$ROOT/scripts/ci/verify-governed-release-composite.sh" --contract "$CASE/bundle/composite-contract.json" --expected-revision "$REV"
-for bin in pqueue-verify-e0-e1-evidence pqueue-verify-e2-scale-evidence pqueue-verify-density-evidence pqueue-verify-e2-failover pqueue-verify-e3-contract; do
+for bin in fireweed-verify-e0-e1-evidence fireweed-verify-e2-scale-evidence fireweed-verify-density-evidence fireweed-verify-e2-failover fireweed-verify-e3-contract; do
   grep -q -- "--bin $bin" "$COMMANDS" || fail "composite did not dispatch $bin"
 done
 

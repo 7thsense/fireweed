@@ -31,7 +31,8 @@ expect_rejects() {
 
 mkdir -p "$tmp_dir/src" "$tmp_dir/docs/helix/history" "$tmp_dir/docs/deployment" \
     "$tmp_dir/crates/fireweed-core/src" "$tmp_dir/crates/fireweed-server" \
-    "$tmp_dir/crates/fireweed-release/src" "$tmp_dir/charts/fireweed-queue/templates"
+    "$tmp_dir/crates/fireweed-release/src" "$tmp_dir/charts/fireweed-queue/templates" \
+    "$tmp_dir/.github/workflows"
 
 cat >"$tmp_dir/src/lowercase.md" <<'EOF'
 The pqueue CLI is the public command.
@@ -97,6 +98,12 @@ cat >"$tmp_dir/charts/fireweed-queue/templates/deployment.yaml" <<'EOF'
 app.kubernetes.io/name: pqueue
 EOF
 expect_rejects "charts/fireweed-queue/templates/deployment.yaml" "deployment-namespace"
+
+cat >"$tmp_dir/.github/workflows/stale-command.yml" <<'EOF'
+steps:
+  - run: cargo test -p pqueue-server
+EOF
+expect_rejects ".github/workflows/stale-command.yml" "operational-namespace"
 
 cat >"$tmp_dir/docs/helix/history/queueyard.md" <<'EOF'
 Queueyard remains in naming-analysis history for audit traceability.
