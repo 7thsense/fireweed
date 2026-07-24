@@ -66,7 +66,9 @@ fn density_loadgen_contains_fail_closed_shape_lifecycle_and_active_load_guards()
         .split("result_rx.await")
         .next()
         .unwrap();
-    assert!(dispatch.contains("fireweed_resp::spawn_governed"));
+    assert!(dispatch.contains("fireweed_resp::try_spawn_governed"));
+    assert!(dispatch.contains("resource: \"runtime task slots\""));
+    assert!(!dispatch.contains("fireweed_resp::spawn_governed"));
     assert!(!dispatch.contains("tokio::spawn"));
 }
 
