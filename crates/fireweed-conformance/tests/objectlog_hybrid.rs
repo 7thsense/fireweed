@@ -24,20 +24,20 @@ fn tmp_root() -> std::path::PathBuf {
 fn public_config(
     root: &std::path::Path,
     max_tail_commands: u64,
-) -> fireweed::EmbeddedDurabilityConfig {
-    fireweed::EmbeddedDurabilityConfig {
-        object_log: fireweed::EmbeddedObjectLogConfig::Local {
+) -> fireweed::ObjectLogRuntimeConfig {
+    fireweed::ObjectLogRuntimeConfig {
+        object_log: fireweed::ObjectLogStorage::Local {
             root: root.join("objects"),
         },
-        projection: fireweed::EmbeddedProjectionConfig::Sqlite {
+        projection: fireweed::ProjectionConfig::Sqlite {
             path: root.join("projection.sqlite"),
         },
-        response_barrier: fireweed::EmbeddedResponseBarrier::Strict,
-        segments: fireweed::EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        response_barrier: fireweed::ResponseBarrier::Strict,
+        segments: fireweed::SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace: "objectlog-hybrid-conformance".into(),
-        recovery: fireweed::EmbeddedRecoveryPolicy {
+        recovery: fireweed::RecoveryPolicy {
             max_tail_commands,
-            ..fireweed::EmbeddedRecoveryPolicy::default()
+            ..fireweed::RecoveryPolicy::default()
         },
     }
 }
@@ -141,7 +141,7 @@ async fn objectlog_hybrid_public_strict_failure_replay_and_request_id_conflict()
     let root = tmp_root();
     let config = public_config(&root, 1_000);
     let pq =
-        fireweed::open_embedded_sqlite(config, Arc::new(fireweed_memory::ManualClock::at(1_000)))
+        fireweed::open_objectlog_sqlite(config, Arc::new(fireweed_memory::ManualClock::at(1_000)))
             .unwrap();
     let queue = shard();
     pq.create_queue(qdef()).await.unwrap();
@@ -151,7 +151,7 @@ async fn objectlog_hybrid_public_strict_failure_replay_and_request_id_conflict()
         .push_with_request_id(&queue, request.clone(), public_item(10))
         .await
         .unwrap();
-    let verification = pq.verify_projection().await.unwrap();
+    let verification = pq.projection_control().unwrap().verify().await.unwrap();
     assert_eq!(
         verification.projection_sequence, verification.authoritative_sequence,
         "strict returned success is manifest-committed and SQLite-visible"
@@ -178,7 +178,7 @@ async fn objectlog_hybrid_public_projection_behind_recovers_without_duplicates()
     let root = tmp_root();
     let config = public_config(&root, 1_000);
     let pq =
-        fireweed::open_embedded_sqlite(config, Arc::new(fireweed_memory::ManualClock::at(1_000)))
+        fireweed::open_objectlog_sqlite(config, Arc::new(fireweed_memory::ManualClock::at(1_000)))
             .unwrap();
     let queue = shard();
     pq.create_queue(qdef()).await.unwrap();
@@ -186,8 +186,8 @@ async fn objectlog_hybrid_public_projection_behind_recovers_without_duplicates()
     let second = pq.push(&queue, public_item(20)).await.unwrap();
     let expected = pq.metrics(&queue).await.unwrap();
 
-    pq.delete_projection().await.unwrap();
-    let rebuilt = pq.rehydrate_projection().await.unwrap();
+    pq.projection_control().unwrap().delete().await.unwrap();
+    let rebuilt = pq.projection_control().unwrap().rebuild().await.unwrap();
     assert_eq!(rebuilt.tail_commands_replayed, 2);
     assert_eq!(pq.metrics(&queue).await.unwrap(), expected);
     assert_eq!(
@@ -208,17 +208,17 @@ async fn objectlog_hybrid_public_interrupted_rebuild_recovers_on_reopen() {
     let root = tmp_root();
     let limited = public_config(&root, 1);
     let pq =
-        fireweed::open_embedded_sqlite(limited, Arc::new(fireweed_memory::ManualClock::at(1_000)))
+        fireweed::open_objectlog_sqlite(limited, Arc::new(fireweed_memory::ManualClock::at(1_000)))
             .unwrap();
     let queue = shard();
     pq.create_queue(qdef()).await.unwrap();
     let first = pq.push(&queue, public_item(10)).await.unwrap();
     let second = pq.push(&queue, public_item(20)).await.unwrap();
-    pq.delete_projection().await.unwrap();
-    assert!(pq.rehydrate_projection().await.is_err());
+    pq.projection_control().unwrap().delete().await.unwrap();
+    assert!(pq.projection_control().unwrap().rebuild().await.is_err());
     drop(pq);
 
-    let reopened = fireweed::open_embedded_sqlite(
+    let reopened = fireweed::open_objectlog_sqlite(
         public_config(&root, 1_000),
         Arc::new(fireweed_memory::ManualClock::at(2_000)),
     )

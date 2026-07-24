@@ -312,7 +312,7 @@ pub mod single_deployment {
             .values
             .get("telemetry_surface")
             .and_then(serde_json::Value::as_str)
-            != Some("Pqueue::metrics+current_position+discover_active_scopes")
+            != Some("Fireweed::metrics+current_position+discover_active_scopes")
             || parsed.as_ref().is_none_or(|values| values.len() < 3)
             || u64_value(row, "telemetry_sample_count")
                 != parsed.as_ref().map(|values| values.len() as u64)

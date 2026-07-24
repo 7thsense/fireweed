@@ -6,8 +6,8 @@ use fireweed::{
     CohortOnIncomplete, CohortPolicy, CreateQueue, EligibilityPolicy, EmbeddedDurabilityConfig,
     EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryPolicy,
     EmbeddedResponseBarrier, EmbeddedSegmentConfig, EnsureQueueError, EntitySchemaDocument,
-    GateKeyPolicy, IndexDeclaration, IndexDef, IndexSpec, IndexType, LibBackend, MetadataValue,
-    OrderingMode, Pqueue, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    Fireweed, GateKeyPolicy, IndexDeclaration, IndexDef, IndexSpec, IndexType, MetadataValue,
+    OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
     QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex, QueueKey, QueueTemplate,
     RecurrenceMode, RecurrencePolicy, RetryPolicy, TenantId, UtcTimestamp,
 };
@@ -301,7 +301,7 @@ async fn validation_and_policy_divergence_are_caller_visible() {
     ));
 }
 
-async fn assert_ensure<B: LibBackend>(pqueue: &Pqueue<B>, queue: &QueueKey, created: bool) {
+async fn assert_ensure(pqueue: &Fireweed, queue: &QueueKey, created: bool) {
     let outcome = pqueue.ensure_queue(queue, &template()).await.unwrap();
     assert_eq!(outcome.created, created);
     assert_eq!(outcome.definition, template().resolve(queue).unwrap());

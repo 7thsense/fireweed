@@ -27,14 +27,13 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
-use fireweed::{NewItem, Pqueue};
+use fireweed::{NewItem, open_memory};
 use fireweed_core::{
     EligibilityPolicy, ItemId, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{Clock, QueueKey};
-use fireweed_memory::composed_memory_backend;
 
 /// Historical E0 capacity reference retained only to prove sub-reference progress is not rejected.
 const HISTORICAL_E0_REFERENCE_PER_SEC: f64 = 10_000_000.0 / 3600.0;
@@ -91,7 +90,7 @@ fn run_owner(
     items_per_queue: u64,
     batch: usize,
 ) -> Vec<f64> {
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SysClock));
+    let pq = open_memory(Arc::new(SysClock));
     futures::executor::block_on(async {
         let mut per_queue_rates = Vec::with_capacity(queues_per_owner);
         for qi in 0..queues_per_owner {

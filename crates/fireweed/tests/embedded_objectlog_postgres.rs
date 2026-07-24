@@ -6,12 +6,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    Bytes, ClaimRef, CommitEntry, CommitRequest, EligibilityPolicy, EmbeddedDurabilityConfig,
-    EmbeddedObjectLogConfig, EmbeddedProjectionConfig, EmbeddedRecoveryPolicy,
-    EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig, EngineError, EntryOutcome,
-    FinalizeKind, InstanceFence, NewItem, OrderingMode, PriorityDirection, PriorityModel,
-    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, QueueKey,
-    RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SideRecord, TenantId,
+    Bytes, ClaimRef, CommitEntry, CommitRequest, CompoundIndexDef, CompoundIndexField,
+    ConfigSecret, EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig,
+    EmbeddedProjectionConfig, EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret,
+    EmbeddedSegmentConfig, EngineError, EntryOutcome, FinalizeKind, IndexDeclaration, IndexType,
+    InstanceFence, NewItem, ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode,
+    PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
+    ProjectionConfig, QueueDefinition, QueueId, QueueIndex, QueueKey, RangeScanRequest,
+    RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SegmentConfig,
+    SideRecord, TenantId,
 };
 use fireweed_engine::DurabilityClass;
 use fireweed_memory::ManualClock;
@@ -58,6 +61,21 @@ fn config(root: &Path, schema: &str, url: &str) -> EmbeddedDurabilityConfig {
     }
 }
 
+fn public_config(root: &Path, schema: &str, url: &str) -> ObjectLogRuntimeConfig {
+    ObjectLogRuntimeConfig {
+        object_log: ObjectLogStorage::Local {
+            root: root.to_path_buf(),
+        },
+        projection: ProjectionConfig::Postgres {
+            url: ConfigSecret::new(url),
+        },
+        response_barrier: ResponseBarrier::Strict,
+        segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
+        namespace: schema.to_owned(),
+        recovery: RecoveryPolicy::default(),
+    }
+}
+
 fn definition() -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new("embedded-tenant").unwrap(),
@@ -83,7 +101,22 @@ fn definition() -> QueueDefinition {
         max_eligible_group_size: None,
         secondary_indexes: vec![],
         entity_schema: None,
-        typed_indexes: vec![],
+        typed_indexes: vec![QueueIndex {
+            name: "by_kind_priority".to_owned(),
+            declaration: IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    CompoundIndexField {
+                        field: "kind".to_owned(),
+                        index_type: IndexType::String,
+                    },
+                    CompoundIndexField {
+                        field: "priority".to_owned(),
+                        index_type: IndexType::Integer,
+                    },
+                ],
+                unique: false,
+            }),
+        }],
         emit_change_records: true,
     }
 }
@@ -99,6 +132,10 @@ fn item(priority: i64) -> NewItem {
     NewItem {
         priority: Some(PriorityValue::Int64(priority)),
         payload: Some(format!("payload-{priority}").into()),
+        entity: Some(serde_json::json!({
+            "kind": "embedded-lifecycle",
+            "priority": priority,
+        })),
         ..NewItem::default()
     }
 }
@@ -133,7 +170,8 @@ fn object_count(root: &Path) -> usize {
     count
 }
 
-fn postgres_in_schema(url: &str, schema: &str) -> Client {
+fn postgres_in_schema(url: &str, namespace: &str) -> Client {
+    let schema = crate::derived_postgres_schema_name(namespace);
     let mut client = Client::connect(url, NoTls).unwrap();
     client
         .batch_execute(&format!("SET search_path TO {schema}"))
@@ -141,7 +179,8 @@ fn postgres_in_schema(url: &str, schema: &str) -> Client {
     client
 }
 
-fn drop_schema(url: &str, schema: &str) {
+fn drop_schema(url: &str, namespace: &str) {
+    let schema = crate::derived_postgres_schema_name(namespace);
     let mut client = Client::connect(url, NoTls).unwrap();
     client
         .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
@@ -274,6 +313,20 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
     let objects_before_delete = object_count(&root);
     block_on(pq.delete_projection()).unwrap();
     assert_eq!(object_count(&root), objects_before_delete);
+    let mut deleted_postgres = postgres_in_schema(&url, &schema);
+    let stale_component_count: i64 = deleted_postgres
+        .query_one("SELECT COUNT(*) FROM pqueue_item_index_component", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(
+        stale_component_count, 0,
+        "projection deletion must clear decomposed typed-index rows before replay"
+    );
+    drop(deleted_postgres);
+    let deleted = block_on(pq.verify_projection()).unwrap();
+    assert!(!deleted.compatible);
+    assert_eq!(deleted.projection_sequence, 0);
+    assert!(deleted.authoritative_sequence > 0);
     let rebuilt = block_on(pq.rehydrate_projection()).unwrap();
     assert!(
         rebuilt.tail_commands_replayed >= 2,
@@ -352,52 +405,63 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
         "with punctuation:-/",
         "with unicode snowman ☃ and more text to exceed sixty-three bytes"
     );
-    let durability = EmbeddedDurabilityConfig {
-        object_log: EmbeddedObjectLogConfig::S3Compatible {
+    let durability = ObjectLogRuntimeConfig {
+        object_log: ObjectLogStorage::S3Compatible {
             endpoint,
             bucket,
             region,
-            access_key_id: EmbeddedSecret::new(access),
-            secret_access_key: EmbeddedSecret::new(secret),
+            access_key_id: ConfigSecret::new(access),
+            secret_access_key: ConfigSecret::new(secret),
             allow_insecure_http,
         },
-        projection: EmbeddedProjectionConfig::Postgres {
-            url: EmbeddedSecret::new(pg_url),
+        projection: ProjectionConfig::Postgres {
+            url: ConfigSecret::new(pg_url),
         },
-        response_barrier: EmbeddedResponseBarrier::Strict,
-        segments: EmbeddedSegmentConfig::new(64 * 1024, 5).unwrap(),
+        response_barrier: ResponseBarrier::Strict,
+        segments: SegmentConfig::new(64 * 1024, 5).unwrap(),
         namespace,
-        recovery: EmbeddedRecoveryPolicy::default(),
+        recovery: RecoveryPolicy::default(),
     };
     let clock = Arc::new(ManualClock::at(1_000));
 
     let postgres_caps = {
-        let pq = fireweed::open_embedded(durability.clone(), clock.clone()).unwrap();
+        let pq = fireweed::open_objectlog_postgres(durability.clone(), clock.clone()).unwrap();
         let key = queue();
         block_on(pq.create_queue(definition())).unwrap();
         block_on(pq.push(&key, item(10))).unwrap();
         block_on(pq.push(&key, item(20))).unwrap();
         assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
+        let control = pq
+            .projection_control()
+            .expect("object-log/Postgres owns a disposable projection");
+        assert!(block_on(control.verify()).unwrap().compatible);
         let caps = pq.commit_capabilities(&key).unwrap();
         assert_authoritative_commit_capabilities(&caps);
         caps
     };
 
     {
-        let pq = fireweed::open_embedded(durability.clone(), clock.clone()).unwrap();
+        let pq = fireweed::open_objectlog_postgres(durability.clone(), clock.clone()).unwrap();
         let key = queue();
         assert_eq!(block_on(pq.metrics(&key)).unwrap().pending, 2);
         assert_eq!(block_on(pq.peek(&key, 10)).unwrap().len(), 2);
+        let control = pq
+            .projection_control()
+            .expect("reopened object-log/Postgres exposes projection maintenance");
+        block_on(control.delete()).unwrap();
+        let rebuilt = block_on(control.rebuild()).unwrap();
+        assert!(rebuilt.projection_sequence > 0);
+        assert!(block_on(control.verify()).unwrap().compatible);
     }
 
     #[cfg(feature = "sqlite")]
     {
         let (_, sqlite_projection) = unique_fixture("s3_sqlite_capability_parity");
         let mut sqlite_durability = durability;
-        sqlite_durability.projection = EmbeddedProjectionConfig::Sqlite {
+        sqlite_durability.projection = ProjectionConfig::Sqlite {
             path: std::env::temp_dir().join(format!("{sqlite_projection}.sqlite")),
         };
-        let pq = fireweed::open_embedded_sqlite(sqlite_durability, clock).unwrap();
+        let pq = fireweed::open_objectlog_sqlite(sqlite_durability, clock).unwrap();
         let sqlite_caps = pq.commit_capabilities(&queue()).unwrap();
         assert_eq!(postgres_caps, sqlite_caps);
     }
@@ -406,8 +470,8 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
 #[tokio::test(flavor = "current_thread")]
 async fn synchronous_open_inside_tokio_returns_typed_error() {
     let (root, schema) = unique_fixture("tokio_sync_open");
-    let error = match fireweed::open_embedded(
-        config(&root, &schema, "postgres://127.0.0.1:1/postgres"),
+    let error = match fireweed::open_objectlog_postgres(
+        public_config(&root, &schema, "postgres://127.0.0.1:1/postgres"),
         Arc::new(ManualClock::at(1_000)),
     ) {
         Ok(_) => panic!("the synchronous constructor must reject an ambient Tokio runtime"),
@@ -416,7 +480,7 @@ async fn synchronous_open_inside_tokio_returns_typed_error() {
     assert_eq!(
         error,
         EngineError::Invalid(
-            "open_embedded cannot run inside a Tokio runtime; use open_embedded_async"
+            "open_objectlog_postgres cannot run inside a Tokio runtime; use open_objectlog_postgres_async"
         )
     );
 }
@@ -428,14 +492,16 @@ async fn asynchronous_open_is_safe_inside_tokio() {
         return;
     };
     let (root, schema) = unique_fixture("tokio_async_open");
-    let pq = fireweed::open_embedded_async(
-        config(&root, &schema, &url),
+    let pq = fireweed::open_objectlog_postgres_async(
+        public_config(&root, &schema, &url),
         Arc::new(ManualClock::at(1_000)),
     )
     .await
     .unwrap();
     drop(pq);
-    drop_schema(&url, &schema);
+    tokio::task::spawn_blocking(move || drop_schema(&url, &schema))
+        .await
+        .unwrap();
     let _ = fs::remove_dir_all(root);
 }
 

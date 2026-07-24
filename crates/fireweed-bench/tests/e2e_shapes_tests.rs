@@ -11,12 +11,11 @@
 
 use std::sync::Arc;
 
-use fireweed::Pqueue;
+use fireweed::{
+    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_memory, open_objectlog,
+    open_postgres_runtime, open_sqlite, open_sqlite_relational,
+};
 use fireweed_bench::{Shape, SystemClock, all_shapes, bench_qdef, lifecycle, qkey};
-use fireweed_memory::composed_memory_backend;
-use fireweed_objectlog::ObjectLogBackend;
-use fireweed_postgres::{PostgresBackend, PostgresRelationalBackend};
-use fireweed_sqlite::{SqliteRelationalBackend, composed_sqlite_backend};
 use futures::executor::block_on;
 
 /// Small but non-trivial: exercises batching + the 10%/10%/80% lifecycle partition with whole groups.
@@ -36,12 +35,7 @@ fn tmp(tag: &str) -> std::path::PathBuf {
 }
 
 /// Run the lifecycle for one shape on a freshly-built backend handle, asserting it returns Ok.
-fn run_one<B: fireweed::LibBackend>(
-    backend: &str,
-    pq: &Pqueue<B>,
-    shape: &Shape,
-    supports_update: bool,
-) {
+fn run_one(backend: &str, pq: &Fireweed, shape: &Shape, supports_update: bool) {
     let qn = format!("{backend}-{}", shape.name);
     let q = qkey(&qn);
     block_on(pq.create_queue(bench_qdef("bench", &qn, shape))).expect("create queue");
@@ -62,7 +56,7 @@ fn run_one<B: fireweed::LibBackend>(
 #[test]
 fn lifecycle_over_shapes_memory() {
     for shape in all_shapes() {
-        let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SystemClock));
+        let pq = open_memory(Arc::new(SystemClock));
         run_one("memory", &pq, &shape, true);
     }
 }
@@ -72,10 +66,7 @@ fn lifecycle_over_shapes_sqlite_log() {
     for shape in all_shapes() {
         let path = tmp(&format!("sqlite-{}", shape.name));
         let _ = std::fs::remove_file(&path);
-        let pq = Pqueue::new(
-            Arc::new(composed_sqlite_backend(path.to_str().unwrap()).expect("open sqlite")),
-            Arc::new(SystemClock),
-        );
+        let pq = open_sqlite(path.to_str().unwrap(), Arc::new(SystemClock)).expect("open sqlite");
         run_one("sqlite", &pq, &shape, true);
         let _ = std::fs::remove_file(&path);
     }
@@ -84,10 +75,8 @@ fn lifecycle_over_shapes_sqlite_log() {
 #[test]
 fn lifecycle_over_shapes_sqlite_relational() {
     for shape in all_shapes() {
-        let pq = Pqueue::new(
-            Arc::new(SqliteRelationalBackend::in_memory().expect("sqlite relational")),
-            Arc::new(SystemClock),
-        );
+        let pq =
+            open_sqlite_relational(":memory:", Arc::new(SystemClock)).expect("sqlite relational");
         run_one("sqlite_relational", &pq, &shape, true);
     }
 }
@@ -97,10 +86,7 @@ fn lifecycle_over_shapes_objectlog() {
     for shape in all_shapes() {
         let dir = tmp(&format!("objectlog-{}", shape.name));
         let _ = std::fs::remove_dir_all(&dir);
-        let pq = Pqueue::new(
-            Arc::new(ObjectLogBackend::open(&dir).expect("open objectlog")),
-            Arc::new(SystemClock),
-        );
+        let pq = open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog");
         // Eventual-apply class: update_fields is refused, so the lifecycle skips it.
         run_one("objectlog", &pq, &shape, false);
         let _ = std::fs::remove_dir_all(&dir);
@@ -121,10 +107,17 @@ fn lifecycle_over_shapes_postgres_log() {
             std::process::id(),
             shape.name.replace('-', "_")
         );
-        let pq = Pqueue::new(
-            Arc::new(PostgresBackend::connect_in_schema(&url, &schema).expect("connect postgres")),
+        let pq = open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(url.clone()),
+                schema: Some(schema),
+                mode: PostgresMode::LogReplay,
+                node_id: None,
+                coordination: None,
+            },
             Arc::new(SystemClock),
-        );
+        )
+        .expect("connect postgres");
         run_one("postgres", &pq, &shape, true);
     }
 }
@@ -143,13 +136,17 @@ fn lifecycle_over_shapes_postgres_relational() {
             std::process::id(),
             shape.name.replace('-', "_")
         );
-        let pq = Pqueue::new(
-            Arc::new(
-                PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .expect("connect postgres relational"),
-            ),
+        let pq = open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(url.clone()),
+                schema: Some(schema),
+                mode: PostgresMode::Relational,
+                node_id: None,
+                coordination: None,
+            },
             Arc::new(SystemClock),
-        );
+        )
+        .expect("connect postgres relational");
         run_one("postgres_relational", &pq, &shape, true);
     }
 }

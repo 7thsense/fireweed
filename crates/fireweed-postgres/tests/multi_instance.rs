@@ -1,7 +1,7 @@
 //! B5 (ADR-009 / TD-003): durable multi-instance shared-store competition over POSTGRES — the full stack
 //! (B1 data-plane fence + B2 coordinated library owner + B4 single durable epoch) end to end.
 //!
-//! Two `Pqueue` instances, each with its OWN postgres backend + control-plane connection but the SAME
+//! Two `Fireweed` instances, each with its OWN postgres backend + control-plane connection but the SAME
 //! schema (one durable store), compete for a queue. The keystone guarantee under test is the **durable
 //! epoch fence**: the fence epoch lives in the shared `queues` table (BQ-23), so a superseded instance is
 //! rejected `EpochFenced` across connections — proven below. (Cross-instance ITEM visibility additionally
@@ -15,11 +15,13 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
-use fireweed::{NewItem, Pqueue};
+use fireweed::{
+    ConfigSecret, Fireweed, NewItem, PostgresCoordinationConfig, PostgresMode,
+    PostgresRuntimeConfig, open_postgres_runtime,
+};
 use fireweed_conformance::qdef;
 use fireweed_core::{OwnerId, QueueId, TenantId, UtcTimestamp};
-use fireweed_engine::{Clock, ControlPlaneConfig, EngineError, QueueControlPlane, QueueKey};
-use fireweed_postgres::{PostgresBackend, PostgresControlPlane, PostgresRelationalBackend};
+use fireweed_engine::{Clock, ControlPlaneConfig, EngineError, QueueKey};
 use postgres::{Client, NoTls};
 
 fn bo<F: Future>(f: F) -> F::Output {
@@ -68,21 +70,23 @@ fn two_instances_compete_over_shared_postgres() {
 
     let clock = Arc::new(ManualClock::at(0));
     // Each instance: its OWN backend + control-plane connection, the SAME schema (one durable store).
-    let make = |owner: &str, node: u8| -> Pqueue<PostgresBackend> {
+    let make = |owner: &str, node: u8| -> Fireweed {
         // Each replica carries a DISTINCT node_id (ADR-009) — as the config-driven service would assign —
         // so even a split-brain/handoff window cannot mint a colliding id over the shared store.
-        let backend = Arc::new(
-            PostgresBackend::connect_in_schema(&url, &schema)
-                .expect("backend")
-                .with_node_id(node),
-        );
-        let cp: Arc<dyn QueueControlPlane> = Arc::new(
-            PostgresControlPlane::connect_in_schema(&url, &schema, ControlPlaneConfig::default())
-                .expect("cp"),
-        );
-        // Postgres binds the storage epoch (BQ-23), so the durable multi-instance constructor accepts it.
-        Pqueue::with_control_plane(backend, clock.clone(), OwnerId::new(owner).unwrap(), cp)
-            .expect("postgres control plane presents the atomic acquire->fence capability")
+        open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(url.clone()),
+                schema: Some(schema.clone()),
+                mode: PostgresMode::LogReplay,
+                node_id: Some(node),
+                coordination: Some(PostgresCoordinationConfig {
+                    instance_id: OwnerId::new(owner).unwrap(),
+                    control_plane: ControlPlaneConfig::default(),
+                }),
+            },
+            clock.clone(),
+        )
+        .expect("postgres control plane presents the atomic acquire->fence capability")
     };
 
     let a = make("owner-A", 1);
@@ -153,18 +157,21 @@ fn relational_multi_instance_has_item_visibility_and_fence() {
     drop(c);
 
     let clock = Arc::new(ManualClock::at(0));
-    let make = |owner: &str, node: u8| -> Pqueue<PostgresRelationalBackend> {
-        let backend = Arc::new(
-            PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                .expect("backend")
-                .with_node_id(node),
-        );
-        let cp: Arc<dyn QueueControlPlane> = Arc::new(
-            PostgresControlPlane::connect_in_schema(&url, &schema, ControlPlaneConfig::default())
-                .expect("cp"),
-        );
-        Pqueue::with_control_plane(backend, clock.clone(), OwnerId::new(owner).unwrap(), cp)
-            .expect("postgres binds the storage epoch")
+    let make = |owner: &str, node: u8| -> Fireweed {
+        open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(url.clone()),
+                schema: Some(schema.clone()),
+                mode: PostgresMode::Relational,
+                node_id: Some(node),
+                coordination: Some(PostgresCoordinationConfig {
+                    instance_id: OwnerId::new(owner).unwrap(),
+                    control_plane: ControlPlaneConfig::default(),
+                }),
+            },
+            clock.clone(),
+        )
+        .expect("postgres binds the storage epoch")
     };
 
     let a = make("owner-A", 1);

@@ -45,16 +45,15 @@ use std::time::Instant;
 use bytes::Bytes;
 use fireweed::{
     BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest, BatchUpdateValue,
-    NewItem, Pqueue, SystemClock,
+    ConfigSecret, Fireweed, NewItem, PostgresMode, PostgresRuntimeConfig, SystemClock,
+    open_postgres_runtime,
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, GroupKey, ItemId, OrderingMode, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId,
     RecurrencePolicy, RequestId, RetryPolicy, TenantId,
 };
-use fireweed_engine::{ControlPlaneStore, DiscoveryGranularity, EngineError, QueueKey};
-use fireweed_postgres::{PostgresConnectConfig, PostgresRelationalBackend};
-use fireweed_server::{PostgresWholeOperationAdapter, fixed_postgres_relational_pool};
+use fireweed_engine::{DiscoveryGranularity, EngineError, QueueKey};
 
 const CONFIGURED_MAX_BATCH_SIZE: u64 = 1_000;
 const CONFIGURED_CONCURRENCY: u64 = 2;
@@ -545,7 +544,7 @@ fn insert_measured_contract(
         ),
         (
             "telemetry_surface".into(),
-            serde_json::json!("Pqueue::metrics+current_position+discover_active_scopes"),
+            serde_json::json!("Fireweed::metrics+current_position+discover_active_scopes"),
         ),
         (
             "telemetry_sample_count".into(),
@@ -713,8 +712,8 @@ fn representative_batch_update(ids: &[ItemId], request_sequence: u64) -> BatchUp
     }
 }
 
-async fn push_batch<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
+async fn push_batch(
+    pq: &Fireweed,
     shard: &QueueKey,
     base: u64,
     n: u64,
@@ -730,8 +729,8 @@ async fn push_batch<B: fireweed::LibBackend>(
 }
 
 /// Claim up to `n` eligible items from `shard`, returning their ids.
-async fn claim<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
+async fn claim(
+    pq: &Fireweed,
     shard: &QueueKey,
     n: usize,
     operations: &OperationProbe,
@@ -746,12 +745,7 @@ async fn claim<B: fireweed::LibBackend>(
 }
 
 /// Finalize-complete the given ids on `shard`.
-async fn finalize<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
-    shard: &QueueKey,
-    ids: &[ItemId],
-    operations: &OperationProbe,
-) {
+async fn finalize(pq: &Fireweed, shard: &QueueKey, ids: &[ItemId], operations: &OperationProbe) {
     let _operation = operations.begin();
     pq.ack(shard, ids.iter().copied())
         .await
@@ -889,10 +883,17 @@ fn production_wrapper_batches_10k_through_native_ports() {
     let application_name = format!("pqueue_e0_batch_proof_{}", std::process::id());
     let separator = if observer_url.contains('?') { '&' } else { '?' };
     let pool_url = format!("{observer_url}{separator}application_name={application_name}_pool");
-    let backend =
-        fixed_postgres_relational_pool(PostgresConnectConfig::new(pool_url), Some(&schema), 2, 0)
-            .expect("connect production pool");
-    let pq = Pqueue::new(backend, Arc::new(SystemClock));
+    let pq = open_postgres_runtime(
+        PostgresRuntimeConfig {
+            url: ConfigSecret::new(pool_url),
+            schema: Some(schema),
+            mode: PostgresMode::Relational,
+            node_id: Some(0),
+            coordination: None,
+        },
+        Arc::new(SystemClock),
+    )
+    .expect("connect production runtime");
     let shard = sk("batch-proof", "hot");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
@@ -971,10 +972,19 @@ fn performance_single_deployment_baseline_tests() {
     let application_name = format!("pqueue_e0e1_evidence_{}", std::process::id());
     let separator = if observer_url.contains('?') { '&' } else { '?' };
     let pool_url = format!("{observer_url}{separator}application_name={application_name}_pool");
-    let b: Arc<PostgresWholeOperationAdapter<PostgresRelationalBackend>> =
-        fixed_postgres_relational_pool(PostgresConnectConfig::new(pool_url), Some(&schema), 2, 0)
-            .expect("connect fixed postgres production pool");
-    let pq = Arc::new(Pqueue::new(Arc::clone(&b), Arc::new(SystemClock)));
+    let pq = Arc::new(
+        open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(pool_url),
+                schema: Some(schema.clone()),
+                mode: PostgresMode::Relational,
+                node_id: Some(0),
+                coordination: None,
+            },
+            Arc::new(SystemClock),
+        )
+        .expect("connect postgres production runtime"),
+    );
     let operations = Arc::new(OperationProbe::default());
     let workers = Arc::new(WorkerProbe::default());
     let caps = RunCaps::from_env(perf_env);
@@ -990,7 +1000,7 @@ fn performance_single_deployment_baseline_tests() {
         pq.create_queue(big_qdef("e0e1", "hot", progress_bound_ms))
             .await
             .unwrap();
-        let persisted = b.queue_definition(&shard).await.unwrap();
+        let persisted = pq.queue_definition(&shard).await.unwrap();
         assert_eq!(persisted.max_push_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.max_claim_batch_size, CONFIGURED_MAX_BATCH_SIZE);
         assert_eq!(persisted.progress_bound_ms, progress_bound_ms);

@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use fireweed::{NewItem, Pqueue};
+use fireweed::{NewItem, open_memory};
 use fireweed_bench::{SystemClock, all_shapes, bench_qdef, qkey};
-use fireweed_memory::composed_memory_backend;
 
 #[test]
 fn resident_terminal_count_tracks_terminal_population_via_metrics() {
     let shape = all_shapes()[0];
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SystemClock));
+    let pq = open_memory(Arc::new(SystemClock));
     let queue = qkey("terminal-metrics");
 
     futures::executor::block_on(async {

@@ -7,7 +7,7 @@ publish = false
 [workspace]
 
 [dependencies]
-fireweed = { path = "../../../../crates/fireweed", default-features = false, features = ["memory"] }
+fireweed = { path = "../../../../crates/fireweed", default-features = false, features = ["memory", "sqlite", "objectlog", "postgres"] }
 
 [[bin]]
 name = "supported"
@@ -24,3 +24,27 @@ path = "src/internal_crate.rs"
 [[bin]]
 name = "backend-accessor"
 path = "src/backend_accessor.rs"
+
+[[bin]]
+name = "legacy-pqueue"
+path = "src/legacy_pqueue.rs"
+
+[[bin]]
+name = "legacy-embedded-pqueue"
+path = "src/legacy_embedded_pqueue.rs"
+
+[[bin]]
+name = "legacy-lib-backend"
+path = "src/legacy_lib_backend.rs"
+
+[[bin]]
+name = "legacy-embedded-handle"
+path = "src/legacy_embedded_handle.rs"
+
+[[bin]]
+name = "legacy-pqueue-new"
+path = "src/legacy_pqueue_new.rs"
+
+[[bin]]
+name = "legacy-embedded-config"
+path = "src/legacy_embedded_config.rs"

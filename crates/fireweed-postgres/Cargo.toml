@@ -45,7 +45,7 @@ tls = ["dep:native-tls", "dep:postgres-native-tls"]
 [dev-dependencies]
 # The library facade, driven as a COORDINATED owner over the postgres backend + control plane for the B5
 # durable multi-instance competition test. `default-features = false` so we don't pull the other adapters.
-fireweed = { path = "../fireweed", default-features = false }
+fireweed = { path = "../fireweed", default-features = false, features = ["postgres"] }
 # Runs the shared backend-conformance suite against the postgres backend (env-gated on PQUEUE_PG_TEST_URL).
 fireweed-conformance = { path = "../fireweed-conformance" }
 [[test]]

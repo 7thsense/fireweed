@@ -13,7 +13,7 @@
 //!    FENCE SCOPE (pqueue-7bac12ce closes the BQ-20/21/22 deferral): Every data-plane port
 //!    (`ClaimPort`/`PushPort`/`FinalizePort`/`RenewLeasePort`/`ReassignLeasePort`/`PurgePort`/`UpsertPort`
 //!    /`CommitTransitionPort`/`ReclaimPort`) accepts `expected_epoch: Option<u64>` from the caller. Both
-//!    the library facade (`Pqueue::push`/`claim`/`ack`/etc.) and the RESP server wiring
+//!    the library facade (`Fireweed::push`/`claim`/`ack`/etc.) and the RESP server wiring
 //!    (`OwnershipRuntime::expected_epoch_for_write`) supply the owner's cached `fence_epoch` from the
 //!    [`OwnedSession`] — so a SUPERSEDED owner's claim/push/finalize is `EpochFenced` at commit time, not
 //!    just the typed raw-commit seam. Backend implementations (compose.rs, sqlite/relational/apply.rs,

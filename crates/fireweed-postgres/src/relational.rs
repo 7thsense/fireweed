@@ -3458,6 +3458,10 @@ fn apply_command_sql(
 // read queries
 // ---------------------------------------------------------------------------
 
+fn sql_limit(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
 fn queue_paused(client: &mut impl GenericClient, shard: &QueueKey) -> EngineResult<bool> {
     let (t, q) = parts(shard);
     let row = st(client.query_opt(
@@ -3479,7 +3483,7 @@ fn select_eligible_sql(
     }
     let (t, q) = parts(shard);
     let now_n = ts_nanos(now);
-    let lim = limit as i64;
+    let lim = sql_limit(limit);
     let rows = st(client.query(
         "SELECT item_id FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
          AND lifecycle_state='Pending' AND superseded=false AND cohort_size IS NULL \
@@ -5606,7 +5610,7 @@ impl Backend for PostgresRelationalBackend {
             retained_commit_idempotency: true,
             non_work_side_records: true,
             authoritative_recovery_reads: true,
-            delayed_awaits_timers: false,
+            delayed_awaits_timers: true,
             durability_class: DurabilityClass::Atomic,
             consistency: "atomic postgres transaction over the relational projection",
         }
@@ -8406,9 +8410,11 @@ impl PostgresRelational {
         let mut g = self.lock();
         st(g.client.batch_execute(
             "TRUNCATE TABLE \
-             pqueue_instance_fences, pqueue_side_records, pqueue_item_index, \
+             pqueue_instance_fences, pqueue_side_records, pqueue_item_index_component, \
+             pqueue_item_index, pqueue_metrics_counted_item, pqueue_queue_metrics_v2, \
              pqueue_request_idempotency, pqueue_gate_state, pqueue_item_gates, pqueue_cohorts, \
-             pqueue_item_key_retention, pqueue_group_summary, relational_emission_cursor, \
+             pqueue_item_key_retention, pqueue_group_summary, pqueue_group_due_pending, \
+             pqueue_id_high_water, relational_emission_cursor, \
              pqueue_items, relational_cursor, queues CASCADE",
         ))?;
         g.queues.clear();
@@ -9671,6 +9677,11 @@ mod sql_shape_tests {
     use super::*;
 
     #[test]
+    fn oversized_sql_limit_saturates_instead_of_wrapping_negative() {
+        assert_eq!(sql_limit(usize::MAX), i64::MAX);
+    }
+
+    #[test]
     fn claim_cte_uses_for_update_skip_locked() {
         assert!(
             CLAIM_CTE.contains("FOR UPDATE SKIP LOCKED"),
@@ -10299,6 +10310,38 @@ mod gated_group_summary_tests {
                 .collect::<Vec<_>>(),
             requested
         );
+    }
+
+    #[test]
+    fn eligible_candidates_accepts_unbounded_limit_sentinel() {
+        let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (eligible_candidates_accepts_unbounded_limit_sentinel) — set PQUEUE_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("pq_rel_unbounded_limit_{}", std::process::id());
+        let mut client = Client::connect(&url, NoTls).expect("connect");
+        client
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(client);
+
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).unwrap();
+        block_on(backend.create_queue(qdef())).unwrap();
+        let expected = block_on(backend.push(
+            &shard(),
+            vec![PushSpec::default(), PushSpec::default()],
+            ts(1),
+            None,
+        ))
+        .unwrap();
+
+        let actual = {
+            let mut inner = backend.inner.lock().expect("poisoned");
+            select_eligible_sql(&mut inner.client, &shard(), ts(2), usize::MAX).unwrap()
+        };
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -12584,6 +12627,8 @@ mod commit_transition_tests {
         let additional = to_ref(&claimed.items[1]);
         let additional_id = additional.item_id;
         let rid = RequestId::new("result-await-continuation-postgres").unwrap();
+        let mut delayed_continuation = item(20);
+        delayed_continuation.not_before = Some(ts(500));
         let body = CommitTransition {
             request_id: Some(rid.clone()),
             entries: vec![CommitTransitionEntry {
@@ -12591,7 +12636,7 @@ mod commit_transition_tests {
                 additional_claim_refs: vec![additional],
                 finalize: FinalizeKind::Complete,
                 side_records: vec![side("instance/result-await", "revision-2")],
-                lifecycle_items: vec![item(20)],
+                lifecycle_items: vec![delayed_continuation],
                 instance_fence: Some(InstanceFence {
                     instance_key: b"result-await".to_vec(),
                     expected: 0,
@@ -12615,7 +12660,14 @@ mod commit_transition_tests {
             CommitEntryOutcome::Committed { lifecycle_item_ids } => lifecycle_item_ids[0],
             other => panic!("expected committed multi-claim entry, got {other:?}"),
         };
-        let next = block_on(backend.claim(claim_req(10, 600, 3))).unwrap();
+        assert!(
+            block_on(backend.claim(claim_req(10, 600, 499)))
+                .unwrap()
+                .items
+                .is_empty(),
+            "the transition continuation must remain delayed before not_before"
+        );
+        let next = block_on(backend.claim(claim_req(10, 600, 500))).unwrap();
         assert_eq!(next.items.len(), 1);
         assert_eq!(next.items[0].item_id, continuation_id);
     }

@@ -73,6 +73,7 @@ pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult
 pub fn open_objectlog(root: impl Into<PathBuf>, clock: Arc<dyn Clock>)
     -> EngineResult<Fireweed>;
 pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
+pub async fn open_postgres_async(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed>;
 pub fn open_postgres_coordinated(
     url: &str,
     clock: Arc<dyn Clock>,
@@ -80,6 +81,10 @@ pub fn open_postgres_coordinated(
     control_plane_config: ControlPlaneConfig,
 ) -> EngineResult<Fireweed>;
 pub fn open_postgres_runtime(
+    config: PostgresRuntimeConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed>;
+pub async fn open_postgres_runtime_async(
     config: PostgresRuntimeConfig,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed>;

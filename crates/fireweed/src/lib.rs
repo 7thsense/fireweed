@@ -1,18 +1,19 @@
 #![forbid(unsafe_code)]
-//! # pqueue
+//! # Fireweed
 //!
-//! The ergonomic Rust **library interface** to the engine — one of the two faces of pqueue (the other
-//! is the RESP/Redis-Streams wire front). It is a thin composition over the engine ports: a concrete
-//! backend (memory / sqlite / objectlog / postgres) and a [`Clock`] are injected; this crate adds
+//! Fireweed's ergonomic Rust embedding interface. Storage authority and projection choices are supplied
+//! only to the `open_*` construction functions and are erased behind one concrete [`Fireweed`] handle.
+//! The crate adds
 //! ergonomic verbs over them: `create_queue` / `push` / `push_batch` / `upsert` / `claim` / `complete` /
 //! `retry` / `release` / `fail` / `renew` / `reassign` / `rearm` / `purge` / `peek` / `claimed` /
 //! `discover` / `metrics` — the full worker + operator surface, each composing a single pre-validating
-//! engine port. A conceptual worker loop claims a batch, processes its items, then calls [`Pqueue::complete`],
-//! [`Pqueue::retry`], or [`Pqueue::release`] with the resulting batch of item ids:
+//! engine port. A conceptual worker loop claims a batch, processes its items, then calls
+//! [`Fireweed::complete`], [`Fireweed::retry`], or [`Fireweed::release`] with the resulting batch of
+//! item ids:
 //!
 //! ```no_run
-//! # use fireweed::{EngineResult, LibBackend, Pqueue, QueueKey};
-//! # async fn worker<B: LibBackend>(queue: &Pqueue<B>, key: &QueueKey) -> EngineResult<()> {
+//! # use fireweed::{EngineResult, Fireweed, QueueKey};
+//! # async fn worker(queue: &Fireweed, key: &QueueKey) -> EngineResult<()> {
 //! loop {
 //!     let claimed = queue.claim(key, 32, 30_000).await?;
 //!     queue.complete(key, claimed.into_iter().map(|item| item.item_id)).await?;
@@ -21,13 +22,12 @@
 //! ```
 //!
 //! Lifecycle helpers remain batch-shaped even though they accept iterators. One call has the same
-//! all-or-nothing failure behavior as [`Pqueue::ack`] and [`Pqueue::nack`]: a fenced, superseded, or
+//! all-or-nothing failure behavior as [`Fireweed::ack`] and [`Fireweed::nack`]: a fenced, superseded, or
 //! non-leased member rejects the call with its structured [`EngineError`] and commits none of that batch.
 //! The older `ack`/`nack`/`discover_active_scopes` vocabulary remains supported without deprecation.
 //!
-//! Dependency direction is hexagonal: this depends only on the domain (`fireweed-engine` + `fireweed-core`),
-//! never on a concrete backend (a backend is passed in). Errors are the engine's structured
-//! [`EngineError`]; nothing is stringly-typed.
+//! Callers depend only on this crate and never inject, name, downcast, or recover a storage backend.
+//! Errors use the structured [`EngineError`] contract.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
@@ -40,18 +40,22 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(any(feature = "sqlite", feature = "objectlog", feature = "postgres", test))]
 mod blocking_backend;
+mod facade;
 
 use axon_esf::encode_index_value;
 // Internal-only types (not named in the public API surface).
-use fireweed_core::WorkerId;
+pub use facade::{
+    Fireweed, ProjectionControl, ProjectionControlCapabilities, ProjectionRebuild,
+    ProjectionVerification,
+};
 use fireweed_engine::{
-    Backend, BatchUpdatePort, ClaimPort, ClaimRequest, CommandPosition, CommitEntryOutcome,
-    CommitTransition, CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore,
-    DiscoveryPort, FinalizeOutcome, FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort,
-    IndexQueryPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
-    PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort,
-    RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
-    acquire_and_fence, validate_api001_reserved_write_fields, validate_claim_compatibility,
+    Backend, BatchUpdatePort, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition,
+    CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
+    FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort, IndexQueryPort, LeaseState,
+    OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
+    QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort, acquire_and_fence,
+    validate_api001_reserved_write_fields, validate_claim_compatibility,
 };
 
 // ---------------------------------------------------------------------------
@@ -73,14 +77,15 @@ pub use fireweed_core::{
     QueryFilter, QueryRequestError, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex,
     RangeScanRequest, RangeScanResponse, RangeScanRow, RecurrenceMode, RecurrencePolicy, RequestId,
     RetryPolicy, SortDirection, TenantId, TimeBucket, TimestampError, TypedValue, UtcTimestamp,
+    WorkerId,
 };
 pub use fireweed_engine::{
     ActiveScope, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest,
     BatchUpdateResponse, BatchUpdateValue, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem,
-    Clock, CommitCapabilities, CommitEntryStatus, CommitRecovery, ControlPlaneConfig,
-    CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult, EntryRecovery,
-    FinalizeKind, GroupBatching, IndexHit, InstanceFence, ItemView, LiveItemView, PayloadUpdate,
-    QueueKey, QueueMetrics, ScheduleUpdate, SideRecord, UpsertOutcome,
+    Clock, CommandPosition, CommitCapabilities, CommitEntryStatus, CommitRecovery,
+    ControlPlaneConfig, CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult,
+    EntryRecovery, FinalizeKind, GroupBatching, IndexHit, InstanceFence, ItemView, LiveItemView,
+    PayloadUpdate, QueueKey, QueueMetrics, ScheduleUpdate, SideRecord, UpsertOutcome,
 };
 
 /// An active-scope result stamped with the exact queue and granularity used for discovery.
@@ -90,6 +95,59 @@ pub struct ActiveScopeDiscovery {
     pub granularity: DiscoveryGranularity,
     pub scopes: Vec<ActiveScope>,
 }
+
+// Generic backend and legacy-composition tests execute inside the library crate so they retain access
+// to crate-private implementation seams without publishing those seams to downstream crates. Cargo's
+// implicit integration-test discovery is disabled; the true downstream facade tests remain explicit
+// `[[test]]` targets in Cargo.toml.
+#[cfg(test)]
+extern crate self as fireweed;
+
+#[cfg(test)]
+#[path = "../tests/active_scope_routing.rs"]
+mod test_active_scope_routing;
+#[cfg(test)]
+#[path = "../tests/coordination.rs"]
+mod test_coordination;
+#[cfg(test)]
+#[path = "../tests/embedded_objectlog_postgres.rs"]
+mod test_embedded_objectlog_postgres;
+#[cfg(test)]
+#[path = "../tests/embedded_objectlog_sqlite.rs"]
+mod test_embedded_objectlog_sqlite;
+#[cfg(test)]
+#[path = "../tests/encapsulation.rs"]
+mod test_encapsulation;
+#[cfg(test)]
+#[path = "../tests/facade.rs"]
+mod test_facade;
+#[cfg(test)]
+#[path = "../tests/hot_projection_queries.rs"]
+mod test_hot_projection_queries;
+#[cfg(test)]
+#[path = "../tests/multi_queue_claim.rs"]
+mod test_multi_queue_claim;
+#[cfg(test)]
+#[path = "../tests/postgres_constructors.rs"]
+mod test_postgres_constructors;
+#[cfg(test)]
+#[path = "../tests/product_validation_tests.rs"]
+mod test_product_validation;
+#[cfg(test)]
+#[path = "../tests/queue_template.rs"]
+mod test_queue_template;
+#[cfg(test)]
+#[path = "../tests/request_id_idempotency.rs"]
+mod test_request_id_idempotency;
+#[cfg(test)]
+#[path = "../tests/schema_validation.rs"]
+mod test_schema_validation;
+#[cfg(test)]
+#[path = "../tests/secondary_indexes.rs"]
+mod test_secondary_indexes;
+#[cfg(test)]
+#[path = "../tests/vectorized_commit.rs"]
+mod test_vectorized_commit;
 
 /// A caller-attested, unfiltered leading prefix of one queue's group-granularity active-scope
 /// discovery. Attestation validates the facts carried by [`ActiveScopeDiscovery`]—the granularity,
@@ -102,7 +160,7 @@ pub struct OldestFirstScopePrefix {
 
 impl OldestFirstScopePrefix {
     /// Attest that `discovery` is an unfiltered leading prefix of the unchanged result returned by
-    /// [`Pqueue::discover_active_scopes_stamped`]. The caller owns the unfiltered-prefix assertion;
+    /// [`Fireweed::discover_active_scopes_stamped`]. The caller owns the unfiltered-prefix assertion;
     /// this method validates every property that can be checked locally.
     pub fn attest(discovery: ActiveScopeDiscovery) -> EngineResult<Self> {
         if discovery.granularity != DiscoveryGranularity::Group {
@@ -316,8 +374,8 @@ mod active_scope_selector_unit_tests {
 ///     .with_name("email-jobs")
 ///     .with_revision("v2");
 /// let queue = QueueKey::new(TenantId::new("acme")?, QueueId::new("outbound")?);
-/// let pqueue = fireweed::open_memory(Arc::new(SystemClock));
-/// let ensured = pqueue.ensure_queue(&queue, &template).await?;
+/// let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+/// let ensured = fireweed.ensure_queue(&queue, &template).await?;
 /// assert_eq!(ensured.definition.queue_id, queue.queue_id);
 /// # Ok(())
 /// # }
@@ -477,7 +535,7 @@ impl PartialEq for QueueTemplate {
     }
 }
 
-/// Successful result of [`Pqueue::ensure_queue`]. Template diagnostics are not persisted.
+/// Successful result of [`Fireweed::ensure_queue`]. Template diagnostics are not persisted.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnsureQueueOutcome {
     pub created: bool,
@@ -486,7 +544,7 @@ pub struct EnsureQueueOutcome {
     pub template_revision: Option<String>,
 }
 
-/// Typed, façade-local failure from [`Pqueue::ensure_queue`].
+/// Typed, façade-local failure from [`Fireweed::ensure_queue`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum EnsureQueueError {
     Validation {
@@ -532,7 +590,7 @@ impl std::error::Error for EnsureQueueError {
 
 /// Wall-clock [`Clock`] for production use — pass `Arc::new(SystemClock)` to any `open_*` constructor.
 /// Tests inject a controllable clock instead (e.g. `fireweed_memory::ManualClock`). Provided here so a
-/// consumer depending on `pqueue` alone has a ready clock without naming `fireweed-engine`.
+/// consumer depending on `fireweed` alone has a ready clock without naming `fireweed-engine`.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -547,7 +605,7 @@ impl Clock for SystemClock {
 /// An owned secret used by embedded durability configuration. Its value is redacted from `Debug` and has
 /// no public accessor; the composition root consumes it internally.
 #[derive(Clone, PartialEq, Eq)]
-pub struct EmbeddedSecret(String);
+pub(crate) struct EmbeddedSecret(String);
 
 impl EmbeddedSecret {
     pub fn new(value: impl Into<String>) -> Self {
@@ -567,7 +625,7 @@ impl fmt::Debug for EmbeddedSecret {
 
 /// Authoritative command-log storage selected by an embedded deployment.
 #[derive(Clone, PartialEq, Eq)]
-pub enum EmbeddedObjectLogConfig {
+pub(crate) enum EmbeddedObjectLogConfig {
     Local {
         root: PathBuf,
     },
@@ -606,7 +664,7 @@ impl fmt::Debug for EmbeddedObjectLogConfig {
 
 /// Disposable materialized projection selected by an embedded deployment.
 #[derive(Clone, PartialEq, Eq)]
-pub enum EmbeddedProjectionConfig {
+pub(crate) enum EmbeddedProjectionConfig {
     Sqlite {
         path: PathBuf,
     },
@@ -630,7 +688,7 @@ impl fmt::Debug for EmbeddedProjectionConfig {
 
 /// The acknowledgement barrier for embedded object-log compositions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbeddedResponseBarrier {
+pub(crate) enum EmbeddedResponseBarrier {
     /// Success requires both the authoritative manifest and durable projection.
     Strict,
     /// Success requires the authoritative manifest and hot projection; durable projection apply may lag.
@@ -639,7 +697,7 @@ pub enum EmbeddedResponseBarrier {
 
 /// Group-commit segment settings for the authoritative object log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EmbeddedSegmentConfig {
+pub(crate) struct EmbeddedSegmentConfig {
     pub target_bytes: usize,
     pub max_latency_ms: u64,
 }
@@ -648,7 +706,7 @@ impl EmbeddedSegmentConfig {
     pub fn new(target_bytes: usize, max_latency_ms: u64) -> EngineResult<Self> {
         if target_bytes == 0 || max_latency_ms == 0 {
             return Err(EngineError::Invalid(
-                "embedded segment target and latency must be non-zero",
+                "object-log segment target and latency must be non-zero",
             ));
         }
         Ok(Self {
@@ -660,7 +718,7 @@ impl EmbeddedSegmentConfig {
 
 /// Action taken when a disposable projection is absent or incompatible with the authoritative log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbeddedRecoveryAction {
+pub(crate) enum EmbeddedRecoveryAction {
     FailClosed,
     /// Delete only the disposable projection namespace and rebuild from authoritative history.
     RehydrateProjection,
@@ -668,7 +726,7 @@ pub enum EmbeddedRecoveryAction {
 
 /// Recovery bounds and validation policy for an embedded durability composition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EmbeddedRecoveryPolicy {
+pub(crate) struct EmbeddedRecoveryPolicy {
     pub incompatible_projection: EmbeddedRecoveryAction,
     pub verify_checksums: bool,
     pub max_tail_commands: u64,
@@ -713,7 +771,7 @@ fn derived_postgres_schema_name(namespace: &str) -> String {
 /// Fully owned public configuration for an embedded authoritative-log plus disposable-projection pair.
 /// Concrete adapter types remain private and credential-bearing fields are redacted from `Debug`.
 ///
-/// ```no_run
+/// ```text
 /// use std::{path::PathBuf, sync::Arc};
 /// use fireweed::{
 ///     EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
@@ -735,7 +793,7 @@ fn derived_postgres_schema_name(namespace: &str) -> String {
 /// # Ok::<(), fireweed::EngineError>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EmbeddedDurabilityConfig {
+pub(crate) struct EmbeddedDurabilityConfig {
     pub object_log: EmbeddedObjectLogConfig,
     pub projection: EmbeddedProjectionConfig,
     pub response_barrier: EmbeddedResponseBarrier,
@@ -744,17 +802,187 @@ pub struct EmbeddedDurabilityConfig {
     pub recovery: EmbeddedRecoveryPolicy,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConfigSecret(EmbeddedSecret);
+
+impl ConfigSecret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(EmbeddedSecret::new(value))
+    }
+}
+
+impl fmt::Debug for ConfigSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ConfigSecret(<redacted>)")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjectLogStorage {
+    Local {
+        root: PathBuf,
+    },
+    S3Compatible {
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: ConfigSecret,
+        secret_access_key: ConfigSecret,
+        allow_insecure_http: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionConfig {
+    Sqlite { path: PathBuf },
+    Postgres { url: ConfigSecret },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseBarrier {
+    Strict,
+    AsyncProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentConfig {
+    pub target_bytes: usize,
+    pub max_latency_ms: u64,
+}
+
+impl SegmentConfig {
+    pub fn new(target_bytes: usize, max_latency_ms: u64) -> EngineResult<Self> {
+        EmbeddedSegmentConfig::new(target_bytes, max_latency_ms)?;
+        Ok(Self {
+            target_bytes,
+            max_latency_ms,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    FailClosed,
+    RebuildProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryPolicy {
+    pub incompatible_projection: RecoveryAction,
+    pub verify_checksums: bool,
+    pub max_tail_commands: u64,
+}
+
+impl Default for RecoveryPolicy {
+    fn default() -> Self {
+        let current = EmbeddedRecoveryPolicy::default();
+        Self {
+            incompatible_projection: RecoveryAction::FailClosed,
+            verify_checksums: current.verify_checksums,
+            max_tail_commands: current.max_tail_commands,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectLogRuntimeConfig {
+    pub object_log: ObjectLogStorage,
+    pub projection: ProjectionConfig,
+    pub response_barrier: ResponseBarrier,
+    pub segments: SegmentConfig,
+    pub namespace: String,
+    pub recovery: RecoveryPolicy,
+}
+
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostgresMode {
+    LogReplay,
+    Relational,
+}
+
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone)]
+pub struct PostgresCoordinationConfig {
+    pub instance_id: OwnerId,
+    pub control_plane: ControlPlaneConfig,
+}
+
+#[cfg(feature = "postgres")]
+#[derive(Debug, Clone)]
+pub struct PostgresRuntimeConfig {
+    pub url: ConfigSecret,
+    pub schema: Option<String>,
+    pub mode: PostgresMode,
+    pub node_id: Option<u8>,
+    pub coordination: Option<PostgresCoordinationConfig>,
+}
+
+impl ObjectLogRuntimeConfig {
+    fn into_embedded(self) -> EmbeddedDurabilityConfig {
+        EmbeddedDurabilityConfig {
+            object_log: match self.object_log {
+                ObjectLogStorage::Local { root } => EmbeddedObjectLogConfig::Local { root },
+                ObjectLogStorage::S3Compatible {
+                    endpoint,
+                    bucket,
+                    region,
+                    access_key_id,
+                    secret_access_key,
+                    allow_insecure_http,
+                } => EmbeddedObjectLogConfig::S3Compatible {
+                    endpoint,
+                    bucket,
+                    region,
+                    access_key_id: access_key_id.0,
+                    secret_access_key: secret_access_key.0,
+                    allow_insecure_http,
+                },
+            },
+            projection: match self.projection {
+                ProjectionConfig::Sqlite { path } => EmbeddedProjectionConfig::Sqlite { path },
+                ProjectionConfig::Postgres { url } => {
+                    EmbeddedProjectionConfig::Postgres { url: url.0 }
+                }
+            },
+            response_barrier: match self.response_barrier {
+                ResponseBarrier::Strict => EmbeddedResponseBarrier::Strict,
+                ResponseBarrier::AsyncProjection => EmbeddedResponseBarrier::AsyncProjection,
+            },
+            segments: EmbeddedSegmentConfig {
+                target_bytes: self.segments.target_bytes,
+                max_latency_ms: self.segments.max_latency_ms,
+            },
+            namespace: self.namespace,
+            recovery: EmbeddedRecoveryPolicy {
+                incompatible_projection: match self.recovery.incompatible_projection {
+                    RecoveryAction::FailClosed => EmbeddedRecoveryAction::FailClosed,
+                    RecoveryAction::RebuildProjection => {
+                        EmbeddedRecoveryAction::RehydrateProjection
+                    }
+                },
+                verify_checksums: self.recovery.verify_checksums,
+                max_tail_commands: self.recovery.max_tail_commands,
+            },
+        }
+    }
+
+    pub fn validate(&self) -> EngineResult<()> {
+        self.clone().into_embedded().validate()
+    }
+}
+
 impl EmbeddedDurabilityConfig {
     pub fn validate(&self) -> EngineResult<()> {
         if self.namespace.trim().is_empty() {
             return Err(EngineError::Invalid(
-                "embedded durability namespace must not be empty",
+                "object-log runtime namespace must not be empty",
             ));
         }
         match &self.object_log {
             EmbeddedObjectLogConfig::Local { root } if root.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
-                    "embedded local object-log root must not be empty",
+                    "local object-log root must not be empty",
                 ));
             }
             EmbeddedObjectLogConfig::S3Compatible {
@@ -771,7 +999,7 @@ impl EmbeddedDurabilityConfig {
                 || secret_access_key.is_empty() =>
             {
                 return Err(EngineError::Invalid(
-                    "embedded S3-compatible configuration fields must not be empty",
+                    "S3-compatible object-log configuration fields must not be empty",
                 ));
             }
             _ => {}
@@ -779,19 +1007,19 @@ impl EmbeddedDurabilityConfig {
         match &self.projection {
             EmbeddedProjectionConfig::Sqlite { path } if path.as_os_str().is_empty() => {
                 return Err(EngineError::Invalid(
-                    "embedded SQLite projection path must not be empty",
+                    "SQLite projection path must not be empty",
                 ));
             }
             EmbeddedProjectionConfig::Postgres { url } if url.is_empty() => {
                 return Err(EngineError::Invalid(
-                    "embedded PostgreSQL projection URL must not be empty",
+                    "PostgreSQL projection URL must not be empty",
                 ));
             }
             _ => {}
         }
         if self.recovery.max_tail_commands == 0 {
             return Err(EngineError::Invalid(
-                "embedded recovery tail bound must be non-zero",
+                "object-log recovery tail bound must be non-zero",
             ));
         }
         Ok(())
@@ -801,6 +1029,7 @@ impl EmbeddedDurabilityConfig {
     ///
     /// Backend-specific follow-up beads install concrete lifecycle behavior. Until then capabilities are
     /// false and every operation rejects fail-closed instead of claiming an unperformed repair.
+    #[allow(dead_code)] // Retained for crate-internal compatibility tests after the v0.20 facade closure.
     pub fn into_handle(self) -> EngineResult<EmbeddedHandle> {
         self.validate()?;
         Ok(EmbeddedHandle {
@@ -814,21 +1043,21 @@ impl EmbeddedDurabilityConfig {
 
 /// Projection lifecycle operations supported by an [`EmbeddedHandle`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EmbeddedLifecycleCapabilities {
+pub(crate) struct EmbeddedLifecycleCapabilities {
     pub verify_projection: bool,
     pub delete_projection: bool,
     pub rehydrate_projection: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EmbeddedProjectionVerification {
+pub(crate) struct EmbeddedProjectionVerification {
     pub compatible: bool,
     pub projection_sequence: u64,
     pub authoritative_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EmbeddedRehydration {
+pub(crate) struct EmbeddedRehydration {
     pub snapshot_used: bool,
     pub tail_commands_replayed: u64,
     pub projection_sequence: u64,
@@ -843,6 +1072,7 @@ type EmbeddedLifecycleFuture<'a, T> = Pin<Box<dyn Future<Output = EngineResult<T
 
 trait EmbeddedLifecycle: Send + Sync {
     fn capabilities(&self) -> EmbeddedLifecycleCapabilities;
+    #[allow(dead_code)] // Exercised by crate-internal lifecycle tests for async projection flushing.
     fn buffered_group_commit_commands(&self) -> Option<usize> {
         None
     }
@@ -852,6 +1082,7 @@ trait EmbeddedLifecycle: Send + Sync {
     fn shutdown(&mut self);
 }
 
+#[allow(dead_code)] // Used by the crate-internal unsupported-lifecycle construction seam.
 struct UnsupportedEmbeddedLifecycle;
 
 impl EmbeddedLifecycle for UnsupportedEmbeddedLifecycle {
@@ -886,7 +1117,7 @@ impl Drop for EmbeddedHandleInner {
 /// flusher/checkpoint lifecycle. Dropping the last clone is the shutdown boundary. No concrete adapter
 /// type appears in the public signature.
 #[derive(Clone)]
-pub struct EmbeddedHandle {
+pub(crate) struct EmbeddedHandle {
     inner: Arc<EmbeddedHandleInner>,
 }
 
@@ -907,6 +1138,7 @@ impl EmbeddedHandle {
     /// exposes that observation. This is a diagnostic synchronization seam, not a durability barrier;
     /// lifecycle operations remain responsible for quiescing accepted writes.
     #[doc(hidden)]
+    #[allow(dead_code)] // Retained for crate-internal lifecycle tests.
     pub fn buffered_group_commit_commands(&self) -> Option<usize> {
         self.inner.lifecycle.buffered_group_commit_commands()
     }
@@ -937,11 +1169,13 @@ impl EmbeddedHandle {
 ///
 /// Queue operations are available directly through [`Deref`] to [`Pqueue`]; projection maintenance is
 /// intentionally exposed only through the stable lifecycle value types below.
-pub struct EmbeddedPqueue<B> {
+#[doc(hidden)]
+pub(crate) struct EmbeddedPqueue<B> {
     pqueue: Pqueue<B>,
     lifecycle: EmbeddedHandle,
 }
 
+#[allow(dead_code)] // Legacy wrapper remains private solely to preserve internal regression coverage.
 impl<B> EmbeddedPqueue<B> {
     pub fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
         self.lifecycle.lifecycle_capabilities()
@@ -967,6 +1201,13 @@ impl<B> EmbeddedPqueue<B> {
 
     pub fn lifecycle_handle(&self) -> EmbeddedHandle {
         self.lifecycle.clone()
+    }
+
+    fn into_fireweed(self) -> Fireweed
+    where
+        B: LibBackend + 'static,
+    {
+        Fireweed::from_pqueue_with_projection(self.pqueue, self.lifecycle)
     }
 }
 
@@ -1059,20 +1300,25 @@ impl ObjectLogPostgresLifecycle {
             backend.with_log(|log| validate_objectlog_postgres_catalog(log, &projection))?;
         let mut projection_sequence = 0;
         let mut authoritative_sequence = 0;
+        let mut compatible = true;
         for definition in definitions {
             let key = QueueKey::new(definition.tenant_id, definition.queue_id);
+            let projected_position = ProjectionStore::recovery_high_water(&projection, &key)?;
+            let authoritative_position = backend.with_log(|log| LogStore::high_water(log, &key))?;
+            compatible &= projected_position == authoritative_position;
             projection_sequence = projection_sequence.max(
-                ProjectionStore::recovery_high_water(&projection, &key)?
+                projected_position
+                    .as_ref()
                     .map_or(0, |position| position.sequence),
             );
             authoritative_sequence = authoritative_sequence.max(
-                backend
-                    .with_log(|log| LogStore::high_water(log, &key))?
+                authoritative_position
+                    .as_ref()
                     .map_or(0, |position| position.sequence),
             );
         }
         Ok(EmbeddedProjectionVerification {
-            compatible: true,
+            compatible,
             projection_sequence,
             authoritative_sequence,
         })
@@ -1523,7 +1769,7 @@ fn open_embedded_object_log(
 /// INTERNAL composition bound, not a consumer-facing trait: a backend satisfies it automatically (blanket
 /// impl over the engine ports) and a consumer never names or implements it. Hidden from the public docs.
 #[doc(hidden)]
-pub trait LibBackend:
+pub(crate) trait LibBackend:
     Backend
     + PushPort
     + ClaimPort
@@ -1638,9 +1884,9 @@ fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
 }
 
 /// A claim whose two times are decided by the caller instead of both being read off this handle's
-/// [`Clock`] ([`Pqueue::claim_at`] / [`Pqueue::claim_response_at`]).
+/// [`Clock`] ([`Fireweed::claim_at`] / [`Fireweed::claim_response_at`]).
 ///
-/// [`Pqueue::claim`] takes ONE `Clock::now` reading and uses it for both jobs a claim needs a time for,
+/// [`Fireweed::claim`] takes ONE `Clock::now` reading and uses it for both jobs a claim needs a time for,
 /// which is exactly right for a worker draining a queue in real time. Scheduled work is the case it
 /// cannot express: selecting the items due at some execution epoch (a backfill, a replay, a scheduler
 /// tick resolved slightly in the past or the future) while the leases it hands out must still be valid
@@ -1654,11 +1900,11 @@ fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
 ///   `lease_time + lease_ms`, and the claim's command is stamped with it. `None` ⇒ this handle's
 ///   `Clock::now()`, which is what a caller wants even when `eligibility_time` is far from it.
 ///
-/// Leaving both `None` is precisely [`Pqueue::claim_with`], so an unset field never changes behaviour.
+/// Leaving both `None` is precisely [`Fireweed::claim_with`], so an unset field never changes behaviour.
 ///
 /// ```no_run
-/// # use fireweed::{ClaimAt, Pqueue, QueueKey, UtcTimestamp, LibBackend, EngineResult};
-/// # async fn f<B: LibBackend>(pq: &Pqueue<B>, queue: &QueueKey, tick: UtcTimestamp) -> EngineResult<()> {
+/// # use fireweed::{ClaimAt, EngineResult, Fireweed, QueueKey, UtcTimestamp};
+/// # async fn f(pq: &Fireweed, queue: &QueueKey, tick: UtcTimestamp) -> EngineResult<()> {
 /// // Work scheduled for `tick`, leased for 60s against the real clock.
 /// let due = pq.claim_at(queue, ClaimAt::new(100, 60_000).eligibility_time(tick)).await?;
 /// # let _ = due;
@@ -1667,7 +1913,7 @@ fn add_millis(ts: UtcTimestamp, millis: u64) -> UtcTimestamp {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct ClaimAt {
-    /// Maximum items to lease (the `max` of [`Pqueue::claim`]).
+    /// Maximum items to lease (the `max` of [`Fireweed::claim`]).
     pub max: usize,
     /// Lease duration in milliseconds, measured from `lease_time`.
     pub lease_ms: u64,
@@ -1675,14 +1921,14 @@ pub struct ClaimAt {
     pub eligibility_time: Option<UtcTimestamp>,
     /// The epoch the lease is measured from. `None` ⇒ this handle's `Clock::now()`.
     pub lease_time: Option<UtcTimestamp>,
-    /// API-001 compatibility options, as for [`Pqueue::claim_with`].
+    /// API-001 compatibility options, as for [`Fireweed::claim_with`].
     pub compatibility: ClaimCompatibility,
 }
 
 const MAX_MULTI_QUEUE_CLAIM_TARGETS: usize = 16;
 const MAX_MULTI_QUEUE_CLAIM_ITEMS: usize = 1024;
 
-/// One independently committed queue claim in [`Pqueue::claim_across_queues`].
+/// One independently committed queue claim in [`Fireweed::claim_across_queues`].
 #[derive(Debug, Clone)]
 pub struct MultiQueueClaimTarget {
     /// Queue to claim from.
@@ -1691,7 +1937,7 @@ pub struct MultiQueueClaimTarget {
     pub claim: ClaimAt,
 }
 
-/// Caller-selected safety limits for [`Pqueue::claim_across_queues`].
+/// Caller-selected safety limits for [`Fireweed::claim_across_queues`].
 ///
 /// The defaults are the largest accepted values. Callers may lower either positive limit, but cannot
 /// raise the fixed ceilings of 16 queues and 1024 aggregate requested items.
@@ -1710,7 +1956,7 @@ impl Default for MultiQueueClaimLimits {
     }
 }
 
-/// The result of one target in [`Pqueue::claim_across_queues`].
+/// The result of one target in [`Fireweed::claim_across_queues`].
 ///
 /// Runtime failures are retained beside their queue instead of failing or truncating the outer call.
 #[derive(Debug)]
@@ -1721,7 +1967,7 @@ pub struct MultiQueueClaimResult {
 
 impl ClaimAt {
     /// A claim of up to `max` items leased for `lease_ms`, with both times defaulted (identical to
-    /// [`Pqueue::claim`] until an explicit time is set).
+    /// [`Fireweed::claim`] until an explicit time is set).
     pub fn new(max: usize, lease_ms: u64) -> Self {
         Self {
             max,
@@ -1749,7 +1995,7 @@ impl ClaimAt {
     }
 }
 
-/// Query-claim timing overrides, mirroring [`ClaimAt`] for [`Pqueue::claim_by_query_at`].
+/// Query-claim timing overrides, mirroring [`ClaimAt`] for [`Fireweed::claim_by_query_at`].
 ///
 /// `eligibility_time` resolves due-ness for the declared-index selection.
 /// `lease_time` stamps the command and anchors the lease expiry.
@@ -1786,7 +2032,7 @@ impl ClaimByQueryAt {
 pub enum Nack {
     /// Return to Pending for re-claim. `not_before` is an optional **queue-native retry backoff**: the item
     /// stays ineligible until that absolute timestamp. `None` re-eligibles it immediately. (Use
-    /// [`Pqueue::nack_retry_after`] for a relative delay.)
+    /// [`Fireweed::nack_retry_after`] for a relative delay.)
     Retry {
         not_before: Option<UtcTimestamp>,
     },
@@ -1806,8 +2052,8 @@ pub enum Ownership {
     Unowned,
 }
 
-/// An item to enqueue. For [`Pqueue::push`], `client_item_key` is optional and defaults to the
-/// server-assigned id when omitted; for [`Pqueue::upsert`], the caller supplies the dedup key as the
+/// An item to enqueue. For [`Fireweed::push`], `client_item_key` is optional and defaults to the
+/// server-assigned id when omitted; for [`Fireweed::upsert`], the caller supplies the dedup key as the
 /// method argument.
 #[derive(Debug, Clone, Default)]
 pub struct NewItem {
@@ -1892,7 +2138,7 @@ pub struct MultiClaimCommitRequest {
     pub entries: Vec<MultiClaimCommitEntry>,
 }
 
-/// The per-entry result of a [`Pqueue::commit`].
+/// The per-entry result of a [`Fireweed::commit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryOutcome {
     /// The entry validated and committed atomically. `lifecycle_item_ids` are the server-assigned ids of the
@@ -2021,7 +2267,8 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
 }
 
 /// The ergonomic library handle. Holds an injected backend + clock; generates ids/lease tokens.
-pub struct Pqueue<B> {
+#[doc(hidden)]
+pub(crate) struct Pqueue<B> {
     backend: Arc<B>,
     clock: Arc<dyn Clock>,
     ids: AtomicU64,
@@ -2094,6 +2341,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// builds the control plane internally so a consumer never names [`QueueControlPlane`]. This lower-level
     /// constructor (bring-your-own control plane) remains available for advanced/custom planes.
     #[doc(hidden)]
+    #[allow(dead_code)] // Private compatibility constructor exercised only by crate-internal tests.
     pub fn with_control_plane(
         backend: Arc<B>,
         clock: Arc<dyn Clock>,
@@ -2113,6 +2361,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// admissible non-durably (N4a). Hidden from the published surface; durable deployments use
     /// [`Pqueue::with_control_plane`].
     #[doc(hidden)]
+    #[allow(dead_code)] // Private compatibility constructor exercised only by crate-internal tests.
     pub fn with_control_plane_in_process(
         backend: Arc<B>,
         clock: Arc<dyn Clock>,
@@ -2634,7 +2883,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// independently and its success or failure appears in [`MultiQueueClaimResult::result`]. Dropping the
     /// outer future cancels waiting, not committed work: in particular, an admitted durable backend call may
     /// still complete. For a single-queue atomic transition that consumes several existing claims, use
-    /// [`Pqueue::commit_multi_claim`] instead.
+    /// [`Fireweed::commit_multi_claim`] instead.
     pub async fn claim_across_queues(
         &self,
         targets: Vec<MultiQueueClaimTarget>,
@@ -2866,7 +3115,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// finalizes the input claim — atomically per entry. `request_id` gives the whole body retained
     /// replay/conflict/expired semantics, so a retried transition returns the prior outcomes without
     /// double-writing. Per-entry [`EntryOutcome`]s are independent (all-or-nothing is NOT required across
-    /// entries). Use [`Pqueue::commit_multi_claim`] when one entry must consume multiple claims. Backends
+    /// entries). Use [`Fireweed::commit_multi_claim`] when one entry must consume multiple claims. Backends
     /// without an atomic transition boundary reject with [`EngineError::Unavailable`].
     pub async fn commit(
         &self,
@@ -3013,6 +3262,7 @@ impl<B: LibBackend> Pqueue<B> {
     }
 
     /// Reconstruct `queue`'s projection as of `position`, run `query` against it, and discard it.
+    #[allow(dead_code)] // Held until the backend-neutral history component replaces this private seam.
     pub async fn read_as_of<T, F>(
         &self,
         queue: &QueueKey,
@@ -3107,7 +3357,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// Pure read (no epoch/fence). `EngineError::Invalid` if `index` is not a unique index on this queue;
     /// `EngineError::Unavailable` on a relational backend (Phase 2).
     ///
-    /// For typed (ADR-011 [`QueueIndex`]) indexes, prefer [`Pqueue::query_index_unique_typed`] — it
+    /// For typed (ADR-011 [`QueueIndex`]) indexes, prefer [`Fireweed::query_index_unique_typed`] — it
     /// accepts [`serde_json::Value`]s directly and validates the type encoding at the API boundary.
     /// This raw-byte overload remains available for legacy [`IndexSpec`] indexes. For typed indexes,
     /// passing bytes that do not decode to the declared field type returns [`EngineError::Invalid`].
@@ -3123,7 +3373,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// Exact composite-key lookup on a secondary index (unique or non-unique, ADR-010). Returns every
     /// matching item ordered by `item_id` ascending. Pure read (no epoch/fence).
     ///
-    /// For typed (ADR-011 [`QueueIndex`]) indexes, prefer [`Pqueue::query_index_typed`] — it accepts
+    /// For typed (ADR-011 [`QueueIndex`]) indexes, prefer [`Fireweed::query_index_typed`] — it accepts
     /// [`serde_json::Value`]s directly and validates the type encoding at the API boundary. This
     /// raw-byte overload remains available for legacy [`IndexSpec`] indexes. For typed indexes,
     /// passing bytes that do not decode to the declared field type returns [`EngineError::Invalid`].
@@ -3231,7 +3481,7 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Transfer the given in-flight items to a FRESH lease (a re-delivery to a new worker — charges one
     /// attempt, per the delivery-count invariant), leasing them for `lease_ms` from now. Mints a new
-    /// lease token. Pre-validated like [`Pqueue::renew`].
+    /// lease token. Pre-validated like [`Fireweed::renew`].
     pub async fn reassign(
         &self,
         queue: &QueueKey,
@@ -3315,7 +3565,7 @@ impl<B: LibBackend> Pqueue<B> {
     }
 
     /// Reschedule a **live** item's `priority` and/or `not_before` after push (BQ pqueue-7a96f929) — the
-    /// "change when/where this item is delivered" verb, distinct from [`Pqueue::update_fields`] (which merges
+    /// "change when/where this item is delivered" verb, distinct from [`Fireweed::update_fields`] (which merges
     /// hot-storage fields/payload). [`ScheduleUpdate::Keep`] leaves a dimension unchanged; `Set(Some(v))`
     /// sets it; `Set(None)` clears it (clearing `not_before` makes the item immediately eligible; clearing
     /// `priority` drops it to the unpriced FIFO tail). A priority change re-keys the item in the eligibility
@@ -3392,10 +3642,10 @@ impl<B: LibBackend> Pqueue<B> {
         self.note(queue, r)
     }
 
-    /// [`Pqueue::reclaim_expired`] at a caller-supplied time. This is the deterministic/logical-time
+    /// [`Fireweed::reclaim_expired`] at a caller-supplied time. This is the deterministic/logical-time
     /// variant for embedders that carry operation time with each request: `now` is forwarded to the
     /// backend without consulting this handle's [`Clock`]. Reclamation semantics, batching, and owner
-    /// fencing are otherwise identical to [`Pqueue::reclaim_expired`].
+    /// fencing are otherwise identical to [`Fireweed::reclaim_expired`].
     pub async fn reclaim_expired_at(
         &self,
         queue: &QueueKey,
@@ -3409,7 +3659,7 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Re-arm a recurring item: complete this delivery and re-arm it for its next occurrence, RESETTING
     /// `attempt_count` to 0. Maps to `Finalize{Rearm}` with no new `not_before` (re-eligible immediately).
-    /// For a recurring item with an idle interval between occurrences use [`Pqueue::rearm_at`].
+    /// For a recurring item with an idle interval between occurrences use [`Fireweed::rearm_at`].
     pub async fn rearm(
         &self,
         queue: &QueueKey,
@@ -3434,7 +3684,7 @@ impl<B: LibBackend> Pqueue<B> {
             .await
     }
 
-    /// [`Pqueue::rearm_at`] with a **relative** interval: re-arm for `delay_ms` from now (the recurrence
+    /// [`Fireweed::rearm_at`] with a **relative** interval: re-arm for `delay_ms` from now (the recurrence
     /// period, computed off this handle's clock).
     pub async fn rearm_after(
         &self,
@@ -3475,9 +3725,9 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// The hot-projection query capabilities `queue`'s backend advertises (API-004 Query Capability
     /// Names). Every flag defaults to `false` until a backend bead implements the corresponding
-    /// capability; a caller MUST check this before issuing [`Pqueue::range_scan`],
-    /// [`Pqueue::grouped_aggregate`], [`Pqueue::declared_bucket_segment`],
-    /// [`Pqueue::bounded_mutation`], or [`Pqueue::claim_by_query`] rather than discover unavailability
+    /// capability; a caller MUST check this before issuing [`Fireweed::range_scan`],
+    /// [`Fireweed::grouped_aggregate`], [`Fireweed::declared_bucket_segment`],
+    /// [`Fireweed::bounded_mutation`], or [`Fireweed::claim_by_query`] rather than discover unavailability
     /// only via the structured [`EngineError::Unavailable`] each returns.
     pub fn hot_projection_capabilities(&self, queue: &QueueKey) -> QueryCapabilityFlags {
         self.backend.hot_projection_capabilities(queue)
@@ -3485,7 +3735,7 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Ordered scan over a declared index with cursor pagination (API-004 Range Scan). Returns
     /// [`EngineError::Unavailable`] on a backend that has not implemented `range_scan` — see
-    /// [`Pqueue::hot_projection_capabilities`].
+    /// [`Fireweed::hot_projection_capabilities`].
     pub async fn range_scan(
         &self,
         queue: &QueueKey,
@@ -3496,7 +3746,7 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Grouped/bucketed count aggregation over a declared index (API-004 Grouping / Aggregation).
     /// Returns [`EngineError::Unavailable`] on a backend that has not implemented
-    /// `grouped_aggregate` — see [`Pqueue::hot_projection_capabilities`].
+    /// `grouped_aggregate` — see [`Fireweed::hot_projection_capabilities`].
     pub async fn grouped_aggregate(
         &self,
         queue: &QueueKey,
@@ -3508,7 +3758,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// Caller-declared numeric bucket segmentation over one declared numeric-indexed field,
     /// including the required null/no-value bucket (API-004 Declared Numeric Buckets). Returns
     /// [`EngineError::Unavailable`] on a backend that has not implemented `declared_bucket_segment`
-    /// — see [`Pqueue::hot_projection_capabilities`].
+    /// — see [`Fireweed::hot_projection_capabilities`].
     pub async fn declared_bucket_segment(
         &self,
         queue: &QueueKey,
@@ -3520,7 +3770,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// Scan a declared-index predicate and apply a caller-specified field update to every matching
     /// record, with per-record optimistic concurrency (API-004 Bounded Mutation). Returns
     /// [`EngineError::Unavailable`] on a backend that has not implemented `bounded_mutation` — see
-    /// [`Pqueue::hot_projection_capabilities`].
+    /// [`Fireweed::hot_projection_capabilities`].
     pub async fn bounded_mutation(
         &self,
         queue: &QueueKey,
@@ -3531,9 +3781,9 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Claim due records selected by a declared-index predicate instead of the queue's default
     /// priority order (API-004 Claim By Query) — an alternate *selection* path into the same claim/
-    /// lease/finalize lifecycle as [`Pqueue::claim`], not a parallel one. Returns
+    /// lease/finalize lifecycle as [`Fireweed::claim`], not a parallel one. Returns
     /// [`EngineError::Unavailable`] on a backend that has not implemented `claim_by_query` — see
-    /// [`Pqueue::hot_projection_capabilities`].
+    /// [`Fireweed::hot_projection_capabilities`].
     pub async fn claim_by_query(
         &self,
         queue: &QueueKey,
@@ -3574,58 +3824,55 @@ impl<B: LibBackend> Pqueue<B> {
 // on an internal crate (strong-by-default, not absolute — OD-6).
 // ---------------------------------------------------------------------------
 
-/// Open a **sole-owner**, in-memory pqueue (atomic durability class) — the zero-setup embedded path.
+/// Open a **sole-owner**, in-memory Fireweed handle (atomic durability class) — the zero-setup path.
 /// Requires the `memory` feature (default).
 #[cfg(feature = "memory")]
-pub fn open_memory(clock: Arc<dyn Clock>) -> Pqueue<impl LibBackend> {
-    Pqueue::new(Arc::new(fireweed_memory::composed_memory_backend()), clock)
+pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
+    Fireweed::from_pqueue(Pqueue::new(
+        Arc::new(fireweed_memory::composed_memory_backend()),
+        clock,
+    ))
 }
 
-/// Open a **sole-owner**, sqlite-backed pqueue (durable log + in-memory projection rebuilt from the log) at
+/// Open a **sole-owner**, SQLite-backed Fireweed handle (durable log + in-memory projection rebuilt from the log) at
 /// `path`. This log-replay family does not maintain relational active-scope summaries, so
-/// [`Pqueue::discover_active_scopes`] returns [`EngineError::Unavailable`]. Use
+/// [`Fireweed::discover_active_scopes`] returns [`EngineError::Unavailable`]. Use
 /// [`open_sqlite_relational`] when durable relational discovery is required. Requires the `sqlite` feature
 /// (default).
 #[cfg(feature = "sqlite")]
-pub fn open_sqlite(
-    path: &str,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Pqueue<impl LibBackend + use<>>> {
+pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
-    Ok(Pqueue::new(
+    Ok(Fireweed::from_pqueue(Pqueue::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
-    ))
+    )))
 }
 
-/// Open a **sole-owner**, relational SQLite pqueue at `path`. Unlike [`open_sqlite`], this constructor keeps
-/// its authoritative projection in relational tables and supports [`Pqueue::discover_active_scopes`],
+/// Open a **sole-owner**, relational SQLite Fireweed handle at `path`. Unlike [`open_sqlite`], this constructor keeps
+/// its authoritative projection in relational tables and supports [`Fireweed::discover_active_scopes`],
 /// including per-group discovery. Queue creation is atomic across independently opened handles and returns
 /// the definition decoded from the durable `queues` catalog. Requires the `sqlite` feature (default).
 #[cfg(feature = "sqlite")]
-pub fn open_sqlite_relational(
-    path: &str,
-    clock: Arc<dyn Clock>,
-) -> EngineResult<Pqueue<impl LibBackend + use<>>> {
+pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_relational(path)?);
-    Ok(Pqueue::new(
+    Ok(Fireweed::from_pqueue(Pqueue::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
-    ))
+    )))
 }
 
-/// Open a **sole-owner**, object-log pqueue (eventual-apply class) rooted at `root`. Requires the
+/// Open a **sole-owner**, object-log Fireweed handle (eventual-apply class) rooted at `root`. Requires the
 /// `objectlog` feature (default).
 #[cfg(feature = "objectlog")]
 pub fn open_objectlog(
     root: impl Into<std::path::PathBuf>,
     clock: Arc<dyn Clock>,
-) -> EngineResult<Pqueue<impl LibBackend>> {
+) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_objectlog::ObjectLogBackend::open(root)?);
-    Ok(Pqueue::new(
+    Ok(Fireweed::from_pqueue(Pqueue::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
-    ))
+    )))
 }
 
 /// Open an authoritative object log with a disposable PostgreSQL projection behind the public embedded
@@ -3635,16 +3882,17 @@ pub fn open_objectlog(
 /// This constructor requires both the `objectlog` and `postgres` features. The SQLite projection variant
 /// uses its dedicated `open_embedded_sqlite` constructor.
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
-pub fn open_embedded(
+#[doc(hidden)]
+pub(crate) fn open_embedded(
     config: EmbeddedDurabilityConfig,
     clock: Arc<dyn Clock>,
-) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
+) -> EngineResult<Fireweed> {
     if tokio::runtime::Handle::try_current().is_ok() {
         return Err(EngineError::Invalid(
-            "open_embedded cannot run inside a Tokio runtime; use open_embedded_async",
+            "open_objectlog_postgres cannot run inside a Tokio runtime; use open_objectlog_postgres_async",
         ));
     }
-    open_embedded_postgres_blocking(config, clock)
+    open_embedded_postgres_blocking(config, clock).map(EmbeddedPqueue::into_fireweed)
 }
 
 /// Async-safe variant of [`open_embedded`] for callers already running on Tokio.
@@ -3652,15 +3900,35 @@ pub fn open_embedded(
 /// PostgreSQL connection setup and teardown are kept on ordinary OS threads because the synchronous
 /// PostgreSQL client owns a private runtime.
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
-pub async fn open_embedded_async(
+#[doc(hidden)]
+pub(crate) async fn open_embedded_async(
     config: EmbeddedDurabilityConfig,
     clock: Arc<dyn Clock>,
-) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
+) -> EngineResult<Fireweed> {
     tokio::task::spawn_blocking(move || open_embedded_postgres_blocking(config, clock))
         .await
         .map_err(|error| {
-            EngineError::Storage(format!("embedded postgres open task failed: {error}"))
+            EngineError::Storage(format!("object-log PostgreSQL open task failed: {error}"))
         })?
+        .map(EmbeddedPqueue::into_fireweed)
+}
+
+/// Open an authoritative object log with a disposable PostgreSQL projection.
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+pub fn open_objectlog_postgres(
+    config: ObjectLogRuntimeConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    open_embedded(config.into_embedded(), clock)
+}
+
+/// Async-safe variant of [`open_objectlog_postgres`].
+#[cfg(all(feature = "objectlog", feature = "postgres"))]
+pub async fn open_objectlog_postgres_async(
+    config: ObjectLogRuntimeConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    open_embedded_async(config.into_embedded(), clock).await
 }
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
@@ -3746,10 +4014,11 @@ fn open_embedded_postgres_blocking(
 /// The SQLite file is a disposable cache: the returned lifecycle handle can verify it, delete it in place,
 /// and rebuild it exactly from authoritative object-log history without changing the live hot projection.
 #[cfg(all(feature = "objectlog", feature = "sqlite"))]
-pub fn open_embedded_sqlite(
+#[doc(hidden)]
+pub(crate) fn open_embedded_sqlite(
     config: EmbeddedDurabilityConfig,
     clock: Arc<dyn Clock>,
-) -> EngineResult<EmbeddedPqueue<impl LibBackend + use<>>> {
+) -> EngineResult<Fireweed> {
     use fireweed_engine::{ComposedBackend, InProcessControlPlane};
 
     config.validate()?;
@@ -3758,7 +4027,7 @@ pub fn open_embedded_sqlite(
         EmbeddedProjectionConfig::Postgres { .. } => return Err(EngineError::Unavailable),
     };
     let projection_path = projection_path.to_str().ok_or(EngineError::Invalid(
-        "embedded SQLite path must be valid UTF-8",
+        "SQLite projection path must be valid UTF-8",
     ))?;
     if let Some(parent) = std::path::Path::new(projection_path).parent()
         && !parent.as_os_str().is_empty()
@@ -3828,23 +4097,154 @@ pub fn open_embedded_sqlite(
     Ok(EmbeddedPqueue {
         pqueue: Pqueue::new(Arc::new(blocking_backend), clock),
         lifecycle,
-    })
+    }
+    .into_fireweed())
 }
 
-/// Open a **sole-owner** postgres-backed pqueue (log-replay class) at `url`. Requires the `postgres`
+/// Open an authoritative object log with a disposable SQLite projection.
+#[cfg(all(feature = "objectlog", feature = "sqlite"))]
+pub fn open_objectlog_sqlite(
+    config: ObjectLogRuntimeConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    open_embedded_sqlite(config.into_embedded(), clock)
+}
+
+/// Open a **sole-owner** PostgreSQL-backed Fireweed handle (log-replay class) at `url`. Requires the `postgres`
 /// feature (opt-in). For a durable **multi-instance** deployment use [`open_postgres_coordinated`].
 #[cfg(feature = "postgres")]
-pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Pqueue<impl LibBackend>> {
+pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_postgres::PostgresBackend::connect(url)?);
-    Ok(Pqueue::new(
+    Ok(Fireweed::from_pqueue(Pqueue::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
-    ))
+    )))
 }
 
-/// Open a **durable multi-instance** coordinated postgres pqueue: builds the postgres backend AND the
+/// Async-safe variant of [`open_postgres`] for callers already running on Tokio.
+#[cfg(feature = "postgres")]
+pub async fn open_postgres_async(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || open_postgres(&url, clock))
+        .await
+        .map_err(|error| EngineError::Storage(format!("PostgreSQL open task failed: {error}")))?
+}
+
+/// Open a PostgreSQL runtime with construction-time storage, schema, identity, and coordination choices.
+#[cfg(feature = "postgres")]
+pub fn open_postgres_runtime(
+    config: PostgresRuntimeConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    let PostgresRuntimeConfig {
+        url,
+        schema,
+        mode,
+        node_id,
+        coordination,
+    } = config;
+    let url = &url.0.0;
+    match mode {
+        PostgresMode::LogReplay => {
+            let backend = match schema.as_deref() {
+                Some(schema) => fireweed_postgres::PostgresBackend::connect_in_schema(url, schema)?,
+                None => fireweed_postgres::PostgresBackend::connect(url)?,
+            };
+            let backend = Arc::new(match node_id {
+                Some(node_id) => backend.with_node_id(node_id),
+                None => backend,
+            });
+            let backend = Arc::new(blocking_backend::BlockingLibBackend::new(backend)?);
+            match coordination {
+                Some(coordination) => {
+                    let control_plane: Arc<dyn QueueControlPlane> =
+                        Arc::new(match schema.as_deref() {
+                            Some(schema) => {
+                                fireweed_postgres::PostgresControlPlane::connect_in_schema(
+                                    url,
+                                    schema,
+                                    coordination.control_plane,
+                                )?
+                            }
+                            None => fireweed_postgres::PostgresControlPlane::connect(
+                                url,
+                                coordination.control_plane,
+                            )?,
+                        });
+                    let executor = backend.executor();
+                    Ok(Fireweed::from_pqueue(
+                        Pqueue::with_owned_control_plane_executor(
+                            backend,
+                            clock,
+                            coordination.instance_id,
+                            control_plane,
+                            executor,
+                        ),
+                    ))
+                }
+                None => Ok(Fireweed::from_pqueue(Pqueue::new(backend, clock))),
+            }
+        }
+        PostgresMode::Relational => {
+            let backend = match schema.as_deref() {
+                Some(schema) => {
+                    fireweed_postgres::PostgresRelationalBackend::connect_in_schema(url, schema)?
+                }
+                None => fireweed_postgres::PostgresRelationalBackend::connect(url)?,
+            };
+            let backend = Arc::new(match node_id {
+                Some(node_id) => backend.with_node_id(node_id),
+                None => backend,
+            });
+            let backend = Arc::new(blocking_backend::BlockingLibBackend::new(backend)?);
+            let queue = match coordination {
+                Some(coordination) => {
+                    let control_plane: Arc<dyn QueueControlPlane> =
+                        Arc::new(match schema.as_deref() {
+                            Some(schema) => {
+                                fireweed_postgres::PostgresControlPlane::connect_in_schema(
+                                    url,
+                                    schema,
+                                    coordination.control_plane,
+                                )?
+                            }
+                            None => fireweed_postgres::PostgresControlPlane::connect(
+                                url,
+                                coordination.control_plane,
+                            )?,
+                        });
+                    let executor = backend.executor();
+                    Pqueue::with_owned_control_plane_executor(
+                        backend,
+                        clock,
+                        coordination.instance_id,
+                        control_plane,
+                        executor,
+                    )
+                }
+                None => Pqueue::new(backend, clock),
+            };
+            Ok(Fireweed::from_batch_pqueue(queue))
+        }
+    }
+}
+
+/// Async-safe variant of [`open_postgres_runtime`] for callers already running on Tokio.
+#[cfg(feature = "postgres")]
+pub async fn open_postgres_runtime_async(
+    config: PostgresRuntimeConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed> {
+    tokio::task::spawn_blocking(move || open_postgres_runtime(config, clock))
+        .await
+        .map_err(|error| {
+            EngineError::Storage(format!("PostgreSQL runtime open task failed: {error}"))
+        })?
+}
+
+/// Open a **durable multi-instance** coordinated Fireweed handle: builds PostgreSQL storage and the
 /// transactional postgres control plane (which binds the storage fence epoch, BQ-23) against `url`, and
-/// returns a coordinated [`Pqueue`] for this `instance_id`. Requires the `postgres` feature. The client
+/// returns a coordinated [`Fireweed`] for this `instance_id`. Requires the `postgres` feature. The client
 /// never names a backend or control plane. (Run each process with a distinct `instance_id`.)
 #[cfg(feature = "postgres")]
 pub fn open_postgres_coordinated(
@@ -3852,19 +4252,21 @@ pub fn open_postgres_coordinated(
     clock: Arc<dyn Clock>,
     instance_id: OwnerId,
     control_plane_config: fireweed_engine::ControlPlaneConfig,
-) -> EngineResult<Pqueue<impl LibBackend>> {
+) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_postgres::PostgresBackend::connect(url)?);
     let control_plane: Arc<dyn QueueControlPlane> = Arc::new(
         fireweed_postgres::PostgresControlPlane::connect(url, control_plane_config)?,
     );
     let backend = Arc::new(blocking_backend::BlockingLibBackend::new(backend)?);
     let control_plane_executor = backend.executor();
-    Ok(Pqueue::with_owned_control_plane_executor(
-        backend,
-        clock,
-        instance_id,
-        control_plane,
-        control_plane_executor,
+    Ok(Fireweed::from_pqueue(
+        Pqueue::with_owned_control_plane_executor(
+            backend,
+            clock,
+            instance_id,
+            control_plane,
+            control_plane_executor,
+        ),
     ))
 }
 

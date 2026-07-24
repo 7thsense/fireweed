@@ -75,7 +75,7 @@ external-kafka = ["dep:rskafka", "dep:chrono"]
 turso-projection = ["dep:fireweed-turso", "fireweed-turso/local"]
 
 [dev-dependencies]
-fireweed = { path = "../fireweed", default-features = false }
+fireweed = { path = "../fireweed", default-features = false, features = ["postgres"] }
 fireweed-core = { path = "../fireweed-core" }
 fireweed-conformance = { path = "../fireweed-conformance" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "test-util"] }

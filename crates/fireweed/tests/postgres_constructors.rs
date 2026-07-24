@@ -1,7 +1,7 @@
 //! OWED-6: the blessed postgres construction paths (require `--features postgres` + a live DB).
 //!
 //! `open_postgres_coordinated` builds the postgres backend AND the binding control plane internally and
-//! returns a coordinated `Pqueue` — the client names neither a backend nor a control plane. Env-gated on
+//! returns a coordinated `Fireweed` — the client names neither a backend nor a control plane. Env-gated on
 //! `PQUEUE_PG_TEST_URL`; driven by a non-tokio executor (the sync postgres client).
 #![cfg(feature = "postgres")]
 
@@ -9,7 +9,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use fireweed::NewItem;
+use fireweed::{ConfigSecret, NewItem, PostgresMode, PostgresRuntimeConfig};
 use fireweed_core::{
     EligibilityPolicy, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
@@ -28,13 +28,16 @@ impl Clock for ManualClock {
     }
 }
 
-fn qkey() -> QueueKey {
-    QueueKey::new(TenantId::new("t1").unwrap(), QueueId::new("q1").unwrap())
+fn qkey(queue_id: &str) -> QueueKey {
+    QueueKey::new(
+        TenantId::new("t1").unwrap(),
+        QueueId::new(queue_id).unwrap(),
+    )
 }
-fn qdef() -> QueueDefinition {
+fn qdef(queue_id: &str) -> QueueDefinition {
     QueueDefinition {
         tenant_id: TenantId::new("t1").unwrap(),
-        queue_id: QueueId::new("q1").unwrap(),
+        queue_id: QueueId::new(queue_id).unwrap(),
         priority_model: PriorityModel {
             kind: PriorityModelKind::Int64,
             direction: PriorityDirection::Ascending,
@@ -61,6 +64,13 @@ fn qdef() -> QueueDefinition {
     }
 }
 
+fn schema_url(url: &str, schema: &str) -> String {
+    let separator = if url.contains('?') { '&' } else { '?' };
+    // The convenience constructor deliberately takes one connection URL. Supplying search_path in that
+    // URL keeps its storage and control-plane connections in the same isolated schema.
+    format!("{url}{separator}options=-c%20search_path%3D{schema}")
+}
+
 /// The coordinated postgres constructor builds backend + binding control plane internally and yields a
 /// working multi-instance owner (acquires + fences) without the client naming either.
 #[test]
@@ -69,22 +79,76 @@ fn open_postgres_coordinated_builds_a_working_owner() {
         eprintln!("OWED-6 SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
         return;
     };
-    // The test runner points PQUEUE_PG_TEST_URL at a fresh database, so the public search_path is clean.
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the test clock is after the Unix epoch")
+        .as_nanos();
+    let queue_id = format!("coordinated-{unique}");
+    let schema = format!("fireweed_coordinated_{unique}");
+    let mut admin = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    admin
+        .batch_execute(&format!("CREATE SCHEMA {schema}"))
+        .unwrap();
+    let isolated_url = schema_url(&url, &schema);
+    let queue = qkey(&queue_id);
     let clock = Arc::new(ManualClock(AtomicI64::new(0)));
     let pq = fireweed::open_postgres_coordinated(
-        &url,
+        &isolated_url,
         clock,
         OwnerId::new("inst-1").unwrap(),
         ControlPlaneConfig::default(),
     )
     .expect("postgres binds the storage epoch, so the coordinated constructor succeeds");
 
-    bo(pq.create_queue(qdef())).unwrap();
-    bo(pq.push(&qkey(), NewItem::default())).unwrap();
-    assert_eq!(bo(pq.metrics(&qkey())).unwrap().pending, 1);
+    bo(pq.create_queue(qdef(&queue_id))).unwrap();
+    bo(pq.push(&queue, NewItem::default())).unwrap();
+    assert_eq!(bo(pq.metrics(&queue)).unwrap().pending, 1);
     // It is a real coordinated owner: ownership resolves to Mine at a granted epoch.
     assert!(matches!(
-        bo(pq.ownership(&qkey())).unwrap(),
+        bo(pq.ownership(&queue)).unwrap(),
         fireweed::Ownership::Mine { epoch: Some(e) } if e >= 1
     ));
+    drop(pq);
+    admin
+        .batch_execute(&format!("DROP SCHEMA {schema} CASCADE"))
+        .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn open_postgres_runtime_async_is_safe_inside_tokio() {
+    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+        eprintln!("SKIPPED — set PQUEUE_PG_TEST_URL to a live DB");
+        return;
+    };
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the test clock is after the Unix epoch")
+        .as_nanos();
+    let queue_id = format!("async-postgres-{unique}");
+    let schema = format!("fireweed_async_{unique}");
+    let queue = qkey(&queue_id);
+    let fireweed = fireweed::open_postgres_runtime_async(
+        PostgresRuntimeConfig {
+            url: ConfigSecret::new(url.clone()),
+            schema: Some(schema.clone()),
+            mode: PostgresMode::Relational,
+            node_id: None,
+            coordination: None,
+        },
+        Arc::new(ManualClock(AtomicI64::new(0))),
+    )
+    .await
+    .expect("async PostgreSQL construction runs off the Tokio runtime thread");
+    fireweed.create_queue(qdef(&queue_id)).await.unwrap();
+    fireweed.push(&queue, NewItem::default()).await.unwrap();
+    assert_eq!(fireweed.metrics(&queue).await.unwrap().pending, 1);
+    drop(fireweed);
+    tokio::task::spawn_blocking(move || {
+        let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        client
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .unwrap();
+    })
+    .await
+    .unwrap();
 }

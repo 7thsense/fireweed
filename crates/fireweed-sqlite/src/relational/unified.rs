@@ -717,7 +717,7 @@ impl AsOfProjectionStore for SqliteRelational {
     // Fail closed here with `Unavailable` so the composed relational backend refuses historical reads
     // exactly like the monolithic `SqliteRelationalBackend` (`HistoricalProjectionRead::read_as_of`),
     // rather than advertise an as-of read it cannot serve. The associated type is only a placeholder to
-    // satisfy the bound (and the `LibBackend` wiring); it is never constructed.
+    // satisfy the internal composition bound; it is never constructed.
     type AsOfProjection = InMemoryProjection;
 
     // No replayable command log: cannot serve historical reads. Decline as-of up-front.

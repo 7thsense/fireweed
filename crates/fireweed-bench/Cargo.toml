@@ -34,13 +34,9 @@ path = "src/main.rs"
 # client panics under a tokio runtime, and all engine-port futures are already `ready`, so a plain executor
 # works for memory/sqlite/objectlog/postgres alike.
 [dependencies]
-fireweed = { path = "../fireweed" }
+fireweed = { path = "../fireweed", features = ["postgres"] }
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
-fireweed-memory = { path = "../fireweed-memory" }
-fireweed-sqlite = { path = "../fireweed-sqlite" }
-fireweed-objectlog = { path = "../fireweed-objectlog" }
-fireweed-postgres = { path = "../fireweed-postgres" }
 futures = "0.3"
 
 [dev-dependencies]

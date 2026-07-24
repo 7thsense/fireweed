@@ -21,15 +21,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use fireweed::Pqueue;
+use fireweed::{
+    ConfigSecret, Fireweed, PostgresMode, PostgresRuntimeConfig, open_memory, open_objectlog,
+    open_postgres_runtime, open_sqlite, open_sqlite_relational,
+};
 use fireweed_bench::{
     FLOOR_ITEMS_PER_HR, FLOOR_ITEMS_PER_SEC, OpStats, Shape, SystemClock, all_shapes, bench_qdef,
     claim_ack, ingest, lifecycle, qkey, shape_by_name,
 };
-use fireweed_memory::composed_memory_backend;
-use fireweed_objectlog::ObjectLogBackend;
-use fireweed_postgres::{PostgresBackend, PostgresRelationalBackend};
-use fireweed_sqlite::{SqliteRelationalBackend, composed_sqlite_backend};
 
 fn main() {
     let cfg = Config::from_args();
@@ -202,15 +201,9 @@ async fn run(cfg: &Config) {
 
 /// Run the per-shape throughput + lifecycle workloads for one prepared backend. `supports_update` is the
 /// atomic-class flag for `update_fields` (false for the eventual-apply object-log backend).
-async fn run_shapes<B, F>(
-    cfg: &Config,
-    name: &str,
-    family: &str,
-    supports_update: bool,
-    mut make: F,
-) where
-    B: fireweed::LibBackend,
-    F: FnMut() -> Pqueue<B>,
+async fn run_shapes<F>(cfg: &Config, name: &str, family: &str, supports_update: bool, mut make: F)
+where
+    F: FnMut() -> Fireweed,
 {
     for shape in &cfg.shapes {
         // ingest / claim share one prepared queue per shape (claim drains what ingest pushed).
@@ -261,7 +254,7 @@ async fn run_shapes<B, F>(
 
 async fn run_memory(cfg: &Config) {
     run_shapes(cfg, "memory", LOG_FAMILY, true, || {
-        Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SystemClock))
+        open_memory(Arc::new(SystemClock))
     })
     .await;
     if cfg.has("recovery") {
@@ -281,15 +274,12 @@ async fn run_sqlite(cfg: &Config) {
             .to_string_lossy()
             .into_owned();
         let _ = std::fs::remove_file(&path);
-        Pqueue::new(
-            Arc::new(composed_sqlite_backend(&path).expect("open sqlite")),
-            Arc::new(SystemClock),
-        )
+        open_sqlite(&path, Arc::new(SystemClock)).expect("open sqlite")
     })
     .await;
     if cfg.has("recovery") {
         recovery_durable(cfg, "sqlite", LOG_FAMILY, |path| {
-            Arc::new(composed_sqlite_backend(path).expect("sqlite"))
+            open_sqlite(path, Arc::new(SystemClock)).expect("sqlite")
         })
         .await;
     }
@@ -297,10 +287,7 @@ async fn run_sqlite(cfg: &Config) {
 
 async fn run_sqlite_relational(cfg: &Config) {
     run_shapes(cfg, "sqlite_relational", REL_FAMILY, true, || {
-        Pqueue::new(
-            Arc::new(SqliteRelationalBackend::in_memory().expect("sqlite relational")),
-            Arc::new(SystemClock),
-        )
+        open_sqlite_relational(":memory:", Arc::new(SystemClock)).expect("sqlite relational")
     })
     .await;
     if cfg.has("recovery") {
@@ -317,10 +304,7 @@ async fn run_objectlog(cfg: &Config) {
         counter += 1;
         let dir = tmp("objectlog", &format!("{counter}"));
         let _ = std::fs::remove_dir_all(&dir);
-        Pqueue::new(
-            Arc::new(ObjectLogBackend::open(&dir).expect("open objectlog")),
-            Arc::new(SystemClock),
-        )
+        open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog")
     })
     .await;
     if cfg.has("recovery") {
@@ -328,10 +312,7 @@ async fn run_objectlog(cfg: &Config) {
         let _ = std::fs::remove_dir_all(&dir);
         let shape = &cfg.shapes[0];
         {
-            let pq = Pqueue::new(
-                Arc::new(ObjectLogBackend::open(&dir).expect("open objectlog")),
-                Arc::new(SystemClock),
-            );
+            let pq = open_objectlog(&dir, Arc::new(SystemClock)).expect("open objectlog");
             let q = qkey("recov");
             pq.create_queue(bench_qdef("bench", "recov", shape))
                 .await
@@ -339,10 +320,7 @@ async fn run_objectlog(cfg: &Config) {
             ingest(&pq, &q, shape, cfg.items, cfg.batch).await;
         }
         let t = Instant::now();
-        let pq = Pqueue::new(
-            Arc::new(ObjectLogBackend::open(&dir).expect("reopen objectlog")),
-            Arc::new(SystemClock),
-        );
+        let pq = open_objectlog(&dir, Arc::new(SystemClock)).expect("reopen objectlog");
         report_recovery("objectlog", LOG_FAMILY, t.elapsed(), &pq, cfg).await;
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -360,22 +338,34 @@ async fn run_postgres(cfg: &Config) {
     run_shapes(cfg, "postgres", LOG_FAMILY, true, || {
         counter += 1;
         let schema = format!("pq_bench_log_{}_{}", std::process::id(), counter);
-        Pqueue::new(
-            Arc::new(PostgresBackend::connect_in_schema(&url, &schema).expect("connect postgres")),
+        open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(url.clone()),
+                schema: Some(schema),
+                mode: PostgresMode::LogReplay,
+                node_id: None,
+                coordination: None,
+            },
             Arc::new(SystemClock),
         )
+        .expect("connect postgres")
     })
     .await;
     if cfg.has("recovery") {
         let schema = format!("pq_bench_log_recov_{}", std::process::id());
         let shape = &cfg.shapes[0];
         {
-            let pq = Pqueue::new(
-                Arc::new(
-                    PostgresBackend::connect_in_schema(&url, &schema).expect("connect postgres"),
-                ),
+            let pq = open_postgres_runtime(
+                PostgresRuntimeConfig {
+                    url: ConfigSecret::new(url.clone()),
+                    schema: Some(schema.clone()),
+                    mode: PostgresMode::LogReplay,
+                    node_id: None,
+                    coordination: None,
+                },
                 Arc::new(SystemClock),
-            );
+            )
+            .expect("connect postgres");
             let q = qkey("recov");
             pq.create_queue(bench_qdef("bench", "recov", shape))
                 .await
@@ -383,12 +373,17 @@ async fn run_postgres(cfg: &Config) {
             ingest(&pq, &q, shape, cfg.items, cfg.batch).await;
         }
         let t = Instant::now();
-        let pq = Pqueue::new(
-            Arc::new(
-                PostgresBackend::connect_in_schema(&url, &schema).expect("reconnect postgres"),
-            ),
+        let pq = open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(url.clone()),
+                schema: Some(schema),
+                mode: PostgresMode::LogReplay,
+                node_id: None,
+                coordination: None,
+            },
             Arc::new(SystemClock),
-        );
+        )
+        .expect("reconnect postgres");
         report_recovery("postgres", LOG_FAMILY, t.elapsed(), &pq, cfg).await;
     }
 }
@@ -405,13 +400,17 @@ async fn run_postgres_relational(cfg: &Config) {
     run_shapes(cfg, "postgres_relational", REL_FAMILY, true, || {
         counter += 1;
         let schema = format!("pq_bench_rel_{}_{}", std::process::id(), counter);
-        Pqueue::new(
-            Arc::new(
-                PostgresRelationalBackend::connect_in_schema(&url, &schema)
-                    .expect("connect postgres relational"),
-            ),
+        open_postgres_runtime(
+            PostgresRuntimeConfig {
+                url: ConfigSecret::new(url.clone()),
+                schema: Some(schema),
+                mode: PostgresMode::Relational,
+                node_id: None,
+                coordination: None,
+            },
             Arc::new(SystemClock),
         )
+        .expect("connect postgres relational")
     })
     .await;
     if cfg.has("recovery") {
@@ -423,16 +422,15 @@ async fn run_postgres_relational(cfg: &Config) {
 }
 
 /// Reopen a durable file-backed log backend and time the rebuild-from-log for the first shape.
-async fn recovery_durable<B, F>(cfg: &Config, name: &str, family: &str, reopen: F)
+async fn recovery_durable<F>(cfg: &Config, name: &str, family: &str, reopen: F)
 where
-    B: fireweed::LibBackend,
-    F: Fn(&str) -> Arc<B>,
+    F: Fn(&str) -> Fireweed,
 {
     let path = tmp(name, "recov").to_string_lossy().into_owned();
     let _ = std::fs::remove_file(&path);
     let shape = &cfg.shapes[0];
     {
-        let pq = Pqueue::new(reopen(&path), Arc::new(SystemClock));
+        let pq = reopen(&path);
         let q = qkey("recov");
         pq.create_queue(bench_qdef("bench", "recov", shape))
             .await
@@ -440,18 +438,12 @@ where
         ingest(&pq, &q, shape, cfg.items, cfg.batch).await;
     }
     let t = Instant::now();
-    let pq = Pqueue::new(reopen(&path), Arc::new(SystemClock));
+    let pq = reopen(&path);
     report_recovery(name, family, t.elapsed(), &pq, cfg).await;
     let _ = std::fs::remove_file(&path);
 }
 
-async fn report_recovery<B: fireweed::LibBackend>(
-    name: &str,
-    family: &str,
-    elapsed: Duration,
-    pq: &Pqueue<B>,
-    cfg: &Config,
-) {
+async fn report_recovery(name: &str, family: &str, elapsed: Duration, pq: &Fireweed, cfg: &Config) {
     let resident = pq
         .metrics(&qkey("recov"))
         .await
@@ -478,7 +470,7 @@ async fn report_recovery<B: fireweed::LibBackend>(
 async fn density(cfg: &Config) {
     println!("\nqueue density (single node, memory backend, minimal shape):");
     let shape = all_shapes()[0]; // minimal
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), Arc::new(SystemClock));
+    let pq = open_memory(Arc::new(SystemClock));
     let cold_each = 100u64;
     let create_start = Instant::now();
     for i in 0..cfg.queues {

@@ -179,7 +179,7 @@ fn portable(id: &str) -> LedgerRow {
         ),
         (
             "telemetry_surface".into(),
-            serde_json::json!("Pqueue::metrics+current_position+discover_active_scopes"),
+            serde_json::json!("Fireweed::metrics+current_position+discover_active_scopes"),
         ),
         ("telemetry_sample_count".into(), serde_json::json!(3)),
         (

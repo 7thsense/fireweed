@@ -48,17 +48,16 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Instant;
 
-use fireweed::{NewItem, Pqueue};
+use fireweed::{
+    ConfigSecret, Fireweed, NewItem, PostgresMode, PostgresRuntimeConfig, open_memory,
+    open_objectlog, open_postgres_runtime, open_sqlite_relational,
+};
 use fireweed_core::{
     EligibilityPolicy, ItemId, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{Clock, QueueKey};
-use fireweed_memory::composed_memory_backend;
-use fireweed_objectlog::ObjectLogBackend;
-use fireweed_postgres::PostgresBackend;
-use fireweed_sqlite::composed_sqlite_log_sqlite_projection;
 
 /// Items a Phase-2 noisy worker pushes+drains per cycle.
 const NOISY_BATCH: u64 = 200;
@@ -109,7 +108,7 @@ fn qk(tenant: &str, queue: &str) -> QueueKey {
     QueueKey::new(TenantId::new(tenant).unwrap(), QueueId::new(queue).unwrap())
 }
 
-async fn seed<B: fireweed::LibBackend>(pq: &Pqueue<B>, key: &QueueKey, items: u64, batch: usize) {
+async fn seed(pq: &Fireweed, key: &QueueKey, items: u64, batch: usize) {
     let mut pushed = 0u64;
     while pushed < items {
         let n = (items - pushed).min(batch as u64) as usize;
@@ -125,12 +124,7 @@ async fn seed<B: fireweed::LibBackend>(pq: &Pqueue<B>, key: &QueueKey, items: u6
 }
 
 /// Drive one queue through a full push + claim + ack of `items`, returning (push_rate, claim_rate) in items/s.
-async fn run_hot<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
-    key: &QueueKey,
-    items: u64,
-    batch: usize,
-) -> (f64, f64) {
+async fn run_hot(pq: &Fireweed, key: &QueueKey, items: u64, batch: usize) -> (f64, f64) {
     let t_push = Instant::now();
     seed(pq, key, items, batch).await;
     let push_rate = items as f64 / t_push.elapsed().as_secs_f64();
@@ -167,7 +161,7 @@ struct ResidencyPoint {
 /// queue is still fully resident afterwards (undisturbed by the hot workload — a correctness-isolation
 /// check). Generic over the backend so the SAME residency ladder runs on the in-memory node AND on the
 /// durable `object_log_sqlite_projection` substrate.
-fn measure_residency_on<B, F>(
+fn measure_residency_on<F>(
     make_backend: F,
     density: usize,
     cold_each: u64,
@@ -175,10 +169,9 @@ fn measure_residency_on<B, F>(
     batch: usize,
 ) -> ResidencyPoint
 where
-    B: fireweed::LibBackend + 'static,
-    F: FnOnce() -> B,
+    F: FnOnce() -> Fireweed,
 {
-    let pq = Pqueue::new(Arc::new(make_backend()), Arc::new(SysClock));
+    let pq = make_backend();
     futures::executor::block_on(async {
         for i in 0..density {
             let key = qk("density", &format!("cold{i}"));
@@ -218,7 +211,7 @@ fn measure_residency(
     batch: usize,
 ) -> ResidencyPoint {
     measure_residency_on(
-        composed_memory_backend,
+        || open_memory(Arc::new(SysClock)),
         density,
         cold_each,
         hot_items,
@@ -240,10 +233,7 @@ fn measure_hot_under_concurrent_load(
     hot_items: u64,
     batch: usize,
 ) -> (f64, f64, u64) {
-    let pq = Arc::new(Pqueue::new(
-        Arc::new(composed_memory_backend()),
-        Arc::new(SysClock),
-    ));
+    let pq = Arc::new(open_memory(Arc::new(SysClock)));
     futures::executor::block_on(async {
         for i in 0..cold {
             pq.create_queue(qdef("noisy", &format!("c{i}")))
@@ -441,11 +431,11 @@ fn queue_density_single_node_tests() {
 
 // ===========================================================================
 // DURABLE-BACKEND residency ladder (B3.2): the SAME 0->100->1000 residency ladder as Phase 1, but on the
-// DURABLE substrates the library facade (`fireweed::Pqueue`, which requires the full `LibBackend` port set)
+// DURABLE substrates through the supported `fireweed::Fireweed` facade
 // exposes — instead of the in-memory node. This closes the durable-backend density point the in-memory suite
 // honestly deferred: prove >=1000 DURABLE co-resident queues on one node with the hot queue still progressing.
 //
-// Two durable substrates, each a full `LibBackend`, together covering the durable projection substrate the
+// Two durable substrates together cover the durable projection substrate the
 // production `object_log_sqlite_projection` runtime is built from:
 //   - `object_log`: `ObjectLogBackend` — the durable local-fs OBJECT-LOG authority (segments written to
 //     disk), the LOG axis of the production `object_log_sqlite_projection` runtime;
@@ -453,8 +443,8 @@ fn queue_density_single_node_tests() {
 //     with the DERIVED on-disk SQLite PROJECTION (`SqliteProjectionStore`), the SAME projection axis the
 //     production `object_log_sqlite_projection` backend materializes its queryable per-queue state into.
 // (The fused `fireweed_server::ObjectLogSqliteBackend` is a server-runtime backend that does NOT implement the
-// full library `LibBackend` port set — it is not drivable through the `Pqueue` facade — so the durable
-// density point is proven on the two full-LibBackend durable substrates it is composed from.)
+// full internal port set — it is not independently drivable through the `Fireweed` facade — so the durable
+// density point is proven on the two durable substrates it is composed from.)
 // Plus, if a live DB is available, a reduced postgres point.
 // ===========================================================================
 
@@ -484,15 +474,14 @@ fn durable_tmp(tag: &str) -> std::path::PathBuf {
 
 /// Run the residency ladder on a durable backend built fresh per level by `make`, printing each point.
 /// `make(cleanup)` builds one backend instance and pushes its on-disk root(s) onto `cleanup` for removal.
-fn run_durable_ladder<B, F>(
+fn run_durable_ladder<F>(
     label: &str,
     densities: &[usize],
     mut make: F,
     cleanup: &mut Vec<std::path::PathBuf>,
 ) -> Vec<ResidencyPoint>
 where
-    B: fireweed::LibBackend + 'static,
-    F: FnMut(&mut Vec<std::path::PathBuf>) -> B,
+    F: FnMut(&mut Vec<std::path::PathBuf>) -> Fireweed,
 {
     println!("\nTP-002 E2 queue density — DURABLE residency ladder (single node, {label}):");
     println!("  co-resident queues | hot push items/s | hot claim items/s | cold still resident");
@@ -566,9 +555,9 @@ fn queue_density_single_node_durable_tests() {
         |cleanup| {
             let dir = durable_tmp("objectlog");
             let _ = std::fs::remove_dir_all(&dir);
-            let backend = ObjectLogBackend::open(&dir).expect("open object_log backend");
             cleanup.push(dir);
-            backend
+            open_objectlog(cleanup.last().unwrap(), Arc::new(SysClock))
+                .expect("open object_log backend")
         },
         &mut cleanup,
     );
@@ -593,14 +582,13 @@ fn queue_density_single_node_durable_tests() {
             let proj = durable_tmp("sqproj.sqlite");
             let _ = std::fs::remove_file(&log);
             let _ = std::fs::remove_file(&proj);
-            let backend = composed_sqlite_log_sqlite_projection(
-                log.to_str().unwrap(),
-                proj.to_str().unwrap(),
-            )
-            .expect("open sqlite_log_sqlite_projection backend");
             cleanup.push(log);
             cleanup.push(proj);
-            backend
+            open_sqlite_relational(
+                cleanup.last().unwrap().to_str().unwrap(),
+                Arc::new(SysClock),
+            )
+            .expect("open durable SQLite projection backend")
         },
         &mut cleanup,
     );
@@ -643,7 +631,17 @@ fn queue_density_single_node_durable_tests() {
                                 .unwrap()
                                 .as_nanos()
                         );
-                        PostgresBackend::connect_in_schema(&url, &schema).expect("connect postgres")
+                        open_postgres_runtime(
+                            PostgresRuntimeConfig {
+                                url: ConfigSecret::new(url.clone()),
+                                schema: Some(schema),
+                                mode: PostgresMode::LogReplay,
+                                node_id: None,
+                                coordination: None,
+                            },
+                            Arc::new(SysClock),
+                        )
+                        .expect("connect postgres")
                     },
                     d,
                     DURABLE_COLD_EACH,

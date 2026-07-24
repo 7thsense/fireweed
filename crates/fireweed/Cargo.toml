@@ -1,5 +1,6 @@
 [package]
 name = "fireweed"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -61,3 +62,11 @@ serde_json = "1"
 # The postgres-constructor smoke test drives the sync postgres client via a non-tokio executor.
 postgres = "0.19"
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+[[test]]
+name = "concrete_fireweed"
+path = "tests/concrete_fireweed.rs"
+
+[[test]]
+name = "sqlite_create_or_read"
+path = "tests/sqlite_create_or_read.rs"

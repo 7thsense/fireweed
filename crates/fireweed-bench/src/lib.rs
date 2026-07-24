@@ -4,7 +4,7 @@
 //! test (`tests/e2e_shapes_tests.rs`) both build on:
 //!   * the [`Shape`] data-shape model (payload size, field cardinality, grouping, priority distribution)
 //!     and its generator, so every workload can be driven over varied DATA SHAPES;
-//!   * the generic throughput workloads (`ingest`, `claim_ack`) over the [`fireweed::LibBackend`] facade;
+//!   * the generic throughput workloads (`ingest`, `claim_ack`) over the [`fireweed::Fireweed`] facade;
 //!   * the fuller [`lifecycle`] workload — a correctness + perf pass that exercises
 //!     push → claim → update_fields → ack/nack(retry) → reclaim_expired and asserts the state-machine
 //!     invariants at each step (returning `Err` on any violation so a `cargo test` can fail loudly).
@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use fireweed::{
-    Bytes, ClaimedItem, EngineError, GroupKey, ItemId, Nack, NewItem, PayloadUpdate, Pqueue,
+    Bytes, ClaimedItem, EngineError, Fireweed, GroupKey, ItemId, Nack, NewItem, PayloadUpdate,
     PriorityValue, QueueDefinition, UtcTimestamp,
 };
 use fireweed_core::{
@@ -324,8 +324,8 @@ impl OpStats {
 // ---------------------------------------------------------------------------
 
 /// Push `items` items of `shape` into `q` in batches of `batch`, timing each `push_batch`.
-pub async fn ingest<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
+pub async fn ingest(
+    pq: &Fireweed,
     q: &QueueKey,
     shape: &Shape,
     items: u64,
@@ -351,8 +351,8 @@ pub async fn ingest<B: fireweed::LibBackend>(
 }
 
 /// Drain up to `items` already-pending records: `claim`+`ack` in batches. Returns (claim, ack) stats.
-pub async fn claim_ack<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
+pub async fn claim_ack(
+    pq: &Fireweed,
     q: &QueueKey,
     items: u64,
     batch: usize,
@@ -394,8 +394,8 @@ pub async fn claim_ack<B: fireweed::LibBackend>(
 }
 
 /// Claim up to `target` eligible items from `q` with `lease_ms`, in batches of `batch`.
-async fn claim_n<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
+async fn claim_n(
+    pq: &Fireweed,
     q: &QueueKey,
     target: u64,
     batch: usize,
@@ -438,8 +438,8 @@ pub struct LifecycleStats {
 /// `reclaim_expired` step; everything finalized in-band holds a long lease so an ack/nack never races
 /// lease expiry. The harness sleeps once, past both the short lease and the nack backoff, before the
 /// reclaim + re-drain.
-pub async fn lifecycle<B: fireweed::LibBackend>(
-    pq: &Pqueue<B>,
+pub async fn lifecycle(
+    pq: &Fireweed,
     q: &QueueKey,
     shape: &Shape,
     items: u64,

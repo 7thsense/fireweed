@@ -201,9 +201,10 @@ environment-gated row may be skipped there.
 | PostgreSQL is silently skipped | Medium | Report as `not run`; never count as a pass |
 | Garage credentials leak into evidence | High | Source host-managed secrets and reject credential values in logs |
 
-**Known gap**: the sibling Snorri migration and new Fireweed contract fixtures
-are not present in this draft's repository state. Their absence is residual
-build work, not accepted test evidence.
+The concrete facade, sibling Snorri migration, supported-surface fixture, and
+compile-fail fixtures are implemented. Release acceptance still requires the
+exact-revision `eldir` Garage run and post-publication tagged-source repeat;
+local or path-based success does not substitute for either row.
 
 ## Build handoff
 

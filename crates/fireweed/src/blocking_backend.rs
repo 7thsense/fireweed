@@ -247,14 +247,14 @@ fn shared_worker_pool() -> EngineResult<Arc<WorkerPool>> {
 
 /// Complete, bounded blocking boundary for the library's full backend surface.
 pub(crate) struct BlockingLibBackend<B: super::LibBackend + 'static> {
-    inner: Arc<B>,
+    inner: Option<Arc<B>>,
     pool: Arc<WorkerPool>,
 }
 
 impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
     pub(crate) fn new(inner: Arc<B>) -> EngineResult<Self> {
         Ok(Self {
-            inner,
+            inner: Some(inner),
             pool: shared_worker_pool()?,
         })
     }
@@ -279,7 +279,7 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
         Fut: Future<Output = EngineResult<T>> + Send + 'static,
         F: FnOnce(Arc<B>) -> Fut + Send + 'static,
     {
-        let inner = Arc::clone(&self.inner);
+        let inner = Arc::clone(self.inner.as_ref().expect("blocking backend is active"));
         let pool = Arc::clone(&self.pool);
         let worker = Self::worker(&queue, pool.worker_count());
         pool.submit_data(worker, move || {
@@ -295,15 +295,54 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
     }
 }
 
+impl<B: super::LibBackend + 'static> Drop for BlockingLibBackend<B> {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        let job: Job = Box::new(move || drop(inner));
+        let sender = self
+            .pool
+            .senders
+            .lock()
+            .expect("blocking worker senders poisoned")
+            .as_ref()
+            .map(|senders| senders.data[0].clone());
+        let Some(sender) = sender else {
+            let _ = std::thread::Builder::new()
+                .name("fireweed-library-drop".into())
+                .spawn(job);
+            return;
+        };
+        match sender.try_send(job) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => {
+                let _ = std::thread::Builder::new()
+                    .name("fireweed-library-drop".into())
+                    .spawn(job);
+            }
+        }
+    }
+}
+
 impl<B: super::LibBackend + 'static> Backend for BlockingLibBackend<B> {
     fn durability_class(&self) -> DurabilityClass {
-        self.inner.durability_class()
+        self.inner
+            .as_ref()
+            .expect("blocking backend is active")
+            .durability_class()
     }
     fn supports_gates(&self) -> bool {
-        self.inner.supports_gates()
+        self.inner
+            .as_ref()
+            .expect("blocking backend is active")
+            .supports_gates()
     }
     fn commit_capabilities(&self) -> CommitCapabilities {
-        self.inner.commit_capabilities()
+        self.inner
+            .as_ref()
+            .expect("blocking backend is active")
+            .commit_capabilities()
     }
     fn commit_raw(
         &self,
@@ -759,7 +798,10 @@ impl<B: super::LibBackend + 'static> DiscoveryPort for BlockingLibBackend<B> {
 
 impl<B: super::LibBackend + 'static> HotProjectionQueryPort for BlockingLibBackend<B> {
     fn hot_projection_capabilities(&self, shard: &QueueKey) -> QueryCapabilityFlags {
-        self.inner.hot_projection_capabilities(shard)
+        self.inner
+            .as_ref()
+            .expect("blocking backend is active")
+            .hot_projection_capabilities(shard)
     }
     fn range_scan(
         &self,

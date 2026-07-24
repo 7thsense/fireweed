@@ -313,10 +313,12 @@ dependencies = [
  "fireweed-engine",
  "fireweed-memory",
  "fireweed-objectlog",
+ "fireweed-postgres",
  "fireweed-sqlite",
  "futures",
  "serde_json",
  "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -326,11 +328,7 @@ dependencies = [
  "fireweed",
  "fireweed-core",
  "fireweed-engine",
- "fireweed-memory",
- "fireweed-objectlog",
- "fireweed-postgres",
  "fireweed-release",
- "fireweed-sqlite",
  "futures",
  "serde_json",
 ]
