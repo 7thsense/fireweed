@@ -16,9 +16,9 @@
       "id": "helm-runtime-compatibility",
       "class": "persisted/wire",
       "path_pattern": "^charts/fireweed-queue/.*$",
-      "match_pattern": "\\bPQUEUE(?:_[A-Z0-9]+)*\\b|/var/lib/pqueue(?:/[^[:space:]]*)?|\\bpqueue_(?:[A-Za-z0-9_]+)\\b",
-      "reason": "The Fireweed chart still renders ADR-020-governed runtime environment aliases and retained on-disk identifiers; chart, workload, image, label, package, and evidence coordinates are rejected independently.",
-      "owner_surface": "Helm runtime configuration and persisted paths",
+      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
+      "reason": "The Fireweed chart still renders ADR-020-governed runtime environment aliases and retained on-disk identifiers, and names historical bead IDs for auditability. The verifier evaluates identity tokens without surrounding path context, so this rule admits chart-local pqueue tokens while the dedicated deployment-coordinate layer independently rejects old chart, workload, image, label, package, and evidence coordinates.",
+      "owner_surface": "Helm runtime configuration, persisted paths, and audit references",
       "removal_condition": "Remove after the configuration and persisted-data owners retire the remaining PQUEUE runtime aliases and pqueue storage identifiers."
     },
     {

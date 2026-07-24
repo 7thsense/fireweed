@@ -79,7 +79,7 @@ spec:
             {{- end }}
             {{- if eq .Values.storage.projection.backend "postgres" }}
             {{- /* Relational-projection DSN: consumed by the postgres/postgres combo
-                   (ComposedBackend<PostgresLog, PostgresRelational, ..>, crates/pqueue-server/src/lib.rs).
+                   (ComposedBackend<PostgresLog, PostgresRelational, ..>, crates/fireweed-server/src/lib.rs).
                    The Lakebase profile uses projection=inmemory, so this never renders there. */}}
             - name: PQUEUE_POSTGRES_PROJECTION_DATABASE_URL
               valueFrom:
