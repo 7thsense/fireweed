@@ -6,11 +6,11 @@
     {
       "id": "rust-workspace-compatibility-crates",
       "class": "temporary compatibility",
-      "path_pattern": "^(Cargo\\.toml|Cargo\\.lock|crates/pqueue(?:-[^/]+)?/.*|tools/turso-compat-probe/.*)$",
+      "path_pattern": "^(crates/fireweed(?:-[^/]+)?/.*|tools/fireweed-turso-compat-probe/.*)$",
       "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "ADR-020 keeps current Cargo packages, crate paths, binary names, and Rust import coordinates callable as compatibility aliases until the public cutover.",
-      "owner_surface": "Rust workspace packaging and APIs",
-      "removal_condition": "Remove after v0.20.0 ships Fireweed package coordinates and the old pqueue Cargo, crate-path, binary, and import aliases have a dedicated retirement plan."
+      "reason": "Renamed Rust crates still contain ADR-020-governed PQUEUE_* configuration aliases, persisted pqueue_* identifiers, RESP pqueue tokens, and historical bead references; the dedicated Cargo/Rust namespace check rejects old package, import, path, and Rust-owned binary coordinates independently.",
+      "owner_surface": "Rust runtime compatibility, persistence/wire identifiers, and audit references",
+      "removal_condition": "Remove after the configuration, protocol, and persisted-data owners retire the remaining pqueue and PQUEUE compatibility identifiers and historical references no longer require scanning."
     },
     {
       "id": "helm-chart-compatibility",
@@ -69,7 +69,7 @@
     {
       "id": "repository-root-runtime-compatibility",
       "class": "temporary compatibility",
-      "path_pattern": "^(README\\.md|Dockerfile|Dockerfile\\.e2|Dockerfile\\.prebuilt|docker-compose\\.yml|\\.gitignore|deny\\.toml)$",
+      "path_pattern": "^(Cargo\\.toml|README\\.md|Dockerfile|Dockerfile\\.e2|Dockerfile\\.prebuilt|docker-compose\\.yml|\\.gitignore|deny\\.toml)$",
       "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
       "reason": "ADR-020 classifies current public docs, container image names, local service names, and runtime coordinates as temporary compatibility surfaces.",
       "owner_surface": "Repository root public docs and runtime packaging",

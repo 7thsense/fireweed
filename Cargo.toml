@@ -6,22 +6,22 @@
 # (OWED-resolution Chunk 4) via the durable-adapter template. No crate is excluded, so `cargo test`
 # covers everything; postgres conformance is env-gated on PQUEUE_PG_TEST_URL (LOUD skip without a DB).
 members = [
-    "crates/pqueue-core",
-    "crates/pqueue-engine",
-    "crates/pqueue-projection",
-    "crates/pqueue-relational",
-    "crates/pqueue-turso",
-    "crates/pqueue-conformance",
-    "crates/pqueue-memory",
-    "crates/pqueue-sqlite",
-    "crates/pqueue-postgres",
-    "crates/pqueue-objectlog",
-    "crates/pqueue-resp",
-    "crates/pqueue",
-    "crates/pqueue-server",
-    "crates/pqueue-release",
-    "crates/pqueue-loadgen",
-    "crates/pqueue-sim-support",
+    "crates/fireweed-core",
+    "crates/fireweed-engine",
+    "crates/fireweed-projection",
+    "crates/fireweed-relational",
+    "crates/fireweed-turso",
+    "crates/fireweed-conformance",
+    "crates/fireweed-memory",
+    "crates/fireweed-sqlite",
+    "crates/fireweed-postgres",
+    "crates/fireweed-objectlog",
+    "crates/fireweed-resp",
+    "crates/fireweed",
+    "crates/fireweed-server",
+    "crates/fireweed-release",
+    "crates/fireweed-loadgen",
+    "crates/fireweed-sim-support",
 ]
 resolver = "3"
 
@@ -33,7 +33,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # Thin ESF types (entity schema + typed index declarations + canonical key encoder) consumed by
-# pqueue-core for ADR-011.  Git-pinned to a release tag; no path dependency.  The axon workspace
+# fireweed-core for ADR-011.  Git-pinned to a release tag; no path dependency.  The axon workspace
 # pins jsonschema with default-features = false so this dep is free of reqwest/hyper/tower.
 # Multi-line TOML string keeps the repo name on a separate line from the host prefix so the
 # ADR-011 AC path-dep check (rg for path=.*axon etc.) does not false-positive on the git URL.
