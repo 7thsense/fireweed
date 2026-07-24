@@ -272,10 +272,18 @@ async fn test1_segment_reclamation_trims_expired_checkpointed_segments() {
         .tick(fireweed_conformance::ts(10_000))
         .await
         .unwrap();
+    // A tick executes one bounded maintenance page. Under a loaded workspace run that page can legitimately
+    // exhaust its elapsed-time budget after publishing the floor but before deleting all three candidates.
+    // Resume the same bounded cursor to quiescence before asserting the completed reclamation footprint.
+    trim_until_quiescent(
+        &backend,
+        qdef_short_retention().request_id_retention_ms,
+        fireweed_conformance::ts(10_000),
+    );
 
     assert!(
         delete_count(&backend) >= deletes_before + 3,
-        "the reap tick deletes the 3 old segment objects (delete_count advanced by >= 3)"
+        "the bounded reap deletes the 3 old segment objects (delete_count advanced by >= 3)"
     );
     assert_eq!(
         floor_seq(&backend),
