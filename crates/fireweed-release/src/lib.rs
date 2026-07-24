@@ -3679,6 +3679,11 @@ pub mod cost {
                     + input.counts.recovery_request_bytes * w.recoveries_per_window;
                 let total_response_bytes = response_bytes
                     + input.counts.recovery_response_bytes * w.recoveries_per_window;
+                let total_requests = comparison.objectlog.put_requests
+                    + comparison.objectlog.get_requests
+                    + comparison.objectlog.list_requests
+                    + comparison.objectlog.delete_requests;
+                let total_bytes = total_request_bytes + total_response_bytes;
                 let values = BTreeMap::from([
                     ("bars_met".into(), serde_json::json!(true)),
                     ("cost_model".into(), serde_json::json!(true)),
@@ -3714,6 +3719,8 @@ pub mod cost {
                     ("steady_state_response_bytes_per_billion".into(), serde_json::json!(round2(response_bytes))),
                     ("request_bytes_per_billion".into(), serde_json::json!(round2(total_request_bytes))),
                     ("response_bytes_per_billion".into(), serde_json::json!(round2(total_response_bytes))),
+                    ("requests_per_billion".into(), serde_json::json!(round2(total_requests))),
+                    ("bytes_per_billion".into(), serde_json::json!(round2(total_bytes))),
                     ("get_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.get_requests))),
                     ("list_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.list_requests))),
                     ("delete_requests_per_billion".into(), serde_json::json!(round2(comparison.objectlog.delete_requests))),
@@ -3722,6 +3729,7 @@ pub mod cost {
                     ("list_usd_per_billion".into(), serde_json::json!(round2(comparison.objectlog.list_cost))),
                     ("delete_usd_per_billion".into(), serde_json::json!(round2(comparison.objectlog.delete_cost))),
                     ("objectlog_usd_per_billion_commands".into(), serde_json::json!(round2(comparison.objectlog_per_billion))),
+                    ("usd_per_billion".into(), serde_json::json!(round2(comparison.objectlog_per_billion))),
                     ("postgres_usd_per_billion_commands".into(), serde_json::json!(round2(comparison.postgres_per_billion))),
                     ("objectlog_below_postgres".into(), serde_json::json!(comparison.objectlog_wins)),
                     ("price_source".into(), serde_json::json!(p.instance_source)),
@@ -4007,17 +4015,25 @@ pub mod cost {
                 }
             }
             let per_billion = |value: f64| value / counts.commands * BILLION;
+            let total_request_bytes = per_billion(counts.request_bytes)
+                + counts.recovery_request_bytes * workload.recoveries_per_window;
+            let total_response_bytes = per_billion(counts.response_bytes)
+                + counts.recovery_response_bytes * workload.recoveries_per_window;
             for (key, expected_value) in [
+                ("request_bytes_per_billion", total_request_bytes),
+                ("response_bytes_per_billion", total_response_bytes),
                 (
-                    "request_bytes_per_billion",
-                    per_billion(counts.request_bytes)
-                        + counts.recovery_request_bytes * workload.recoveries_per_window,
+                    "requests_per_billion",
+                    comparison.objectlog.put_requests
+                        + comparison.objectlog.get_requests
+                        + comparison.objectlog.list_requests
+                        + comparison.objectlog.delete_requests,
                 ),
                 (
-                    "response_bytes_per_billion",
-                    per_billion(counts.response_bytes)
-                        + counts.recovery_response_bytes * workload.recoveries_per_window,
+                    "bytes_per_billion",
+                    total_request_bytes + total_response_bytes,
                 ),
+                ("usd_per_billion", comparison.objectlog_per_billion),
             ] {
                 if number(row, key).is_none_or(|actual| (actual - expected_value).abs() > 0.011) {
                     errors.push(format!(
@@ -4592,6 +4608,28 @@ pub mod cost {
                     .iter()
                     .any(|e| e.contains("lacks inputs required to recompute cost"))
             );
+        }
+
+        #[test]
+        fn release_cost_validator_rejects_tampered_aggregate_density() {
+            let mut rows = synthetic_release_cost_rows();
+            rows[0]
+                .measurements
+                .values
+                .insert("requests_per_billion".into(), serde_json::json!(1));
+            rows[1].measurements.values.remove("bytes_per_billion");
+            rows[2]
+                .measurements
+                .values
+                .insert("usd_per_billion".into(), serde_json::json!(0));
+            let errors = validate_release_cost_rows(&rows).unwrap_err();
+            for key in [
+                "requests_per_billion",
+                "bytes_per_billion",
+                "usd_per_billion",
+            ] {
+                assert!(errors.iter().any(|error| error.contains(key)), "{errors:?}");
+            }
         }
 
         #[test]

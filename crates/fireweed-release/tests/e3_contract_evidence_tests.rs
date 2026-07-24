@@ -129,6 +129,22 @@ fn rejects_marker_only_recovery_and_recorder_controls() {
 }
 
 #[test]
+fn rejects_recovery_without_canonical_order_or_production_checksum_proof() {
+    let fixture = Fixture::new();
+    fixture.mutate_e3_row(0, |row| {
+        row["measurements"]["recovery_state_digest_algorithm"] =
+            serde_json::json!("fnv1a128+disk-unique-id-index");
+    });
+    assert!(fixture.errors().contains("exact streaming 10M recovery"));
+
+    let fixture = Fixture::new();
+    fixture.mutate_e3_row(0, |row| {
+        row["measurements"]["recovery_checksum_validation_passed"] = serde_json::json!(false);
+    });
+    assert!(fixture.errors().contains("exact streaming 10M recovery"));
+}
+
+#[test]
 fn rejects_missing_tampered_or_zero_recovery_load_batch_measurements() {
     let missing = Fixture::new();
     missing.mutate_e3_row(0, |row| {

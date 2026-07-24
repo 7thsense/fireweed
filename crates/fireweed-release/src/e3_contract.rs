@@ -942,7 +942,12 @@ fn require_exact_recovery(row: &LedgerRow, errors: &mut Vec<E3ContractError>) {
         || values
             .get("recovery_state_digest_algorithm")
             .and_then(serde_json::Value::as_str)
-            != Some("fnv1a128+disk-unique-id-index")
+            != Some("fnv1a128+disk-unique-id-index+canonical-live-state-and-order-v1")
+        || values
+            .get("recovery_integrity_validation")
+            .and_then(serde_json::Value::as_str)
+            != Some("production-segment-record-and-frame-checksums-v1")
+        || values.get("recovery_checksum_validation_passed") != Some(&serde_json::Value::Bool(true))
         || require_u64(row, "recovery_resident", errors) != Some(10_000_000)
         || require_u64(row, "recovery_command_count", errors)
             != Some(if row.backend_profile == "object_log_sqlite_projection" {
