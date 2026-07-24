@@ -4678,12 +4678,15 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     /// class. Boundary: the floor is an EXCLUSIVE lower bound (last-reclaimed seq), so `from_seq == floor+1`
     /// still SUCCEEDS and `from_seq <= floor` FAILS CLOSED.
     ///
-    /// GATED on a horizon EXISTING so a branch's legitimate `seq == f` seed (design §5(ii); branch creation
-    /// seeds a floor entry but writes NO horizon) is never suppressed: with no horizon the full manifest list
-    /// still enumerates every entry, so the natural behavior stands — a genuinely-reclaimed range still
-    /// errors organically on the missing-segment GET, while a branch reading its own present seed reads it.
-    /// This is behavior-preserving: a below-floor read errors today (organic missing-segment) exactly when
-    /// `from_seq <= floor`, and every production recovery/idempotency fold resumes at `floor + 1`.
+    /// A durable horizon proves the requested prefix has been reclaimed and fails immediately. Bounded
+    /// reclamation, however, deletes a segment and its manifest entry before a later page finalizes that
+    /// horizon. In that intermediate state a source read must also fail closed when the exact requested
+    /// below-floor sequence is no longer manifested; otherwise it silently skips to the surviving tail.
+    /// An actually manifested pinned source boundary remains readable until the final pin is released.
+    ///
+    /// Committed branches are the exception when no horizon exists: a branch created above an already-trimmed
+    /// source inherits its floor and has an effective genesis at `floor + 1`, so `read_from(branch, 0)` must
+    /// continue to read that retained branch view. A branch with its own horizon still fails closed normally.
     ///
     /// CONCURRENCY: `horizon` is the caller's snapshot captured BEFORE this call, and the SAME snapshot drives
     /// the subsequent range-list ([`Self::read_manifest_at`]). Reading the horizon before the floor guarantees
@@ -4700,11 +4703,32 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         from_seq: u64,
         horizon: Option<u64>,
     ) -> EngineResult<()> {
-        if horizon.is_some()
-            && let Some(floor) = self.read_retention_floor(shard)?
+        if let Some(floor) = self.read_retention_floor(shard)?
             && from_seq <= floor.sequence
         {
-            return Err(deleted_manifest_prefix_error(from_seq, floor.sequence));
+            if horizon.is_some() {
+                return Err(deleted_manifest_prefix_error(from_seq, floor.sequence));
+            }
+
+            // A branch inheriting its source floor intentionally starts at floor+1. With no branch-local
+            // horizon, a caller's genesis cursor means that effective genesis rather than missing source data.
+            if self.store_get(&branch_metadata_key(shard))?.is_some() {
+                return Ok(());
+            }
+
+            // A live source pin leaves the requested boundary manifested even though other below-floor
+            // segments may already be reclaimed. Once the final pin is released, bounded expiry removes this
+            // entry before its watermark-finalization page; reject that transient deleted-prefix state too.
+            let requested_sequence_is_manifested = self.read_manifest(shard)?.iter().any(|entry| {
+                !entry.fence
+                    && !Self::is_reclaimed_manifest_marker(entry)
+                    && entry.segment_key.is_some()
+                    && entry.first_seq <= from_seq
+                    && from_seq <= Self::visible_last_seq(entry)
+            });
+            if !requested_sequence_is_manifested {
+                return Err(deleted_manifest_prefix_error(from_seq, floor.sequence));
+            }
         }
         Ok(())
     }
