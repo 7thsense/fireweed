@@ -68,6 +68,25 @@ fn set_emission_cursor(url: &str, schema: &str, position: CommandPosition) {
         .expect("write cursor");
 }
 
+fn terminal_position(url: &str, schema: &str, item_id: &str) -> CommandPosition {
+    let mut client = postgres::Client::connect(url, NoTls).expect("connect");
+    client
+        .batch_execute(&format!("SET search_path TO {schema}"))
+        .expect("set schema");
+    let row = client
+        .query_one(
+            "SELECT c.assignment_epoch, c.seq FROM pqueue_items i \
+             JOIN pqueue_commands c ON c.tenant=i.tenant_id AND c.queue=i.queue_id \
+                 AND c.seq=i.last_command_sequence \
+             WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.item_id=$3",
+            &[&"t1", &"q1", &item_id],
+        )
+        .expect("read terminal command position");
+    let epoch: i64 = row.get(0);
+    let sequence: i64 = row.get(1);
+    CommandPosition::new(shard(), epoch as u64, sequence as u64)
+}
+
 #[test]
 fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
     let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
@@ -97,7 +116,16 @@ fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
     ))
     .unwrap();
 
-    set_emission_cursor(&url, &schema, CommandPosition::new(shard(), 0, 1));
+    let terminal_position = terminal_position(&url, &schema, &item_id.to_string());
+    let behind_sequence = terminal_position
+        .sequence
+        .checked_sub(1)
+        .expect("a terminal command follows at least one queue command");
+    set_emission_cursor(
+        &url,
+        &schema,
+        CommandPosition::new(shard(), terminal_position.backend_epoch, behind_sequence),
+    );
 
     block_on(backend.tick(ts(3))).unwrap();
     assert_eq!(
@@ -106,7 +134,7 @@ fn postgres_terminal_reap_sweeps_with_cursor_conjunction() {
         "retention-elapsed but cursor-behind must not reap"
     );
 
-    set_emission_cursor(&url, &schema, CommandPosition::new(shard(), 0, 2));
+    set_emission_cursor(&url, &schema, terminal_position);
     block_on(backend.tick(ts(5))).unwrap();
     assert_eq!(
         block_on(backend.metrics(&shard())).unwrap().complete,
