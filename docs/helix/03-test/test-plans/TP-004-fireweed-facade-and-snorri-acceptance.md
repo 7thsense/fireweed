@@ -129,7 +129,8 @@ documented test database variable is available and are otherwise recorded as
 not run.
 
 ```sh
-cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory,conformance pqueue_memory_state_store_conformance_executes -- --exact --nocapture
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory,conformance -- --list | rg '^tests::pqueue_memory_state_store_conformance_executes: test$'
+cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features memory,conformance tests::pqueue_memory_state_store_conformance_executes -- --exact --nocapture
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features sqlite sqlite_public_facade_commits_authoritative_transition -- --nocapture
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features sqlite hot_projection_sqlite_visibility_business_cases -- --nocapture
 cargo test --manifest-path ../snorri/Cargo.toml -p snorri-pqueue --no-default-features --features objectlog,sqlite objectlog_sqlite_delete_and_rehydrate -- --nocapture
