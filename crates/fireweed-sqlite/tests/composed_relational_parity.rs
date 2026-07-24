@@ -16,7 +16,10 @@ use fireweed_engine::{
     DiscoveryPort, EngineError, GroupBatching, ProjectionRead, PushPort, PushSpec, SetGatesCommand,
     SetGatesPort,
 };
-use fireweed_sqlite::{composed_sqlite_backend_in_memory, composed_sqlite_relational_in_memory};
+use fireweed_sqlite::{
+    composed_sqlite_backend_in_memory, composed_sqlite_relational,
+    composed_sqlite_relational_in_memory,
+};
 
 fn ts(s: i64) -> UtcTimestamp {
     UtcTimestamp::new(s, 0).unwrap()
@@ -264,12 +267,20 @@ async fn composed_log_replay_claim_stays_unavailable_for_non_item_units() {
 
 /// REGRESSION (fencing/rollback discipline): a rich claim that gets FENCED (stale epoch) must leave no
 /// durable side effect — in particular the in-transaction `pqueue_group_summary` refresh performed during
-/// candidate selection must be ROLLED BACK, not committed. We observe this through read-only discovery
-/// (which never refreshes the summary itself): a group made eligible only by TIME passing (so its summary
-/// row is still stale) must stay INVISIBLE to discovery after the fenced claim.
+/// candidate selection must be ROLLED BACK, not committed. Discovery now derives exact eligibility from
+/// live item rows, so this storage-invariant regression uses a private file-backed database and inspects the
+/// summary row directly before and after the fenced claim.
 #[tokio::test]
 async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() {
-    let b = composed_sqlite_relational_in_memory().unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "fireweed-composed-relational-fenced-summary-{}-{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let b = composed_sqlite_relational(path.to_str().unwrap()).unwrap();
     b.create_queue(qdef_rich()).await.unwrap();
     // A grouped item that is NOT due until ts(200): at push time (ts 0) the group summary's
     // oldest_eligible_at stays NULL (no eligible member yet) and no later mutation refreshes it.
@@ -279,15 +290,29 @@ async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() 
     };
     b.push(&shard(), vec![delayed], ts(0), None).await.unwrap();
 
-    // Baseline: at ts(300) the item is due by time, but discovery (read-only) still under-reports it
-    // because no mutation has refreshed the stale summary row yet.
-    let before = b
-        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(300))
-        .await
-        .unwrap();
-    assert!(
-        before.is_empty(),
-        "precondition: the time-due group's summary is still stale (discovery under-reports)"
+    let summary = || {
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row(
+                "SELECT oldest_eligible_at, eligible_item_count, rep_item_id \
+                 FROM pqueue_group_summary \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND group_key='g1'",
+                rusqlite::params![shard().tenant_id.as_str(), shard().queue_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<i64>>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+    let stale = (None, 0, None);
+    assert_eq!(
+        summary(),
+        stale,
+        "precondition: the time-due group's mutation-time summary is still stale"
     );
 
     // A same_group_key claim under a STALE epoch: selection refreshes the summary IN-TRANSACTION and finds
@@ -307,16 +332,15 @@ async fn composed_relational_fenced_rich_claim_leaves_group_summary_unchanged() 
         "a stale-epoch rich claim is fenced"
     );
 
-    // The fenced claim must have left NO durable side effect: discovery still reports nothing, proving the
-    // in-transaction group-summary refresh was rolled back (not committed).
-    let after = b
-        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(300))
-        .await
-        .unwrap();
-    assert!(
-        after.is_empty(),
+    // The fenced claim must have left NO durable side effect: the transient selection refresh was rolled
+    // back, so the durable mutation-time summary remains byte-for-byte equivalent at its semantic fields.
+    assert_eq!(
+        summary(),
+        stale,
         "a fenced rich claim must not durably refresh pqueue_group_summary"
     );
+    drop(b);
+    std::fs::remove_file(path).unwrap();
 }
 
 // ---------------------------------------------------------------------------
