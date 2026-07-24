@@ -836,9 +836,14 @@ impl BackendSpec {
 pub fn resolve_postgres_log(
     env: &std::collections::BTreeMap<String, String>,
 ) -> Result<LogSpec, String> {
-    let nonempty = |key: &str| env.get(key).filter(|s| !s.is_empty()).cloned();
-    let url = nonempty("PQUEUE_POSTGRES_LOG_DATABASE_URL")
-        .or_else(|| nonempty("PQUEUE_PG_URL"))
+    let nonempty = |suffix: &str| {
+        env.get(&format!("FIREWEED_{suffix}"))
+            .or_else(|| env.get(&format!("PQUEUE_{suffix}")))
+            .filter(|s| !s.is_empty())
+            .cloned()
+    };
+    let url = nonempty("POSTGRES_LOG_DATABASE_URL")
+        .or_else(|| nonempty("PG_URL"))
         .unwrap_or_else(|| "postgres://postgres@127.0.0.1:5432/postgres".to_string());
 
     // Fail closed before connecting if the DSN requires TLS but this build cannot provide it.
@@ -857,7 +862,10 @@ pub fn resolve_postgres_log(
 
     // Databricks service-principal / PAT credential injection: present iff DATABRICKS_HOST is set. The
     // provider supersedes any DSN password (and sets the postgres user for service-principal OAuth).
-    let credentials = if nonempty("DATABRICKS_HOST").is_some() {
+    let credentials = if env
+        .get("DATABRICKS_HOST")
+        .is_some_and(|value| !value.is_empty())
+    {
         let config = fireweed_postgres::DatabricksCredentialConfig::from_env_map(env.clone())
             .map_err(|e| format!("invalid Databricks credential configuration: {e}"))?;
         let provider = fireweed_postgres::DatabricksCredentialProvider::from_config(config)
@@ -883,9 +891,14 @@ pub fn resolve_postgres_log(
 pub fn resolve_postgres_projection(
     env: &std::collections::BTreeMap<String, String>,
 ) -> Result<ProjectionSpec, String> {
-    let nonempty = |key: &str| env.get(key).filter(|s| !s.is_empty()).cloned();
-    let url = nonempty("PQUEUE_POSTGRES_PROJECTION_DATABASE_URL")
-        .or_else(|| nonempty("PQUEUE_PG_PROJECTION_URL"))
+    let nonempty = |suffix: &str| {
+        env.get(&format!("FIREWEED_{suffix}"))
+            .or_else(|| env.get(&format!("PQUEUE_{suffix}")))
+            .filter(|s| !s.is_empty())
+            .cloned()
+    };
+    let url = nonempty("POSTGRES_PROJECTION_DATABASE_URL")
+        .or_else(|| nonempty("PG_PROJECTION_URL"))
         .unwrap_or_else(|| "postgres://postgres@127.0.0.1:5432/postgres".to_string());
 
     // Fail closed before connecting if the DSN requires TLS but this build cannot provide it.

@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "fireweed-service"
 path = "src/bin/fireweed-service.rs"
 
+[[bin]]
+name = "pqueue-service"
+path = "src/bin/fireweed-service.rs"
+
 # Composition root: the ONE place that names concrete adapters. Wires a chosen backend
 # (memory/sqlite/objectlog) + a system clock to the RESP front (`fireweed-resp`) and runs a background
 # ReclaimDriver task so leases reclaim without client traffic (TD-007 §3). Everything else depends only

@@ -173,6 +173,26 @@ fn keyvalue_dsn_and_pg_url_fallback_are_accepted_without_credentials() {
     ));
 }
 
+#[test]
+fn fireweed_postgres_url_wins_the_pqueue_compatibility_alias() {
+    let env: BTreeMap<String, String> = [
+        (
+            "PQUEUE_PG_URL".to_string(),
+            "postgres://legacy.invalid/db?sslmode=disable".to_string(),
+        ),
+        (
+            "FIREWEED_PG_URL".to_string(),
+            "postgres://fireweed.invalid/db?sslmode=disable".to_string(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let LogSpec::Postgres { url, .. } = resolve_postgres_log(&env).unwrap() else {
+        panic!("expected Postgres log configuration");
+    };
+    assert_eq!(url, "postgres://fireweed.invalid/db?sslmode=disable");
+}
+
 /// Compile-time structural regression for the production constructor seam: one wrapper accepts a fixed
 /// vector of composed PostgreSQL workers. The vector length is the connection bound; queue count is absent
 /// from the type and cannot manufacture another connection after construction.

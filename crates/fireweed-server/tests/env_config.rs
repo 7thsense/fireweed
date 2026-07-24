@@ -10,6 +10,72 @@ fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 }
 
 #[test]
+fn fireweed_environment_is_authoritative_and_pqueue_remains_an_alias() {
+    let fireweed = Config::from_env(&env(&[
+        ("FIREWEED_LOG_BACKEND", "memory"),
+        ("FIREWEED_PROJECTION_BACKEND", "inmemory"),
+        ("FIREWEED_LISTEN_ADDR", "127.0.0.1:7001"),
+    ]))
+    .expect("Fireweed environment names must parse");
+    let compatibility = Config::from_env(&env(&[
+        ("PQUEUE_LOG_BACKEND", "memory"),
+        ("PQUEUE_PROJECTION_BACKEND", "inmemory"),
+        ("PQUEUE_LISTEN_ADDR", "127.0.0.1:7001"),
+    ]))
+    .expect("pqueue environment aliases must remain callable through v0.20.0");
+
+    assert_eq!(fireweed.listen, compatibility.listen);
+    assert!(matches!(fireweed.backend.log, LogSpec::Memory));
+    assert!(matches!(compatibility.backend.log, LogSpec::Memory));
+}
+
+#[test]
+fn fireweed_environment_wins_conflicting_compatibility_alias() {
+    let config = Config::from_env(&env(&[
+        ("PQUEUE_LISTEN_ADDR", "127.0.0.1:7001"),
+        ("FIREWEED_LISTEN_ADDR", "127.0.0.1:7002"),
+    ]))
+    .expect("conflicting aliases resolve deterministically");
+    assert_eq!(config.listen, "127.0.0.1:7002");
+}
+
+#[test]
+fn public_config_errors_name_the_fireweed_namespace() {
+    let Err(error) = Config::from_env(&env(&[("FIREWEED_BOOTSTRAP_QUEUES", "missing-colon")]))
+    else {
+        panic!("invalid Fireweed configuration must fail closed");
+    };
+    assert!(error.to_string().contains("FIREWEED_BOOTSTRAP_QUEUES"));
+    assert!(!error.to_string().contains("PQUEUE_BOOTSTRAP_QUEUES"));
+}
+
+#[test]
+fn service_help_advertises_fireweed_and_documents_the_alias() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_fireweed-service"))
+        .arg("--help")
+        .output()
+        .expect("run fireweed-service --help");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(stdout.starts_with("fireweed-service\n"));
+    assert!(stdout.contains("FIREWEED_LISTEN_ADDR"));
+    assert!(stdout.contains("PQUEUE_* environment variables remain accepted"));
+    assert!(stdout.contains("Persisted /var/lib/pqueue paths remain unchanged"));
+}
+
+#[test]
+fn pqueue_service_binary_alias_runs_the_fireweed_help() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pqueue-service"))
+        .arg("--help")
+        .output()
+        .expect("run pqueue-service compatibility alias");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(stdout.starts_with("fireweed-service\n"));
+    assert!(stdout.contains("FIREWEED_LISTEN_ADDR"));
+}
+
+#[test]
 fn postgres_control_plane_env_selects_typed_shared_authority() {
     let config = Config::from_env(&env(&[
         ("PQUEUE_CONTROL_PLANE", "postgres"),

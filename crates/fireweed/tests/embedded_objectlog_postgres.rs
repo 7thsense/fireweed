@@ -19,6 +19,11 @@ use fireweed_objectlog::segmented::S3BlobStore;
 use futures::executor::block_on;
 use postgres::{Client, NoTls};
 
+fn runtime_env(suffix: &str) -> Result<String, std::env::VarError> {
+    std::env::var(format!("FIREWEED_{suffix}"))
+        .or_else(|_| std::env::var(format!("PQUEUE_{suffix}")))
+}
+
 fn unique_fixture(name: &str) -> (PathBuf, String) {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -145,7 +150,7 @@ fn drop_schema(url: &str, schema: &str) {
 
 #[test]
 fn public_objectlog_postgres_delete_and_rehydrate() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = runtime_env("PG_TEST_URL") else {
         eprintln!(
             "SKIP public_objectlog_postgres_delete_and_rehydrate: PQUEUE_PG_TEST_URL is unset"
         );
@@ -314,9 +319,7 @@ fn public_objectlog_postgres_delete_and_rehydrate() {
 
 #[test]
 fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
-    let endpoint = match std::env::var("PQUEUE_S3_TEST_URL")
-        .or_else(|_| std::env::var("PQUEUE_S3_TEST_ENDPOINT"))
-    {
+    let endpoint = match runtime_env("S3_TEST_URL").or_else(|_| runtime_env("S3_TEST_ENDPOINT")) {
         Ok(value) => value,
         Err(_) => {
             if std::env::var_os("CI").is_some() {
@@ -330,11 +333,11 @@ fn public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection() {
             return;
         }
     };
-    let bucket = std::env::var("PQUEUE_S3_TEST_BUCKET").unwrap_or_else(|_| unique_bucket("pg"));
-    let access = std::env::var("PQUEUE_S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let secret = std::env::var("PQUEUE_S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
-    let region = std::env::var("PQUEUE_S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
-    let pg_url = std::env::var("PQUEUE_PG_TEST_URL")
+    let bucket = runtime_env("S3_TEST_BUCKET").unwrap_or_else(|_| unique_bucket("pg"));
+    let access = runtime_env("S3_TEST_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let secret = runtime_env("S3_TEST_SECRET_KEY").unwrap_or_else(|_| "minioadmin".into());
+    let region = runtime_env("S3_TEST_REGION").unwrap_or_else(|_| "us-east-1".into());
+    let pg_url = runtime_env("PG_TEST_URL")
         .expect("PQUEUE_PG_TEST_URL must be set when exercising the postgres projection");
     let allow_insecure_http = endpoint.starts_with("http://");
 
@@ -420,7 +423,7 @@ async fn synchronous_open_inside_tokio_returns_typed_error() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn asynchronous_open_is_safe_inside_tokio() {
-    let Ok(url) = std::env::var("PQUEUE_PG_TEST_URL") else {
+    let Ok(url) = runtime_env("PG_TEST_URL") else {
         eprintln!("SKIP asynchronous_open_is_safe_inside_tokio: PQUEUE_PG_TEST_URL is unset");
         return;
     };
@@ -441,8 +444,8 @@ async fn asynchronous_open_is_safe_inside_tokio() {
 #[test]
 #[ignore = "US-009 recovery proof requires PQUEUE_PG_TEST_URL"]
 fn us009_objectlog_postgres_rich_commit_recovery_promotion() {
-    let url = std::env::var("PQUEUE_PG_TEST_URL")
-        .expect("US-009 promotion proof requires PQUEUE_PG_TEST_URL");
+    let url =
+        runtime_env("PG_TEST_URL").expect("US-009 promotion proof requires PQUEUE_PG_TEST_URL");
     let (root, schema) = unique_fixture("us009_objectlog_postgres_commit");
     let durability = config(&root, &schema, &url);
     let clock = Arc::new(ManualClock::at(1_000));
