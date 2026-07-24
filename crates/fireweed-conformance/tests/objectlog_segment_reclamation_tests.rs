@@ -1024,9 +1024,17 @@ async fn test5_crash_mid_delete_is_recoverable_and_idempotent() {
     backend.with_log(|l| {
         l.set_fault_hook(Some(CrashOnNth::new(FaultCutPoint::DuringSegmentExpiry, 2)))
     });
-    let res = backend
-        .trim_reclaimable_segments(&shard(), 1_000, fireweed_conformance::ts(1_000_000))
-        .expect("bounded delete pass reports the injected fault");
+    let mut res = fireweed_engine::MaintenanceSummary::default();
+    for _ in 0..32 {
+        let page = backend
+            .trim_reclaimable_segments(&shard(), 1_000, fireweed_conformance::ts(1_000_000))
+            .expect("bounded delete pass reports the injected fault");
+        let continue_bounded = page.stopped_by == Some(MaintenanceStopReason::BudgetExhausted);
+        res.merge(page);
+        if !continue_bounded {
+            break;
+        }
+    }
     assert_eq!(
         res.stopped_by,
         Some(MaintenanceStopReason::PermanentFailure),
