@@ -14,7 +14,7 @@ if (($# != 1)); then
 fi
 
 destination="$1"
-temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/pqueue-gitleaks.XXXXXX")"
+temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-gitleaks.XXXXXX")"
 trap 'rm -rf "${temporary_directory}"' EXIT
 
 curl --fail --location --proto '=https' --tlsv1.2 \

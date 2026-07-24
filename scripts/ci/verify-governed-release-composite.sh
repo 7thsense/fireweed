@@ -41,9 +41,9 @@ PY
 )
 [[ ${#fields[@]} -eq 6 ]] || exit 1
 CARGO=(rustup run 1.92.0 cargo)
-"${CARGO[@]}" run -q -p pqueue-release --bin pqueue-verify-e0-e1-evidence -- --e0 "${fields[0]}" --e1 "${fields[1]}" --expected-revision "$revision"
-"${CARGO[@]}" run -q -p pqueue-release --bin pqueue-verify-e2-scale-evidence -- "${fields[2]}" --expected-revision "$revision"
-"${CARGO[@]}" run -q -p pqueue-release --bin pqueue-verify-density-evidence -- "${fields[3]}"
+"${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-e0-e1-evidence -- --e0 "${fields[0]}" --e1 "${fields[1]}" --expected-revision "$revision"
+"${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-e2-scale-evidence -- "${fields[2]}" --expected-revision "$revision"
+"${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-density-evidence -- "${fields[3]}"
 python3 - "${fields[3]}" "${fields[4]}" "$revision" <<'PY'
 import json, sys
 
@@ -58,6 +58,6 @@ d=density_rows[0]
 f=json.load(open(sys.argv[2], encoding="utf-8"))
 if f.get("source_revision") != sys.argv[3]: raise SystemExit("E2 failover revision mismatch")
 PY
-"${CARGO[@]}" run -q -p pqueue-release --bin pqueue-verify-e2-failover -- "${fields[4]}"
-"${CARGO[@]}" run -q -p pqueue-release --bin pqueue-verify-e3-contract -- --manifest "${fields[5]}" --expected-revision "$revision"
+"${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-e2-failover -- "${fields[4]}"
+"${CARGO[@]}" run -q -p fireweed-release --bin fireweed-verify-e3-contract -- --manifest "${fields[5]}" --expected-revision "$revision"
 echo "governed release composite valid for $revision"

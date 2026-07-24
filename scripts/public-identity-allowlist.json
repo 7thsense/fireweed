@@ -25,10 +25,10 @@
       "id": "github-workflow-compatibility",
       "class": "temporary compatibility",
       "path_pattern": "^\\.github/workflows/.*\\.yml$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b|7thsense-pqueue|github\\.com/telepathdata/7thsense-pqueue(?:\\.git)?",
-      "reason": "ADR-020 identifies CI, release, checkout paths, repository URLs, and downstream workflow consumers as migration surfaces that must keep old coordinates during the dual-name period.",
-      "owner_surface": "GitHub Actions CI and release automation",
-      "removal_condition": "Remove when workflows check out fireweed-queue, publish Fireweed artifacts, and no CI job depends on pqueue compatibility coordinates."
+      "match_pattern": "^PQUEUE_(?:PG_TEST_URL|S3_TEST_(?:ENDPOINT|ACCESS_KEY|SECRET_KEY))$|^pqueue-test$",
+      "reason": "The live Postgres and S3 test harnesses still read these v0.20.0 compatibility variables and the historical MinIO fixture bucket; checkout paths, Cargo coordinates, binaries, release variables, and public workflow labels have moved to Fireweed.",
+      "owner_surface": "GitHub Actions provisioned integration-test compatibility inputs",
+      "removal_condition": "Remove when every provisioned integration-test harness reads FIREWEED_* as its primary input and the retained MinIO fixture bucket is migrated."
     },
     {
       "id": "deployment-docs-compatibility-and-persistence",
@@ -38,15 +38,6 @@
       "reason": "ADR-020 distinguishes operator-facing examples from retained on-disk and runtime wire identifiers such as /var/lib/pqueue and PQUEUE_* compatibility variables.",
       "owner_surface": "Deployment and operator documentation",
       "removal_condition": "Remove after public deployment examples use Fireweed coordinates and any retained pqueue storage or wire identifiers are covered by a separate data-migration ADR."
-    },
-    {
-      "id": "operator-rendered-example-compatibility",
-      "class": "temporary compatibility",
-      "path_pattern": "^docs/operator/.*$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "The generated operator console remains tied to the current pqueue service and chart examples until the Fireweed public examples are rendered.",
-      "owner_surface": "Generated public operator examples",
-      "removal_condition": "Remove when generated operator examples are rebuilt with Fireweed public naming."
     },
     {
       "id": "performance-and-release-audit-history",

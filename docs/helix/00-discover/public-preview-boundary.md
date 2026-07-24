@@ -61,7 +61,7 @@ wired profile into this support boundary.
 Experimental components are present in the repository but are not part of the public support claim:
 
 - `objectlog/hybrid-strict` remains explicitly experimental and not production-supported.
-- `objectlog/turso` and `pqueue-turso` remain feature-gated and
+- `objectlog/turso` and `fireweed-turso` remain feature-gated and
   validation-oriented until the focused Turso lane is separately promoted.
 - Experimental surfaces may change or be removed without compatibility aliases.
 
@@ -74,22 +74,22 @@ classified below so the preview boundary remains explicit and auditable.
 
 | Crate | Preview class | Public commitment |
 |---|---|---|
-| `pqueue` | Public Rust facade | Supported ergonomic library and composition surface. |
-| `pqueue-core` | Public contract | Supported domain types and queue contract used by the facade. |
-| `pqueue-engine` | Runtime substrate | Supported through the public facade and server, not promised as a standalone API. |
-| `pqueue-projection` | Runtime substrate | Supported through shipped profiles, not promised as a standalone API. |
-| `pqueue-relational` | Runtime substrate | Shared implementation used by supported relational projections. |
-| `pqueue-objectlog` | Runtime adapter | Supported through the object-log profiles above. |
-| `pqueue-sqlite` | Runtime adapter | Supported through `sqlite/inmemory` and object-log projection profiles. |
-| `pqueue-server` | Public runtime | Supported service binary within the profile boundary above. |
-| `pqueue-resp` | Public protocol adapter | Supported RESP surface subject to its documented conformance contract. |
-| `pqueue-memory` | Development/reference | Local evaluation and conformance only; no durability claim. |
-| `pqueue-postgres` | Deferred adapter | Present and tested, but outside the public-preview support boundary. |
-| `pqueue-turso` | Experimental adapter | Feature-gated validation surface; no compatibility promise. |
-| `pqueue-conformance` | Test tooling | Contributor-facing contract tests; not a runtime product artifact. |
-| `pqueue-loadgen` | Test tooling | Load and evidence generation; no public runtime API commitment. |
-| `pqueue-release` | Release tooling | Maintainer tooling; not a runtime product artifact. |
-| `pqueue-sim-support` | Test tooling | Simulation fixtures and support; not a runtime product artifact. |
+| `fireweed` | Public Rust facade | Supported ergonomic library and composition surface. |
+| `fireweed-core` | Public contract | Supported domain types and queue contract used by the facade. |
+| `fireweed-engine` | Runtime substrate | Supported through the public facade and server, not promised as a standalone API. |
+| `fireweed-projection` | Runtime substrate | Supported through shipped profiles, not promised as a standalone API. |
+| `fireweed-relational` | Runtime substrate | Shared implementation used by supported relational projections. |
+| `fireweed-objectlog` | Runtime adapter | Supported through the object-log profiles above. |
+| `fireweed-sqlite` | Runtime adapter | Supported through `sqlite/inmemory` and object-log projection profiles. |
+| `fireweed-server` | Public runtime | Supported service binary within the profile boundary above. |
+| `fireweed-resp` | Public protocol adapter | Supported RESP surface subject to its documented conformance contract. |
+| `fireweed-memory` | Development/reference | Local evaluation and conformance only; no durability claim. |
+| `fireweed-postgres` | Deferred adapter | Present and tested, but outside the public-preview support boundary. |
+| `fireweed-turso` | Experimental adapter | Feature-gated validation surface; no compatibility promise. |
+| `fireweed-conformance` | Test tooling | Contributor-facing contract tests; not a runtime product artifact. |
+| `fireweed-loadgen` | Test tooling | Load and evidence generation; no public runtime API commitment. |
+| `fireweed-release` | Release tooling | Maintainer tooling; not a runtime product artifact. |
+| `fireweed-sim-support` | Test tooling | Simulation fixtures and support; not a runtime product artifact. |
 
 ## Non-goals
 
