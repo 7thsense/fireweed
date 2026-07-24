@@ -107,6 +107,9 @@ fail at startup instead of silently selecting another backend.
   explains the workload boundary.
 - [Rust facade source and crate documentation](crates/fireweed/src/lib.rs)
   covers embedded construction and worker lifecycle verbs.
+- [Embedded workflow example](crates/fireweed/examples/scheduler_boundary.rs)
+  composes queue templates, grouped discovery, stateless dispersion, bounded
+  multi-queue claims, and worker finalization over durable relational SQLite.
 - [Container runtime contract](docs/deployment/container-runtime-contract.md)
   lists runtime settings, storage profiles, and retained compatibility names.
 - [Operator deployment guide](docs/deployment/operator-guide.md) covers Helm,
