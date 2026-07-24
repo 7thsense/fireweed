@@ -1875,6 +1875,10 @@ fn err_reply(e: &EngineError) -> Resp {
         // over RESP today, so this is latent — but the token must be honest).
         EngineError::QueueDefinitionConflict => Resp::Error("ERR pqueue queue_conflict".into()),
         EngineError::Storage(_) | EngineError::DurableDataCorrupt { .. } => {
+            // Keep adapter/storage details out of the client-visible RESP token, but do not erase them
+            // from operator diagnostics. Live release evidence relies on the server log to distinguish a
+            // durable fault from an intentionally retryable admission response.
+            eprintln!("[fireweed-resp] internal engine error: {e}");
             Resp::Error("ERR pqueue internal".into())
         }
         // Every other variant carries a `-ERR pqueue …` token via `resp_token()` above; this arm is
