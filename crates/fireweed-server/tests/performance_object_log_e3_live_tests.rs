@@ -2304,7 +2304,17 @@ fn profile_row(
             );
             values.insert(
                 "recovery_state_digest_algorithm".into(),
-                serde_json::json!("fnv1a128+disk-unique-id-index"),
+                serde_json::json!(
+                    "fnv1a128+disk-unique-id-index+canonical-live-state-and-order-v1"
+                ),
+            );
+            values.insert(
+                "recovery_integrity_validation".into(),
+                serde_json::json!("production-segment-record-and-frame-checksums-v1"),
+            );
+            values.insert(
+                "recovery_checksum_validation_passed".into(),
+                serde_json::json!(true),
             );
             values.insert(
                 "recovery_state_digest_before".into(),
