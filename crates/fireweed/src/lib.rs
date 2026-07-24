@@ -4,9 +4,26 @@
 //! The ergonomic Rust **library interface** to the engine — one of the two faces of pqueue (the other
 //! is the RESP/Redis-Streams wire front). It is a thin composition over the engine ports: a concrete
 //! backend (memory / sqlite / objectlog / postgres) and a [`Clock`] are injected; this crate adds
-//! singular, ergonomic verbs over them: `create_queue` / `push` / `push_batch` / `upsert` / `claim` /
-//! `ack` / `nack` / `fail` / `renew` / `reassign` / `rearm` / `purge` / `peek` / `claimed` / `metrics` —
-//! the full worker + operator surface, each composing a single pre-validating engine port.
+//! ergonomic verbs over them: `create_queue` / `push` / `push_batch` / `upsert` / `claim` / `complete` /
+//! `retry` / `release` / `fail` / `renew` / `reassign` / `rearm` / `purge` / `peek` / `claimed` /
+//! `discover` / `metrics` — the full worker + operator surface, each composing a single pre-validating
+//! engine port. A conceptual worker loop claims a batch, processes its items, then calls [`Pqueue::complete`],
+//! [`Pqueue::retry`], or [`Pqueue::release`] with the resulting batch of item ids:
+//!
+//! ```no_run
+//! # use fireweed::{EngineResult, LibBackend, Pqueue, QueueKey};
+//! # async fn worker<B: LibBackend>(queue: &Pqueue<B>, key: &QueueKey) -> EngineResult<()> {
+//! loop {
+//!     let claimed = queue.claim(key, 32, 30_000).await?;
+//!     queue.complete(key, claimed.into_iter().map(|item| item.item_id)).await?;
+//! }
+//! # }
+//! ```
+//!
+//! Lifecycle helpers remain batch-shaped even though they accept iterators. One call has the same
+//! all-or-nothing failure behavior as [`Pqueue::ack`] and [`Pqueue::nack`]: a fenced, superseded, or
+//! non-leased member rejects the call with its structured [`EngineError`] and commits none of that batch.
+//! The older `ack`/`nack`/`discover_active_scopes` vocabulary remains supported without deprecation.
 //!
 //! Dependency direction is hexagonal: this depends only on the domain (`fireweed-engine` + `fireweed-core`),
 //! never on a concrete backend (a backend is passed in). Errors are the engine's structured
@@ -2058,6 +2075,16 @@ impl<B: LibBackend> Pqueue<B> {
             .await
     }
 
+    /// Complete a batch of leased items. This is the worker-loop alias for [`Self::ack`] and preserves its
+    /// all-or-nothing batch transition and structured errors. Existing `ack` callers remain supported.
+    pub async fn complete(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+    ) -> EngineResult<()> {
+        self.ack(queue, ids).await
+    }
+
     /// Return leased items to the queue: `Retry` (optionally with a backoff `not_before`) or `Release`.
     pub async fn nack(
         &self,
@@ -2072,6 +2099,29 @@ impl<B: LibBackend> Pqueue<B> {
         self.finalize(queue, ids, kind, not_before).await
     }
 
+    /// Return a batch of leased items for another attempt, optionally deferred until the absolute
+    /// `not_before` timestamp. This is the worker-loop alias for `nack(..., Nack::Retry { not_before })` and
+    /// preserves its all-or-nothing batch transition, attempt accounting, retry exhaustion, and errors.
+    /// Pass `None` for an immediate retry or use [`Self::retry_after`] for a relative delay.
+    pub async fn retry(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        not_before: Option<UtcTimestamp>,
+    ) -> EngineResult<()> {
+        self.nack(queue, ids, Nack::Retry { not_before }).await
+    }
+
+    /// Release a batch of leased items immediately back to pending work. This is the worker-loop alias for
+    /// `nack(..., Nack::Release)` and preserves its all-or-nothing transition and structured errors.
+    pub async fn release(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+    ) -> EngineResult<()> {
+        self.nack(queue, ids, Nack::Release).await
+    }
+
     /// `nack(Retry)` with a **relative** backoff: defer the item's re-eligibility by `delay_ms` from now
     /// (queue-native retry backoff, computed off this handle's clock).
     pub async fn nack_retry_after(
@@ -2082,6 +2132,17 @@ impl<B: LibBackend> Pqueue<B> {
     ) -> EngineResult<()> {
         let not_before = Some(add_millis(self.clock.now(), delay_ms));
         self.nack(queue, ids, Nack::Retry { not_before }).await
+    }
+
+    /// Retry a batch after a relative delay from this handle's clock. This is the worker-loop alias for
+    /// [`Self::nack_retry_after`] and preserves the same all-or-nothing transition and retry timing.
+    pub async fn retry_after(
+        &self,
+        queue: &QueueKey,
+        ids: impl IntoIterator<Item = ItemId>,
+        delay_ms: u64,
+    ) -> EngineResult<()> {
+        self.nack_retry_after(queue, ids, delay_ms).await
     }
 
     async fn finalize(
@@ -2299,6 +2360,16 @@ impl<B: LibBackend> Pqueue<B> {
         self.backend
             .discover_active_scopes(queue, granularity, now)
             .await
+    }
+
+    /// Discover eligible scopes in the backend's authoritative oldest-eligible-first order. This is a
+    /// read-only alias for [`Self::discover_active_scopes`]; it neither filters, re-ranks, nor reserves work.
+    pub async fn discover(
+        &self,
+        queue: &QueueKey,
+        granularity: DiscoveryGranularity,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        self.discover_active_scopes(queue, granularity).await
     }
 
     /// Read one live hot-storage item by caller-supplied key. Returns `None` once the item is complete,
