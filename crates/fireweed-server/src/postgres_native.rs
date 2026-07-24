@@ -319,7 +319,7 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
             // Admission is the ownership boundary. From this point onward an owned task holds the request
             // and both queued permits, so dropping the caller cannot silently discard an accepted mutation.
             // Shutdown cancels tasks still waiting for their queue/running slot and drains tasks that started.
-            fireweed_resp::spawn_governed(async move {
+            let Some(_task) = fireweed_resp::try_spawn_governed(async move {
                 let gate = capacity.gate(&queue);
                 let queue_guard = tokio::select! {
                     biased;
@@ -390,7 +390,11 @@ impl<B: RespBackend> PostgresWholeOperationAdapter<B> {
                     }
                 };
                 let _ = result_tx.send(result);
-            });
+            }) else {
+                return Err(EngineError::Backpressure {
+                    resource: "runtime task slots",
+                });
+            };
             result_rx.await.map_err(|_| {
                 EngineError::Storage("blocking storage operation responder dropped".into())
             })?

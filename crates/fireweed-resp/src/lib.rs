@@ -87,6 +87,19 @@ fn try_acquire_runtime_task_locked() -> Option<RuntimeTaskGuard> {
     Some(RuntimeTaskGuard)
 }
 
+/// Keep a finite connection allowance usable when both density resource governors are active.
+/// Mandatory server tasks still use the full node-wide task limit; opportunistic maintenance and
+/// control-plane work may use only the portion not reserved for RESP connection handlers.
+fn opportunistic_runtime_task_limit() -> usize {
+    let task_limit = MAX_RUNTIME_TASKS.load(Ordering::SeqCst);
+    let connection_reserve = MAX_LIVE_CONNECTIONS.load(Ordering::SeqCst);
+    if task_limit == usize::MAX || connection_reserve == usize::MAX {
+        task_limit
+    } else {
+        task_limit.saturating_sub(connection_reserve)
+    }
+}
+
 pub fn spawn_governed<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
@@ -113,6 +126,9 @@ where
 {
     let guard = {
         let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
+        if LIVE_RUNTIME_TASKS.load(Ordering::SeqCst) >= opportunistic_runtime_task_limit() {
+            return None;
+        }
         try_acquire_runtime_task_locked()
     }?;
     Some(tokio::spawn(async move {
@@ -2158,6 +2174,7 @@ mod tests {
     async fn governed_task_cap_is_non_poisoning_and_retries_after_capacity_returns() {
         assert_eq!(LIVE_RUNTIME_TASKS.load(Ordering::SeqCst), 0);
         let prior_limit = MAX_RUNTIME_TASKS.swap(1, Ordering::SeqCst);
+        let prior_connection_limit = MAX_LIVE_CONNECTIONS.swap(usize::MAX, Ordering::SeqCst);
         let prior_max = MAX_OBSERVED_TASKS.swap(0, Ordering::SeqCst);
 
         let (release, wait) = tokio::sync::oneshot::channel::<()>();
@@ -2180,7 +2197,36 @@ mod tests {
         assert_eq!(retry.await.unwrap(), 7);
         assert_eq!(LIVE_RUNTIME_TASKS.load(Ordering::SeqCst), 0);
 
+        MAX_RUNTIME_TASKS.store(3, Ordering::SeqCst);
+        MAX_LIVE_CONNECTIONS.store(1, Ordering::SeqCst);
+        let (release_mandatory, wait_mandatory) = tokio::sync::oneshot::channel::<()>();
+        let mandatory = spawn_governed(async move {
+            let _ = wait_mandatory.await;
+        });
+        let (release_opportunistic, wait_opportunistic) = tokio::sync::oneshot::channel::<()>();
+        let opportunistic = try_spawn_governed(async move {
+            let _ = wait_opportunistic.await;
+        })
+        .expect("one opportunistic task fits below connection headroom");
+        assert!(
+            try_spawn_governed(async {}).is_none(),
+            "opportunistic work must preserve the configured connection headroom"
+        );
+        let connection_guard = {
+            let _spawn = TASK_SPAWN_LOCK.lock().expect("task spawn lock poisoned");
+            try_acquire_runtime_task_locked()
+        }
+        .expect("the reserved connection task still fits under the node-wide limit");
+        assert_eq!(runtime_task_resource_counts(), (3, 3, 3));
+        drop(connection_guard);
+        release_opportunistic.send(()).unwrap();
+        release_mandatory.send(()).unwrap();
+        opportunistic.await.unwrap();
+        mandatory.await.unwrap();
+        assert_eq!(LIVE_RUNTIME_TASKS.load(Ordering::SeqCst), 0);
+
         MAX_RUNTIME_TASKS.store(prior_limit, Ordering::SeqCst);
+        MAX_LIVE_CONNECTIONS.store(prior_connection_limit, Ordering::SeqCst);
         MAX_OBSERVED_TASKS.store(prior_max, Ordering::SeqCst);
     }
 }
