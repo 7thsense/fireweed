@@ -220,8 +220,12 @@ pub fn item_max(id: &str, key: &str, priority: i64, max_attempts: u32) -> PushIt
 }
 
 pub fn envelope(command: QueueCommand, item_ids: Vec<ItemId>) -> CommandEnvelope {
+    static NEXT_COMMAND_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     CommandEnvelope {
-        command_id: CommandId::new("c"),
+        command_id: CommandId::new(format!(
+            "conformance-{}",
+            NEXT_COMMAND_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )),
         request_id: None,
         request_fingerprint: None,
         request_outcome: None,
