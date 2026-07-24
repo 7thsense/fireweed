@@ -26,6 +26,7 @@ pqueue-memory = { path = "../pqueue-memory", optional = true }
 pqueue-sqlite = { path = "../pqueue-sqlite", optional = true }
 pqueue-objectlog = { path = "../pqueue-objectlog", optional = true }
 pqueue-postgres = { path = "../pqueue-postgres", optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
 
 [features]
 # Default pulls the embeddable adapters so `cargo build`/`cargo test` behave as before; a consumer who
@@ -35,7 +36,7 @@ default = ["memory", "sqlite", "objectlog"]
 memory = ["dep:pqueue-memory"]
 sqlite = ["dep:pqueue-sqlite"]
 objectlog = ["dep:pqueue-objectlog"]
-postgres = ["dep:pqueue-postgres"]
+postgres = ["dep:pqueue-postgres", "dep:tokio"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time"] }

@@ -97,6 +97,18 @@ jobs:
           docker run --rm --network host --entrypoint sh minio/mc -c \
             "mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && mc mb -p local/pqueue-test"
 
+      - name: Embedded S3 + PostgreSQL projection proof
+        env:
+          PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
+          PQUEUE_S3_TEST_ENDPOINT: http://127.0.0.1:9000
+          PQUEUE_S3_TEST_ACCESS_KEY: minioadmin
+          PQUEUE_S3_TEST_SECRET_KEY: minioadmin
+        run: >-
+          cargo +1.92.0 test -p pqueue --features postgres
+          --test embedded_objectlog_postgres
+          public_s3_objectlog_postgres_open_and_reopen_with_disposable_projection
+          -- --exact --nocapture
+
       - name: PR gate (enforcing)
         env:
           # Run the full postgres conformance/durability suite (not just the single proof test)

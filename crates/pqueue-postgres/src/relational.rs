@@ -9219,6 +9219,52 @@ impl ProjectionStore for PostgresRelational {
         true
     }
 
+    fn supports_commit_transition(&self) -> bool {
+        true
+    }
+
+    fn commit_validate(
+        &self,
+        shard: &QueueKey,
+        claim_refs: &[pqueue_engine::ClaimRef],
+        now: UtcTimestamp,
+    ) -> EngineResult<()> {
+        let mut inner = self.lock();
+        let mut transaction = st(inner.client.transaction())?;
+        for claim_ref in claim_refs {
+            commit_validate_sql(&mut transaction, shard, claim_ref, now)?;
+        }
+        st(transaction.rollback())?;
+        Ok(())
+    }
+
+    fn instance_fence(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<u64>> {
+        let mut inner = self.lock();
+        let (tenant, queue) = parts(shard);
+        st(inner.client.query_opt(
+            "SELECT fence FROM pqueue_instance_fences \
+             WHERE tenant_id=$1 AND queue_id=$2 AND instance_key=$3",
+            &[&tenant, &queue, &key],
+        ))?
+        .map(|row| {
+            let fence: i64 = row.get(0);
+            u64::try_from(fence)
+                .map_err(|_| EngineError::Storage("stored instance fence is negative".to_owned()))
+        })
+        .transpose()
+    }
+
+    fn side_record(&self, shard: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
+        let mut inner = self.lock();
+        let (tenant, queue) = parts(shard);
+        Ok(st(inner.client.query_opt(
+            "SELECT payload FROM pqueue_side_records \
+             WHERE tenant_id=$1 AND queue_id=$2 AND key=$3",
+            &[&tenant, &queue, &key],
+        ))?
+        .map(|row| Bytes::from(row.get::<_, Vec<u8>>(0))))
+    }
+
     fn select_rich_claim(
         &self,
         shard: &QueueKey,
