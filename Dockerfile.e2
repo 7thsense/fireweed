@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # TP-002 E2 multi-node kind harness image (NOT a production image — see Dockerfile for that). It bakes the
-# production `pqueue-service` binary AND the `pqueue-loadgen` in-cluster RESP load generator into one image,
+# production `fireweed-service` binary AND the `fireweed-loadgen` in-cluster RESP load generator into one image,
 # so a kind cluster can run BOTH the CPU-limited owner server pods and a lean, separated in-cluster load Job
 # from a single `kind load docker-image`. The entrypoint defaults to the service; the load Job overrides
-# `command:` to run `pqueue-loadgen`. Built by `scripts/perf/tp002-e2-kind.sh`.
+# `command:` to run `fireweed-loadgen`. Built by `scripts/perf/tp002-e2-kind.sh`.
 
 # ---- builder ----
 FROM rust:1.92-bookworm AS builder
@@ -14,24 +14,24 @@ COPY . .
 # target is copied out before the layer ends because a cache mount is not present in the final image.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --release -p pqueue-server --bin pqueue-service \
- && cargo build --release -p pqueue-loadgen --bin pqueue-loadgen \
+    cargo build --release -p fireweed-server --bin fireweed-service \
+ && cargo build --release -p fireweed-loadgen --bin fireweed-loadgen \
  && mkdir -p /out \
- && cp target/release/pqueue-service target/release/pqueue-loadgen /out/
+ && cp target/release/fireweed-service target/release/fireweed-loadgen /out/
 
 # ---- runtime ----
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates libssl3 \
  && rm -rf /var/lib/apt/lists/* \
- && useradd --system --uid 10001 --user-group --no-create-home pqueue
+ && useradd --system --uid 10001 --user-group --no-create-home fireweed
 
-COPY --from=builder /out/pqueue-service /usr/local/bin/pqueue-service
-COPY --from=builder /out/pqueue-loadgen /usr/local/bin/pqueue-loadgen
+COPY --from=builder /out/fireweed-service /usr/local/bin/fireweed-service
+COPY --from=builder /out/fireweed-loadgen /usr/local/bin/fireweed-loadgen
 
-USER pqueue
+USER fireweed
 ENV PQUEUE_LISTEN_ADDR=0.0.0.0:8080 \
     PQUEUE_LOG_BACKEND=objectlog \
     PQUEUE_PROJECTION_BACKEND=inmemory
 EXPOSE 8080
-ENTRYPOINT ["/usr/local/bin/pqueue-service"]
+ENTRYPOINT ["/usr/local/bin/fireweed-service"]

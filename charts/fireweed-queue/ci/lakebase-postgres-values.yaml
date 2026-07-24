@@ -1,4 +1,4 @@
-# Static render values: Lakebase postgres_native profile.
+# Fireweed Queue static render values: Lakebase postgres_native profile.
 #
 # The log DSN lives in a Kubernetes Secret. Its value must be a self-sufficient
 # libpq key=value DSN such as:
@@ -17,11 +17,11 @@ storage:
     sslMode: require
     auth:
       mode: service-principal-oauth
-      existingSecret: pqueue-lakebase-oauth
+      existingSecret: fireweed-lakebase-oauth
   log:
     backend: postgres
     postgres:
-      existingSecret: pqueue-lakebase-dsn
+      existingSecret: fireweed-lakebase-dsn
       databaseUrlKey: database-url
   projection:
     backend: inmemory

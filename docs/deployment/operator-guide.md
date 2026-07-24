@@ -1,17 +1,17 @@
-# pqueue Operator Deployment Guide
+# Fireweed Queue Operator Deployment Guide
 
 <!-- markdownlint-disable MD013 -->
 
-This guide covers the v0.9.0 release packaging. The Helm chart configures
+This guide covers the v0.20.0 Fireweed release packaging. The Helm chart configures
 storage as separate log, projection, and control-plane axes.
 
 ## Release Artifacts
 
-- container image `ghcr.io/OWNER/pqueue-service:<version>`
-- image digest evidence `pqueue-service-image.txt`
-- Helm chart package `pqueue-<version>.tgz`
-- Helm chart evidence `pqueue-helm-chart.txt`
-- binary archives `pqueue-<version>-<target-triple>.tar.gz`
+- container image `ghcr.io/OWNER/fireweed-service:<version>`
+- image digest evidence `fireweed-service-image.txt`
+- Helm chart package `fireweed-queue-<version>.tgz`
+- Helm chart evidence `fireweed-queue-helm-chart.txt`
+- binary archives `fireweed-<version>-<target-triple>.tar.gz`
 - checksum file `SHA256SUMS`
 
 ## Storage Axes
@@ -23,7 +23,7 @@ storage as separate log, projection, and control-plane axes.
 | Projection backend | `storage.projection.backend` | `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, `postgres` |
 | Control plane | `storage.controlPlane.backend` | `inprocess`, `postgres` |
 
-The current `pqueue-server` release smoke paths include `objectlog/inmemory`,
+The current `fireweed-server` release smoke paths include `objectlog/inmemory`,
 `objectlog/sqlite`, `objectlog/hybrid`, and `objectlog/hybrid-async`. The chart
 also exposes a replica-safe shared profile that combines `objectlog` + `s3`
 with `storage.controlPlane.backend=postgres` and `storage.projection.backend=sqlite`.
@@ -72,12 +72,12 @@ object-log log axis pairs with `hybrid-async`; `memory/hybrid-async`,
 ## Install
 
 ```sh
-NAMESPACE=pqueue
-RELEASE=pqueue
+NAMESPACE=fireweed
+RELEASE=fireweed
 
 kubectl create namespace "$NAMESPACE"
 
-helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
+helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${VERSION}.tgz" \
   --namespace "$NAMESPACE" \
   --set image.repository="$IMAGE" \
   --set image.tag="$VERSION" \
@@ -89,7 +89,7 @@ helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
 Replica-safe shared profile:
 
 ```sh
-helm install "$RELEASE" "$DIST_DIR/pqueue-${VERSION}.tgz" \
+helm install "$RELEASE" "$DIST_DIR/fireweed-queue-${VERSION}.tgz" \
   --namespace "$NAMESPACE" \
   --set image.repository="$IMAGE" \
   --set image.tag="$VERSION" \
@@ -126,6 +126,23 @@ the Postgres control-plane schema and credentials. Plan and validate those
 steps separately before changing profiles. Rolling upgrades within the shared
 profile must retain compatible S3 configuration, Postgres schema, Secret keys,
 and fencing/lease settings until every replica runs the new image.
+
+### Rename resource-recreation boundary
+
+`fireweed-queue` changes the chart name, helper namespace, default workload
+names, selector labels, service account, ConfigMap, Service, and PVC names. Helm
+does not adopt resources from an existing `pqueue` release automatically. A
+Fireweed install therefore creates a new resource set; it is not an in-place
+rename of the old release.
+
+For local persistent storage, stop writes, back up the old PVC, and either copy
+its contents into the Fireweed PVC or set `persistence.existingClaim` to a
+deliberately migrated claim before directing traffic to the new Service. Shared
+S3/Postgres deployments may point at the same durable authorities only after
+verifying compatible schemas, fencing settings, and Secrets. Keep the old
+release available for rollback until Fireweed recovery and readback checks pass,
+then remove it explicitly. The chart publishes no `pqueue` release or resource
+alias.
 
 ## Bootstrap Queue Inventories
 

@@ -1,12 +1,12 @@
 replicaCount: 1
 
 image:
-  repository: pqueue
+  repository: ghcr.io/OWNER/fireweed-service
   pullPolicy: IfNotPresent
   tag: ""
 
 imagePullSecrets: []
-nameOverride: ""
+nameOverride: "fireweed"
 fullnameOverride: ""
 
 serviceAccount:
@@ -59,7 +59,7 @@ probes:
 
 config:
   listenAddr: 0.0.0.0:8080
-  principalId: pqueue-service
+  principalId: fireweed-service
   tenants: []
 
 # Queues provisioned before the RESP listener becomes ready. An explicit list

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Disposable kind-based Helm install smoke harness for the pqueue chart.
+# Disposable kind-based Helm install smoke harness for the Fireweed Queue chart.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-CHART_DIR="${REPO_ROOT}/charts/pqueue"
+CHART_DIR="${REPO_ROOT}/charts/fireweed-queue"
 
 LOG_BACKEND=""
 PROJECTION_BACKEND=""
 CLUSTER_NAME=""
-RELEASE_NAME="pqueue"
-NAMESPACE="pqueue"
-IMAGE="pqueue:ci"
+RELEASE_NAME="fireweed"
+NAMESPACE="fireweed"
+IMAGE="fireweed-service:ci"
 IMAGE_CONTEXT="${PQUEUE_KIND_IMAGE_CONTEXT:-${REPO_ROOT}}"
 IMAGE_DOCKERFILE="${PQUEUE_KIND_IMAGE_DOCKERFILE:-}"
 TIMEOUT="180s"
@@ -31,16 +31,16 @@ die() { err "$*"; exit 1; }
 
 usage() {
     cat <<'EOF'
-kind-helm-test.sh - run a disposable kind Helm install smoke test for pqueue
+kind-helm-test.sh - run a disposable kind Helm install smoke test for Fireweed Queue
 
 USAGE:
   bash scripts/ci/kind-helm-test.sh --log-backend <backend> --projection-backend <backend> [OPTIONS]
 
 REQUIRED TOOLS FOR REAL RUNS:
-  docker    build the pqueue image
+  docker    build the Fireweed service image
   kind      create/delete the disposable Kubernetes cluster and load the image
   kubectl   apply helper manifests, wait for rollout, and run the smoke check
-  helm      install/upgrade the charts/pqueue release
+  helm      install/upgrade the charts/fireweed-queue release
 
 STORAGE BACKENDS (runnable live smokes):
   objectlog + inmemory   ephemeral projection over the durable object log
@@ -54,15 +54,15 @@ STORAGE BACKENDS (runnable live smokes):
   postgres  + inmemory   durable postgres command log + in-memory projection
                          (the wired managed-postgres profile). The harness stands
                          up a throwaway in-cluster postgres and injects its DSN as
-                         the pqueue-postgres-log Secret before installing the chart.
+                         the fireweed-postgres-log Secret before installing the chart.
   postgres  + sqlite     durable postgres command log + a derived SQLite relational
                          projection on the chart's storage volume. Same in-cluster
                          postgres as above for the log axis; no projection Secret.
   postgres  + postgres   durable postgres command log + a SEPARATE postgres-backed
                          relational projection (distinct table sets, no collision).
                          The harness reuses the one throwaway in-cluster postgres for
-                         both axes and injects its DSN as both the pqueue-postgres-log
-                         and pqueue-postgres-projection Secrets.
+                         both axes and injects its DSN as both the fireweed-postgres-log
+                         and fireweed-postgres-projection Secrets.
 
 OPTIONS:
   --log-backend <backend>  Required log backend for this runtime smoke.
@@ -72,9 +72,9 @@ OPTIONS:
                            checking tools or creating a cluster.
   --cluster-name <name>    kind cluster name. Defaults to a disposable
                            pqueue-<log>-<projection>-<pid> name.
-  --release-name <name>    Helm release name. Default: pqueue.
-  --namespace <name>       Kubernetes namespace. Default: pqueue.
-  --image <repo:tag>       Image to build, load, and install. Default: pqueue:ci.
+  --release-name <name>    Helm release name. Default: fireweed.
+  --namespace <name>       Kubernetes namespace. Default: fireweed.
+  --image <repo:tag>       Image to build, load, and install. Default: fireweed-service:ci.
   --image-context <path>   Docker build context. Default: repository root.
   --image-dockerfile <path>
                            Optional Dockerfile path for docker build -f.
@@ -91,7 +91,7 @@ OPTIONS:
   --keep-cluster           Do not delete the kind cluster on exit.
   -h, --help               Show this help text and exit.
 
-The harness builds the pqueue container image, creates a kind cluster, loads the
+The harness builds the Fireweed service container image, creates a kind cluster, loads the
 image into that cluster, installs the Helm chart with the selected CI storage
 values file, waits for readiness, checks RESP PING through kubectl
 port-forward, and deletes the cluster by default.
@@ -138,17 +138,17 @@ values_file_for() {
 }
 
 # The Kubernetes Secret name + key the postgres-inmemory/postgres-sqlite values files expect the log DSN
-# under (must match charts/pqueue/ci/postgres-inmemory-values.yaml and postgres-sqlite-values.yaml:
+# under (must match charts/fireweed-queue/ci/postgres-inmemory-values.yaml and postgres-sqlite-values.yaml:
 # storage.log.postgres.existingSecret/databaseUrlKey).
-PG_SECRET_NAME="pqueue-postgres-log"
+PG_SECRET_NAME="fireweed-postgres-log"
 PG_SECRET_KEY="database-url"
 # The Kubernetes Secret name + key the postgres-postgres values file expects the projection DSN under (must
-# match charts/pqueue/ci/postgres-postgres-values.yaml: storage.projection.postgres.existingSecret/databaseUrlKey).
-PG_PROJECTION_SECRET_NAME="pqueue-postgres-projection"
+# match charts/fireweed-queue/ci/postgres-postgres-values.yaml: storage.projection.postgres.existingSecret/databaseUrlKey).
+PG_PROJECTION_SECRET_NAME="fireweed-postgres-projection"
 PG_PROJECTION_SECRET_KEY="database-url"
 # In-cluster throwaway postgres coordinates (Deployment/Service applied by deploy_in_cluster_postgres).
 PG_IN_CLUSTER_IMAGE="postgres:16"
-PG_IN_CLUSTER_HOST="pqueue-ci-postgres"
+PG_IN_CLUSTER_HOST="fireweed-ci-postgres"
 PG_IN_CLUSTER_USER="pqueue"
 PG_IN_CLUSTER_PASSWORD="pqueue"
 PG_IN_CLUSTER_DB="pqueue"
@@ -158,7 +158,7 @@ needs_in_cluster_postgres() {
     [[ "${LOG_BACKEND}" == "postgres" || "${PROJECTION_BACKEND}" == "postgres" ]]
 }
 
-# The cargo features the pqueue image must be built with for the selected backend. The postgres log axis
+# The cargo features the Fireweed image must be built with for the selected backend. The postgres log axis
 # needs the `postgres` feature (Backend::PostgresNative); everything else ships the default (no-feature) image.
 image_cargo_features() {
     if needs_in_cluster_postgres; then
@@ -283,7 +283,7 @@ validate_config() {
         postgres:postgres) ;;
         *) die "runtime smoke supports log=objectlog projection={inmemory,sqlite,hybrid,hybrid-async}, and log=postgres projection={inmemory,sqlite,postgres}; requested log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}" ;;
     esac
-    [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example pqueue:ci"
+    [[ "${IMAGE}" == *:* ]] || die "--image must include an explicit tag, for example fireweed-service:ci"
     [[ -d "${IMAGE_CONTEXT}" ]] || die "--image-context must be an existing directory: ${IMAGE_CONTEXT}"
     if [[ -n "${IMAGE_DOCKERFILE}" && ! -f "${IMAGE_DOCKERFILE}" ]]; then
         die "--image-dockerfile must be an existing file: ${IMAGE_DOCKERFILE}"
@@ -299,7 +299,7 @@ validate_config() {
     [[ -f "$(values_file_for "${LOG_BACKEND}" "${PROJECTION_BACKEND}")" ]] || die "missing values file for log=${LOG_BACKEND} projection=${PROJECTION_BACKEND}"
 
     if [[ -z "${CLUSTER_NAME}" ]]; then
-        CLUSTER_NAME="pqueue-${LOG_BACKEND}-${PROJECTION_BACKEND}-$$"
+        CLUSTER_NAME="fireweed-${LOG_BACKEND}-${PROJECTION_BACKEND}-$$"
     fi
 }
 
@@ -351,7 +351,7 @@ dry_run_plan() {
     fi
     print_cmd helm upgrade --install "${RELEASE_NAME}" "${CHART_DIR}" --kube-context "kind-${CLUSTER_NAME}" --namespace "${NAMESPACE}" --values "${values}" --set "fullnameOverride=${RELEASE_NAME}" --set "image.repository=${image_repository}" --set "image.tag=${image_tag}" --set "image.pullPolicy=IfNotPresent" --set "bootstrap.generated.count=${BOOTSTRAP_GENERATED_COUNT}" --set-string "bootstrap.generated.tenant=${BOOTSTRAP_GENERATED_TENANT}" --set-string "bootstrap.generated.prefix=${BOOTSTRAP_GENERATED_PREFIX}" --wait --timeout "${TIMEOUT}"
     print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" rollout status "deployment/${RELEASE_NAME}" --timeout "${TIMEOUT}"
-    echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} port-forward pod/<ready-pqueue-pod> ${SMOKE_PORT}:8080"
+    echo "+ kubectl --context kind-${CLUSTER_NAME} -n ${NAMESPACE} port-forward pod/<ready-fireweed-pod> ${SMOKE_PORT}:8080"
     echo "+ RESP PING 127.0.0.1:${SMOKE_PORT}"
     echo "+ RESP XADD/XREADGROUP 127.0.0.1:${SMOKE_PORT}"
     case "${LOG_BACKEND}" in
@@ -397,7 +397,7 @@ stop_port_forward() {
 }
 
 pod_selector() {
-    printf 'app.kubernetes.io/instance=%s,app.kubernetes.io/name=pqueue' "${RELEASE_NAME}"
+    printf 'app.kubernetes.io/instance=%s,app.kubernetes.io/name=fireweed' "${RELEASE_NAME}"
 }
 
 current_ready_pod() {
@@ -412,7 +412,7 @@ current_ready_pod() {
             tail -n 1 |
             awk '{print $2}'
     )"
-    [[ -n "${pod_name}" ]] || die "no running pqueue pod found for selector ${selector}"
+    [[ -n "${pod_name}" ]] || die "no running Fireweed pod found for selector ${selector}"
     {
         print_cmd kubectl --context "kind-${CLUSTER_NAME}" -n "${NAMESPACE}" wait --for=condition=Ready "pod/${pod_name}" --timeout "${TIMEOUT}"
     } >&2
@@ -659,7 +659,7 @@ EOF
         --dry-run=client -o yaml | kubectl_cmd apply -f -
 
     # The postgres/postgres combo drives its projection axis through a second postgres connection
-    # (distinct table sets from the log axis, no collision - see crates/pqueue-server/src/lib.rs's
+    # (distinct table sets from the log axis, no collision - see crates/fireweed-server/src/lib.rs's
     # postgres/postgres composition). Reuse the same throwaway in-cluster postgres instance and DSN, under
     # the projection Secret name the postgres-postgres values file expects.
     if [[ "${PROJECTION_BACKEND}" == "postgres" ]]; then

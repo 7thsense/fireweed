@@ -1,15 +1,15 @@
 apiVersion: v2
-name: pqueue
-description: Helm chart compatibility alias for the Fireweed Queue RESP service
+name: fireweed-queue
+description: Helm chart for the Fireweed Queue RESP service
 type: application
 version: 0.6.0
 appVersion: "0.6.0"
 annotations:
   fireweed.dev/version-policy: "independent source defaults; release packaging overrides version and appVersion"
-  fireweed.dev/compatibility-policy: "pqueue chart coordinates remain a compatibility alias under ADR-020"
+  fireweed.dev/rename-policy: "Fireweed coordinates are authoritative under ADR-020"
 keywords:
-  - pqueue
+  - fireweed
   - queue
   - kubernetes
 maintainers:
-  - name: pqueue maintainers
+  - name: Fireweed maintainers

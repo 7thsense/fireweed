@@ -1,6 +1,6 @@
 # Helm static validation gate
 
-`scripts/ci/helm-gate.sh` validates the pqueue Helm chart without creating a
+`scripts/ci/helm-gate.sh` validates the Fireweed Queue Helm chart without creating a
 cluster.
 
 The chart storage contract is expressed as axes:
@@ -28,7 +28,7 @@ the runtime renders `PQUEUE_PROJECTION_BACKEND=hybrid-async`, the same
 `PQUEUE_SQLITE_PROJECTION_PATH`, and the async-apply threshold env
 `PQUEUE_HYBRID_ASYNC_*` from `storage.projection.hybridAsync`. The chart schema
 constrains every threshold to `>= 1`; a checked-in CI values profile,
-`charts/pqueue/ci/objectlog-hybrid-async-values.yaml`, renders the combination and
+`charts/fireweed-queue/ci/objectlog-hybrid-async-values.yaml`, renders the combination and
 is included in the static gate. Its rendered-contract assertions require the
 SQLite path and persistent volume mount plus all five fail-closed controls:
 `PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS`,

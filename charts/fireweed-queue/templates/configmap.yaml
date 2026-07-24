@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "pqueue.fullname" . }}-config
+  name: {{ include "fireweed-queue.fullname" . }}-config
   labels:
-    {{- include "pqueue.labels" . | nindent 4 }}
+    {{- include "fireweed-queue.labels" . | nindent 4 }}
 data:
   PQUEUE_LISTEN_ADDR: {{ .Values.config.listenAddr | quote }}
   PQUEUE_REPLICA_COUNT: {{ .Values.replicaCount | quote }}

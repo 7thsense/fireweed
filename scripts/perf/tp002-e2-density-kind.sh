@@ -4,7 +4,7 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 CLUSTER=${CLUSTER:-pqueue-density}
-IMAGE=${IMAGE:-pqueue:density-e2}
+IMAGE=${IMAGE:-fireweed-service:density-e2}
 QUEUE_COUNT=${QUEUE_COUNT:-1001}
 ITEMS=${ITEMS:-300000}
 CONTROL_ITEMS=${CONTROL_ITEMS:-10000}
@@ -184,7 +184,7 @@ spec:
           image: $IMAGE
           imagePullPolicy: Never
           command:
-            - /usr/local/bin/pqueue-loadgen
+            - /usr/local/bin/fireweed-loadgen
             - density-run
             - --addr
             - pqueue.$NAMESPACE.svc.cluster.local:8080
@@ -395,7 +395,7 @@ if [[ "$EVIDENCE_MODE" == d5-diagnostic ]]; then
   printf 'DIAGNOSTIC_OUT=%s\n' "$LEDGER_OUT"
   exit 0
 fi
-rustup run 1.92.0 cargo run --locked --quiet -p pqueue-loadgen -- density-emit-row \
+rustup run 1.92.0 cargo run --locked --quiet -p fireweed-loadgen -- density-emit-row \
   --result "$RESULT_FILE" \
   --observed-threads "$OBSERVED_THREADS" --thread-limit "$THREAD_LIMIT" \
   --observed-connections "$OBSERVED_CONNECTIONS" --connection-limit "$CONNECTION_LIMIT" \

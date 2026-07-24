@@ -77,6 +77,12 @@ old_rust_binary = re.compile(
     r"verify-e3-contract|verify-evidence-attestation|verify-ledger|"
     r"verify-transaction-evidence)\b"
 )
+old_deployment_coordinate = re.compile(
+    r"charts/pqueue|\bpqueue-service\b|\bpqueue-helm-chart\b|"
+    r"\bpqueue-[0-9][A-Za-z0-9.+-]*\.tgz\b|"
+    r"app\.kubernetes\.io/name[=:][ \t]*pqueue\b|"
+    r'(?:define|include)[ \t]+"pqueue\.'
+)
 text_suffixes = {
     ".c",
     ".css",
@@ -150,9 +156,30 @@ def is_probably_text(path: Path) -> bool:
     return path.suffix in text_suffixes
 
 
+def is_deployment_surface(rel: str) -> bool:
+    if rel in {"README.md", "Dockerfile", "Dockerfile.e2", "Dockerfile.prebuilt", "docker-compose.yml", ".github/workflows/release.yml"}:
+        return True
+    if rel.startswith(("charts/", "docs/deployment/", "docs/operator/")):
+        return True
+    return rel in {
+        "scripts/ci/deployment-release-gate.sh",
+        "scripts/ci/helm-gate.sh",
+        "scripts/ci/kind-helm-test.sh",
+        "scripts/release/package-binaries.sh",
+        "scripts/release/package-helm-chart.sh",
+        "scripts/release/verify-release-artifacts.sh",
+        "scripts/release/verify-release-artifacts-test.sh",
+        "scripts/release/write-container-image-evidence.sh",
+        "scripts/perf/tp002-e2-density-kind.sh",
+        "scripts/perf/tp002-e2-failover-kind.sh",
+        "scripts/perf/tp002-e2-kind.sh",
+    }
+
+
 allowlist = load_allowlist(allowlist_path)
 violations = []
 rust_namespace_violations = []
+deployment_namespace_violations = []
 checked_files = 0
 matches = 0
 
@@ -170,6 +197,11 @@ for rel in tracked_files():
     if re.search(r"^(?:crates/pqueue(?:-[^/]+)?|tools/turso-compat-probe)(?:/|$)", rel):
         rust_namespace_violations.append((rel, 0, "old Cargo crate path", rel))
     for line_no, line in enumerate(lines, start=1):
+        found = old_deployment_coordinate.search(line) if is_deployment_surface(rel) else None
+        if found:
+            deployment_namespace_violations.append(
+                (rel, line_no, "old deployment coordinate", found.group(0))
+            )
         if (rel == "Cargo.toml" or rel == "Cargo.lock" or rel.endswith("/Cargo.toml") or rel.endswith("/Cargo.lock")):
             found = old_cargo_coordinate.search(line)
             if found:
@@ -204,6 +236,15 @@ if rust_namespace_violations:
     for rel, line_no, identity_class, token in rust_namespace_violations[:200]:
         print(f"{rel}:{line_no}: {identity_class}: {token}", file=sys.stderr)
     remaining = len(rust_namespace_violations) - 200
+    if remaining > 0:
+        print(f"... {remaining} additional violation(s) omitted", file=sys.stderr)
+    sys.exit(1)
+
+if deployment_namespace_violations:
+    print("unapproved deployment namespace residue found:", file=sys.stderr)
+    for rel, line_no, identity_class, token in deployment_namespace_violations[:200]:
+        print(f"{rel}:{line_no}: {identity_class}: {token}", file=sys.stderr)
+    remaining = len(deployment_namespace_violations) - 200
     if remaining > 0:
         print(f"... {remaining} additional violation(s) omitted", file=sys.stderr)
     sys.exit(1)

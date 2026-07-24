@@ -13,13 +13,13 @@
       "removal_condition": "Remove after the configuration, protocol, and persisted-data owners retire the remaining pqueue and PQUEUE compatibility identifiers and historical references no longer require scanning."
     },
     {
-      "id": "helm-chart-compatibility",
-      "class": "temporary compatibility",
-      "path_pattern": "^charts/pqueue/.*$",
-      "match_pattern": "(?i)\\bpqueue(?:[-_][A-Za-z0-9]+)*\\b|\\bPQUEUE(?:_[A-Z0-9]+)*\\b",
-      "reason": "ADR-020 classifies the existing Helm chart, rendered workload names, chart package name, and runtime environment prefix as temporary compatibility aliases.",
-      "owner_surface": "Helm chart and Kubernetes deployment manifests",
-      "removal_condition": "Remove after charts/fireweed-queue is authoritative and old pqueue chart/rendered coordinates are either migrated or separately retained by an operator compatibility ADR."
+      "id": "helm-runtime-compatibility",
+      "class": "persisted/wire",
+      "path_pattern": "^charts/fireweed-queue/.*$",
+      "match_pattern": "\\bPQUEUE(?:_[A-Z0-9]+)*\\b|/var/lib/pqueue(?:/[^[:space:]]*)?|\\bpqueue_(?:[A-Za-z0-9_]+)\\b",
+      "reason": "The Fireweed chart still renders ADR-020-governed runtime environment aliases and retained on-disk identifiers; chart, workload, image, label, package, and evidence coordinates are rejected independently.",
+      "owner_surface": "Helm runtime configuration and persisted paths",
+      "removal_condition": "Remove after the configuration and persisted-data owners retire the remaining PQUEUE runtime aliases and pqueue storage identifiers."
     },
     {
       "id": "github-workflow-compatibility",

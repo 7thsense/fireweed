@@ -16,7 +16,7 @@
   defines the Helm, kind, storage-axis, and object-log release-readiness
   contract.
 - [Container image and runtime config contract](docs/deployment/container-runtime-contract.md)
-  defines the `pqueue-service` image entrypoint, environment/config keys, health
+  defines the `fireweed-service` image entrypoint, environment/config keys, health
   endpoint/port, and storage backend settings consumed by Helm.
 - [Choosing pqueue instead of a stream](docs/helix/01-frame/guides/choosing-pqueue.md)
   explains when to use pqueue's mutable-priority leased work queue model instead
@@ -28,24 +28,24 @@
 ## Release Artifacts
 
 Fireweed Queue's first public-preview release is `v0.20.0`. The workspace
-packages are release-synchronized at `0.20.0`. The `pqueue` package, binary,
-image, and chart names in the examples below remain compatibility aliases for
-this release; this version alignment does not rename runtime surfaces. The Helm
-chart's source defaults use independent versioning, while release packaging
+packages are release-synchronized at `0.20.0`. The Fireweed package, binary,
+image, and chart names below are authoritative; old deployment coordinates are
+not published as aliases. The Helm chart's source defaults use independent
+versioning, while release packaging
 overrides its chart and application versions to `0.20.0`.
 
 The `v0.20.0` release provides:
 
-- container image `ghcr.io/<owner>/pqueue-service:0.20.0` plus
-  `ghcr.io/<owner>/pqueue-service:sha-<commit>`;
-- Helm chart package `pqueue-0.20.0.tgz`;
-- binary archives `pqueue-0.20.0-<target-triple>.tar.gz`;
+- container image `ghcr.io/<owner>/fireweed-service:0.20.0` plus
+  `ghcr.io/<owner>/fireweed-service:sha-<commit>`;
+- Helm chart package `fireweed-queue-0.20.0.tgz`;
+- binary archives `fireweed-0.20.0-<target-triple>.tar.gz`;
 - `SHA256SUMS`;
-- release evidence files `pqueue-service-image.txt` and
-  `pqueue-helm-chart.txt`.
+- release evidence files `fireweed-service-image.txt` and
+  `fireweed-queue-helm-chart.txt`.
 
 Operators should download the GitHub Release assets, verify `SHA256SUMS`, and
-compare the image tag digest against `pqueue-service-image.txt` before
+compare the image tag digest against `fireweed-service-image.txt` before
 deployment. See
 [operator release artifacts](docs/deployment/operator-release-artifacts.md) for
 the exact commands.
@@ -53,8 +53,8 @@ the exact commands.
 For local development, build and smoke-check the service image:
 
 ```sh
-docker build -t pqueue:dev .
-docker run --rm pqueue:dev --help
+docker build -t fireweed-service:dev .
+docker run --rm fireweed-service:dev --help
 ```
 
 See the

@@ -3,10 +3,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CHART="${ROOT}/charts/pqueue"
+CHART="${ROOT}/charts/fireweed-queue"
 CLUSTER="${PQUEUE_E2_CLUSTER:-pqueue-e2-failover-$$}"
 NS="pqueue-e2"
-IMAGE="${PQUEUE_E2_IMAGE:-pqueue:e2-failover}"
+IMAGE="${PQUEUE_E2_IMAGE:-fireweed-service:e2-failover}"
 TIMEOUT="${PQUEUE_E2_TIMEOUT:-240s}"
 PORT="${PQUEUE_E2_PORT:-18180}"
 PG_PORT="${PQUEUE_E2_PG_PORT:-15433}"
@@ -228,8 +228,8 @@ k -n "${NS}" run pqueue-e2-mc --restart=Never --image="${MC_IMAGE}" --image-pull
 k -n "${NS}" wait --for=jsonpath='{.status.phase}'=Succeeded pod/pqueue-e2-mc --timeout "${TIMEOUT}"
 k -n "${NS}" logs pqueue-e2-mc
 
-k -n "${NS}" create secret generic pqueue-objectlog-s3 --from-literal=access-key-id=minioadmin --from-literal=secret-access-key=minioadmin
-k -n "${NS}" create secret generic pqueue-control-plane \
+k -n "${NS}" create secret generic fireweed-objectlog-s3 --from-literal=access-key-id=minioadmin --from-literal=secret-access-key=minioadmin
+k -n "${NS}" create secret generic fireweed-control-plane \
   --from-literal=database-url='postgres://pqueue:pqueue@pqueue-e2-postgres:5432/pqueue?sslmode=disable'
 
 REPO="${IMAGE%:*}"; TAG="${IMAGE##*:}"
