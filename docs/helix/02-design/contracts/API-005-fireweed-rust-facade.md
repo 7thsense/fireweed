@@ -79,6 +79,10 @@ pub fn open_postgres_coordinated(
     instance_id: OwnerId,
     control_plane_config: ControlPlaneConfig,
 ) -> EngineResult<Fireweed>;
+pub fn open_postgres_runtime(
+    config: PostgresRuntimeConfig,
+    clock: Arc<dyn Clock>,
+) -> EngineResult<Fireweed>;
 pub fn open_objectlog_postgres(
     config: ObjectLogRuntimeConfig,
     clock: Arc<dyn Clock>,
@@ -92,6 +96,31 @@ pub fn open_objectlog_sqlite(
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed>;
 ```
+
+Advanced PostgreSQL deployments may select their storage shape, schema, node
+identity, and coordination topology at the composition root:
+
+```rust
+pub enum PostgresMode { LogReplay, Relational }
+
+pub struct PostgresCoordinationConfig {
+    pub instance_id: OwnerId,
+    pub control_plane: ControlPlaneConfig,
+}
+
+pub struct PostgresRuntimeConfig {
+    pub url: ConfigSecret,
+    pub schema: Option<String>,
+    pub mode: PostgresMode,
+    pub node_id: Option<u8>,
+    pub coordination: Option<PostgresCoordinationConfig>,
+}
+```
+
+These fields are construction inputs only. The resulting `Fireweed` does not
+expose the selected mode, schema, node identity, coordination topology, or
+backend objects. `open_postgres` and `open_postgres_coordinated` remain the
+convenience constructors for their common configurations.
 
 The composed object-log configuration is:
 
