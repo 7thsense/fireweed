@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# PR gate runner for pqueue.
+# Pull-request gate runner for Fireweed Queue.
 #
 # Usage: pr-gate.sh --mode bootstrap|enforcing
 #
 # bootstrap  Run fmt / clippy / test / cargo-deny / cargo-machete /
 #            coverage-report (no thresholds) / property+fuzz smoke.
-#            Hard coverage enforcement (pqueue-core >=90% line / >=85%
-#            branch; pqueue-engine >=80% line) runs in the enforcing mode /
+#            Hard coverage enforcement (fireweed-core >=90% line / >=85%
+#            branch; fireweed-engine >=80% line) runs in the enforcing mode /
 #            release-gate.sh; bootstrap only reports.
 # enforcing  Run the release-enforced local gate: fmt check, focused ledger
 #            validator tests, live coverage thresholds, closure checks, release
@@ -46,11 +46,11 @@ if [[ "$MODE" == "enforcing" ]]; then
     rustup run 1.92.0 cargo fmt --all --check
 
     echo "--- ledger validator tests ---"
-    rustup run 1.92.0 cargo test -p pqueue-release -- --nocapture
+    rustup run 1.92.0 cargo test -p fireweed-release -- --nocapture
 
     echo "--- coverage threshold parser fixtures ---"
-    bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate pqueue-core --min-lines 90 --min-branches 85
-    bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/engine-pass.info" --crate pqueue-engine --min-lines 80
+    bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/core-pass.info" --crate fireweed-core --min-lines 90 --min-branches 85
+    bash "${SCRIPT_DIR}/check-lcov-coverage.py" --fixture "${SCRIPT_DIR}/fixtures/lcov/engine-pass.info" --crate fireweed-engine --min-lines 80
 
     echo "--- product workflow suite names ---"
     bash "${SCRIPT_DIR}/verify-product-workflow-names.sh" "${SCRIPT_DIR}/release-repeat-suites.toml"

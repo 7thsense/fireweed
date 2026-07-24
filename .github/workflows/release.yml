@@ -32,12 +32,12 @@ jobs:
           --health-retries 10
     defaults:
       run:
-        working-directory: pqueue
+        working-directory: fireweed
     steps:
-      - name: Checkout pqueue
+      - name: Checkout Fireweed
         uses: actions/checkout@v5
         with:
-          path: pqueue
+          path: fireweed
           fetch-depth: 0
 
       - name: Install pinned gitleaks
@@ -81,7 +81,7 @@ jobs:
         run: |
           workspace_version="$(
             cargo metadata --no-deps --format-version 1 |
-              jq -r '.packages[] | select(.name == "pqueue") | .version'
+              jq -r '.packages[] | select(.name == "fireweed") | .version'
           )"
           test "${{ steps.release.outputs.tag }}" = "v${workspace_version}"
           test "${{ steps.release.outputs.version }}" = "${workspace_version}"
@@ -97,10 +97,10 @@ jobs:
 
       - name: Acquire and preflight exact-revision governed evidence
         env:
-          PQUEUE_GOVERNED_EVIDENCE_BASE_URL: ${{ vars.PQUEUE_GOVERNED_EVIDENCE_BASE_URL }}
+          FIREWEED_GOVERNED_EVIDENCE_BASE_URL: ${{ vars.FIREWEED_GOVERNED_EVIDENCE_BASE_URL }}
         run: |
-          test -n "$PQUEUE_GOVERNED_EVIDENCE_BASE_URL"
-          evidence_url="${PQUEUE_GOVERNED_EVIDENCE_BASE_URL%/}/${GITHUB_SHA}.tar.gz"
+          test -n "$FIREWEED_GOVERNED_EVIDENCE_BASE_URL"
+          evidence_url="${FIREWEED_GOVERNED_EVIDENCE_BASE_URL%/}/${GITHUB_SHA}.tar.gz"
           mkdir -p target
           curl --fail --location --proto '=https' --tlsv1.2 \
             "$evidence_url" -o target/tp002-release.tar.gz
@@ -125,16 +125,16 @@ jobs:
           matrix_evidence=docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl
           parity_evidence=docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl
           rm -f "$matrix_evidence" "$parity_evidence"
-          cargo +1.92.0 test -p pqueue-conformance \
+          cargo +1.92.0 test -p fireweed-conformance \
             --test external_transaction_contract_matrix_tests \
             ac_txn_contract_matrix_postgres_storage_pairs -- --exact --nocapture
-          cargo +1.92.0 test -p pqueue-conformance \
+          cargo +1.92.0 test -p fireweed-conformance \
             --test external_transaction_contract_matrix_tests \
             ac_txn_6_postgres_storage_pair_parity -- --exact --nocapture
           test -s "$matrix_evidence"
           test -s "$parity_evidence"
-          cargo +1.92.0 run -p pqueue-release \
-            --bin pqueue-verify-transaction-evidence -- \
+          cargo +1.92.0 run -p fireweed-release \
+            --bin fireweed-verify-transaction-evidence -- \
             --evidence "$matrix_evidence" \
             --evidence "$parity_evidence"
 
@@ -165,8 +165,8 @@ jobs:
       - name: Bind governed TP-002 evidence to exact release tag
         shell: bash
         run: |
-          cargo +1.92.0 run -q -p pqueue-release \
-            --bin pqueue-verify-evidence-attestation -- \
+          cargo +1.92.0 run -q -p fireweed-release \
+            --bin fireweed-verify-evidence-attestation -- \
             --manifest target/tp002-release/attestation.json \
             --repo-root . \
             --tag "${{ steps.release.outputs.tag }}" \
@@ -175,7 +175,7 @@ jobs:
       - name: Deployment release gate
         env:
           KIND_NODE_IMAGE: kindest/node:v1.31.0
-          PQUEUE_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          FIREWEED_RELEASE_VERSION: ${{ steps.release.outputs.version }}
           PQUEUE_PG_TEST_URL: postgres://postgres:pq@127.0.0.1:5432/postgres
         run: bash scripts/ci/deployment-release-gate.sh
 
@@ -221,8 +221,8 @@ jobs:
         id: container-build
         uses: docker/build-push-action@v7
         with:
-          context: ./pqueue/target/release-image
-          file: ./pqueue/target/release-image/Dockerfile
+          context: ./fireweed/target/release-image
+          file: ./fireweed/target/release-image/Dockerfile
           push: true
           tags: |
             ${{ steps.container.outputs.version_tag }}
@@ -249,9 +249,9 @@ jobs:
 
       - name: Finalize deployment proof
         env:
-          PQUEUE_RELEASE_VERSION: ${{ steps.release.outputs.version }}
-          PQUEUE_RELEASE_DIST: target/release-dist
-          PQUEUE_IMAGE_EVIDENCE_FILE: target/release-dist/fireweed-service-image.txt
+          FIREWEED_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          FIREWEED_RELEASE_DIST: target/release-dist
+          FIREWEED_IMAGE_EVIDENCE_FILE: target/release-dist/fireweed-service-image.txt
         run: |
           bash scripts/ci/deployment-release-gate.sh --finalize-proof
           install -m 0644 \

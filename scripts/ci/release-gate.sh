@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# release-gate.sh — pqueue release evidence gate.
+# release-gate.sh — Fireweed Queue release evidence gate.
 #
 # Crate map after the Phase-6 hexagonal migration (the ONLY crates this gate
-# references): pqueue-core / pqueue-engine / pqueue-projection /
-# pqueue-conformance / pqueue-memory / pqueue-sqlite / pqueue-postgres /
-# pqueue-objectlog / pqueue-resp / pqueue / pqueue-server / pqueue-release /
-# pqueue-bench. The deleted pqueue-service / pqueue-storage / pqueue-kafka
+# references): fireweed-core / fireweed-engine / fireweed-projection /
+# fireweed-conformance / fireweed-memory / fireweed-sqlite / fireweed-postgres /
+# fireweed-objectlog / fireweed-resp / fireweed / fireweed-server / fireweed-release /
+# fireweed-bench. The deleted pre-Fireweed service, storage, and Kafka crates
 # crates are NOT referenced anywhere below.
 #
 # WHAT THIS GATE PROVES:
@@ -17,8 +17,8 @@
 #   - Repository-held TP-003 evidence snapshot contains passing required rows
 #     for AC-TXN-1/2/3/6 on both exact Postgres storage pairs. Fresh generation
 #     is enforced by CI/release workflows.
-#   - Live coverage bars: pqueue-core >=90% line / >=85% branch,
-#     pqueue-engine >=80% line (enforced below; this comment is not the
+#   - Live coverage bars: fireweed-core >=90% line / >=85% branch,
+#     fireweed-engine >=80% line (enforced below; this comment is not the
 #     authority — the check-lcov-coverage.py calls are).
 #
 # The exact-tag freshness attestation is intentionally enforced by the tag workflow, where the resolved tag
@@ -29,7 +29,7 @@ set -euo pipefail
 CARGO="rustup run 1.92.0 cargo"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-TP002_RELEASE_DIR="${PQUEUE_TP002_RELEASE_DIR:-${REPO_ROOT}/target/tp002-release}"
+TP002_RELEASE_DIR="${FIREWEED_TP002_RELEASE_DIR:-${REPO_ROOT}/target/tp002-release}"
 TP002_COMPOSITE_CONTRACT="${TP002_RELEASE_DIR}/composite-contract.json"
 if (($# != 0)); then
     printf 'release-gate.sh: unexpected argument(s): %s\n' "$*" >&2
@@ -49,7 +49,7 @@ for required in "${TP002_COMPOSITE_CONTRACT}"; do
     }
 done
 
-echo "=== pqueue release gate (fresh smoke + governed TP-002 release evidence) ==="
+echo "=== Fireweed Queue release gate (fresh smoke + governed TP-002 release evidence) ==="
 
 echo "--- fmt ---"
 ${CARGO} fmt --all --check
@@ -58,32 +58,33 @@ echo "--- clippy ---"
 ${CARGO} clippy --workspace --all-targets -- -D warnings
 
 echo "--- exact Postgres TP-003 transaction evidence fixtures ---"
-${CARGO} test -p pqueue-release --test transaction_evidence_tests -- --nocapture
+${CARGO} test -p fireweed-release --test transaction_evidence_tests -- --nocapture
 
 echo "--- repository-held Postgres TP-003 transaction evidence snapshot ---"
-${CARGO} run -p pqueue-release --bin pqueue-verify-transaction-evidence -- \
+${CARGO} run -p fireweed-release --bin fireweed-verify-transaction-evidence -- \
     --evidence "${REPO_ROOT}/docs/perf/evidence/tp003-ac-txn-matrix-postgres-storage-pairs.jsonl" \
     --evidence "${REPO_ROOT}/docs/perf/evidence/tp003-ac-txn-parity-postgres-storage-pairs.jsonl"
 
-# A CLEAN ledger dir so stale pre-migration rows in target/pqueue-ledger can
+# A clean ledger directory so stale pre-migration rows in the retained
+# target/pqueue-ledger evidence path can
 # never satisfy the gate. Every suite is pointed at this dir via the env var
-# that pqueue_release::ledger_path() honors.
-PQUEUE_LEDGER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pqueue-ledger.XXXXXX")"
-export PQUEUE_LEDGER_DIR
-trap 'rm -rf "${PQUEUE_LEDGER_DIR}"' EXIT
-echo "--- clean ledger dir: ${PQUEUE_LEDGER_DIR} ---"
+# that fireweed_release::ledger_path() honors.
+FIREWEED_LEDGER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-ledger.XXXXXX")"
+export FIREWEED_LEDGER_DIR
+trap 'rm -rf "${FIREWEED_LEDGER_DIR}"' EXIT
+echo "--- clean ledger dir: ${FIREWEED_LEDGER_DIR} ---"
 
 echo "--- workspace correctness tests ---"
 ${CARGO} test --workspace
 
 echo "--- bench evidence suites (separate workspace; emits E2 smoke rows) ---"
-${CARGO} test --manifest-path "${REPO_ROOT}/crates/pqueue-bench/Cargo.toml" \
+${CARGO} test --manifest-path "${REPO_ROOT}/crates/fireweed-bench/Cargo.toml" \
     --test performance_cross_queue_scale_out_tests \
     --test queue_density_single_node_tests
 
 echo "--- strict validation of any smoke rows emitted by correctness tests ---"
-${CARGO} run -p pqueue-release --bin pqueue-verify-ledger -- \
-    --ledger-dir "${PQUEUE_LEDGER_DIR}" \
+${CARGO} run -p fireweed-release --bin fireweed-verify-ledger -- \
+    --ledger-dir "${FIREWEED_LEDGER_DIR}" \
     --strict \
     --require-smoke-evidence E2,E3
 
@@ -95,29 +96,29 @@ echo "--- live coverage gate ---"
 mkdir -p "${REPO_ROOT}/target/coverage"
 # Clean instrumentation so artifacts from deleted crates can't contaminate.
 ${CARGO} llvm-cov clean --workspace
-${CARGO} llvm-cov --package pqueue-core --lcov \
-    --output-path "${REPO_ROOT}/target/coverage/pqueue-core.lcov"
+${CARGO} llvm-cov --package fireweed-core --lcov \
+    --output-path "${REPO_ROOT}/target/coverage/fireweed-core.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
-    --lcov "${REPO_ROOT}/target/coverage/pqueue-core.lcov" --crate pqueue-core --min-lines 90
+    --lcov "${REPO_ROOT}/target/coverage/fireweed-core.lcov" --crate fireweed-core --min-lines 90
 # cargo-llvm-cov spawns Cargo/rustc subprocesses of its own. Pin the whole
 # subprocess tree to nightly and put the nightly binaries ahead of Homebrew's
 # standalone stable Cargo/rustc; selecting only the outer Cargo allows the
 # nested `rustc` lookup to reject llvm-cov's nightly-only `-Z` branch flags.
 NIGHTLY_BIN="$(dirname "$(rustup which --toolchain nightly rustc)")"
 PATH="${NIGHTLY_BIN}:${PATH}" RUSTUP_TOOLCHAIN=nightly \
-    rustup run nightly cargo llvm-cov --package pqueue-core --branch --lcov \
-    --output-path "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov"
+    rustup run nightly cargo llvm-cov --package fireweed-core --branch --lcov \
+    --output-path "${REPO_ROOT}/target/coverage/fireweed-core-branch.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
-    --lcov "${REPO_ROOT}/target/coverage/pqueue-core-branch.lcov" \
-    --crate pqueue-core --min-lines 90 --min-branches 85
+    --lcov "${REPO_ROOT}/target/coverage/fireweed-core-branch.lcov" \
+    --crate fireweed-core --min-lines 90 --min-branches 85
 ${CARGO} llvm-cov clean --workspace
-for package in pqueue-engine pqueue pqueue-memory pqueue-sqlite; do
+for package in fireweed-engine fireweed fireweed-memory fireweed-sqlite; do
     CARGO_BUILD_JOBS=1 ${CARGO} llvm-cov --no-report --package "${package}"
 done
 ${CARGO} llvm-cov report --lcov \
-    --output-path "${REPO_ROOT}/target/coverage/pqueue-engine.lcov"
+    --output-path "${REPO_ROOT}/target/coverage/fireweed-engine.lcov"
 bash "${SCRIPT_DIR}/check-lcov-coverage.py" \
-    --lcov "${REPO_ROOT}/target/coverage/pqueue-engine.lcov" --crate pqueue-engine --min-lines 80
+    --lcov "${REPO_ROOT}/target/coverage/fireweed-engine.lcov" --crate fireweed-engine --min-lines 80
 
 echo "--- build-closure integrity ---"
 bash "${SCRIPT_DIR}/verify-build-closure.sh" --aggregate pqueue-131eadfa

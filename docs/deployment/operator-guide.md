@@ -35,11 +35,11 @@ unsupported chart combination awaiting an implicit startup check. It is
 env/direct-config-only, intentionally omitted from the chart schema, live-kind
 matrix, and production support contract. Setting
 `storage.projection.backend=hybrid-strict` must fail Helm schema validation; do
-not treat the server's `PQUEUE_PROJECTION_BACKEND=hybrid-strict` wiring as a
+not treat the server's `FIREWEED_PROJECTION_BACKEND=hybrid-strict` wiring as a
 public deployment claim.
 
 `objectlog/hybrid` is the SQLite-first plus hot-memory object-log profile. It
-uses `PQUEUE_SQLITE_PROJECTION_PATH`, treats the object log as the
+uses `FIREWEED_SQLITE_PROJECTION_PATH`, treats the object log as the
 authority, hydrates memory from SQLite `ProjectionImage` before serving from a
 SQLite high-water, and fails closed on memory-apply poisoning. Non-objectlog
 hybrid pairings are unsupported unless a future release explicitly documents and
@@ -52,7 +52,7 @@ pod because its log and projection persistence are not shared.
 `storage.log.objectLog.store=s3` selects the shared S3 object-log profile. Use
 it with `storage.controlPlane.backend=postgres`,
 `storage.projection.backend=sqlite`, `replicaCount > 1`, and
-`persistence.enabled=false`. The chart renders pod-reachable `PQUEUE_ADVERTISE_ADDR`
+`persistence.enabled=false`. The chart renders pod-reachable `FIREWEED_ADVERTISE_ADDR`
 from the pod IP, uses `emptyDir` for the rebuildable SQLite projection, and does
 not render the local object-log path or a shared RWO projection PVC.
 
@@ -64,7 +64,7 @@ object-log tail replay on recovery). Set the async-apply
 debt/backpressure/poison thresholds under `storage.projection.hybridAsync`
 (`applyLagMaxCommands`, `applyDebtMaxBytes`, `applyQueueDepthMax`,
 `oldestUnappliedMaxMs`, `applyPoisonRetryThreshold`); the chart renders them as
-`PQUEUE_HYBRID_ASYNC_*`. Every bound must be `> 0` (a zero bound is instantly
+`FIREWEED_HYBRID_ASYNC_*`. Every bound must be `> 0` (a zero bound is instantly
 backpressured) and the server fails closed at startup otherwise. Only the
 object-log log axis pairs with `hybrid-async`; `memory/hybrid-async`,
 `sqlite/hybrid-async`, and `postgres/hybrid-async` fail at startup.
@@ -172,9 +172,9 @@ queue keys in numeric order.
 An explicit non-empty `bootstrap.queues` list takes precedence over generated
 settings. With neither form configured, the server preserves the `t1:q1`
 default. The corresponding direct environment variables are
-`PQUEUE_BOOTSTRAP_QUEUES`, `PQUEUE_BOOTSTRAP_GENERATED_COUNT`,
-`PQUEUE_BOOTSTRAP_GENERATED_TENANT`, and
-`PQUEUE_BOOTSTRAP_GENERATED_PREFIX`.
+`FIREWEED_BOOTSTRAP_QUEUES`, `FIREWEED_BOOTSTRAP_GENERATED_COUNT`,
+`FIREWEED_BOOTSTRAP_GENERATED_TENANT`, and
+`FIREWEED_BOOTSTRAP_GENERATED_PREFIX`.
 
 ## Verification
 

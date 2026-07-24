@@ -95,6 +95,12 @@ old_deployment_coordinate = re.compile(
     r"app\.kubernetes\.io/name[=:][ \t]*pqueue\b|"
     r'(?:define|include)[ \t]+"pqueue\.'
 )
+old_operational_coordinate = re.compile(
+    r"(?:-p|--package)[ \t]+pqueue(?:-[A-Za-z0-9-]+)?\b|"
+    r"--bin[ \t]+pqueue(?:-[A-Za-z0-9-]+)?\b|"
+    r"crates/pqueue(?:-[A-Za-z0-9-]+)?(?:/|\b)|"
+    r"(?:working-directory|path):[ \t]*pqueue\b"
+)
 text_suffixes = {
     ".c",
     ".css",
@@ -188,6 +194,16 @@ def is_deployment_surface(rel: str) -> bool:
     }
 
 
+def is_current_operational_surface(rel: str) -> bool:
+    return (
+        rel.startswith(".github/workflows/")
+        or rel.startswith("scripts/ci/")
+        or rel.startswith("scripts/release/")
+        or rel.startswith("docs/deployment/")
+        or rel.startswith("docs/operator/")
+    )
+
+
 allowlist = load_allowlist(allowlist_path)
 violations = []
 rust_namespace_violations = []
@@ -217,6 +233,11 @@ for rel in tracked_files():
         if found:
             deployment_namespace_violations.append(
                 (rel, line_no, "old deployment coordinate", found.group(0))
+            )
+        found = old_operational_coordinate.search(line) if is_current_operational_surface(rel) else None
+        if found:
+            deployment_namespace_violations.append(
+                (rel, line_no, "old operational coordinate", found.group(0))
             )
         if (rel == "Cargo.toml" or rel == "Cargo.lock" or rel.endswith("/Cargo.toml") or rel.endswith("/Cargo.lock")):
             found = old_cargo_coordinate.search(line)

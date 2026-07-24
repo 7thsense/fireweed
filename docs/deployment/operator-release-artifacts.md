@@ -118,9 +118,9 @@ The gate writes:
 - `target/deployment-release-gate/release-dist/`
 
 The JSON proof records the commit SHA, Helm chart version and package path,
-container image tag/digest when supplied by `PQUEUE_IMAGE_TAG`,
-`PQUEUE_IMAGE_DIGEST`, `PQUEUE_IMAGE_COORDINATE`, or
-`PQUEUE_IMAGE_EVIDENCE_FILE`, every command and exit status, the storage
+container image tag/digest when supplied by `FIREWEED_IMAGE_TAG`,
+`FIREWEED_IMAGE_DIGEST`, `FIREWEED_IMAGE_COORDINATE`, or
+`FIREWEED_IMAGE_EVIDENCE_FILE`, every command and exit status, the storage
 combination matrix, local Docker/kind skips, and supporting artifact paths. If image
 coordinates are unavailable in a local non-release run, the image fields are
 recorded as `unavailable` and the gate can still pass non-cluster checks.

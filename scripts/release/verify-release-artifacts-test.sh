@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pqueue-release-artifacts-test.XXXXXX")"
+DIST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-release-artifacts-test.XXXXXX")"
 trap 'rm -rf "${DIST_DIR}"' EXIT
 
 VERSION="0.0.0-test"

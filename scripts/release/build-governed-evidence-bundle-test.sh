@@ -50,8 +50,8 @@ apply_fake_rustup() {
     'args=("$@")' \
     'value_after() { local wanted="$1"; shift; while (($#)); do if [[ "$1" == "$wanted" ]]; then printf "%s" "$2"; return; fi; shift; done; exit 2; }' \
     'case " $* " in' \
-    '  *" --bin pqueue-build-e3-contract "*) out="$(value_after --out "${args[@]}")"; printf "{\"schema_version\":1}\n" >"$out" ;;' \
-    '  *" --bin pqueue-build-evidence-attestation "*) out="$(value_after --out "${args[@]}")"; commit="$(value_after --commit "${args[@]}")"; printf "{\"source\":{\"commit\":\"%s\"}}\n" "$commit" >"$out" ;;' \
+    '  *" --bin fireweed-build-e3-contract "*) out="$(value_after --out "${args[@]}")"; printf "{\"schema_version\":1}\n" >"$out" ;;' \
+    '  *" --bin fireweed-build-evidence-attestation "*) out="$(value_after --out "${args[@]}")"; commit="$(value_after --commit "${args[@]}")"; printf "{\"source\":{\"commit\":\"%s\"}}\n" "$commit" >"$out" ;;' \
     'esac' >"$path"
   chmod +x "$path"
 }
@@ -122,7 +122,7 @@ expect_failure wrong_revision env PATH="$CASE_ROOT/wrong-revision/bin:$PATH" \
   --out "$CASE_ROOT/wrong-revision/tp002-release" --revision "$wrong_revision"
 
 make_inputs "$CASE_ROOT/outside"
-outside="$(mktemp -d "${TMPDIR:-/tmp}/pqueue-governed-archive-outside.XXXXXX")"
+outside="$(mktemp -d "${TMPDIR:-/tmp}/fireweed-governed-archive-outside.XXXXXX")"
 trap 'rm -rf "$CASE_ROOT" "$outside"' EXIT
 expect_failure outside_repo env PATH="$CASE_ROOT/outside/bin:$PATH" \
   bash "$SCRIPT_DIR/build-governed-evidence-bundle.sh" \

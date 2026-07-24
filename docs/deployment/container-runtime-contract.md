@@ -7,39 +7,44 @@ The release image entrypoint is `fireweed-service`, the RESP server built from
 
 | Key | Required | Default | Meaning |
 |-----|----------|---------|---------|
-| `PQUEUE_LISTEN_ADDR` | no | `0.0.0.0:8080` | RESP listen address. |
-| `PQUEUE_LOG_BACKEND` | no | `objectlog` | Log backend axis: `objectlog`, `postgres`, `sqlite`, or `memory`. |
-| `PQUEUE_PROJECTION_BACKEND` | no | `inmemory` | Projection backend axis: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or `postgres`. |
-| `PQUEUE_OBJECT_LOG_ROOT` | when log is `objectlog` | `/var/lib/pqueue/object-log` | Local object-log root. |
-| `PQUEUE_SQLITE_LOG_PATH` | when log is `sqlite` | `/var/lib/pqueue/pqueue-log.db` | Local SQLite log path. |
-| `PQUEUE_SQLITE_PROJECTION_PATH` | when projection is `sqlite`, `hybrid`, or `hybrid-async` | `/var/lib/pqueue/pqueue-projection.db` | Local SQLite materialized projection path for `objectlog/sqlite`, the SQLite-first durable image for `objectlog/hybrid`, and the asynchronous durable checkpoint image for `objectlog/hybrid-async`. |
-| `PQUEUE_OBJECT_LOG_MODE` | no | `file` | `objectlog` substrate: `file` (per-command) or `segmented` (group-commit, the production form). |
-| `PQUEUE_SEGMENT_TARGET_BYTES` | no | `262144` | `segmented`: byte-size seal trigger. |
-| `PQUEUE_SEGMENT_MAX_LATENCY_MS` | no | `20` | `segmented`: latency seal trigger and implementation of the object-log commit-latency-bound knob (`max_commit_latency_ms`). Lower values reduce mutation latency and increase object/log request cost; higher values improve batch density and increase latency. This knob must not weaken transaction integrity. |
-| `PQUEUE_SEGMENT_WRITER_FORMAT` | no | `v2` | Durable format for newly sealed segments. Exact lowercase values `v2` and `v3` are accepted; empty, mixed-case, numeric, and unknown values fail startup. Readers always accept arbitrarily interleaved v2/v3 history. Release N keeps v2 as the rollout-safe default and permits opt-in v3 soak. After the first v3 commit, downgrading to a binary without v3 read support is unsafe until every v3 object ages out; switching this setting back to v2 is supported and does not rewrite committed objects. |
-| `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` | no | `1000000` | `objectlog/sqlite`, `objectlog/hybrid`, and `objectlog/hybrid-async` recovery-window budget. A reopen recovers from the SQLite projection snapshot/image + its recorded high-water and replays only the object-log tail beyond it (not the full genesis log). A tail longer than this budget is logged as a recovery-window warning (the projection has fallen far behind the durable log). |
-| `PQUEUE_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS` | no | `100000` | `objectlog/hybrid-async`: hard cap on committed command sequences the durable SQLite checkpoint may trail the object-log head before backpressure. Must be `> 0`; a zero bound fails closed at startup. |
-| `PQUEUE_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES` | no | `536870912` | `objectlog/hybrid-async`: hard cap on retained object-log bytes not yet trimmable via async apply. Must be `> 0`. |
-| `PQUEUE_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX` | no | `1024` | `objectlog/hybrid-async`: hard cap on sealed segment batches awaiting async SQLite apply. Must be `> 0`. |
-| `PQUEUE_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS` | no | `60000` | `objectlog/hybrid-async`: hard cap on the age of the oldest unapplied committed command. Must be `> 0`. |
-| `PQUEUE_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD` | no | `3` | `objectlog/hybrid-async`: consecutive failed SQLite apply attempts for a batch that trip fail-closed poison. Must be `> 0`. |
-| `PQUEUE_POSTGRES_LOG_DATABASE_URL` | when log is `postgres` (Helm) | _(none)_ | The DSN the Helm postgres/Lakebase profile renders from the log-backend Secret. Takes precedence over `PQUEUE_PG_URL`. A libpq URL **or** `key=value` DSN, with a native password; `sslmode=require` selects the native-tls path. |
-| `PQUEUE_PG_URL` | when log is `postgres` (local/dev) | `postgres://postgres@127.0.0.1:5432/postgres` | libpq/postgres connection string (URL or `key=value` DSN) for the `postgres/inmemory` backend; the fallback when `PQUEUE_POSTGRES_LOG_DATABASE_URL` is unset. With `sslmode=require` (or `prefer`) the binary must be built `--features postgres,tls` to connect over native-tls; on a non-tls build an `sslmode=require` DSN fails closed at startup (no plaintext downgrade). |
-| `DATABRICKS_HOST`, `DATABRICKS_DATABASE_INSTANCE_NAME`, `DATABRICKS_CLIENT_ID`+`DATABRICKS_CLIENT_SECRET` (service principal) or `DATABRICKS_TOKEN`+`PQUEUE_DATABRICKS_POSTGRES_USER` (PAT) | when using Databricks Lakebase credentials | _(none)_ | Optional Databricks credential injection for the `postgres` backend: when `DATABRICKS_HOST` is set, a service-principal/PAT credential provider supplies the postgres user/password at connect instead of the DSN password. |
-| `PQUEUE_BOOTSTRAP_QUEUES` | no | `t1:q1` | Comma-separated `tenant:queue` bootstrap list. A non-empty value takes precedence over generated inventory settings. |
-| `PQUEUE_BOOTSTRAP_GENERATED_COUNT` | no | _(none)_ | Generate this many bootstrap queues in deterministic numeric order. Valid range: 1–10,000. When absent, generation is disabled. |
-| `PQUEUE_BOOTSTRAP_GENERATED_TENANT` | no | `t1` | Tenant for generated bootstrap queues. |
-| `PQUEUE_BOOTSTRAP_GENERATED_PREFIX` | no | `q` | Queue prefix for generated bootstrap queues (`q0`, `q1`, … with the default). |
-| `PQUEUE_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
+| `FIREWEED_LISTEN_ADDR` | no | `0.0.0.0:8080` | RESP listen address. |
+| `FIREWEED_LOG_BACKEND` | no | `objectlog` | Log backend axis: `objectlog`, `postgres`, `sqlite`, or `memory`. |
+| `FIREWEED_PROJECTION_BACKEND` | no | `inmemory` | Projection backend axis: `inmemory`, `sqlite`, `hybrid`, `hybrid-async`, or `postgres`. |
+| `FIREWEED_OBJECT_LOG_ROOT` | when log is `objectlog` | `/var/lib/pqueue/object-log` | Local object-log root. |
+| `FIREWEED_SQLITE_LOG_PATH` | when log is `sqlite` | `/var/lib/pqueue/pqueue-log.db` | Local SQLite log path. |
+| `FIREWEED_SQLITE_PROJECTION_PATH` | when projection is `sqlite`, `hybrid`, or `hybrid-async` | `/var/lib/pqueue/pqueue-projection.db` | Local SQLite materialized projection path for `objectlog/sqlite`, the SQLite-first durable image for `objectlog/hybrid`, and the asynchronous durable checkpoint image for `objectlog/hybrid-async`. |
+| `FIREWEED_OBJECT_LOG_MODE` | no | `file` | `objectlog` substrate: `file` (per-command) or `segmented` (group-commit, the production form). |
+| `FIREWEED_SEGMENT_TARGET_BYTES` | no | `262144` | `segmented`: byte-size seal trigger. |
+| `FIREWEED_SEGMENT_MAX_LATENCY_MS` | no | `20` | `segmented`: latency seal trigger and implementation of the object-log commit-latency-bound knob (`max_commit_latency_ms`). Lower values reduce mutation latency and increase object/log request cost; higher values improve batch density and increase latency. This knob must not weaken transaction integrity. |
+| `FIREWEED_SEGMENT_WRITER_FORMAT` | no | `v2` | Durable format for newly sealed segments. Exact lowercase values `v2` and `v3` are accepted; empty, mixed-case, numeric, and unknown values fail startup. Readers always accept arbitrarily interleaved v2/v3 history. Release N keeps v2 as the rollout-safe default and permits opt-in v3 soak. After the first v3 commit, downgrading to a binary without v3 read support is unsafe until every v3 object ages out; switching this setting back to v2 is supported and does not rewrite committed objects. |
+| `FIREWEED_RECOVERY_MAX_TAIL_COMMANDS` | no | `1000000` | `objectlog/sqlite`, `objectlog/hybrid`, and `objectlog/hybrid-async` recovery-window budget. A reopen recovers from the SQLite projection snapshot/image + its recorded high-water and replays only the object-log tail beyond it (not the full genesis log). A tail longer than this budget is logged as a recovery-window warning (the projection has fallen far behind the durable log). |
+| `FIREWEED_HYBRID_ASYNC_APPLY_LAG_MAX_COMMANDS` | no | `100000` | `objectlog/hybrid-async`: hard cap on committed command sequences the durable SQLite checkpoint may trail the object-log head before backpressure. Must be `> 0`; a zero bound fails closed at startup. |
+| `FIREWEED_HYBRID_ASYNC_APPLY_DEBT_MAX_BYTES` | no | `536870912` | `objectlog/hybrid-async`: hard cap on retained object-log bytes not yet trimmable via async apply. Must be `> 0`. |
+| `FIREWEED_HYBRID_ASYNC_APPLY_QUEUE_DEPTH_MAX` | no | `1024` | `objectlog/hybrid-async`: hard cap on sealed segment batches awaiting async SQLite apply. Must be `> 0`. |
+| `FIREWEED_HYBRID_ASYNC_OLDEST_UNAPPLIED_MAX_MS` | no | `60000` | `objectlog/hybrid-async`: hard cap on the age of the oldest unapplied committed command. Must be `> 0`. |
+| `FIREWEED_HYBRID_ASYNC_APPLY_POISON_RETRY_THRESHOLD` | no | `3` | `objectlog/hybrid-async`: consecutive failed SQLite apply attempts for a batch that trip fail-closed poison. Must be `> 0`. |
+| `FIREWEED_POSTGRES_LOG_DATABASE_URL` | when log is `postgres` (Helm) | _(none)_ | The DSN the Helm postgres/Lakebase profile renders from the log-backend Secret. Takes precedence over `FIREWEED_PG_URL`. A libpq URL **or** `key=value` DSN, with a native password; `sslmode=require` selects the native-tls path. |
+| `FIREWEED_PG_URL` | when log is `postgres` (local/dev) | `postgres://postgres@127.0.0.1:5432/postgres` | libpq/postgres connection string (URL or `key=value` DSN) for the `postgres/inmemory` backend; the fallback when `FIREWEED_POSTGRES_LOG_DATABASE_URL` is unset. With `sslmode=require` (or `prefer`) the binary must be built `--features postgres,tls` to connect over native-tls; on a non-tls build an `sslmode=require` DSN fails closed at startup (no plaintext downgrade). |
+| `DATABRICKS_HOST`, `DATABRICKS_DATABASE_INSTANCE_NAME`, `DATABRICKS_CLIENT_ID`+`DATABRICKS_CLIENT_SECRET` (service principal) or `DATABRICKS_TOKEN`+`FIREWEED_DATABRICKS_POSTGRES_USER` (PAT) | when using Databricks Lakebase credentials | _(none)_ | Optional Databricks credential injection for the `postgres` backend: when `DATABRICKS_HOST` is set, a service-principal/PAT credential provider supplies the postgres user/password at connect instead of the DSN password. |
+| `FIREWEED_BOOTSTRAP_QUEUES` | no | `t1:q1` | Comma-separated `tenant:queue` bootstrap list. A non-empty value takes precedence over generated inventory settings. |
+| `FIREWEED_BOOTSTRAP_GENERATED_COUNT` | no | _(none)_ | Generate this many bootstrap queues in deterministic numeric order. Valid range: 1–10,000. When absent, generation is disabled. |
+| `FIREWEED_BOOTSTRAP_GENERATED_TENANT` | no | `t1` | Tenant for generated bootstrap queues. |
+| `FIREWEED_BOOTSTRAP_GENERATED_PREFIX` | no | `q` | Queue prefix for generated bootstrap queues (`q0`, `q1`, … with the default). |
+| `FIREWEED_RECLAIM_INTERVAL_MS` | no | `1000` | Reclaim tick interval. |
+
+The v0.20.0 runtime also accepts matching `PQUEUE_*` names as temporary
+compatibility aliases; when both forms are set, `FIREWEED_*` wins. The
+`/var/lib/pqueue` paths and `pqueue_*` database identifiers are intentionally
+retained persistence names, not public product coordinates.
 
 The current server composition root wires `memory/inmemory`, `sqlite/inmemory`,
 `objectlog/inmemory`, `objectlog/sqlite`, `objectlog/hybrid`, and
-`objectlog/hybrid-async` unconditionally. `PQUEUE_LOG_BACKEND=objectlog` with
-`PQUEUE_PROJECTION_BACKEND=hybrid` uses the same
-`PQUEUE_SQLITE_PROJECTION_PATH` as `sqlite` and the generic segmented
-object-log group-commit runtime. `PQUEUE_PROJECTION_BACKEND=hybrid-async` runs
+`objectlog/hybrid-async` unconditionally. `FIREWEED_LOG_BACKEND=objectlog` with
+`FIREWEED_PROJECTION_BACKEND=hybrid` uses the same
+`FIREWEED_SQLITE_PROJECTION_PATH` as `sqlite` and the generic segmented
+object-log group-commit runtime. `FIREWEED_PROJECTION_BACKEND=hybrid-async` runs
 the same object-log + hybrid substrate under its canonical profile name, carrying
-the `PQUEUE_HYBRID_ASYNC_*` async-apply debt/backpressure/poison thresholds
+the `FIREWEED_HYBRID_ASYNC_*` async-apply debt/backpressure/poison thresholds
 (manifest commit + synchronous in-memory apply/render is the success barrier; the
 durable SQLite image is an asynchronous checkpoint that may lag). Only the
 object-log log axis pairs with `hybrid-async`; `memory/hybrid-async`,
@@ -58,12 +63,14 @@ unsupported-storage message.
 
 Lakebase is a **real runtime path**, not render-only: build the service image with the
 `tls` feature and point it at the rendered DSN. The Helm postgres/Lakebase profile
-renders the DSN Secret as `PQUEUE_POSTGRES_LOG_DATABASE_URL` (consumed in preference
-to `PQUEUE_PG_URL`). A `key=value` or URL DSN with `sslmode=require` connects over the
+currently renders the DSN Secret through the temporary
+`PQUEUE_POSTGRES_LOG_DATABASE_URL` compatibility alias (consumed in preference to
+`FIREWEED_PG_URL`). The chart deployment owner removes that alias when the rendered
+environment migration lands. A `key=value` or URL DSN with `sslmode=require` connects over the
 native-tls connector; an `sslmode=require` DSN on a non-tls build fails closed at
 startup (it never silently downgrades to plaintext). When `DATABRICKS_HOST` and the
 service-principal (`DATABRICKS_CLIENT_ID`/`DATABRICKS_CLIENT_SECRET`) or PAT
-(`DATABRICKS_TOKEN`/`PQUEUE_DATABRICKS_POSTGRES_USER`) envs are present, a credential
+(`DATABRICKS_TOKEN`/`FIREWEED_DATABRICKS_POSTGRES_USER`) envs are present, a credential
 provider injects the postgres user/password at connect instead of the DSN password.
 
 Build the TLS image with the documented build arg:
@@ -72,7 +79,7 @@ Build the TLS image with the documented build arg:
 docker build --build-arg CARGO_FEATURES=tls -t fireweed-service:tls .
 ```
 
-(or `PQUEUE_FEATURES=tls scripts/release/package-binaries.sh` for the binary tarball).
+(or `FIREWEED_FEATURES=tls scripts/release/package-binaries.sh` for the binary tarball).
 The runtime image installs `ca-certificates` + `libssl3` so the native-tls connector
 can verify the Lakebase server certificate. This wires the connection path only; the
 live Lakebase provider-certification run remains separate (`pqueue-ea625701`).
@@ -80,7 +87,7 @@ live Lakebase provider-certification run remains separate (`pqueue-ea625701`).
 ## Transaction and Storage-Combination Contract
 
 The storage axes are implementation choices, not API variants. Any executable
-combination MUST preserve the same native pqueue transaction contract:
+combination MUST preserve the same native Fireweed transaction contract:
 
 - a successful mutating response means accepted effects are durable and visible
   to subsequent reads, claims, idempotency replay, and restart recovery;
@@ -116,7 +123,7 @@ genesis log. Because the high-water only advances with the projection apply, it
 can never lead what is durably materialized; a crash between an object-log
 commit and its projection apply leaves the uncommitted tail to be replayed
 (idempotently — an already-applied prefix is skipped, never double-applied), so
-restart preserves committed state. `PQUEUE_RECOVERY_MAX_TAIL_COMMANDS` bounds the
+restart preserves committed state. `FIREWEED_RECOVERY_MAX_TAIL_COMMANDS` bounds the
 expected tail and warns when exceeded. The `segmented` substrate realizes the
 genuine bounded-tail I/O saving; the `file` substrate resumes apply at the
 high-water (it remains the per-command smoke reference).
