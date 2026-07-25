@@ -37,8 +37,15 @@ impl SecretRedactor {
         let mut values = Vec::new();
         if let Some(pg) = postgres {
             values.push(pg.url.clone());
-            if let Some(authority) = pg.url.split("://").nth(1).and_then(|v| v.split('@').next()) {
-                values.extend(authority.split(':').map(str::to_owned));
+            if let Some(password) = pg
+                .url
+                .split("://")
+                .nth(1)
+                .and_then(|value| value.split('@').next())
+                .and_then(|userinfo| userinfo.split_once(':'))
+                .map(|(_, password)| password.to_owned())
+            {
+                values.push(password);
             }
         }
         if let Some(store) = s3 {
@@ -393,6 +400,11 @@ mod tests {
             redactor_fixture()
                 .validate_serialized_evidence(b"secret-key")
                 .is_err()
+        );
+        assert!(
+            redactor_fixture()
+                .validate_serialized_evidence(b"fireweed alice")
+                .is_ok()
         );
     }
 
