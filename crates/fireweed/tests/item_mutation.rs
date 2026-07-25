@@ -213,6 +213,7 @@ async fn selector_first_match_invalidates_lease_and_retained_terminal_can_be_pur
                                     value: EntityPredicateValue::Value(serde_json::json!("job")),
                                 }],
                             },
+                            predicates: vec![],
                             lease_guard: LeaseGuard::Match(
                                 claimed.lease_token.clone().expect("item lease token"),
                             ),
@@ -227,6 +228,7 @@ async fn selector_first_match_invalidates_lease_and_retained_terminal_can_be_pur
                                 scope: ItemSelectorScope::Live,
                                 predicates: vec![],
                             },
+                            predicates: vec![],
                             lease_guard: LeaseGuard::InvalidateActive,
                             patch: ItemPatch {
                                 lifecycle: LifecyclePatch::SetFailed,
@@ -302,6 +304,7 @@ async fn selector_first_match_invalidates_lease_and_retained_terminal_can_be_pur
                                 fireweed::ItemState::Complete,
                             ])],
                         },
+                        predicates: vec![],
                         lease_guard: LeaseGuard::RejectActive,
                         patch: ItemPatch {
                             lifecycle: LifecyclePatch::Purge,
@@ -403,6 +406,76 @@ async fn active_lease_boundary_and_composed_predicates_use_evaluated_at() {
         fireweed.claim(&queue, 1, 1_000).await.unwrap()[0].item_id,
         item_id
     );
+}
+
+#[tokio::test]
+async fn selector_precondition_failure_keeps_first_match_ownership() {
+    let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+    let queue = create(&fireweed, "selector-precondition").await;
+    let key = ClientItemKey::new("selector-precondition-item").unwrap();
+    fireweed
+        .push(
+            &queue,
+            NewItem {
+                client_item_key: Some(key.clone()),
+                entity: Some(serde_json::json!({"kind": "job"})),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let response = fireweed
+        .mutate_items(
+            &queue,
+            ItemMutationRequest {
+                request_id: RequestId::new("selector-precondition-first-match").unwrap(),
+                evaluated_at: ts(10),
+                dry_run: false,
+                returning: ItemMutationReturning::Identity,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::SelectFirst {
+                    clauses: vec![
+                        SelectedMutation {
+                            selector_id: "first".into(),
+                            selector: ItemSelector {
+                                scope: ItemSelectorScope::Live,
+                                predicates: vec![ItemPredicate::EntityEq {
+                                    pointer: "/kind".into(),
+                                    value: EntityPredicateValue::Value(serde_json::json!("job")),
+                                }],
+                            },
+                            predicates: vec![ItemPredicate::AttemptCountEq(99)],
+                            lease_guard: LeaseGuard::RejectActive,
+                            patch: ItemPatch {
+                                lifecycle: LifecyclePatch::SetFailed,
+                                ..Default::default()
+                            },
+                        },
+                        SelectedMutation {
+                            selector_id: "second".into(),
+                            selector: ItemSelector {
+                                scope: ItemSelectorScope::Live,
+                                predicates: vec![],
+                            },
+                            predicates: vec![],
+                            lease_guard: LeaseGuard::RejectActive,
+                            patch: ItemPatch {
+                                lifecycle: LifecyclePatch::SetFailed,
+                                ..Default::default()
+                            },
+                        },
+                    ],
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.results[0].selector_id.as_deref(), Some("first"));
+    assert!(matches!(
+        response.results[0].outcome,
+        ItemMutationOutcome::PreconditionFailed(fireweed::ItemMutationPrecondition::Predicate)
+    ));
+    assert!(fireweed.live_item(&queue, key).await.unwrap().is_some());
 }
 
 #[cfg(feature = "objectlog")]

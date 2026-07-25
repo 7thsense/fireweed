@@ -3029,13 +3029,24 @@ impl ProjectionData {
                         continue;
                     };
                     selectors[selector_index].matched += 1;
-                    let (outcome, command) = self.plan_record_mutation(
-                        record,
-                        &clause.lease_guard,
-                        &clause.patch,
-                        request.evaluated_at,
-                        request.dry_run,
-                    )?;
+                    let (outcome, command) = if clause.predicates.iter().all(|predicate| {
+                        mutation_predicate_matches(record, predicate, request.evaluated_at)
+                    }) {
+                        self.plan_record_mutation(
+                            record,
+                            &clause.lease_guard,
+                            &clause.patch,
+                            request.evaluated_at,
+                            request.dry_run,
+                        )?
+                    } else {
+                        (
+                            ItemMutationOutcome::PreconditionFailed(
+                                ItemMutationPrecondition::Predicate,
+                            ),
+                            None,
+                        )
+                    };
                     update_selector_aggregate(&mut selectors[selector_index], &outcome);
                     if let Some(command) = command {
                         commands.push(command);
