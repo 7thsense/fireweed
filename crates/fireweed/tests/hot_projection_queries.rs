@@ -190,7 +190,8 @@ async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&memory_fireweed).await;
+    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&memory_fireweed)
+        .await;
 
     let sqlite_path = std::env::temp_dir()
         .join(format!(
@@ -205,7 +206,8 @@ async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
-    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&sqlite_fireweed).await;
+    assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim(&sqlite_fireweed)
+        .await;
 }
 
 #[tokio::test]

@@ -518,8 +518,7 @@ async fn composed_objectlog_supports_atomic_upsert() {
     let second = fireweed.upsert(&q, key, at(3)).await.unwrap();
     match second {
         fireweed_engine::UpsertOutcome::Replaced {
-            superseded_item_id,
-            ..
+            superseded_item_id, ..
         } => assert_eq!(superseded_item_id, first_id),
         other => panic!("second upsert must replace, got {other:?}"),
     }
@@ -891,7 +890,10 @@ async fn composed_objectlog_supports_read_your_write_field_mutation() {
         .await
         .unwrap()
         .expect("updated item remains live");
-    assert_eq!(live.fields.get("state").map(Bytes::as_ref), Some(&b"ready"[..]));
+    assert_eq!(
+        live.fields.get("state").map(Bytes::as_ref),
+        Some(&b"ready"[..])
+    );
     assert_eq!(live.payload.as_deref(), Some(&b"updated"[..]));
     let _ = std::fs::remove_dir_all(&root);
 }
