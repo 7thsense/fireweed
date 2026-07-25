@@ -177,7 +177,7 @@ backend, but the per-segment projection write is a cheap in-memory `ProjectionDa
 command instead of a batched SQLite transaction. Durable boundary is unchanged (the sealed segment + manifest
 entry); the projection is a derived view **rebuilt by `read_all` replay** in `create_queue` on open. Wired
 config-flagged: `FIREWEED_OBJECT_LOG_MODE=segmented` + `FIREWEED_PROJECTION_BACKEND=inmemory` selects it (the file
-`ObjectLogBackend` remains the `objectlog`+`inmemory`+`file` path). **Recovery verified live:** push 3,000
+the supported composed backend remains the `objectlog`+`inmemory`+`file` path). **Recovery verified live:** push 3,000
 items → `XLEN 3000`; restart the container against the **same** volume → `XLEN 3000` (replayed from the log).
 
 ### Single-node measurement (one segmented node, container on the bridge, tmpfs, 12-core box)

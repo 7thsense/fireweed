@@ -28,8 +28,8 @@ fencing), TD-007 (durability), ADR-015 (full-async storage boundaries). Conforma
 
 ## Context
 
-Every driven backend today is a **monolith**. `MemoryBackend`, `SqliteBackend`, `ObjectLogBackend`,
-`PostgresBackend`, and the two relational backends each bundle a specific command **log** with a specific
+The original driven backends were **monoliths**. `MemoryBackend`, `SqliteBackend`, `PostgresBackend`,
+and the two relational backends each bundle a specific command **log** with a specific
 **projection** and re-implement *every* engine port over that pair. The orchestration logic (claim,
 push, upsert, finalize, renew, reassign, purge, update-fields, reclaim, tick) is then duplicated almost
 verbatim across crates: compare `fireweed-memory/src/lib.rs` and `fireweed-sqlite/src/lib.rs` — they differ

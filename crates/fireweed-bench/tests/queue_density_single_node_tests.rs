@@ -25,7 +25,7 @@
 //!
 //! The DURABLE-backend density point (B3.2) is covered by a SEPARATE test in this same file,
 //! [`queue_density_single_node_durable_tests`]: it runs the SAME 0->100->1000 residency ladder on the DURABLE
-//! substrates the library facade exposes — the durable local-fs object-log authority (`ObjectLogBackend`, the
+//! substrates the library facade exposes — the durable local-fs object-log authority (the composed object-log
 //! LOG axis of the production `object_log_sqlite_projection` runtime) AND a durable command LOG + derived
 //! on-disk SQLite PROJECTION (`composed_sqlite_log_sqlite_projection`, the projection axis that runtime
 //! materializes into) — plus, when a live DB is present, a reduced postgres point. It proves >=1000 DURABLE
@@ -437,7 +437,7 @@ fn queue_density_single_node_tests() {
 //
 // Two durable substrates together cover the durable projection substrate the
 // production `object_log_sqlite_projection` runtime is built from:
-//   - `object_log`: `ObjectLogBackend` — the durable local-fs OBJECT-LOG authority (segments written to
+//   - `object_log`: composed object-log backend — the durable local-fs OBJECT-LOG authority (segments written to
 //     disk), the LOG axis of the production `object_log_sqlite_projection` runtime;
 //   - `sqlite_log_sqlite_projection`: `composed_sqlite_log_sqlite_projection` — a durable command LOG paired
 //     with the DERIVED on-disk SQLite PROJECTION (`SqliteProjectionStore`), the SAME projection axis the
@@ -550,7 +550,7 @@ fn queue_density_single_node_durable_tests() {
 
     // ---- Durable substrate 1: the object-log authority (durable local-fs LOG axis) ----
     let ol_points = run_durable_ladder(
-        "object_log (ObjectLogBackend, durable local-fs segments)",
+        "object_log (composed backend, durable local-fs segments)",
         &densities,
         |cleanup| {
             let dir = durable_tmp("objectlog");
@@ -701,7 +701,7 @@ fn queue_density_single_node_durable_tests() {
         "object_log",
         cmd,
         &format!(
-            "in-process single node, durable local-fs object-log authority (ObjectLogBackend, segments on disk) — the LOG axis of the production object_log_sqlite_projection runtime; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
+            "in-process single node, durable local-fs composed object-log authority (segments on disk) — the LOG axis of the production object_log_sqlite_projection runtime; durable per-queue pending seed cold_each={DURABLE_COLD_EACH}, hot_items={DURABLE_HOT_ITEMS}, batch={DURABLE_BATCH}; residency ladder 0->100->1000 durable co-resident queues"
         ),
         full_bar,
         &ol_points,

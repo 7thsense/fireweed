@@ -9,10 +9,8 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
-# Driven adapter (EVENTUAL-APPLY durability class): the command log is a set of immutable per-command
-# objects on an object store (a local filesystem stands in for S3 here — no server). The projection is
-# the shared `fireweed-projection` materialization, rebuilt from the object log. Upsert (atomic XDEL+XADD)
-# is NOT offered on this class (Invariant 2) and returns `-ERR fireweed unavailable`.
+# Object-log primitives and supported composed object-log profiles. A local filesystem supplies the
+# log-only test substrate; production composition uses the segmented object log with an explicit projection.
 [dependencies]
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
@@ -55,10 +53,6 @@ path = "tests/conformance.rs"
 [[test]]
 name = "durability"
 path = "tests/durability.rs"
-
-[[test]]
-name = "reconnect_smoke"
-path = "tests/reconnect_smoke.rs"
 
 [[test]]
 name = "object_log_commit_recovery_tests"

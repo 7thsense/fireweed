@@ -4,7 +4,7 @@
 //! ([`SegmentedObjectLog`]`<`[`LocalFsBlobStore`]`>`) as a [`fireweed_engine::LogStore`], so the orthogonal
 //! [`ComposedBackend`] can assemble an object-log backend as `ObjectLog × InMemoryProjection ×
 //! InProcessControlPlane` — the eventual-apply log-replay composition that inherits the shared conformance
-//! suite, identical to the monolithic `ObjectLogBackend`.
+//! suite using the backend-opaque composed profile.
 //!
 //! ## Group-commit ack-after-seal inside `LogStore::append`
 //!
@@ -910,7 +910,7 @@ impl LogStore for ObjectLog {
 
 /// The composed object-log backend: `ComposedBackend<ObjectLog, InMemoryProjection, ObjectLog>`
 /// — the eventual-apply log-replay composition (ADR-012 Phase 1b-i), capability-equivalent to the
-/// monolithic `ObjectLogBackend`.
+/// supported composed object-log profile.
 pub type ComposedObjectLogBackend = ComposedBackend<ObjectLog, InMemoryProjection, ObjectLog>;
 
 /// Assemble a composed object-log backend rooted at `root`. Runs recovery-on-open (ADR-012 P2): a reopen

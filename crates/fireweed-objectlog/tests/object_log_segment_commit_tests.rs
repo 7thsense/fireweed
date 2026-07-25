@@ -7,13 +7,10 @@ use fireweed_core::{
     EligibilityPolicy, ItemId, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
 };
-use fireweed_engine::LogStore;
-use fireweed_engine::{
-    ControlPlaneStore, EngineError, MaintenanceStopReason, ProjectionRead, PushCommand,
-    QueueCommand,
-};
+use fireweed_engine::{EngineError, MaintenanceStopReason, PushCommand, QueueCommand};
+use fireweed_engine::{LogRead, LogStore};
 use fireweed_objectlog::{
-    FaultCutPoint, FaultHook, LocalObjectLog, ObjectLog, ObjectLogBackend, ObjectLogSegmentConfig,
+    FaultCutPoint, FaultHook, LocalObjectLog, ObjectLog, ObjectLogSegmentConfig,
 };
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -202,11 +199,16 @@ async fn segmented_commands_wait_for_manifest_commit() {
         "two durable segment objects for three commands at max=2"
     );
 
-    let reopened = ObjectLogBackend::open(&root).expect("reopen");
+    let reopened = LocalObjectLog::open(&root).expect("reopen");
     assert_eq!(
-        reopened.metrics(&shard).await.unwrap().pending,
+        reopened
+            .read_from(&shard, None, 10)
+            .await
+            .unwrap()
+            .entries
+            .len(),
         3,
-        "reopen must rebuild the committed segment contents"
+        "reopen must expose the committed segment contents"
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -256,10 +258,15 @@ async fn segment_manifest_cas_fences_concurrent_writers() {
         "only the fenced-in writer should commit a segment"
     );
 
-    let reopened = ObjectLogBackend::open(&root).expect("reopen");
-    assert_eq!(reopened.current_epoch(&shard).await.unwrap(), 1);
+    let reopened = LocalObjectLog::open(&root).expect("reopen");
+    assert_eq!(reopened.current_epoch(&shard).unwrap(), 1);
     assert_eq!(
-        reopened.metrics(&shard).await.unwrap().pending,
+        reopened
+            .read_from(&shard, None, 10)
+            .await
+            .unwrap()
+            .entries
+            .len(),
         1,
         "only one committed command should be recovered"
     );

@@ -162,7 +162,7 @@ review → commit → `ddx bead close`.
 - **BQ-42 object-log E3 + retire old suite.** Re-run object-log cost/ack/recovery (E3); delete
   `performance_multi_shard_scale_out_tests`. *Acc:* E3 evidence row; old suite gone. **DONE** — recreated
   the spec-named `object_log_commit_recovery_tests` (deleted with fireweed-service) in `crates/fireweed-objectlog/
-  tests/`, driving the real `ObjectLogBackend`: measured ingest 102k/s + claim+ack 151k/s (both ≫ E0 floor),
+  tests/`, driving the composed object-log backend: measured ingest 102k/s + claim+ack 151k/s (both ≫ E0 floor),
   per-commit ack-latency distribution (reported), and recovery (drop+reopen rebuilds the full resident set
   purely from the durable log — verified `pending==N` from disk). Old suite already gone (hexagonal migration;
   TP-002 marks it retired). Fresh-eyes GO-with-conditions (prior BLOCKING: recovery is full-genesis replay

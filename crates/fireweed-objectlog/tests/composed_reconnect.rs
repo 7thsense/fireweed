@@ -3,8 +3,8 @@
 //!
 //! - `objectlog_inmemory` — `ComposedBackend<ObjectLog, InMemoryProjection, ObjectLog>`: a
 //!   reopen enumerates the durable `queue.json` catalog and rebuilds the fresh in-memory projection by
-//!   replaying the segmented object log from genesis (mirrors the monolithic `ObjectLogBackend`, which
-//!   `reconnect_smoke.rs` runs the same suite against).
+//!   replaying the segmented object log from genesis; this reconnect suite exercises that supported
+//!   profile directly.
 //! - `objectlog_sqlite_projection` — `ComposedBackend<ObjectLog, SqliteProjectionStore, ...>`: the DERIVED
 //!   sqlite projection persists its high-water, so a reopen replays ONLY the object-log tail beyond the
 //!   snapshot (snapshot-tail recovery, bead pqueue-8a76daad). This is the composition the prior subagent

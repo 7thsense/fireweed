@@ -1,21 +1,17 @@
-//! Object-log durability + class semantics: the object log is the source of truth (reopen rebuilds the
-//! projection), and the backend declares the eventual-apply class (so upsert is refused).
+//! Durability checks for the filesystem log-only substrate and supported composed object-log profile.
 
-use fireweed_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
+use fireweed_conformance::{claim_req, envelope, item, qdef, qkey, shard};
 use fireweed_core::{
     ClientItemKey, CohortOnIncomplete, CohortPolicy, EntitySchemaDocument, GateKeyPolicy,
     IndexDeclaration, IndexDef, IndexSpec, IndexType, ItemId, MetadataValue, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueId, QueueIndex,
-    RecurrenceMode, RecurrencePolicy, RequestId, TenantId, UtcTimestamp,
+    RecurrenceMode, RecurrencePolicy, TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    Backend, ClaimPort, ControlPlaneStore, DurabilityClass, EngineError, LogRead, ProjectionRead,
-    PushCommand, PushPort, PushSpec, QueueCommand, RawCommitRequest, ReplacePendingCommand,
-    SetGatesCommand,
+    ClaimPort, ControlPlaneStore, EngineError, LogRead, ProjectionRead, PushCommand, PushPort,
+    PushSpec, QueueCommand, ReplacePendingCommand, SetGatesCommand,
 };
-use fireweed_objectlog::{
-    LocalObjectLog, ObjectLogBackend, ObjectLogSegmentConfig, composed_objectlog_backend,
-};
+use fireweed_objectlog::{LocalObjectLog, ObjectLogSegmentConfig, composed_objectlog_backend};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier};
@@ -34,21 +30,14 @@ fn queue_dir(root: &std::path::Path, key: &fireweed_engine::QueueKey) -> std::pa
     root.join(encoded)
 }
 
-/// Overwrite the highest-numbered log object under `root`'s single shard with invalid JSON (simulates an
-/// append interrupted mid-write).
-fn corrupt_last_log_object(root: &std::path::Path) {
-    for shard_entry in std::fs::read_dir(root).unwrap() {
-        let log_dir = shard_entry.unwrap().path().join("log");
-        if !log_dir.exists() {
-            continue;
-        }
-        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&log_dir)
-            .unwrap()
-            .map(|e| e.unwrap().path())
-            .collect();
-        files.sort();
-        std::fs::write(files.last().unwrap(), b"{ truncated not valid json").unwrap();
-    }
+fn corrupt_last_log_object(root: &std::path::Path, key: &fireweed_engine::QueueKey) {
+    let log_dir = queue_dir(root, key).join("log");
+    let mut files = std::fs::read_dir(log_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    files.sort();
+    std::fs::write(files.last().unwrap(), b"{ truncated not valid json").unwrap();
 }
 
 fn push_env(id: &str) -> fireweed_engine::CommandEnvelope {
@@ -58,37 +47,6 @@ fn push_env(id: &str) -> fireweed_engine::CommandEnvelope {
         }),
         vec![ItemId::new(id).unwrap()],
     )
-}
-
-fn typed_qdef() -> fireweed_core::QueueDefinition {
-    let mut def = qdef();
-    def.entity_schema = Some(
-        serde_json::from_value::<EntitySchemaDocument>(json!({
-            "entity_schema": {
-                "type": "object",
-                "required": ["name"],
-                "properties": {
-                    "name": {"type": "string"}
-                }
-            }
-        }))
-        .unwrap(),
-    );
-    def
-}
-
-fn typed_valid_item(id: &str) -> fireweed_engine::PushSpec {
-    fireweed_engine::PushSpec {
-        entity: Some(json!({"name": id})),
-        ..Default::default()
-    }
-}
-
-fn typed_invalid_item(id: &str) -> fireweed_engine::PushSpec {
-    fireweed_engine::PushSpec {
-        entity: Some(json!({"count": id.len()})),
-        ..Default::default()
-    }
 }
 
 fn non_default_qdef() -> fireweed_core::QueueDefinition {
@@ -162,16 +120,6 @@ fn non_default_qdef() -> fireweed_core::QueueDefinition {
         emit_change_records: false,
     }
 }
-
-#[tokio::test]
-async fn declares_eventual_apply_class() {
-    let root = tmp_root("class");
-    let _ = std::fs::remove_dir_all(&root);
-    let b = ObjectLogBackend::open(&root).expect("open");
-    assert_eq!(b.durability_class(), DurabilityClass::EventualApply);
-    let _ = std::fs::remove_dir_all(&root);
-}
-
 #[tokio::test]
 async fn local_object_log_appends_reads_and_reopens_without_projection() {
     let root = tmp_root("local-store");
@@ -380,130 +328,6 @@ fn local_object_log_rejects_incompatible_non_placement_definition() {
 }
 
 #[tokio::test]
-async fn object_log_backend_compatible_race_loser_can_push_claim_and_reopen() {
-    let root = tmp_root("backend-compatible-create-race-immediate-use");
-    let _ = std::fs::remove_dir_all(&root);
-    let barrier = Arc::new(Barrier::new(2));
-    let backends = [
-        Arc::new(ObjectLogBackend::open(&root).expect("open first contender")),
-        Arc::new(ObjectLogBackend::open(&root).expect("open second contender")),
-    ];
-    let handles = backends
-        .iter()
-        .cloned()
-        .map(|backend| {
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                futures::executor::block_on(backend.create_queue(qdef()))
-            })
-        })
-        .collect::<Vec<_>>();
-    let outcomes = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("contender thread"))
-        .collect::<Result<Vec<_>, _>>()
-        .expect("compatible race outcomes");
-
-    assert_eq!(outcomes.iter().filter(|outcome| outcome.created).count(), 1);
-    assert!(outcomes.iter().all(|outcome| outcome.definition == qdef()));
-    let loser_index = outcomes
-        .iter()
-        .position(|outcome| !outcome.created)
-        .expect("one compatible loser");
-    let loser = &backends[loser_index];
-
-    loser
-        .push(
-            &qkey(),
-            vec![PushSpec::default()],
-            UtcTimestamp::new(1, 0).unwrap(),
-            None,
-        )
-        .await
-        .expect("loser push");
-    let claimed = loser
-        .claim(claim_req(10, 30, 10))
-        .await
-        .expect("loser claim");
-    assert_eq!(claimed.items.len(), 1);
-
-    drop(backends);
-    let reopened = ObjectLogBackend::open(&root).expect("reopen after loser use");
-    assert_eq!(reopened.queue_definition(&qkey()).await.unwrap(), qdef());
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test]
-async fn object_log_backend_loser_replays_commands_committed_before_create_handoff() {
-    let root = tmp_root("backend-loser-replays-before-create");
-    let _ = std::fs::remove_dir_all(&root);
-    // Both handles open before authority exists. Data-plane ownership then hands off in order: the winner
-    // creates and durably pushes before the stale handle resolves its compatible create.
-    let winner = ObjectLogBackend::open(&root).expect("open winner");
-    let loser = ObjectLogBackend::open(&root).expect("open loser before create");
-    assert!(winner.create_queue(qdef()).await.unwrap().created);
-    winner
-        .push(
-            &qkey(),
-            vec![PushSpec::default()],
-            UtcTimestamp::new(1, 0).unwrap(),
-            None,
-        )
-        .await
-        .expect("winner durable push");
-
-    let outcome = loser
-        .create_queue(qdef())
-        .await
-        .expect("compatible handoff");
-    assert!(!outcome.created);
-    assert_eq!(
-        loser.peek(&qkey(), 10).await.expect("replayed read").len(),
-        1
-    );
-    let claimed = loser
-        .claim(claim_req(10, 30, 10))
-        .await
-        .expect("loser claims replayed authoritative item");
-    assert_eq!(claimed.items.len(), 1);
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test]
-async fn object_log_backend_incompatible_loser_caches_durable_winner_for_read() {
-    let root = tmp_root("backend-incompatible-loser-readable");
-    let _ = std::fs::remove_dir_all(&root);
-    let definition = non_default_qdef();
-    let mut incompatible = definition.clone();
-    incompatible.request_id_retention_ms += 1;
-    let winner = ObjectLogBackend::open(&root).expect("open winner");
-    let loser = ObjectLogBackend::open(&root).expect("open loser before create");
-    assert!(
-        winner
-            .create_queue(definition.clone())
-            .await
-            .unwrap()
-            .created
-    );
-
-    assert!(matches!(
-        loser.create_queue(incompatible).await,
-        Err(EngineError::QueueDefinitionConflict)
-    ));
-    let key =
-        fireweed_engine::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    assert_eq!(
-        loser.queue_definition(&key).await.expect("cached winner"),
-        definition
-    );
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test]
 async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
     let root = tmp_root("composed-compatible-loser-immediate-use");
     let _ = std::fs::remove_dir_all(&root);
@@ -535,6 +359,72 @@ async fn composed_object_log_compatible_loser_can_use_queue_immediately() {
 
     let reopened = composed_objectlog_backend(&root).expect("reopen");
     assert_eq!(reopened.queue_definition(&qkey()).await.unwrap(), qdef());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn composed_loser_replays_commands_committed_before_create_handoff() {
+    let root = tmp_root("composed-loser-replays-before-create");
+    let _ = std::fs::remove_dir_all(&root);
+    let winner = composed_objectlog_backend(&root).expect("open winner");
+    let loser = composed_objectlog_backend(&root).expect("open loser before create");
+    assert!(winner.create_queue(qdef()).await.unwrap().created);
+    winner
+        .push(
+            &qkey(),
+            vec![PushSpec::default()],
+            UtcTimestamp::new(1, 0).unwrap(),
+            None,
+        )
+        .await
+        .expect("winner durable push");
+
+    let outcome = loser
+        .create_queue(qdef())
+        .await
+        .expect("compatible handoff");
+    assert!(!outcome.created);
+    assert_eq!(
+        loser.peek(&qkey(), 10).await.expect("replayed read").len(),
+        1
+    );
+    let claimed = loser
+        .claim(claim_req(10, 30, 10))
+        .await
+        .expect("loser claims replayed authoritative item");
+    assert_eq!(claimed.items.len(), 1);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn composed_incompatible_loser_caches_durable_winner_for_read() {
+    let root = tmp_root("composed-incompatible-loser-readable");
+    let _ = std::fs::remove_dir_all(&root);
+    let definition = non_default_qdef();
+    let mut incompatible = definition.clone();
+    incompatible.request_id_retention_ms += 1;
+    let winner = composed_objectlog_backend(&root).expect("open winner");
+    let loser = composed_objectlog_backend(&root).expect("open loser before create");
+    assert!(
+        winner
+            .create_queue(definition.clone())
+            .await
+            .unwrap()
+            .created
+    );
+
+    assert!(matches!(
+        loser.create_queue(incompatible).await,
+        Err(EngineError::QueueDefinitionConflict)
+    ));
+    let key =
+        fireweed_engine::QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+    assert_eq!(
+        loser.queue_definition(&key).await.expect("cached winner"),
+        definition
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -666,57 +556,12 @@ async fn local_object_log_rejects_replace_pending_before_append() {
 }
 
 #[tokio::test]
-async fn replace_pending_command_is_refused_at_the_write_path() {
-    // I-1: the upsert ban holds at the durable write path, not only at `replace_if_pending`. A raw
-    // ReplacePending command driven through the typed raw commit must be refused with Unavailable BEFORE any
-    // object is written.
-    let root = tmp_root("rp");
+async fn local_object_log_rejects_gate_commands_before_append() {
+    let root = tmp_root("local-set-gates");
     let _ = std::fs::remove_dir_all(&root);
-    let b = ObjectLogBackend::open(&root).expect("open");
-    b.create_queue(qdef()).await.unwrap();
-    commit(
-        &b,
-        envelope(
-            QueueCommand::Push(PushCommand {
-                items: vec![item("1", "ka", 5)],
-            }),
-            vec![],
-        ),
-    )
-    .await;
-    let env = envelope(
-        QueueCommand::ReplacePending(ReplacePendingCommand {
-            client_item_key: ClientItemKey::new("ka").unwrap(),
-            superseded_item_id: ItemId::new("1").unwrap(),
-            replacement: item("6", "ka", 5),
-        }),
-        vec![],
-    );
-    let epoch = b.current_epoch(&shard()).await.unwrap();
-    let res = b
-        .commit_raw(RawCommitRequest::new(shard(), vec![env], epoch))
-        .await;
-    assert_eq!(
-        res,
-        Err(EngineError::Unavailable),
-        "ReplacePending is refused on the eventual-apply class at the write path"
-    );
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test]
-async fn raw_setgates_is_rejected_before_any_object_is_written() {
-    // Unsupported gate commands must be rejected before the object log appends anything.
-    let root = tmp_root("setgates");
-    let _ = std::fs::remove_dir_all(&root);
-    let b = ObjectLogBackend::open(&root).expect("open");
-    b.create_queue(qdef()).await.unwrap();
-    let valid = envelope(
-        QueueCommand::Push(PushCommand {
-            items: vec![item("1", "ka", 5)],
-        }),
-        vec![],
-    );
+    let store = LocalObjectLog::open(&root).expect("open");
+    store.create_queue(qdef()).unwrap();
+    let valid = push_env("1");
     let unsupported = envelope(
         QueueCommand::SetGates(SetGatesCommand {
             gate_keys: vec!["hold".to_string()],
@@ -724,60 +569,39 @@ async fn raw_setgates_is_rejected_before_any_object_is_written() {
         }),
         vec![],
     );
-    let epoch = b.current_epoch(&shard()).await.unwrap();
-    let res = b
-        .commit_raw(RawCommitRequest::new(
-            shard(),
-            vec![valid, unsupported],
-            epoch,
-        ))
-        .await;
-    assert_eq!(res, Err(EngineError::Unavailable));
-    let page = b.read_from(&shard(), None, 10).await.unwrap();
-    assert!(page.entries.is_empty(), "rejected batch wrote no objects");
+
+    assert_eq!(
+        store
+            .append(&shard(), &[valid, unsupported], 0)
+            .unwrap_err(),
+        EngineError::Unavailable
+    );
+    assert!(
+        store
+            .read_from(&shard(), None, 10)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
-async fn torn_trailing_object_is_skipped_on_reopen() {
-    // I-2: a partial/torn highest-seq object (an append interrupted by a crash) must be treated as
-    // uncommitted — `open()` recovers the prior state rather than bricking.
-    let root = tmp_root("torn");
+async fn local_object_log_skips_a_torn_trailing_segment_on_reopen() {
+    let root = tmp_root("local-torn-tail");
     let _ = std::fs::remove_dir_all(&root);
-    {
-        let b = ObjectLogBackend::open(&root).expect("open");
-        b.create_queue(qdef()).await.unwrap();
-        // Two separate commits → two log objects (seq 0, seq 1).
-        commit(
-            &b,
-            envelope(
-                QueueCommand::Push(PushCommand {
-                    items: vec![item("1", "ka", 5)],
-                }),
-                vec![],
-            ),
-        )
-        .await;
-        commit(
-            &b,
-            envelope(
-                QueueCommand::Push(PushCommand {
-                    items: vec![item("2", "kb", 9)],
-                }),
-                vec![],
-            ),
-        )
-        .await;
-        assert_eq!(b.metrics(&qkey()).await.unwrap().pending, 2);
-    }
-    corrupt_last_log_object(&root); // torn seq-1 object
+    let key = shard();
+    let store = LocalObjectLog::open(&root).expect("open");
+    store.create_queue(qdef()).unwrap();
+    store.append(&key, &[push_env("1")], 0).unwrap();
+    store.append(&key, &[push_env("2")], 0).unwrap();
+    corrupt_last_log_object(&root, &key);
 
-    let b = ObjectLogBackend::open(&root).expect("open must tolerate a torn trailing object");
-    assert_eq!(
-        b.metrics(&qkey()).await.unwrap().pending,
-        1,
-        "only the intact (seq 0) object replayed; the torn trailing one was skipped"
-    );
+    let reopened = LocalObjectLog::open(&root).expect("reopen");
+    let page = reopened.read_from(&key, None, 10).await.unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].0.sequence, 0);
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -800,135 +624,12 @@ async fn objectlog_segment_configuration_is_respected() {
         .append(&shard, &[push_env("1"), push_env("2"), push_env("3")], 0)
         .expect("append");
 
-    let backend = ObjectLogBackend::open(&root).expect("reopen");
-    let stats = backend.segment_stats(&shard).expect("segment stats");
+    let stats = store.segment_stats(&shard).expect("segment stats");
     assert_eq!(
         stats.segment_objects, 3,
         "segment_max_bytes=1 should cap the batch size at one command per segment"
     );
     assert_eq!(stats.command_objects, 3);
 
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test]
-async fn projection_rebuilds_from_object_log_on_reopen() {
-    let root = tmp_root("reopen");
-    let _ = std::fs::remove_dir_all(&root);
-
-    // Session 1: create the queue, push three items, claim the highest-priority one.
-    {
-        let b = ObjectLogBackend::open(&root).expect("open");
-        b.create_queue(qdef()).await.unwrap();
-        commit(
-            &b,
-            envelope(
-                QueueCommand::Push(PushCommand {
-                    items: vec![
-                        item("1", "ka", 30),
-                        item("2", "kb", 10),
-                        item("3", "kc", 20),
-                    ],
-                }),
-                vec![],
-            ),
-        )
-        .await;
-        b.claim(claim_req(1, 500, 100)).await.unwrap(); // claims "b" (priority 10)
-        let m = b.metrics(&qkey()).await.unwrap();
-        assert_eq!((m.pending, m.leased), (2, 1));
-    }
-
-    // Session 2: REOPEN the same object store — projection must be replayed from the objects.
-    {
-        let b = ObjectLogBackend::open(&root).expect("reopen");
-        let m = b.metrics(&qkey()).await.unwrap();
-        assert_eq!(
-            (m.pending, m.leased),
-            (2, 1),
-            "reopened projection reflects 3 pushes + 1 claim replayed from the object log"
-        );
-        // A claim after reopen must succeed (cmd_seq restored → no object-name collision) and lease the
-        // next item; a further reopen replays that too.
-        b.claim(claim_req(1, 500, 100)).await.unwrap();
-        let m = b.metrics(&qkey()).await.unwrap();
-        assert_eq!((m.pending, m.leased), (1, 2));
-    }
-    {
-        let b = ObjectLogBackend::open(&root).expect("reopen 2");
-        let m = b.metrics(&qkey()).await.unwrap();
-        assert_eq!(
-            (m.pending, m.leased),
-            (1, 2),
-            "post-reopen claim survived replay"
-        );
-    }
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-async fn schema_validation_backend<B>(backend: &B)
-where
-    B: ControlPlaneStore + PushPort + ProjectionRead,
-{
-    let q = shard();
-    backend.create_queue(typed_qdef()).await.unwrap();
-
-    let err = backend
-        .push(
-            &q,
-            vec![typed_invalid_item("bad")],
-            fireweed_conformance::ts(0),
-            None,
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
-    assert_eq!(backend.metrics(&q).await.unwrap().pending, 0);
-
-    let rid = RequestId::new("req-1").unwrap();
-    let err = backend
-        .push_with_request_id(
-            &q,
-            rid.clone(),
-            vec![typed_invalid_item("bad")],
-            fireweed_conformance::ts(1),
-            None,
-        )
-        .await
-        .unwrap_err();
-    assert!(matches!(err, EngineError::EntitySchemaViolation(_)));
-    assert_eq!(backend.metrics(&q).await.unwrap().pending, 0);
-
-    let first = backend
-        .push_with_request_id(
-            &q,
-            rid.clone(),
-            vec![typed_valid_item("ok")],
-            fireweed_conformance::ts(2),
-            None,
-        )
-        .await
-        .unwrap();
-    let replay = backend
-        .push_with_request_id(
-            &q,
-            rid,
-            vec![typed_valid_item("ok")],
-            fireweed_conformance::ts(3),
-            None,
-        )
-        .await
-        .unwrap();
-    assert_eq!(first, replay, "valid replay must reuse the committed ids");
-    assert_eq!(backend.metrics(&q).await.unwrap().pending, 1);
-}
-
-#[tokio::test]
-async fn object_log_backend_schema_validation_rejects_before_append_and_idempotency() {
-    let root = tmp_root("schema-object-log");
-    let _ = std::fs::remove_dir_all(&root);
-    let backend = ObjectLogBackend::open(&root).expect("open");
-    schema_validation_backend(&backend).await;
     let _ = std::fs::remove_dir_all(&root);
 }

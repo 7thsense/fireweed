@@ -7990,7 +7990,7 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
     // The orthogonal `LogStore` axis (compose.rs) requires a durable high-water mark and projection
     // snapshots. The manifest tail is the authoritative command position, but the engine also drives an
     // EXPLICIT high-water (snapshot truncation, TD-007 §4) and writes projection snapshots — both stored
-    // here as small JSON blobs alongside the segments, exactly as the per-file `ObjectLogBackend` keeps a
+    // here as small JSON blobs alongside the segments, exactly as the filesystem log substrate keeps a
     // `high_water.json`.
 
     /// Read the durable high-water mark blob (`None` if no commit/set has advanced it yet).
