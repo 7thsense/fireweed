@@ -365,7 +365,12 @@ impl ProjectionStore for SqliteRelational {
                 "SELECT request_fingerprint,response_payload,command_positions,expires_at \
                  FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
                  AND operation=?3 AND request_id=?4",
-                params![tenant, queue, IDEMPOTENCY_OPERATION_ITEM_MUTATION, request_id.as_str()],
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+                    request_id.as_str()
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional())?;
@@ -377,7 +382,12 @@ impl ProjectionStore for SqliteRelational {
             st(tx.execute(
                 "DELETE FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
                  AND operation=?3 AND request_id=?4",
-                params![tenant, queue, IDEMPOTENCY_OPERATION_ITEM_MUTATION, request_id.as_str()],
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+                    request_id.as_str()
+                ],
             ))?;
             st(tx.commit())?;
             return Ok(None);
@@ -385,8 +395,9 @@ impl ProjectionStore for SqliteRelational {
         if stored_fingerprint != fingerprint.to_be_bytes() {
             return Err(EngineError::RequestIdConflict);
         }
-        let mut response: fireweed_engine::ItemMutationResponse = serde_json::from_str(&response_payload)
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let mut response: fireweed_engine::ItemMutationResponse =
+            serde_json::from_str(&response_payload)
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
         let positions = positions_from_json(shard, &positions_json)?;
         response.position = positions.last().cloned();
         st(tx.commit())?;

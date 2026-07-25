@@ -658,7 +658,7 @@ pub(crate) fn export_projection_image_sql(
     let mut stmt = st(conn.prepare(
         "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
          fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,fenced,\
-         superseded,max_attempts,created_seq \
+         superseded,max_attempts,created_seq,terminal_at,terminal_command_epoch,last_command_sequence \
          FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
@@ -683,6 +683,9 @@ pub(crate) fn export_projection_image_sql(
             row.get::<_, i64>(17)?,
             row.get::<_, i64>(18)?,
             row.get::<_, i64>(19)?,
+            row.get::<_, Option<i64>>(20)?,
+            row.get::<_, Option<i64>>(21)?,
+            row.get::<_, i64>(22)?,
         ))
     }))?;
     let mut items = Vec::new();
@@ -708,6 +711,9 @@ pub(crate) fn export_projection_image_sql(
             superseded,
             max_attempts,
             created_seq,
+            terminal_at,
+            terminal_command_epoch,
+            last_command_sequence,
         ) = st(row)?;
         let item_id = ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
         let entity_document = entity_document
@@ -747,8 +753,10 @@ pub(crate) fn export_projection_image_sql(
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             fenced: fenced != 0,
             superseded: superseded != 0,
-            terminal_at: None,
-            terminal_position: None,
+            terminal_at: terminal_at.map(nanos_ts),
+            terminal_position: terminal_command_epoch.map(|epoch| {
+                CommandPosition::new(shard.clone(), epoch as u64, last_command_sequence as u64)
+            }),
         });
     }
 

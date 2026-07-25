@@ -1766,44 +1766,61 @@ pub(crate) fn apply_command_sql(
                 let item_id = item.item_id.to_string();
                 match &item.action {
                     ResolvedItemMutationAction::Purge => {
-                        let changed = st(tx.execute(
-                            "DELETE FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        let exists: bool = st(tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM fireweed_items \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3)",
                             params![t, q, item_id],
+                            |row| row.get(0),
                         ))?;
-                        if changed != 1 {
+                        if !exists {
                             return Err(EngineError::Conflict);
                         }
-                        st(tx.execute(
-                            "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
-                            params![t, q, item_id],
-                        ))?;
-                        delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
-                        token_ops.push(TokenOp::Clear(shard.clone(), item.item_id));
+                        apply_command_sql(
+                            tx,
+                            queues,
+                            grouped_shards,
+                            claim_scan_hints,
+                            claim_scan_default_fifo,
+                            token_ops,
+                            shard,
+                            position,
+                            seq,
+                            now,
+                            &QueueCommand::PurgeItems(fireweed_engine::PurgeItemsCommand {
+                                item_ids: vec![item.item_id],
+                                force: true,
+                            }),
+                        )?;
                     }
                     ResolvedItemMutationAction::Replace(values) => {
                         let priority_json = values.priority.as_ref().map(to_json).transpose()?;
                         let priority_sort = elig_sort(
                             &values.priority,
-                            &queues.get(shard).ok_or(EngineError::NotFound)?.priority_model,
+                            &queues
+                                .get(shard)
+                                .ok_or(EngineError::NotFound)?
+                                .priority_model,
                         );
-                        let terminal = matches!(values.state, ItemState::Complete | ItemState::Failed);
-                        let (lease_hash_sql, lease_expiry_sql, worker_sql, fenced_sql) =
-                            if values.invalidate_lease {
-                                (Value::Null, Value::Null, Value::Null, Value::Integer(0))
-                            } else {
-                                let current: (Option<Vec<u8>>, Option<i64>, Option<String>, i64) = st(tx.query_row(
+                        let terminal =
+                            matches!(values.state, ItemState::Complete | ItemState::Failed);
+                        let (lease_hash_sql, lease_expiry_sql, worker_sql, fenced_sql) = if values
+                            .invalidate_lease
+                        {
+                            (Value::Null, Value::Null, Value::Null, Value::Integer(0))
+                        } else {
+                            let current: (Option<Vec<u8>>, Option<i64>, Option<String>, i64) = st(tx.query_row(
                                     "SELECT lease_token_hash,lease_expires_at,worker_id,fenced FROM fireweed_items \
                                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
                                     params![t, q, item_id],
                                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                                 ))?;
-                                (
-                                    current.0.map(Value::Blob).unwrap_or(Value::Null),
-                                    current.1.map(Value::Integer).unwrap_or(Value::Null),
-                                    current.2.map(Value::Text).unwrap_or(Value::Null),
-                                    Value::Integer(current.3),
-                                )
-                            };
+                            (
+                                current.0.map(Value::Blob).unwrap_or(Value::Null),
+                                current.1.map(Value::Integer).unwrap_or(Value::Null),
+                                current.2.map(Value::Text).unwrap_or(Value::Null),
+                                Value::Integer(current.3),
+                            )
+                        };
                         let changed = st(tx.execute(
                             "UPDATE fireweed_items SET lifecycle_state=?4,priority=?5,priority_sort=?6,not_before=?7,\
                              eligible_since=?8,payload=?9,fields=?10,metadata=?11,entity_document=?12,\

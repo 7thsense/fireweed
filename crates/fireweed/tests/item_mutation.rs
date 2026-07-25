@@ -562,7 +562,10 @@ async fn objectlog_sqlite_reopen_replays_without_selector_evaluation() {
     drop(fireweed);
 
     let reopened = fireweed::open_objectlog_sqlite(runtime, Arc::new(SystemClock)).unwrap();
-    assert_eq!(reopened.mutate_items(&queue, request).await.unwrap(), committed);
+    assert_eq!(
+        reopened.mutate_items(&queue, request).await.unwrap(),
+        committed
+    );
     drop(reopened);
     let _ = std::fs::remove_dir_all(root);
 }
