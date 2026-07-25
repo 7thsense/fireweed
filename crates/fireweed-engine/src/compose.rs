@@ -57,16 +57,17 @@ use crate::maintenance::{
     MaintenanceObjectClass, MaintenancePolicy,
 };
 use crate::port::{
-    AsOfProjectionStore, Backend, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem,
-    CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus, CommitRecovery,
-    CommitTransition, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, EntryRecovery,
-    FinalizePort, HistoricalProjectionRead, IndexHit, IndexQueryPort, ItemView, LeaseView,
-    LiveItemView, LogRead, MaintenanceStopReason, MaintenanceSummary, PendingPage, PendingSummary,
-    ProjectionRead, ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueMetrics,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
-    validate_api001_reserved_write_fields, validate_instance_fence,
+    AsOfProjectionStore, Backend, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdatePort,
+    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, BoundedMutationContext, ClaimPort,
+    ClaimRef, ClaimRequest, Claimed, ClaimedItem, CommandPage, CommitCapabilities,
+    CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionPort,
+    ControlPlaneStore, CreateQueueOutcome, EntryRecovery, FinalizePort, HistoricalProjectionRead,
+    IndexHit, IndexQueryPort, ItemView, LeaseView, LiveItemView, LogRead, MaintenanceStopReason,
+    MaintenanceSummary, PendingPage, PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort,
+    PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
+    RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore,
+    TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    generate_query_lease_token, validate_api001_reserved_write_fields, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::sequenced_metadata::{AdvanceThenDelete, RetainedAddress, RetentionFloorClass};
@@ -900,6 +901,21 @@ pub struct RichClaimSelection {
     pub cohort_id: Option<CohortId>,
 }
 
+/// One version-fenced field update planned by a projection for an API-004 bounded mutation. The
+/// composition durably appends these commands before applying them; projection adapters must not mutate
+/// their serving image while producing the plan.
+#[derive(Debug, Clone)]
+pub struct BoundedMutationUpdate {
+    pub command: UpdateFieldsCommand,
+    pub expected_item_version: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundedMutationPlan {
+    pub response: BoundedMutationResponse,
+    pub updates: Vec<BoundedMutationUpdate>,
+}
+
 /// The projection axis: the materialized read model. Exposes the full `ProjectionRead` surface, the
 /// secondary-index queries, the pre-commit VALIDATION helpers the orchestration relies on (so the
 /// post-append `apply` is infallible — commit has no rollback), and the `apply` seam itself.
@@ -918,6 +934,54 @@ pub trait ProjectionStore: Send {
 
     /// Materialize a shard's projection from its [`QueueDefinition`] (called from `create_queue`).
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()>;
+
+    /// Resolve a retained push request directly from a durable relational projection.
+    ///
+    /// Log-backed compositions rebuild their in-memory replay cache from command envelopes and inherit
+    /// this no-op. A unified relational log/projection has no replayable command stream, so it overrides
+    /// this seam to consult the request-outcome row written in the same transaction as the mutation.
+    /// `Ok(Some(ids))` is an identical-body replay; a different retained body returns
+    /// [`EngineError::RequestIdConflict`].
+    fn replay_durable_push(
+        &mut self,
+        _shard: &QueueKey,
+        _request_id: &RequestId,
+        _items: &[PushSpec],
+        _now: UtcTimestamp,
+    ) -> EngineResult<Option<Vec<ItemId>>> {
+        Ok(None)
+    }
+
+    /// Relational counterpart of [`Self::replay_durable_push`] for API-001 BatchUpdate.
+    fn replay_durable_batch_update(
+        &mut self,
+        _shard: &QueueKey,
+        _request_id: &RequestId,
+        _fingerprint: u64,
+        _now: UtcTimestamp,
+    ) -> EngineResult<Option<BatchUpdateResponse>> {
+        Ok(None)
+    }
+
+    /// Resolve a retained vectorized commit from unified relational authority.
+    fn replay_durable_commit(
+        &mut self,
+        _shard: &QueueKey,
+        _request_id: &RequestId,
+        _fingerprint: u64,
+        _now: UtcTimestamp,
+    ) -> EngineResult<Option<Vec<CommitOutcomeEntry>>> {
+        Ok(None)
+    }
+
+    /// Read retained commit recovery without resubmitting the original request body.
+    fn read_durable_commit(
+        &self,
+        _shard: &QueueKey,
+        _request_id: &RequestId,
+    ) -> EngineResult<Option<Vec<CommitOutcomeEntry>>> {
+        Ok(None)
+    }
 
     /// Apply committed `commands` (at `positions`) to the projection.
     /// seam. The caller pre-validated, so this is infallible in practice.
@@ -1058,6 +1122,27 @@ pub trait ProjectionStore: Send {
     ) -> EngineResult<Option<ItemId>>;
     fn item_state(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<ItemState>>;
     fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>>;
+
+    /// Resolve every item/key referenced by one API-001 BatchUpdate against one projection snapshot.
+    /// Implementations backed by relational storage override this with one set-oriented read. The
+    /// returned rows may be in any order; orchestration restores request order from the request itself.
+    fn batch_update_snapshot(
+        &self,
+        _shard: &QueueKey,
+        _refs: &[BatchUpdateItemRef],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// Preflight the successful commands produced from the snapshot before the durable append. The bools
+    /// align with `commands`; `false` is an entry-local validation rejection and does not reject siblings.
+    fn batch_update_preflight(
+        &self,
+        _shard: &QueueKey,
+        _commands: &[UpdateFieldsCommand],
+    ) -> EngineResult<Vec<bool>> {
+        Err(EngineError::Unavailable)
+    }
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>>;
     /// Every shard's expired leases at `now` (the global `tick` sweep). Shards with none are omitted.
     fn all_expired_leases(&self, now: UtcTimestamp) -> Vec<(QueueKey, Vec<ItemId>)>;
@@ -1121,18 +1206,14 @@ pub trait ProjectionStore: Send {
         Ok(ExpiredLeasePage { leases, next })
     }
 
-    // -- rich (non-item) claim selection + relational-class capabilities (BQ-14) ---------------------
+    // -- rich claim/discovery and gate capabilities (BQ-14) ------------------------------------------
     //
-    // These back the composition's non-item claim path (whole-group / same-group-key / whole-cohort), the
-    // operator gate-state capability, and per-group active-scope discovery. They are RELATIONAL-class: the
-    // in-memory / log-replay projection family maintains no per-group summary or cohort/gate tables, so it
-    // inherits the `false` / `Unavailable` defaults and the composition refuses these units — exact
-    // capability parity with the monolithic `MemoryBackend`. The unified sqlite-relational projection store
-    // overrides them by porting its own `select_*` / `discover_active_scopes_sql` SQL.
+    // Rich non-item claims remain relational-class. Gate storage and exact active-scope discovery are
+    // supported by both the shared in-memory/log-replay projection and relational projections.
 
     /// Whether this projection stores gate membership + gate-state and enforces `SetGates` at claim
-    /// selection. `false` (the default) makes the composition refuse gate-bearing pushes and `SetGates`
-    /// (the log-replay family has no gate tables); the relational projection overrides it to `true`.
+    /// selection. `false` (the default) makes the composition refuse gate-bearing pushes and `SetGates`;
+    /// capable projections override it to `true`.
     fn supports_gates(&self) -> bool {
         false
     }
@@ -1154,9 +1235,9 @@ pub trait ProjectionStore: Send {
         Err(EngineError::Unavailable)
     }
 
-    /// Roll up the per-group active-scope summary into ranked [`ActiveScope`]s at `granularity` (BQ-14e).
-    /// The default refuses with [`EngineError::Unavailable`] (the log-replay family maintains no per-group
-    /// summary); the relational projection overrides it with the `pqueue_group_summary` rollup.
+    /// Derive ranked [`ActiveScope`]s at `granularity` (BQ-14e). Implementations may read a relational
+    /// summary or derive the exact live rollup directly from their materialized item projection.
+    /// The default refuses with [`EngineError::Unavailable`].
     fn discover_active_scopes(
         &self,
         _shard: &QueueKey,
@@ -1362,6 +1443,16 @@ pub trait ProjectionStore: Send {
         Err(EngineError::Unavailable)
     }
 
+    /// Plan, but do not apply, a bounded mutation. Log-backed compositions use this seam so each
+    /// successful per-record update passes through the authoritative append/apply boundary.
+    fn plan_bounded_mutation(
+        &self,
+        _shard: &QueueKey,
+        _request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationPlan> {
+        Err(EngineError::Unavailable)
+    }
+
     // -- secondary-index query ----------------------------------------------
 
     fn index_get_unique(
@@ -1453,6 +1544,17 @@ pub trait ProjectionStore: Send {
         }
         Ok(())
     }
+}
+
+/// The minimum immutable projection row needed to plan a BatchUpdate without scalar projection calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchUpdateSnapshotItem {
+    pub item_id: ItemId,
+    pub client_item_key: ClientItemKey,
+    pub state: ItemState,
+    pub item_version: u64,
+    pub fenced: bool,
+    pub superseded: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1581,6 +1683,8 @@ struct Inner<L, P> {
     /// is the whole `Vec<EntryRecovery>` so a body+request_id replay returns the prior per-entry outcomes
     /// verbatim with NO double-write. Held under the same UoW lock so check + append + record stays atomic.
     commit_idempotency: HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
+    /// Whole-request API-001 BatchUpdate replay cache, rebuilt from durable request-outcome envelopes.
+    batch_update_idempotency: HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>,
     cmd_seq: u64,
     /// Per-queue group-commit coordinators (ADR-012 P2). Empty + unused on the synchronous (atomic / OFF)
     /// path; populated only when the composition runs the ack-after-seal write path against a group-commit
@@ -1628,6 +1732,7 @@ struct RecoveryIdempotencyCaches<'a> {
     push: &'a mut HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>,
     claim: &'a mut HashMap<QueueKey, QueueIdempotencyCache<(Vec<ItemId>, LeaseToken)>>,
     commit: &'a mut HashMap<QueueKey, QueueIdempotencyCache<Vec<EntryRecovery>>>,
+    batch_update: &'a mut HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>,
 }
 
 /// A conservative cross-owner clock-skew guard band (ms) subtracted from the retention cutoff before a
@@ -1735,6 +1840,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 idempotency: HashMap::new(),
                 claim_by_query_idempotency: HashMap::new(),
                 commit_idempotency: HashMap::new(),
+                batch_update_idempotency: HashMap::new(),
                 cmd_seq: 0,
                 coords: HashMap::new(),
                 known_shards: HashSet::new(),
@@ -2706,6 +2812,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                         idempotency,
                         claim_by_query_idempotency,
                         commit_idempotency,
+                        batch_update_idempotency,
                         ..
                     } = &mut *g;
                     log.ensure_shard(&key)?;
@@ -2751,6 +2858,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                             push: idempotency,
                             claim: claim_by_query_idempotency,
                             commit: commit_idempotency,
+                            batch_update: batch_update_idempotency,
                         },
                         &key,
                         def.request_id_retention_ms,
@@ -2875,6 +2983,12 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                 &page.entries,
             )?;
             Self::fold_commit_idempotency(&mut commit_accums, &page.entries)?;
+            Self::fold_batch_update_idempotency(
+                &mut *caches.batch_update,
+                shard,
+                retention_ms,
+                &page.entries,
+            )?;
             for (_, envelope) in &page.entries {
                 for item_id in &envelope.item_ids {
                     counters.observe(shard, *item_id);
@@ -2896,6 +3010,37 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
         }
         Self::finish_commit_idempotency(caches.commit, shard, retention_ms, commit_accums);
         Ok(max_cmd_seq)
+    }
+
+    fn fold_batch_update_idempotency(
+        idempotency: &mut HashMap<QueueKey, QueueIdempotencyCache<BatchUpdateResponse>>,
+        shard: &QueueKey,
+        retention_ms: u64,
+        entries: &[(CommandPosition, CommandEnvelope)],
+    ) -> EngineResult<()> {
+        for (_, env) in entries {
+            let (
+                Some(request_id),
+                Some(fingerprint),
+                Some(RequestOutcome::BatchUpdate { response_payload }),
+            ) = (
+                env.request_id.as_ref(),
+                env.request_fingerprint,
+                env.request_outcome.as_ref(),
+            )
+            else {
+                continue;
+            };
+            let response = serde_json::from_str(response_payload)
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            idempotency.entry(shard.clone()).or_default().record(
+                request_id.clone(),
+                BodyHash(fingerprint),
+                response,
+                request_expires_at(env.created_at, retention_ms),
+            );
+        }
+        Ok(())
     }
 
     fn fold_push_idempotency(
@@ -3492,6 +3637,192 @@ fn claim_by_query_body_hash(request: &ClaimByQueryRequest) -> EngineResult<BodyH
     )))
 }
 
+fn batch_update_body_hash(request: &BatchUpdateRequest) -> EngineResult<BodyHash> {
+    use sha2::{Digest, Sha256};
+
+    // `request_id` is the cache key, not part of the logical request body.
+    let bytes = serde_json::to_vec(&request.updates)
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let digest = Sha256::digest(bytes);
+    Ok(BodyHash(u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    )))
+}
+
+struct PlannedBatchUpdate {
+    outcomes: Vec<BatchUpdateOutcome>,
+    commands: Vec<(usize, UpdateFieldsCommand)>,
+}
+
+fn plan_batch_update(
+    definition: &QueueDefinition,
+    supports_gates: bool,
+    updates: Vec<crate::port::BatchUpdateEntry>,
+    snapshot: Vec<BatchUpdateSnapshotItem>,
+) -> PlannedBatchUpdate {
+    let mut by_id = HashMap::with_capacity(snapshot.len());
+    let mut by_key = HashMap::<ClientItemKey, ItemId>::with_capacity(snapshot.len());
+    for item in snapshot {
+        // Superseded records retain their historical key in relational storage but are no longer the
+        // active key mapping. Excluding them matches the in-memory projection's `by_key` semantics.
+        if !item.superseded {
+            by_key.insert(item.client_item_key.clone(), item.item_id);
+        }
+        by_id.insert(item.item_id, item);
+    }
+
+    let mut outcomes = vec![BatchUpdateOutcome::Conflict; updates.len()];
+    let mut commands = Vec::with_capacity(updates.len());
+    let mut seen = HashSet::with_capacity(updates.len());
+
+    for (outcome_index, update) in updates.into_iter().enumerate() {
+        let resolved = match &update.item_ref {
+            BatchUpdateItemRef::ItemId(item_id) => Some(*item_id),
+            BatchUpdateItemRef::ClientItemKey(key) => by_key.get(key).copied(),
+            BatchUpdateItemRef::Both {
+                item_id,
+                client_item_key,
+            } => match (by_id.get(item_id), by_key.get(client_item_key)) {
+                (Some(_), Some(resolved)) if resolved == item_id => Some(*item_id),
+                (Some(_), Some(_)) => {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
+                    continue;
+                }
+                _ => None,
+            },
+        };
+        let Some(item_id) = resolved else {
+            outcomes[outcome_index] = BatchUpdateOutcome::NotFound;
+            continue;
+        };
+        let Some(current) = by_id.get(&item_id) else {
+            outcomes[outcome_index] = BatchUpdateOutcome::NotFound;
+            continue;
+        };
+        if !seen.insert(item_id) {
+            outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+            continue;
+        }
+        if current.state.is_terminal() {
+            outcomes[outcome_index] = BatchUpdateOutcome::Terminal;
+            continue;
+        }
+        if current.state != ItemState::Pending || current.superseded || current.fenced {
+            outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+            continue;
+        }
+        if update
+            .expected_item_version
+            .is_some_and(|expected| expected != current.item_version)
+        {
+            outcomes[outcome_index] = BatchUpdateOutcome::Conflict;
+            continue;
+        }
+
+        let set_fields = match update.fields {
+            BatchUpdateValue::Keep => None,
+            BatchUpdateValue::Replace(fields) => {
+                let reserved = fields.keys().cloned().map(|name| (name, None)).collect();
+                if validate_api001_reserved_write_fields(&reserved).is_err() {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
+                    continue;
+                }
+                Some(fields)
+            }
+        };
+        let set_metadata = match update.metadata {
+            BatchUpdateValue::Keep => None,
+            BatchUpdateValue::Replace(metadata) => Some(metadata),
+        };
+        let set_gate_keys = match update.gate_keys {
+            BatchUpdateValue::Keep => None,
+            BatchUpdateValue::Replace(mut gate_keys) => {
+                gate_keys.sort();
+                gate_keys.dedup();
+                let malformed = gate_keys.iter().any(|key| {
+                    key.is_empty()
+                        || key.len() > 256
+                        || !key
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+                });
+                let disabled = definition.eligibility_policy.gate_keys
+                    != fireweed_core::GateKeyPolicy::Dynamic
+                    && !gate_keys.is_empty();
+                let unsupported = !supports_gates && !gate_keys.is_empty();
+                let over_cap = definition
+                    .eligibility_policy
+                    .max_gate_keys_per_item
+                    .is_some_and(|max| gate_keys.len() as u64 > max);
+                if malformed || disabled || unsupported || over_cap {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
+                    continue;
+                }
+                Some(gate_keys)
+            }
+        };
+        let set_priority = match update.priority {
+            BatchUpdateValue::Keep => ScheduleUpdate::Keep,
+            BatchUpdateValue::Replace(priority) => {
+                let type_matches = matches!(
+                    (&definition.priority_model.kind, &priority),
+                    (
+                        fireweed_core::PriorityModelKind::Timestamp,
+                        PriorityValue::Timestamp(_)
+                    ) | (
+                        fireweed_core::PriorityModelKind::Int64,
+                        PriorityValue::Int64(_)
+                    ) | (
+                        fireweed_core::PriorityModelKind::Decimal,
+                        PriorityValue::Decimal(_)
+                    ) | (
+                        fireweed_core::PriorityModelKind::Text,
+                        PriorityValue::Text(_)
+                    )
+                );
+                if !type_matches {
+                    outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
+                    continue;
+                }
+                ScheduleUpdate::Set(Some(priority))
+            }
+        };
+        let set_not_before = match update.not_before {
+            BatchUpdateValue::Keep => ScheduleUpdate::Keep,
+            BatchUpdateValue::Replace(value) => ScheduleUpdate::Set(value),
+        };
+        let payload = match update.payload {
+            BatchUpdateValue::Keep => PayloadUpdate::Keep,
+            BatchUpdateValue::Replace(value) => PayloadUpdate::Set(value),
+        };
+
+        outcomes[outcome_index] = BatchUpdateOutcome::Updated {
+            item_id,
+            client_item_key: current.client_item_key.clone(),
+            item_version: current.item_version + 1,
+        };
+        commands.push((
+            outcome_index,
+            UpdateFieldsCommand {
+                item_id,
+                field_ops: BTreeMap::new(),
+                payload,
+                set_priority,
+                set_not_before,
+                set_entity_document: None,
+                set_fields,
+                set_metadata,
+                set_gate_keys,
+                api001_batch: true,
+            },
+        ));
+    }
+
+    PlannedBatchUpdate { outcomes, commands }
+}
+
 /// Stable body fingerprint for the vectorized commit path: a non-cryptographic hash over the serialized
 /// commit entries (the request_id is the cache KEY, not part of the body). A different body under the same
 /// request id is a `RequestIdConflict`; an equal body replays the prior per-entry outcomes.
@@ -3561,21 +3892,19 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> Backend for ComposedBacke
         self.durability
     }
 
-    /// Whether the composition stores gate membership + enforces `SetGates` at claim selection — it inherits
-    /// this from its projection axis (the relational projection has the gate tables; the log-replay family
-    /// does not), so a gate-bearing push / `SetGates` is admitted iff the projection can materialize it.
+    /// Whether the composition stores gate membership + enforces `SetGates` at claim selection. It inherits
+    /// this from its projection axis; the shared in-memory/log-replay and relational projections opt in,
+    /// while any projection retaining the default remains fail-closed.
     fn supports_gates(&self) -> bool {
         self.supports_gates
     }
 
     /// The authoritative-commit capabilities (Snorri StateStore boundary, epic pqueue-2201fd37). The
-    /// composition advertises the FULL vectorized-commit guarantees iff BOTH axes support it: the projection
-    /// materializes the commit-class read model (`supports_commit_transition`) AND the log gives an atomic
-    /// append+apply boundary. Otherwise it advertises the all-false default so a consumer (Snorri) rejects it
-    /// before activation. This reaches parity with the monolithic `MemoryBackend` for the composed memory
-    /// backend (`MemoryLog × InMemoryProjection`).
+    /// composition advertises the full vectorized-commit guarantees when the projection materializes the
+    /// commit-class read model. The authoritative log append is the durability boundary; a disposable
+    /// projection may apply after that boundary and recover from the same committed batch on reopen.
     fn commit_capabilities(&self) -> CommitCapabilities {
-        if self.supports_commit_transition && self.is_atomic() {
+        if self.supports_commit_transition {
             CommitCapabilities {
                 atomic_transition_commit: true,
                 vectorized_commit: true,
@@ -3889,6 +4218,18 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> PushPort for ComposedBack
                 IdempotencyDecision::Replay(ids) => return Ok(ids),
                 IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                 IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+            }
+            if let Some(ids) = g
+                .projection
+                .replay_durable_push(shard, &request_id, &items, now)?
+            {
+                g.idempotency.entry(shard.clone()).or_default().record(
+                    request_id,
+                    fingerprint,
+                    ids.clone(),
+                    expires_at,
+                );
+                return Ok(ids);
             }
             // TD-004 hard-debt admission gate — placed AFTER the idempotency Replay/Conflict resolution so it
             // gates only the PROCEED path (genuinely new work that adds async-apply debt). An idempotent
@@ -4360,11 +4701,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpsertPort for ComposedBa
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
-            // Upsert (`ReplacePending`) needs the atomic look-then-replace boundary; an eventual-apply log
-            // refuses it (parity with the monolith's `upsert_is_unavailable`), rather than splitting it.
-            if !self.is_atomic() {
-                return Err(EngineError::Unavailable);
-            }
+            // Selection and append are serialized as one log-authoritative operation. Disposable
+            // projections recover the committed replacement from that log on reopen.
             let def = self.control.queue_definition(shard)?;
             let schema = def
                 .entity_schema
@@ -4679,10 +5017,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
-            // In-place field/payload merge is an atomic-class feature; an eventual-apply log refuses it.
-            if !self.is_atomic() {
-                return Err(EngineError::Unavailable);
-            }
+            // Validation and append are serialized; the authoritative log carries the mutation across
+            // projection rebuilds even when append and materialization are separate durability axes.
             validate_api001_reserved_write_fields(&field_ops)?;
             let def = self.control.queue_definition(shard)?;
             let schema = def
@@ -4720,6 +5056,152 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> UpdateFieldsPort
             g.projection
                 .item_version(shard, &item_id)?
                 .ok_or(EngineError::NotFound)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BatchUpdatePort
+// ---------------------------------------------------------------------------
+
+impl<L: LogStore, P: ProjectionStore, C: ControlPlane> BatchUpdatePort
+    for ComposedBackend<L, P, C>
+{
+    fn batch_update(
+        &self,
+        shard: &QueueKey,
+        request: BatchUpdateRequest,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<BatchUpdateResponse>> + Send {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
+            if request.updates.is_empty() {
+                return Err(EngineError::Invalid("empty batch update"));
+            }
+            if request.updates.len() > 1_000 {
+                return Err(EngineError::BatchTooLarge);
+            }
+
+            let fingerprint = batch_update_body_hash(&request)?;
+            let definition = self.control.queue_definition(shard)?;
+            let expires_at = request_expires_at(now, definition.request_id_retention_ms);
+            let refs = request
+                .updates
+                .iter()
+                .map(|update| update.item_ref.clone())
+                .collect::<Vec<_>>();
+            let request_id = request.request_id.clone();
+
+            let mut inner = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&inner, shard)?;
+            // BatchUpdate is a read-modify-write boundary. A pending group-commit push must be sealed and
+            // projected before taking the one snapshot used for every entry in this request.
+            let group_commit = self.gc_active(&inner);
+            if group_commit {
+                Self::gc_force_seal(&mut inner, shard, ts_to_ms(now))?;
+            }
+            match inner
+                .batch_update_idempotency
+                .entry(shard.clone())
+                .or_default()
+                .check(&request_id, fingerprint, now)
+            {
+                IdempotencyDecision::Replay(response) => return Ok(response),
+                IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
+                IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+            }
+            if let Some(response) = inner.projection.replay_durable_batch_update(
+                shard,
+                &request_id,
+                fingerprint.0,
+                now,
+            )? {
+                inner
+                    .batch_update_idempotency
+                    .entry(shard.clone())
+                    .or_default()
+                    .record(request_id, fingerprint, response.clone(), expires_at);
+                return Ok(response);
+            }
+
+            let snapshot = inner.projection.batch_update_snapshot(shard, &refs)?;
+            let mut plan =
+                plan_batch_update(&definition, self.supports_gates, request.updates, snapshot);
+            let candidate_commands = plan
+                .commands
+                .iter()
+                .map(|(_, command)| command.clone())
+                .collect::<Vec<_>>();
+            let accepted = inner
+                .projection
+                .batch_update_preflight(shard, &candidate_commands)?;
+            if accepted.len() != candidate_commands.len() {
+                return Err(EngineError::Storage(
+                    "batch update preflight returned a mismatched result count".into(),
+                ));
+            }
+            plan.commands = plan
+                .commands
+                .into_iter()
+                .zip(accepted)
+                .filter_map(|((outcome_index, command), accepted)| {
+                    if accepted {
+                        Some((outcome_index, command))
+                    } else {
+                        plan.outcomes[outcome_index] = BatchUpdateOutcome::Invalid;
+                        None
+                    }
+                })
+                .collect();
+
+            let response = BatchUpdateResponse {
+                request_id: request_id.clone(),
+                results: plan.outcomes,
+            };
+            let response_payload = serde_json::to_string(&response)
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            let mut envelopes = plan
+                .commands
+                .into_iter()
+                .map(|(_, command)| {
+                    let item_id = command.item_id;
+                    Self::make_envelope(
+                        &mut inner,
+                        self.node_id,
+                        QueueCommand::UpdateFields(command),
+                        vec![item_id],
+                        now,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if envelopes.is_empty() {
+                envelopes.push(Self::make_envelope(
+                    &mut inner,
+                    self.node_id,
+                    QueueCommand::WriteSideRecords(WriteSideRecordsCommand::default()),
+                    Vec::new(),
+                    now,
+                ));
+            }
+            let marker = envelopes
+                .first_mut()
+                .expect("batch update always emits a command or marker");
+            marker.request_id = Some(request_id.clone());
+            marker.request_fingerprint = Some(fingerprint.0);
+            marker.request_outcome = Some(RequestOutcome::BatchUpdate { response_payload });
+
+            // One append call is the durable unit for all successful siblings and the replay marker.
+            if group_commit {
+                Self::gc_commit_sync_batch(&mut inner, shard, envelopes, expected_epoch)?;
+            } else {
+                Self::commit_locked_batch(&mut inner, shard, envelopes, expected_epoch)?;
+            }
+            inner
+                .batch_update_idempotency
+                .entry(shard.clone())
+                .or_default()
+                .record(request_id, fingerprint, response.clone(), expires_at);
+            Ok(response)
         })
     }
 }
@@ -5343,10 +5825,8 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ReschedulePort for Compos
         expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
         queue_serialized(&self.mutation_gate, shard.clone(), move || {
-            // Reschedule is an atomic-class feature; an eventual-apply log refuses it (no eligibility re-key).
-            if !self.is_atomic() {
-                return Err(EngineError::Unavailable);
-            }
+            // Rescheduling is recorded as UpdateFields in the authoritative log, so every projection axis
+            // rebuilds the same eligibility key.
             let mut g = self.inner.lock().expect("poisoned");
             Self::require_known_shard(&g, shard)?;
             // Same pre-commit gate as a field update: an absent / terminal / superseded / fenced id or a
@@ -5458,11 +5938,35 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
         &self,
         shard: &QueueKey,
         request: BoundedMutationRequest,
+        context: BoundedMutationContext,
     ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
-        deferred(move || {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
             let mut g = self.inner.lock().expect("poisoned");
             Self::require_known_shard(&g, shard)?;
-            g.projection.bounded_mutation(shard, request)
+            let plan = g.projection.plan_bounded_mutation(shard, request)?;
+            for update in plan.updates {
+                let item_id = update.command.item_id;
+                g.projection.update_fields_validate(
+                    shard,
+                    &item_id,
+                    Some(update.expected_item_version),
+                )?;
+                g.projection.index_validate_update(
+                    shard,
+                    &item_id,
+                    &update.command.field_ops,
+                    update.command.set_entity_document.as_ref(),
+                )?;
+                let env = Self::make_envelope(
+                    &mut g,
+                    self.node_id,
+                    QueueCommand::UpdateFields(update.command),
+                    vec![item_id],
+                    context.now,
+                );
+                Self::commit_locked(&mut g, shard, env, context.expected_epoch)?;
+            }
+            Ok(plan.response)
         })
     }
 
@@ -5581,7 +6085,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
                     checksum: CommandChecksum(0),
                     created_at: context.now,
                 };
-                Self::commit_locked(&mut g, shard, env, None)?;
+                Self::commit_locked(&mut g, shard, env, context.expected_epoch)?;
                 g.claim_by_query_idempotency
                     .entry(shard.clone())
                     .or_default()
@@ -5617,7 +6121,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::HotProjectio
                 checksum: CommandChecksum(0),
                 created_at,
             };
-            Self::commit_locked(&mut g, shard, env, None)?;
+            Self::commit_locked(&mut g, shard, env, context.expected_epoch)?;
             let items = g.projection.render_claimed(shard, &item_ids)?;
             debug_assert_eq!(
                 items.len(),
@@ -5685,7 +6189,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
             };
             let mut g = self.inner.lock().expect("poisoned");
             Self::require_known_shard(&g, shard)?;
-            if !self.is_atomic() || !g.projection.supports_commit_transition() {
+            if !g.projection.supports_commit_transition() {
                 return Err(EngineError::Unavailable);
             }
 
@@ -5716,6 +6220,25 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                     }
                     IdempotencyDecision::Conflict => return Err(EngineError::RequestIdConflict),
                     IdempotencyDecision::Proceed | IdempotencyDecision::Expired => {}
+                }
+                if let Some(entries) =
+                    g.projection
+                        .replay_durable_commit(shard, rid, fingerprint.0, now)?
+                {
+                    let recovery = entries
+                        .into_iter()
+                        .map(recovery_from_outcome_entry)
+                        .collect::<Vec<_>>();
+                    g.commit_idempotency
+                        .entry(shard.clone())
+                        .or_default()
+                        .record(
+                            rid.clone(),
+                            fingerprint,
+                            recovery.clone(),
+                            request_expires_at(now, retention),
+                        );
+                    return Ok(outcomes_from_recovery(&recovery));
                 }
             }
 
@@ -5919,25 +6442,13 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> CommitTransitionPort
                 });
             }
 
-            // (3) Durably record the FULL per-entry outcome (committed AND rejected) for ANY request_id-bearing
-            //     commit that has >=1 REJECTED entry — MIXED and ALL-REJECTED alike (bead pqueue-db60657d
-            //     Problems 1 & 2). A rejected entry mutates and appends nothing of its own, so without this its
-            //     outcome is lost across a restart: a MIXED commit would rebuild a SHORTER vec (falling through
-            //     the `recovery.len() == entries.len()` guard to re-execution), and an ALL-REJECTED commit would
-            //     rebuild NOTHING and re-execute — and re-execution reads `now`, so a Conflict rejected before a
-            //     lease expired can re-reject StaleLease after it (a DIFFERENT structured error, not the
-            //     byte-identical replay the live in-memory record gives). We stamp the whole vec on ONE terminal
-            //     marker envelope (a no-op empty `WriteSideRecords`) carrying the caller's request_id +
-            //     whole-body fingerprint + `RequestOutcome::CommitTransition`. An ALL-COMMITTED commit needs no
-            //     marker (recovery reconstructs it exactly from its `Finalize` runs). The marker rides in the
-            //     SAME atomic append as the committed envelopes, so the outcome is durable EXACTLY when the
-            //     commit is — never a half state.
+            // (3) Durably record the FULL per-entry outcome for every request-id-bearing commit. Log-backed
+            //     stores can reconstruct all-committed outcomes from their command run, but unified relational
+            //     authority intentionally has no replayable log. One explicit marker gives both families the
+            //     same direct, byte-faithful recovery source for committed, mixed, and all-rejected outcomes.
+            //     The marker rides in the SAME atomic append as the committed envelopes.
             let mut batch = committed_envelopes;
-            if let Some(rid) = &request_id
-                && recovery
-                    .iter()
-                    .any(|r| matches!(r.status, CommitEntryStatus::Rejected(_)))
-            {
+            if let Some(rid) = &request_id {
                 let outcome_entries: Vec<CommitOutcomeEntry> =
                     recovery.iter().map(outcome_entry_from_recovery).collect();
                 let command_id = Self::next_command_id(&mut g, self.node_id);
@@ -5993,16 +6504,29 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RecoveryReadPort
     ) -> impl std::future::Future<Output = EngineResult<Option<CommitRecovery>>> + Send {
         deferred(move || {
             let g = self.inner.lock().expect("poisoned");
-            if !self.is_atomic() || !g.projection.supports_commit_transition() {
+            if !g.projection.supports_commit_transition() {
                 Err(EngineError::Unavailable)
             } else {
-                Ok(g.commit_idempotency
+                let cached = g
+                    .commit_idempotency
                     .get(shard)
                     .and_then(|c| c.peek(&request_id))
-                    .map(|entries| CommitRecovery {
-                        request_id,
-                        entries,
-                    }))
+                    .or_else(|| {
+                        g.projection
+                            .read_durable_commit(shard, &request_id)
+                            .ok()
+                            .flatten()
+                            .map(|entries| {
+                                entries
+                                    .into_iter()
+                                    .map(recovery_from_outcome_entry)
+                                    .collect()
+                            })
+                    });
+                Ok(cached.map(|entries| CommitRecovery {
+                    request_id,
+                    entries,
+                }))
             }
         })
     }
@@ -6023,11 +6547,9 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> RecoveryReadPort
 }
 
 // ---------------------------------------------------------------------------
-// Capability-delegating ports (relational-class features). Gate state (`SetGates`) and per-group
-// active-scope discovery are projection-axis capabilities: the relational projection materializes the gate
-// tables + per-group summary and implements them, while the in-memory / log-replay family stores neither
-// and refuses them via the projection defaults — exact capability parity with the monolithic `MemoryBackend`
-// and `SqliteRelationalBackend`.
+// Capability-delegating ports. Gate state (`SetGates`) is implemented by the shared in-memory/log-replay
+// projection and relational projections. Per-group active-scope discovery remains relational-only; a
+// projection retaining either default refuses that operation.
 // ---------------------------------------------------------------------------
 
 impl<L: LogStore, P: ProjectionStore, C: ControlPlane> crate::port::SetGatesPort
@@ -6706,6 +7228,58 @@ mod ordered_tests {
             Ok(Some(1))
         }
 
+        fn batch_update_snapshot(
+            &self,
+            _shard: &QueueKey,
+            refs: &[BatchUpdateItemRef],
+        ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+            let state = self.state.lock().expect("fake projection poisoned");
+            let mut ids = BTreeSet::new();
+            for item_ref in refs {
+                match item_ref {
+                    BatchUpdateItemRef::ItemId(item_id) => {
+                        ids.insert(*item_id);
+                    }
+                    BatchUpdateItemRef::ClientItemKey(key) => {
+                        if let Ok(item_id) = ItemId::new(key.as_str()) {
+                            ids.insert(item_id);
+                        }
+                    }
+                    BatchUpdateItemRef::Both { item_id, .. } => {
+                        ids.insert(*item_id);
+                    }
+                }
+            }
+            Ok(ids
+                .into_iter()
+                .filter_map(|item_id| {
+                    let lifecycle = if state.pending.contains(&item_id) {
+                        Some(ItemState::Pending)
+                    } else if state.leased.contains_key(&item_id) {
+                        Some(ItemState::Leased)
+                    } else {
+                        state.terminal.get(&item_id).map(|_| ItemState::Complete)
+                    }?;
+                    Some(BatchUpdateSnapshotItem {
+                        item_id,
+                        client_item_key: ClientItemKey::new(item_id.to_string()).unwrap(),
+                        state: lifecycle,
+                        item_version: 1,
+                        fenced: false,
+                        superseded: false,
+                    })
+                })
+                .collect())
+        }
+
+        fn batch_update_preflight(
+            &self,
+            _shard: &QueueKey,
+            commands: &[UpdateFieldsCommand],
+        ) -> EngineResult<Vec<bool>> {
+            Ok(vec![true; commands.len()])
+        }
+
         fn expired_leases(
             &self,
             _shard: &QueueKey,
@@ -6966,6 +7540,184 @@ mod ordered_tests {
             typed_indexes: vec![],
             emit_change_records: true,
         }
+    }
+
+    #[test]
+    fn batch_update_planner_rejects_wrong_priority_type() {
+        let item_id = ItemId::from_u64(1);
+        let client_item_key = ClientItemKey::new("item-1").unwrap();
+        let update = crate::port::BatchUpdateEntry {
+            item_ref: BatchUpdateItemRef::ItemId(item_id),
+            expected_item_version: Some(7),
+            priority: BatchUpdateValue::Replace(PriorityValue::Timestamp(ts(10))),
+            not_before: BatchUpdateValue::Keep,
+            payload: BatchUpdateValue::Keep,
+            metadata: BatchUpdateValue::Keep,
+            gate_keys: BatchUpdateValue::Keep,
+            fields: BatchUpdateValue::Keep,
+        };
+        let plan = plan_batch_update(
+            &qdef(),
+            false,
+            vec![update],
+            vec![BatchUpdateSnapshotItem {
+                item_id,
+                client_item_key,
+                state: ItemState::Pending,
+                item_version: 7,
+                fenced: false,
+                superseded: false,
+            }],
+        );
+
+        assert_eq!(plan.outcomes, vec![BatchUpdateOutcome::Invalid]);
+        assert!(plan.commands.is_empty());
+    }
+
+    #[test]
+    fn composed_batch_update_is_one_append_and_replays_after_recovery() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        );
+        futures::executor::block_on(backend.create_queue(qdef())).unwrap();
+        let ids = futures::executor::block_on(backend.push(
+            &queue(),
+            vec![PushSpec::default(), PushSpec::default()],
+            ts(1),
+            None,
+        ))
+        .unwrap();
+        let request = BatchUpdateRequest {
+            request_id: RequestId::new("batch-request-1").unwrap(),
+            updates: ids
+                .iter()
+                .map(|item_id| crate::port::BatchUpdateEntry {
+                    item_ref: BatchUpdateItemRef::ItemId(*item_id),
+                    expected_item_version: Some(1),
+                    priority: BatchUpdateValue::Keep,
+                    not_before: BatchUpdateValue::Keep,
+                    payload: BatchUpdateValue::Replace(Some(Bytes::from_static(b"updated"))),
+                    metadata: BatchUpdateValue::Keep,
+                    gate_keys: BatchUpdateValue::Keep,
+                    fields: BatchUpdateValue::Keep,
+                })
+                .collect(),
+        };
+
+        let response = futures::executor::block_on(backend.batch_update(
+            &queue(),
+            request.clone(),
+            ts(2),
+            None,
+        ))
+        .unwrap();
+        assert!(response.results.iter().all(|outcome| matches!(
+            outcome,
+            BatchUpdateOutcome::Updated {
+                item_version: 2,
+                ..
+            }
+        )));
+        assert_eq!(
+            backend.with_log(FakeGroupCommitLog::sealed_batches),
+            vec![1, 2]
+        );
+
+        let replay = futures::executor::block_on(backend.batch_update(
+            &queue(),
+            request.clone(),
+            ts(3),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(replay, response);
+        assert_eq!(
+            backend.with_log(FakeGroupCommitLog::sealed_batches),
+            vec![1, 2]
+        );
+
+        let mut conflicting = request.clone();
+        conflicting.updates[0].payload =
+            BatchUpdateValue::Replace(Some(Bytes::from_static(b"different")));
+        assert_eq!(
+            futures::executor::block_on(backend.batch_update(&queue(), conflicting, ts(3), None,)),
+            Err(EngineError::RequestIdConflict)
+        );
+        assert_eq!(
+            backend.with_log(FakeGroupCommitLog::sealed_batches),
+            vec![1, 2]
+        );
+
+        let recovered = ComposedBackend::new(
+            backend.with_log(Clone::clone),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        )
+        .recover()
+        .unwrap();
+        let reopened_replay =
+            futures::executor::block_on(recovered.batch_update(&queue(), request, ts(4), None))
+                .unwrap();
+        assert_eq!(reopened_replay, response);
+        assert_eq!(
+            recovered.with_log(FakeGroupCommitLog::sealed_batches),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn composed_all_rejected_batch_persists_one_replay_marker() {
+        let backend = ComposedBackend::new(
+            FakeGroupCommitLog::default(),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        )
+        .with_group_commit(true);
+        futures::executor::block_on(backend.create_queue(qdef())).unwrap();
+        let request = BatchUpdateRequest {
+            request_id: RequestId::new("all-rejected").unwrap(),
+            updates: vec![crate::port::BatchUpdateEntry {
+                item_ref: BatchUpdateItemRef::ItemId(ItemId::from_u64(999)),
+                expected_item_version: None,
+                priority: BatchUpdateValue::Keep,
+                not_before: BatchUpdateValue::Keep,
+                payload: BatchUpdateValue::Keep,
+                metadata: BatchUpdateValue::Keep,
+                gate_keys: BatchUpdateValue::Keep,
+                fields: BatchUpdateValue::Keep,
+            }],
+        };
+        let response = futures::executor::block_on(backend.batch_update(
+            &queue(),
+            request.clone(),
+            ts(2),
+            None,
+        ))
+        .unwrap();
+        assert_eq!(response.results, vec![BatchUpdateOutcome::NotFound]);
+        assert_eq!(
+            backend.with_log(FakeGroupCommitLog::sealed_batches),
+            vec![1]
+        );
+
+        let recovered = ComposedBackend::new(
+            backend.with_log(Clone::clone),
+            FakeProjection::default(),
+            InProcessControlPlane::new(),
+        )
+        .recover()
+        .unwrap();
+        assert_eq!(
+            futures::executor::block_on(recovered.batch_update(&queue(), request, ts(3), None,))
+                .unwrap(),
+            response
+        );
+        assert_eq!(
+            recovered.with_log(FakeGroupCommitLog::sealed_batches),
+            vec![1]
+        );
     }
 
     #[test]
@@ -8216,12 +8968,14 @@ mod ordered_tests {
         let mut recovered = HashMap::new();
         let mut recovered_push = HashMap::new();
         let mut recovered_commit = HashMap::new();
+        let mut recovered_batch_update = HashMap::new();
         ComposedBackend::<FakeGroupCommitLog, FakeProjection, InProcessControlPlane>::rebuild_idempotency_from_log(
             &log,
             RecoveryIdempotencyCaches {
                 push: &mut recovered_push,
                 claim: &mut recovered,
                 commit: &mut recovered_commit,
+                batch_update: &mut recovered_batch_update,
             },
             &shard,
             10_000,
@@ -8269,12 +9023,14 @@ mod ordered_tests {
         let mut recovered_push = HashMap::new();
         let mut recovered_claim = HashMap::new();
         let mut recovered_commit = HashMap::new();
+        let mut recovered_batch_update = HashMap::new();
         ComposedBackend::<FakeGroupCommitLog, FakeProjection, InProcessControlPlane>::rebuild_idempotency_from_log(
             &log,
             RecoveryIdempotencyCaches {
                 push: &mut recovered_push,
                 claim: &mut recovered_claim,
                 commit: &mut recovered_commit,
+                batch_update: &mut recovered_batch_update,
             },
             &shard,
             60_000,

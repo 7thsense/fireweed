@@ -1,5 +1,5 @@
 //! TP-003 **product validation** (AC-E2E-*) — the P0/core product workflows driven through the current
-//! library facade ([`fireweed::Pqueue`]) over the in-memory backend, at SMOKE scale. This rebuilds the
+//! library facade ([`fireweed::RuntimeCore`]) over the in-memory backend, at SMOKE scale. This rebuilds the
 //! `product_validation_tests` suite that lived in the removed `fireweed-service` crate.
 //!
 //! Each workflow exercises the real acceptance-criterion invariants (not trivial asserts) and emits a
@@ -25,7 +25,7 @@ use bytes::Bytes;
 use fireweed::{
     ActiveScope, ClaimCompatibility, ClaimRef, ClientItemKey, CommitEntry, CommitRequest,
     DiscoveryGranularity, EngineError, EntryOutcome, FinalizeKind, GroupBatching, LibBackend, Nack,
-    NewItem, PayloadUpdate, Pqueue, ScheduleUpdate, UpsertOutcome,
+    NewItem, PayloadUpdate, RuntimeCore, ScheduleUpdate, UpsertOutcome,
 };
 use fireweed_core::{
     CohortOnIncomplete, CohortPolicy, EligibilityPolicy, GroupKey, ItemId, OrderingMode,
@@ -46,9 +46,9 @@ use fireweed_sqlite::{
 
 /// A fresh in-memory single-node deployment + a manual clock (so a workflow can advance wall-clock time
 /// deterministically). Returns the handle and the clock.
-fn deployment() -> (Pqueue<ComposedMemoryBackend>, Arc<ManualClock>) {
+fn deployment() -> (RuntimeCore<ComposedMemoryBackend>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
+    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     (pq, clock)
 }
 
@@ -138,7 +138,7 @@ fn emit_ac(
         inv_ids,
         pass_bar,
         "memory",
-        "in-process lib facade (Pqueue + MemoryBackend); release shape is the provisioned run",
+        "in-process lib facade (RuntimeCore + MemoryBackend); release shape is the provisioned run",
         values,
     );
 }
@@ -322,7 +322,7 @@ async fn downstream_pacing_non_goal_e2e() {
 
 /// Drain `q` fully in `batch`-sized claims (ack each), returning the claimed priorities in delivery order.
 async fn drain_priorities(
-    pq: &Pqueue<ComposedMemoryBackend>,
+    pq: &RuntimeCore<ComposedMemoryBackend>,
     q: &QueueKey,
     batch: usize,
 ) -> Vec<i64> {
@@ -554,7 +554,7 @@ async fn scheduled_action_delivery_e2e() {
     let sqlite_path = unique_temp_path("scheduled-sqlite");
     let _ = std::fs::remove_file(&sqlite_path);
     let sqlite_clock = Arc::new(ManualClock::at(0));
-    let sqlite = Pqueue::new(
+    let sqlite = RuntimeCore::new(
         Arc::new(composed_sqlite_backend(sqlite_path.to_str().unwrap()).expect("open sqlite")),
         sqlite_clock.clone(),
     );
@@ -566,7 +566,7 @@ async fn scheduled_action_delivery_e2e() {
     let dir = unique_temp_path("scheduled-objectlog");
     let _ = std::fs::remove_dir_all(&dir);
     let object_clock = Arc::new(ManualClock::at(0));
-    let objectlog = Pqueue::new(
+    let objectlog = RuntimeCore::new(
         Arc::new(ObjectLogBackend::open(&dir).expect("open object log")),
         object_clock.clone(),
     );
@@ -966,7 +966,7 @@ struct ScheduledProfileEvidence {
 }
 
 async fn scheduled_batch_delivery_profile<B: LibBackend>(
-    pq: &Pqueue<B>,
+    pq: &RuntimeCore<B>,
     clock: Arc<ManualClock>,
     tenant: &str,
 ) -> ScheduledProfileEvidence {
@@ -1083,7 +1083,7 @@ async fn scheduled_batch_delivery_profile<B: LibBackend>(
 }
 
 async fn claim_one<B: LibBackend>(
-    pq: &Pqueue<B>,
+    pq: &RuntimeCore<B>,
     q: &QueueKey,
     order: &mut Vec<i64>,
     ids: &mut Vec<ItemId>,
@@ -1106,7 +1106,7 @@ fn payload_label(item: &fireweed::ClaimedItem) -> String {
     String::from_utf8(item.payload.clone().expect("payload").to_vec()).expect("utf8 payload")
 }
 
-async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &Pqueue<B>, tenant: &str) -> bool {
+async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &RuntimeCore<B>, tenant: &str) -> bool {
     let q = qk(tenant, "campaign");
     pq.create_queue(qdef(
         tenant,
@@ -1169,7 +1169,7 @@ async fn assert_keyed_upsert_converges<B: LibBackend>(pq: &Pqueue<B>, tenant: &s
     true
 }
 
-async fn assert_upsert_unavailable<B: LibBackend>(pq: &Pqueue<B>, tenant: &str) -> bool {
+async fn assert_upsert_unavailable<B: LibBackend>(pq: &RuntimeCore<B>, tenant: &str) -> bool {
     let q = qk(tenant, "campaign");
     pq.create_queue(qdef(
         tenant,
@@ -1600,8 +1600,8 @@ async fn marketo_group_batching_e2e() {
     );
 
     // --- ASSERTED whole-group SELECTION on the gate/group-capable relational backend (BQ-14b) ---
-    // The relational family implements atomic whole-group claim. Same lib facade (Pqueue), relational backend.
-    let rel = Pqueue::new(
+    // The relational family implements atomic whole-group claim. Same lib facade (RuntimeCore), relational backend.
+    let rel = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::in_memory().expect("relational backend")),
         Arc::new(ManualClock::at(0)),
     );
@@ -1750,9 +1750,9 @@ fn cohort_qdef(
 }
 
 /// AC-E2E-3 (TP-003): model `actions_scheduled` callback batches on a cohort-enabled queue through the
-/// generic facade/in-memory family. Relational backends implement whole-cohort selection/lifecycle; this
-/// test keeps the generic-family claim-compatibility contract pinned so a well-formed non-item claim is not
-/// silently downgraded to item-level delivery. (FR-32a..32c, FR-47a, FR-47c, FR-48.)
+/// generic facade/in-memory family. This keeps claim compatibility and non-item selection pinned so a
+/// well-formed whole-cohort request is neither rejected nor silently downgraded to item-level delivery.
+/// (FR-32a..32c, FR-47a, FR-47c, FR-48.)
 ///
 /// COVERED via the lib facade (each assertion bites a DISTINCT cause):
 ///   - item-level claim still works on a cohort-enabled queue (parity);
@@ -1760,8 +1760,8 @@ fn cohort_qdef(
 ///   - whole_cohort on a cohort queue with completion_bound_ms = None -> Invalid("requires cohort completion...");
 ///   - whole_cohort with completion_bound_ms (90s) > progress_bound_ms (60s) -> Invalid("...<= progress_bound_ms");
 ///   - whole_cohort COMBINED with group_key -> Invalid("cannot be combined...");
-///   - a well-formed whole_cohort claim is RECOGNIZED (ClaimUnit::WholeCohort) and refused with Unavailable
-///     by the LOG-REPLAY family, NOT silently item-claimed.
+///   - a well-formed whole_cohort claim is recognized and returns no items when no complete cohort exists,
+///     rather than leasing ordinary work.
 /// ASSERTED (BQ-14c): atomic whole-cohort SELECTION on the relational backend via the same lib facade — a
 /// COMPLETE cohort leases all-or-nothing under a shared cohort lease token while an incomplete cohort is
 /// skipped (no partial-cohort leak, INV-7).
@@ -1858,16 +1858,16 @@ async fn callback_cohort_e2e() {
         "whole_cohort cannot be combined with group_key: {combined:?}"
     );
 
-    // (e) a WELL-FORMED whole_cohort claim is recognized (ClaimUnit::WholeCohort) and refused with
-    // Unavailable by the generic/in-memory family, NOT silently item-claimed.
+    // (e) A well-formed whole-cohort claim is accepted by the shared projection. The queue currently has
+    // only an ordinary item, so the rich claim returns empty instead of silently item-claiming it.
     let well_formed = pq.claim_with(&cohort_q, 10, 60_000, whole_cohort()).await;
     assert!(
-        matches!(well_formed, Err(EngineError::Unavailable)),
-        "a well-formed whole_cohort claim is refused with Unavailable by the log-replay family: {well_formed:?}"
+        matches!(&well_formed, Ok(items) if items.is_empty()),
+        "a well-formed whole_cohort claim succeeds without leasing ordinary items: {well_formed:?}"
     );
 
     // --- ASSERTED atomic whole-cohort SELECTION on the relational backend (BQ-14c, all-or-nothing) ---
-    let rel = Pqueue::new(
+    let rel = RuntimeCore::new(
         Arc::new(composed_sqlite_relational_in_memory().expect("relational backend")),
         Arc::new(ManualClock::at(0)),
     );
@@ -1934,7 +1934,7 @@ async fn callback_cohort_e2e() {
     emit_ac(
         "AC-E2E-3",
         &[],
-        "item-level claim parity on a cohort-enabled queue; the generic-family whole_cohort claim-compatibility contract is enforced with distinct errors (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined); well-formed -> Unavailable on the log-replay family); and ASSERTED atomic whole-cohort SELECTION on the relational backend (BQ-14c): a COMPLETE cohort leases all-or-nothing under a shared cohort lease token while an incomplete cohort is skipped (no partial-cohort leak, INV-7). [DEFERRED: incomplete-cohort expiry->failed-with-reason is in the relational suites]",
+        "item-level claim parity on a cohort-enabled queue; whole_cohort compatibility errors remain distinct (non-cohort -> Invalid(enabled); no completion_bound -> Invalid(requires); completion>progress -> Invalid(<=progress); combined with group_key -> Invalid(combined)); a well-formed shared-projection request succeeds without leasing ordinary items; and a COMPLETE cohort leases all-or-nothing under a shared cohort lease token while an incomplete cohort is skipped (INV-7). [DEFERRED: incomplete-cohort expiry->failed-with-reason is in the relational suites]",
         BTreeMap::from([
             (
                 "item_level_claim_len".into(),
@@ -2149,7 +2149,7 @@ async fn noisy_neighbor_scale_e2e() {
     // oldest-eligible age (most-starved first). The facade returns the UNFILTERED ranking (no principal —
     // unauthorized-scope exclusion is the auth layer's concern per ADR-002).
     let disc_clock = Arc::new(ManualClock::at(0));
-    let rel = Pqueue::new(
+    let rel = RuntimeCore::new(
         Arc::new(composed_sqlite_relational_in_memory().expect("relational backend")),
         disc_clock.clone(),
     );
@@ -2289,7 +2289,7 @@ async fn worker_crash_recovery_e2e() {
 
     // ----- build durable state, then "crash" (drop the handle) -----
     let (complete_before, accounted_before) = {
-        let pq = Pqueue::new(
+        let pq = RuntimeCore::new(
             Arc::new(ObjectLogBackend::open(&dir).expect("open object log")),
             Arc::new(ManualClock::at(0)),
         );
@@ -2312,14 +2312,14 @@ async fn worker_crash_recovery_e2e() {
         let accounted = m.pending + m.leased + m.complete + m.failed;
         assert_eq!(accounted, n, "every accepted item accounted before crash");
         (m.complete, accounted)
-    }; // <- the Pqueue + ObjectLogBackend drop here; only the on-disk object log survives.
+    }; // <- the RuntimeCore + ObjectLogBackend drop here; only the on-disk object log survives.
 
     // ----- COUNTERFACTUAL: a FRESH dir recovers nothing (recovery is from disk, not a surviving projection) -----
     let fresh_dir =
         std::env::temp_dir().join(format!("pqueue-pv-e2e5-fresh-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&fresh_dir);
     {
-        let fresh = Pqueue::new(
+        let fresh = RuntimeCore::new(
             Arc::new(ObjectLogBackend::open(&fresh_dir).expect("open fresh")),
             Arc::new(ManualClock::at(0)),
         );
@@ -2332,7 +2332,7 @@ async fn worker_crash_recovery_e2e() {
     }
 
     // ----- RECOVERY: reopen the SAME on-disk log; the projection is rebuilt from disk -----
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(ObjectLogBackend::open(&dir).expect("reopen object log")),
         Arc::new(ManualClock::at(0)),
     );

@@ -1,5 +1,5 @@
 //! Request-id idempotency contract over the memory (atomic-class) backend, exercised through the public
-//! `Pqueue` facade. Proves the retained-replay machinery the Snorri authoritative-commit boundary builds
+//! `RuntimeCore` facade. Proves the retained-replay machinery the Snorri authoritative-commit boundary builds
 //! on (ddx-pqueue-2201fd37): the caller's `request_id` propagates into the durable command envelope and
 //! drives replay / conflict / expired outcomes.
 //!
@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use fireweed::{EngineError, NewItem, Pqueue, PriorityValue, RequestId};
+use fireweed::{EngineError, NewItem, PriorityValue, RequestId, RuntimeCore};
 use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy, TenantId,
@@ -60,7 +60,7 @@ fn item(priority: i64) -> NewItem {
 
 #[tokio::test]
 async fn same_request_id_same_body_replays_without_a_second_append() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -86,7 +86,7 @@ async fn same_request_id_same_body_replays_without_a_second_append() {
 
 #[tokio::test]
 async fn same_request_id_different_body_conflicts() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -114,7 +114,7 @@ async fn same_request_id_different_body_conflicts() {
 #[tokio::test]
 async fn retry_after_retention_window_is_a_fresh_push() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
+    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     // Short retention so a clock advance crosses the expiry boundary.
     pq.create_queue(qdef(1_000)).await.unwrap();
@@ -144,7 +144,7 @@ async fn retry_after_retention_window_is_a_fresh_push() {
 
 #[tokio::test]
 async fn distinct_request_ids_each_append() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );

@@ -78,8 +78,9 @@ pub use claim_validation::{
     validate_claim_compatibility,
 };
 pub use compose::{
-    ComposeFaultHook, ComposeFaultPoint, ComposedBackend, ControlPlane, DefinitionCursor,
-    DefinitionPage, DetachedLogMaintenance, DetachedRetentionOutcome, DetachedRetentionRequest,
+    BatchUpdateSnapshotItem, BoundedMutationPlan, BoundedMutationUpdate, ComposeFaultHook,
+    ComposeFaultPoint, ComposedBackend, ControlPlane, DefinitionCursor, DefinitionPage,
+    DetachedLogMaintenance, DetachedRetentionOutcome, DetachedRetentionRequest,
     DetachedTrimWatermark, ExpiredLeaseCursor, ExpiredLeasePage, InProcessControlPlane,
     LogLineageIdentity, LogStore, ProjectionStore, RecoveryStart, RichClaimSelection,
     definition_page_from_sorted_rows, definition_page_from_storage_rows, max_position,
@@ -124,21 +125,21 @@ pub use finalize_validation::{
 };
 pub use port::{
     AsOfProjectionStore, Backend, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome,
-    BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, ChangeRecordSink,
-    ClaimByQueryContext, ClaimPort, ClaimRef, ClaimRequest, Claimed, ClaimedItem, Clock,
-    CohortFinalizePort, CohortLeaseTarget, CohortRenewLeasePort, CommandPage, CommitCapabilities,
-    CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionEntry,
-    CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery,
-    FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort, IdGen, IndexHit,
-    IndexQueryPort, InstanceFence, ItemView, LeaseView, LiveItemView, LogRead,
-    MAX_ORDERED_INDEPENDENT_PUSH_ITEMS, MaintenanceStopReason, MaintenanceSummary, PendingPage,
-    PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushPort, PushSpec,
-    QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    RequestIdReplayProbe, ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    generate_query_lease_token, is_api001_reserved_write_field,
-    validate_api001_reserved_write_fields, validate_distinct_commit_claims,
-    validate_instance_fence,
+    BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue,
+    BoundedMutationContext, ChangeRecordSink, ClaimByQueryContext, ClaimPort, ClaimRef,
+    ClaimRequest, Claimed, ClaimedItem, Clock, CohortFinalizePort, CohortLeaseTarget,
+    CohortRenewLeasePort, CommandPage, CommitCapabilities, CommitEntryOutcome, CommitEntryStatus,
+    CommitRecovery, CommitTransition, CommitTransitionEntry, CommitTransitionPort,
+    ControlPlaneStore, CreateQueueOutcome, DiscoveryPort, EntryRecovery, FinalizePort,
+    HistoricalProjectionRead, HotProjectionQueryPort, IdGen, IndexHit, IndexQueryPort,
+    InstanceFence, ItemView, LeaseView, LiveItemView, LogRead, MAX_ORDERED_INDEPENDENT_PUSH_ITEMS,
+    MaintenanceStopReason, MaintenanceSummary, PendingPage, PendingSummary, ProjectionRead,
+    ProjectionSnapshot, PurgePort, PushPort, PushSpec, QueueMetrics, ReassignLeasePort,
+    ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort, RequestIdReplayProbe,
+    ReschedulePort, SetGatesPort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    is_api001_reserved_write_field, validate_api001_reserved_write_fields,
+    validate_distinct_commit_claims, validate_instance_fence,
 };
 pub use schema_validation::{compile_entity_schema, validate_entity};
 pub use types::{CommandPosition, DurabilityClass, QueueKey};
@@ -152,43 +153,43 @@ mod tests {
         // The wire vocabulary is pinned in TD-006 section 7 and asserted verbatim by conformance.
         assert_eq!(
             EngineError::Invalid("x").resp_token(),
-            Some("-ERR pqueue invalid")
+            Some("-ERR fireweed invalid")
         );
         assert_eq!(
             EngineError::Terminal.resp_token(),
-            Some("-ERR pqueue terminal")
+            Some("-ERR fireweed terminal")
         );
         assert_eq!(
             EngineError::StaleLease.resp_token(),
-            Some("-ERR pqueue stale_lease")
+            Some("-ERR fireweed stale_lease")
         );
         assert_eq!(
             EngineError::Superseded.resp_token(),
-            Some("-ERR pqueue superseded")
+            Some("-ERR fireweed superseded")
         );
         assert_eq!(
             EngineError::Unavailable.resp_token(),
-            Some("-ERR pqueue unavailable")
+            Some("-ERR fireweed unavailable")
         );
         assert_eq!(
             EngineError::Conflict.resp_token(),
-            Some("-ERR pqueue conflict")
+            Some("-ERR fireweed conflict")
         );
         assert_eq!(
             EngineError::BatchTooLarge.resp_token(),
-            Some("-ERR pqueue batch_too_large")
+            Some("-ERR fireweed batch_too_large")
         );
         assert_eq!(
             EngineError::RequestIdConflict.resp_token(),
-            Some("-ERR pqueue request_id_conflict")
+            Some("-ERR fireweed request_id_conflict")
         );
         assert_eq!(
             EngineError::RequestExpired.resp_token(),
-            Some("-ERR pqueue request_expired")
+            Some("-ERR fireweed request_expired")
         );
         assert_eq!(
             EngineError::EpochFenced.resp_token(),
-            Some("-ERR pqueue epoch_stale")
+            Some("-ERR fireweed epoch_stale")
         );
         // NotFound (to nil) and Forbidden (to -NOPERM) have non-`-ERR` mappings; no token here.
         assert_eq!(EngineError::NotFound.resp_token(), None);
@@ -230,7 +231,7 @@ mod tests {
     fn pause_error_is_structured() {
         assert_eq!(
             EngineError::Paused { drain_intake: true }.resp_token(),
-            Some("-ERR pqueue paused")
+            Some("-ERR fireweed paused")
         );
     }
 

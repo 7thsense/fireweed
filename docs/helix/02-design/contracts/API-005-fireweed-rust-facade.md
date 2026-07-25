@@ -57,9 +57,10 @@ First-party tests use a crate-private construction seam.
 Storage authority, projection implementation, response-barrier choice, and
 coordination topology are construction inputs only. `Fireweed` exposes no
 post-construction backend/projection identity, discriminator, downcast, or
-configuration getter. Callers make behavioral decisions through the existing
-queue-scoped capability methods and through `projection_control()` when
-maintenance authority exists.
+configuration getter. Queue-scoped capability values describe execution
+characteristics of functionality that remains available on every supported
+composition; callers use `projection_control()` only when maintenance
+authority exists.
 
 ### Construction
 
@@ -191,9 +192,14 @@ profile-specific wrapper type is returned.
 ### Queue operations
 
 The following operation families are inherent `Fireweed` methods and preserve
-their current input, output, error, and async behavior. This is a facade
-compatibility inventory; it does not assert that every convenience method is a
-complete binding of API-001's request-id-bearing batch operation:
+their input, output, error, and async behavior. Every supported constructor
+MUST implement every method in this inventory. Construction-time storage
+composition MUST NOT turn an inherent method into
+`EngineError::Unavailable`; a composition that cannot implement the complete
+surface is unsupported and MUST NOT be exposed by API-005. The only optional
+handle is `projection_control()`, because it represents a concern absent from
+profiles without a disposable projection. Capability inspection may describe
+execution characteristics, but MUST NOT excuse missing core functionality.
 
 | Family | Methods |
 | --- | --- |
@@ -204,6 +210,12 @@ complete binding of API-001's request-id-bearing batch operation:
 | Read and discovery | `peek`, `current_position`, `discover_active_scopes`, `discover_active_scopes_stamped`, `discover`, `live_item`, `live_items`, `query_index_unique`, `query_index`, `query_index_unique_typed`, `query_index_typed`, `claimed` |
 | Metrics and projection query | `metrics`, `metrics_by_query`, `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, `declared_bucket_segment` |
 | Mutation and maintenance | `renew`, `reassign`, `update_fields`, `batch_update`, `update`, `set_gates`, `reclaim_expired`, `reclaim_expired_at`, `rearm`, `rearm_at`, `rearm_after`, `purge`, `bounded_mutation` |
+
+Per-constructor parity is a release invariant. One shared conformance suite
+MUST invoke every method family against every supported constructor, including
+`batch_update` and `live_items` in the same lifecycle. A representative call on
+one backend, compile-only forwarding, or an expected `Unavailable` result is
+not parity evidence.
 
 Iterator-taking compatibility methods may collect into `Vec<ItemId>` at the
 erased boundary. This does not change their observable contract.
@@ -293,7 +305,9 @@ the enforcement mechanism.
 
 The Snorri named-type closure is:
 
-`AggregateGroup`, `BucketRule`, `Bytes`, `ClaimAt`, `ClaimByQueryAt`,
+`AggregateGroup`, `BatchUpdateEntry`, `BatchUpdateItemRef`,
+`BatchUpdateOutcome`, `BatchUpdateRequest`, `BatchUpdateResponse`,
+`BatchUpdateValue`, `BucketRule`, `Bytes`, `ClaimAt`, `ClaimByQueryAt`,
 `ClaimByQueryRequest`, `ClaimCompatibility`, `ClaimRef`, `Claimed`,
 `ClaimedItem`, `ClientItemKey`, `Clock`, `CommitCapabilities`, `CommitEntry`,
 `CommitRecovery`, `CommitRequest`, `CompoundIndexDef`, `CompoundIndexField`,
@@ -320,7 +334,7 @@ non-generic `Fireweed` using these operations:
 `push_batch_with_request_id`, `upsert`, `claim_with`, `claim_by_query`,
 `claim_by_query_at`, `ack`, `nack`, `commit`, `commit_capabilities`,
 `explain_commit`, `side_record`, `live_item`, `query_index_unique_typed`,
-`update`, `purge`, `claimed`, `metrics`, `metrics_by_query`,
+`batch_update`, `update`, `purge`, `claimed`, `metrics`, `metrics_by_query`,
 `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, and
 `declared_bucket_segment`.
 
@@ -348,6 +362,7 @@ pub async fn explain_commit(&self, queue: &QueueKey, request_id: RequestId) -> E
 pub async fn side_record(&self, queue: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>>;
 pub async fn live_item(&self, queue: &QueueKey, key: ClientItemKey) -> EngineResult<Option<LiveItemView>>;
 pub async fn query_index_unique_typed(&self, queue: &QueueKey, index: &str, values: &[serde_json::Value]) -> EngineResult<Option<IndexHit>>;
+pub async fn batch_update(&self, queue: &QueueKey, request: BatchUpdateRequest) -> EngineResult<BatchUpdateResponse>;
 pub async fn update(&self, queue: &QueueKey, item_id: ItemId, priority: ScheduleUpdate<PriorityValue>, not_before: ScheduleUpdate<UtcTimestamp>, expected_item_version: Option<u64>) -> EngineResult<u64>;
 pub async fn purge(&self, queue: &QueueKey, ids: impl IntoIterator<Item = ItemId>, force: bool) -> EngineResult<u64>;
 pub async fn claimed(&self, queue: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>>;
@@ -376,8 +391,8 @@ pub async fn declared_bucket_segment(&self, queue: &QueueKey, request: DeclaredB
 
 | Condition | Error / outcome | Retry | Recovery expectation |
 | --- | --- | --- | --- |
-| Profile does not support an operation | Existing structured `EngineError`, normally `Unavailable` | Only after selecting a supporting profile | No backend downcast or internal-port call is permitted |
-| Queue-scoped capability is absent | Capability value is false or the operation returns its existing structured error | Per API-001 | Branch on the queue-scoped capability; backend identity is not observable |
+| Supported composition lacks a core operation | Construction/release validation failure | No | Do not expose or release the incomplete composition |
+| Core operation is transiently unavailable at runtime | Existing structured `EngineError::Unavailable` | Per API-001 | Retry without selecting a different storage implementation |
 | Projection maintenance is not owned | `projection_control()` returns `None` | No | Queue operations and hot-query capability checks remain independent |
 | Projection is offline or maintenance fails | Structured `EngineError` from the control operation | Per the existing recovery contract | Re-inspect or rebuild through the same borrowed control |
 | Synchronous object-log/Postgres open occurs inside Tokio | `EngineError::Invalid` directing the caller to `open_objectlog_postgres_async` | Yes | No partially opened `Fireweed` escapes |
@@ -389,9 +404,7 @@ use std::sync::Arc;
 use fireweed::{EngineError, Fireweed, QueueKey};
 
 async fn activate(fireweed: Arc<Fireweed>, queue: QueueKey) -> Result<(), EngineError> {
-    if !fireweed.commit_capabilities(&queue)?.atomic_transition_commit {
-        return Err(EngineError::Unavailable);
-    }
+    let _execution_characteristics = fireweed.commit_capabilities(&queue)?;
     if let Some(control) = fireweed.projection_control() {
         let verification = control.verify().await?;
         if !verification.compatible {

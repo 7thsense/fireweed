@@ -3,15 +3,18 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, ItemId, ItemState, LeaseToken, MetricsByQueryRequest, QueueDefinition,
-    RequestId, UtcTimestamp,
+    ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse,
+    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken,
+    MetricsByQueryRequest, QueryCapabilityFlags, QueueDefinition, RangeScanRequest,
+    RangeScanResponse, RequestId, UtcTimestamp,
 };
 use fireweed_engine::TerminalEmissionMetrics;
 use fireweed_engine::{
-    AsOfProjectionStore, ClaimRef, ClaimedItem, CohortLeaseTarget, CommandEnvelope,
-    CommandPosition, CreateQueueOutcome, EngineError, EngineResult, FinalizeOutcome,
-    IdempotencyDecision, IndexHit, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary,
-    ProjectionRead, PushFingerprint, PushItem, QueueCounters, QueueKey, QueueMetrics,
+    AsOfProjectionStore, BatchUpdateItemRef, BatchUpdateSnapshotItem, ClaimRef, ClaimedItem,
+    CohortLeaseTarget, CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError,
+    EngineResult, FinalizeOutcome, IdempotencyDecision, IndexHit, ItemView, LeaseView,
+    LiveItemView, PendingPage, PendingSummary, ProjectionRead, PushFingerprint, PushItem,
+    QueueCounters, QueueKey, QueueMetrics, UpdateFieldsCommand,
 };
 use fireweed_engine::{ProjectionSnapshot, ProjectionStore};
 use fireweed_projection::{InMemoryProjection, ProjectionData, ProjectionImage};
@@ -710,6 +713,14 @@ impl SqliteProjectionStore {
         export_projection_image_sql(&g.conn, shard)
     }
 
+    fn projection_data(&self, shard: &QueueKey) -> EngineResult<ProjectionData> {
+        let definition = {
+            let g = self.lock();
+            g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
+        };
+        ProjectionData::from_image(&definition, self.export_projection_image(shard)?)
+    }
+
     /// The object-log lineage the async checkpoint worker durably recorded for `shard`, or `None` if no
     /// lineage row exists (a queue whose projection was materialized synchronously, or never checkpointed).
     /// Recovery cross-validates this against the log identity via
@@ -943,6 +954,17 @@ impl SqliteProjectionStore {
 }
 
 impl ProjectionStore for SqliteProjectionStore {
+    fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
+        QueryCapabilityFlags {
+            range_scan: true,
+            grouped_aggregate: true,
+            declared_bucket_segment: true,
+            bounded_mutation: true,
+            claim_by_query: true,
+            side_record_query: false,
+        }
+    }
+
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         let mut g = self.lock();
         create_queue_sql(&mut g, definition.clone())?;
@@ -1070,6 +1092,22 @@ impl ProjectionStore for SqliteProjectionStore {
 
     fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
         item_version_sql(&self.lock().conn, shard, id)
+    }
+
+    fn batch_update_snapshot(
+        &self,
+        shard: &QueueKey,
+        refs: &[BatchUpdateItemRef],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        batch_update_snapshot_sql(&self.lock().conn, shard, refs)
+    }
+
+    fn batch_update_preflight(
+        &self,
+        _shard: &QueueKey,
+        commands: &[UpdateFieldsCommand],
+    ) -> EngineResult<Vec<bool>> {
+        Ok(vec![true; commands.len()])
     }
 
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
@@ -1283,6 +1321,39 @@ impl ProjectionStore for SqliteProjectionStore {
         projection.metrics_by_query(request)
     }
 
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> EngineResult<RangeScanResponse> {
+        self.projection_data(shard)?.range_scan(request)
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        self.projection_data(shard)?.grouped_aggregate(request)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        self.projection_data(shard)?
+            .declared_bucket_segment(request)
+    }
+
+    fn plan_bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::BoundedMutationRequest,
+    ) -> EngineResult<fireweed_engine::BoundedMutationPlan> {
+        self.projection_data(shard)?.plan_bounded_mutation(request)
+    }
+
     fn terminal_emission_metrics(
         &self,
         shard: &QueueKey,
@@ -1330,20 +1401,20 @@ impl ProjectionStore for SqliteProjectionStore {
 
     fn index_get_unique(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> EngineResult<Option<IndexHit>> {
-        Err(EngineError::Unavailable)
+        self.projection_data(shard)?.index_get_unique(index, key)
     }
 
     fn index_lookup(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
-        Err(EngineError::Unavailable)
+        self.projection_data(shard)?.index_lookup(index, key)
     }
 }
 

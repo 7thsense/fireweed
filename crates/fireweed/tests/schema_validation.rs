@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use fireweed::{
     ClaimRef, ClaimedItem, CommitEntry, CommitRequest, EngineError, EntryOutcome, FinalizeKind,
-    NewItem, PayloadUpdate, Pqueue, RequestId,
+    NewItem, PayloadUpdate, RequestId, RuntimeCore,
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, EntitySchemaDocument, OrderingMode, PriorityDirection,
@@ -70,8 +70,8 @@ fn typed_def() -> QueueDefinition {
     }
 }
 
-fn make() -> Pqueue<ComposedMemoryBackend> {
-    Pqueue::new(
+fn make() -> RuntimeCore<ComposedMemoryBackend> {
+    RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     )

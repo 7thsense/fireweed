@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use fireweed::{
     ClaimAt, Clock, ControlPlaneConfig, EngineError, EngineResult, MultiQueueClaimLimits,
-    MultiQueueClaimTarget, NewItem, OrderingMode, OwnerId, Ownership, Pqueue, PriorityDirection,
+    MultiQueueClaimTarget, NewItem, OrderingMode, OwnerId, Ownership, PriorityDirection,
     PriorityModel, PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, QueueKey,
-    RecurrencePolicy, RetryPolicy, TenantId,
+    RecurrencePolicy, RetryPolicy, RuntimeCore, TenantId,
 };
 use fireweed_core::EligibilityPolicy;
 use fireweed_engine::{
@@ -255,14 +255,14 @@ async fn coordinated_acquisition_is_sorted_and_runtime_failures_are_per_target()
     let cp = Arc::new(RecordingControlPlane::new());
     let a = queue("a");
     let b = queue("b");
-    let setup = Pqueue::new(backend.clone(), clock.clone());
+    let setup = RuntimeCore::new(backend.clone(), clock.clone());
     setup.create_queue(definition("a")).await.unwrap();
     setup.create_queue(definition("b")).await.unwrap();
     setup.push(&a, NewItem::default()).await.unwrap();
     setup.push(&b, NewItem::default()).await.unwrap();
 
     let cp_trait: Arc<dyn QueueControlPlane> = cp.clone();
-    let pq = Pqueue::with_control_plane_in_process(
+    let pq = RuntimeCore::with_control_plane_in_process(
         backend,
         clock.clone(),
         OwnerId::new("owner-a").unwrap(),

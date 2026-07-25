@@ -1,5 +1,5 @@
 //! Contract test for the authoritative vectorized claimed-work commit (Snorri StateStore boundary, epic
-//! pqueue-2201fd37), exercised over the MemoryBackend through the public `Pqueue` facade.
+//! pqueue-2201fd37), exercised over the MemoryBackend through the internal runtime core.
 //!
 //! Proves acceptance #2 (atomic per-entry validate + opaque non-work side records + dispatchable lifecycle
 //! enqueue + input finalize, with per-entry committed/rejected outcomes) and acceptance #3 (request-id
@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use fireweed::{
     ClaimRef, CommitEntry, CommitEntryStatus, CommitRequest, EngineError, EntryOutcome,
-    FinalizeKind, InstanceFence, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem, Pqueue,
-    PriorityValue, RequestId, SideRecord,
+    FinalizeKind, InstanceFence, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem,
+    PriorityValue, RequestId, RuntimeCore, SideRecord,
 };
 use fireweed_core::{
     EligibilityPolicy, IndexDeclaration, IndexDef, IndexType, OrderingMode, PriorityDirection,
@@ -64,7 +64,7 @@ fn item(priority: i64) -> NewItem {
 }
 
 /// Push one input item and claim it, returning the `ClaimRef` (id + lease token + version) the commit needs.
-async fn push_and_claim(pq: &Pqueue<impl fireweed::LibBackend>, q: &QueueKey) -> ClaimRef {
+async fn push_and_claim(pq: &RuntimeCore<impl fireweed::LibBackend>, q: &QueueKey) -> ClaimRef {
     pq.push(q, item(10)).await.unwrap();
     let claimed = pq.claim(q, 1, 60_000).await.unwrap();
     assert_eq!(claimed.len(), 1, "exactly one item claimed");
@@ -112,7 +112,7 @@ fn claim_ref(item: &fireweed::ClaimedItem) -> ClaimRef {
 #[tokio::test]
 async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_continuation() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     let mut definition = qdef(60_000);
     definition.typed_indexes = vec![QueueIndex {
@@ -196,7 +196,7 @@ async fn multi_claim_commit_atomically_consumes_result_and_await_and_appends_con
 
 #[tokio::test]
 async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -252,7 +252,7 @@ async fn multi_claim_commit_rejects_atomically_when_any_claim_is_stale() {
 #[tokio::test]
 async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
 
@@ -321,7 +321,7 @@ async fn commit_validates_writes_side_records_enqueues_lifecycle_and_finalizes()
 async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
     // Wrong lease token.
     {
-        let pq = Pqueue::new(
+        let pq = RuntimeCore::new(
             Arc::new(composed_memory_backend()),
             Arc::new(ManualClock::at(0)),
         );
@@ -360,7 +360,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
 
     // Wrong item_version.
     {
-        let pq = Pqueue::new(
+        let pq = RuntimeCore::new(
             Arc::new(composed_memory_backend()),
             Arc::new(ManualClock::at(0)),
         );
@@ -403,7 +403,7 @@ async fn commit_rejects_bad_lease_token_and_bad_version_without_writing() {
 #[tokio::test]
 async fn commit_request_id_replays_conflicts_and_expires() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
+    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     pq.create_queue(qdef(1_000)).await.unwrap();
 
@@ -538,7 +538,7 @@ async fn commit_is_unavailable_on_a_non_atomic_backend() {
 #[tokio::test]
 async fn commit_advances_validates_and_rejects_instance_fence() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef(60_000)).await.unwrap();
     let key = b"instance/run-1".to_vec();
@@ -650,7 +650,7 @@ async fn commit_advances_validates_and_rejects_instance_fence() {
 /// it before activation.
 #[tokio::test]
 async fn capabilities_advertise_atomic_commit_on_memory_and_reject_objectlog() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -688,7 +688,7 @@ async fn capabilities_advertise_atomic_commit_on_memory_and_reject_objectlog() {
 /// finalized + not claimable; the side record is not claimable/peekable.
 #[tokio::test]
 async fn explain_commit_reconstructs_the_transition_and_side_records_are_non_work() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );

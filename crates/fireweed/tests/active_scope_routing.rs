@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use fireweed::{
     ActiveScope, ActiveScopeDiscovery, DiscoveryGranularity, EngineError, GroupKey, NewItem,
-    OldestFirstScopePrefix, Pqueue, QueueDefinition, QueueId, QueueKey, TenantId, UtcTimestamp,
-    select_active_scope_from_prefix,
+    OldestFirstScopePrefix, QueueDefinition, QueueId, QueueKey, RuntimeCore, TenantId,
+    UtcTimestamp, select_active_scope_from_prefix,
 };
 use fireweed_core::{
     EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
@@ -193,7 +193,7 @@ fn ungrouped_scope_is_selectable_with_explicit_filter_diagnostic() {
 #[tokio::test]
 async fn queue_definition_accessor_reads_memory_and_durable_policy() {
     let q = queue("tenant", "queue");
-    let memory = Pqueue::new(
+    let memory = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );

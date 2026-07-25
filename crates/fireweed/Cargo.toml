@@ -37,7 +37,7 @@ futures = "0.3"
 sha2 = "0.11"
 # Adapters are OPTIONAL deps, activated per feature. The published library is a thin composition root
 # that builds the chosen backend internally (ADR-009 §4a / B3) so a client never names a concrete backend
-# — `Pqueue::open_*` is the construction path. This is the deliberate composition-root dependency inversion.
+# — the `open_*` functions are the construction path. This is the deliberate composition-root dependency inversion.
 fireweed-memory = { version = "0.20.0", path = "../fireweed-memory", optional = true }
 fireweed-sqlite = { version = "0.20.0", path = "../fireweed-sqlite", optional = true }
 fireweed-objectlog = { version = "0.20.0", path = "../fireweed-objectlog", optional = true }
@@ -70,3 +70,16 @@ path = "tests/concrete_fireweed.rs"
 [[test]]
 name = "sqlite_create_or_read"
 path = "tests/sqlite_create_or_read.rs"
+
+[[test]]
+name = "public_interface_conformance"
+path = "tests/public_interface_conformance.rs"
+
+[[test]]
+name = "public_interface_external_conformance"
+path = "tests/public_interface_external_conformance.rs"
+required-features = ["postgres", "objectlog", "sqlite"]
+
+[[test]]
+name = "public_durability_matrix"
+path = "tests/public_durability_matrix.rs"

@@ -1321,8 +1321,8 @@ async fn pq_hmget<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
 
 /// `XACK key group id [id ...]` - finalize-complete the acked entries.
 ///
-/// The batch is all-or-nothing (FinalizePort pre-validates): a fenced lease → `-ERR pqueue stale_lease`,
-/// a superseded id → `-ERR pqueue superseded`, a non-leased id → `-ERR pqueue invalid`, NOTHING is
+/// The batch is all-or-nothing (FinalizePort pre-validates): a fenced lease → `-ERR fireweed stale_lease`,
+/// a superseded id → `-ERR fireweed superseded`, a non-leased id → `-ERR fireweed invalid`, NOTHING is
 /// committed, and the reply is the acked count only on full success. (Per-id partial results +
 /// lease-token/PEL ownership are a later refinement, TD-006 §3.)
 async fn xack<B: RespBackend, H: RespHooks>(
@@ -1879,7 +1879,7 @@ async fn xinfo<B: RespBackend>(backend: &Arc<B>, args: &[Vec<u8>]) -> Resp {
 }
 
 fn err_reply(e: &EngineError) -> Resp {
-    // `-ERR pqueue …` tokens map straight through; the non-`-ERR` errors get their idiomatic Redis
+    // `-ERR fireweed …` tokens map straight through; the non-`-ERR` errors get their idiomatic Redis
     // reply (TD-006 §2/§7): Forbidden → `-NOPERM`, not-found → `-ERR no such queue`.
     if let Some(tok) = e.resp_token() {
         return Resp::Error(tok.trim_start_matches('-').to_string());
@@ -1897,7 +1897,7 @@ fn err_reply(e: &EngineError) -> Resp {
             eprintln!("[fireweed-resp] internal engine error: {e}");
             Resp::Error("ERR pqueue internal".into())
         }
-        // Every other variant carries a `-ERR pqueue …` token via `resp_token()` above; this arm is
+        // Every other variant carries a `-ERR fireweed …` token via `resp_token()` above; this arm is
         // unreachable, but stays total.
         _ => Resp::Error("ERR pqueue internal".into()),
     }
@@ -2020,9 +2020,9 @@ mod tests {
 
     #[test]
     fn forbidden_maps_to_noperm_not_generic_err() {
-        // TD-006 §2: cross-tenant / operator denial → -NOPERM (NOT a fake -ERR pqueue token).
+        // TD-006 §2: cross-tenant / operator denial → -NOPERM (NOT a fake -ERR fireweed token).
         assert!(err_text(&EngineError::Forbidden("nope")).starts_with("NOPERM"));
-        // `-ERR pqueue …` tokened errors pass through verbatim.
+        // `-ERR fireweed …` tokened errors pass through verbatim.
         assert_eq!(err_text(&EngineError::StaleLease), "ERR pqueue stale_lease");
         assert_eq!(err_text(&EngineError::Superseded), "ERR pqueue superseded");
         assert_eq!(err_text(&EngineError::NotFound), "ERR no such queue");

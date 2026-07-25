@@ -2227,6 +2227,12 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
                 )
                 .optional())?
             .ok_or(EngineError::NotFound)?;
+            if context
+                .expected_epoch
+                .is_some_and(|expected| expected != assignment_epoch as u64)
+            {
+                return Err(EngineError::EpochFenced);
+            }
             let lease_token = fireweed_engine::generate_query_lease_token()?;
             let hash = lease_hash(&lease_token);
             let lease_expires_nanos = ts_nanos(lease_expires_at);
@@ -2542,6 +2548,7 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
         &self,
         shard: &QueueKey,
         request: BoundedMutationRequest,
+        context: fireweed_engine::BoundedMutationContext,
     ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
         let result = (|| {
             if request.max_scan_rows == 0 {
@@ -2630,20 +2637,21 @@ impl fireweed_engine::HotProjectionQueryPort for SqliteRelationalBackend {
             }
 
             let (tenant, queue) = parts(shard);
-            let now = {
-                let d = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default();
-                UtcTimestamp::new(d.as_secs() as i64, d.subsec_nanos()).expect("valid ts")
-            };
+            let now = context.now;
             let tx = st(g
                 .conn
                 .transaction_with_behavior(TransactionBehavior::Immediate))?;
-            let (seq, _epoch): (i64, i64) = st(tx.query_row(
+            let (seq, epoch): (i64, i64) = st(tx.query_row(
                 "SELECT next_seq,assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
                 params![tenant, queue],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             ))?;
+            if context
+                .expected_epoch
+                .is_some_and(|expected| expected != epoch as u64)
+            {
+                return Err(EngineError::EpochFenced);
+            }
             // Match the canonical UpdateFields unique-index behavior per record.  Existing holders win;
             // for a free target key, deterministic item-id order reserves it for the first mutation.
             let mut reservations: HashMap<(String, Vec<u8>), String> = HashMap::new();
@@ -3433,6 +3441,26 @@ mod hot_query_sql_tests {
     static SET_GATES_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
     static SIDE_RECORD_TRACE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+    fn bounded_mutation_context() -> fireweed_engine::BoundedMutationContext {
+        fireweed_engine::BoundedMutationContext {
+            now: UtcTimestamp::new(10, 0).unwrap(),
+            expected_epoch: None,
+        }
+    }
+
+    fn status_mutation(value: &str) -> BoundedMutationRequest {
+        BoundedMutationRequest {
+            index: Some("by_status".into()),
+            filters: vec![QueryFilter {
+                field: "status".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("ready".into()),
+            }],
+            set_fields: BTreeMap::from([("status".into(), TypedValue::String(value.into()))]),
+            max_scan_rows: 10,
+        }
+    }
+
     fn count_pel_statement(_: &str) {
         PEL_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
@@ -3622,6 +3650,7 @@ mod hot_query_sql_tests {
                     )]),
                     max_scan_rows: rows as u32,
                 },
+                bounded_mutation_context(),
             )
             .await
             .unwrap();
@@ -3972,6 +4001,95 @@ mod hot_query_sql_tests {
     }
 
     #[tokio::test]
+    async fn api004_mutations_use_supplied_time_and_fence_stale_owner_epoch() {
+        let backend = SqliteRelationalBackend::in_memory().unwrap();
+        let definition = mutation_queue();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        backend.create_queue(definition).await.unwrap();
+        let item_id = backend
+            .push(
+                &shard,
+                vec![PushSpec {
+                    entity: Some(serde_json::json!({"status":"ready"})),
+                    ..PushSpec::default()
+                }],
+                UtcTimestamp::new(0, 0).unwrap(),
+                None,
+            )
+            .await
+            .unwrap()[0];
+        let current_epoch = backend.acquire_epoch(&shard).await.unwrap();
+
+        let stale = fireweed_engine::BoundedMutationContext {
+            now: UtcTimestamp::new(50, 0).unwrap(),
+            expected_epoch: Some(current_epoch - 1),
+        };
+        assert_eq!(
+            backend
+                .bounded_mutation(&shard, status_mutation("stale"), stale)
+                .await,
+            Err(EngineError::EpochFenced)
+        );
+
+        let claim = ClaimByQueryRequest {
+            index: Some("by_status".into()),
+            filters: vec![QueryFilter {
+                field: "status".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("ready".into()),
+            }],
+            order_by: fireweed_core::OrderField {
+                field: "status".into(),
+                direction: fireweed_core::SortDirection::Ascending,
+            },
+            max_items: 1,
+            lease_duration_ms: 1_000,
+            worker_id: fireweed_core::WorkerId::new("worker").unwrap(),
+            request_id: Some(RequestId::new("stale-query").unwrap()),
+        };
+        assert!(matches!(
+            backend
+                .claim_by_query(
+                    &shard,
+                    claim,
+                    fireweed_engine::ClaimByQueryContext {
+                        now: UtcTimestamp::new(60, 0).unwrap(),
+                        eligibility_time: None,
+                        expected_epoch: Some(current_epoch - 1),
+                    },
+                )
+                .await,
+            Err(EngineError::EpochFenced)
+        ));
+
+        let committed_at = UtcTimestamp::new(77, 123).unwrap();
+        backend
+            .bounded_mutation(
+                &shard,
+                status_mutation("done"),
+                fireweed_engine::BoundedMutationContext {
+                    now: committed_at,
+                    expected_epoch: Some(current_epoch),
+                },
+            )
+            .await
+            .unwrap();
+        let (state, updated_at): (String, i64) = backend
+            .inner
+            .lock()
+            .unwrap()
+            .conn
+            .query_row(
+                "SELECT lifecycle_state,updated_at FROM pqueue_items WHERE item_id=?1",
+                params![item_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "Pending");
+        assert_eq!(updated_at, ts_nanos(committed_at));
+    }
+
+    #[tokio::test]
     async fn bounded_mutation_keyset_loops_past_each_internal_scan_page() {
         let backend = SqliteRelationalBackend::in_memory().unwrap();
         let definition = mutation_queue();
@@ -4007,6 +4125,7 @@ mod hot_query_sql_tests {
                     )]),
                     max_scan_rows: 17,
                 },
+                bounded_mutation_context(),
             )
             .await
             .unwrap();
@@ -4067,6 +4186,7 @@ mod hot_query_sql_tests {
                     )]),
                     max_scan_rows: 10,
                 },
+                bounded_mutation_context(),
             )
             .await
             .unwrap();
@@ -4294,6 +4414,7 @@ mod hot_query_sql_tests {
                     )]),
                     max_scan_rows: 10,
                 },
+                bounded_mutation_context(),
             )
             .await
             .unwrap();

@@ -53,7 +53,7 @@ method has a conformance test that fails if the impl returns a default/no-op** (
 - **Eventual-apply** (objectlog): ack after log commit, apply within a bounded window; guarantee is
   self-read-after-write only. Priority order is "over applied state, eventual"; pure
   lagging-projection objectlog profiles keep **upsert forbidden** (re-`XADD` on an existing key returns
-  `-ERR pqueue unavailable`) because the upsert↔claim race is unclosable when the claim reads a
+  `-ERR fireweed unavailable`) because the upsert↔claim race is unclosable when the claim reads a
   lagging projection (§3 flavor-difference 5).
 - `objectlog/hybrid-strict` and `objectlog/hybrid-async` are the profile-qualified exception: they may
   lift the mutable-write ban only after TD-004 proves deterministic apply-time re-validation with
@@ -90,15 +90,15 @@ command holds even where pqueue's flavor differs. Two implementation invariants:
   colliding with a **pending** item (via `UpsertPort`, same UoW as claim) returns a new monotonic id;
   old id reads deleted; `XLEN` nets unchanged. Collision with **claimed/terminal** → reject. Absent
   `client_item_key` ⇒ always append. On pure lagging-projection eventual-apply profiles ⇒
-  `-ERR pqueue unavailable` (§2.2). On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the
+  `-ERR fireweed unavailable` (§2.2). On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the
   same upsert path may be admitted only after TD-004's deterministic apply-time re-validation /
   ack-after-apply proof. A later `XACK`/`XCLAIM` of a **superseded** old id returns
-  **`-ERR pqueue superseded`** (never a silent `nil` — preserves at-least-once "no silent drop").
+  **`-ERR fireweed superseded`** (never a silent `nil` — preserves at-least-once "no silent drop").
 
 **Stock surface (faithful per contract):**
 - `XADD` — upsert-on-key (Inv 2).
 - `XREADGROUP >` — priority-ordered *delivery* (Inv 1); cursorless.
-- `XACK` — complete; **operator-fenced lease → `-ERR pqueue stale_lease`** (NOT `0` — a `0` would read
+- `XACK` — complete; **operator-fenced lease → `-ERR fireweed stale_lease`** (NOT `0` — a `0` would read
   as success and defeat the fence).
 - `XCLAIM`/`XAUTOCLAIM` — **reclaim is entry-id-ordered (cursor-faithful)**; priority governs delivery,
   not reclaim. **Same-consumer `XCLAIM`/`XCLAIM JUSTID` = renew and charges no attempt; cross-consumer
@@ -122,8 +122,8 @@ command holds even where pqueue's flavor differs. Two implementation invariants:
    forgiving — a client relying on self-`XCLAIM` to advance retry count for poison detection sees it
    not advance. Use the library for explicit attempt control.
 
-Canonical error replies (asserted verbatim by e2e/conformance): `-ERR pqueue stale_lease`,
-`-ERR pqueue superseded`, `-ERR pqueue unavailable`, `-ERR pqueue terminal`, `-ERR pqueue invalid`.
+Canonical error replies (asserted verbatim by e2e/conformance): `-ERR fireweed stale_lease`,
+`-ERR fireweed superseded`, `-ERR fireweed unavailable`, `-ERR fireweed terminal`, `-ERR fireweed invalid`.
 
 **RESP capability = {RESP-stock, library}.** Zero required `PQ*`. Filtered claims, gates, cohorts,
 rich finalize dispositions, mutable-priority, create/config, scopes, operator/inspect are
@@ -135,12 +135,12 @@ marked ones are intentional. Optional single `PQFIN` for atomic rich finalize is
   assert delivered-set == produced-set, each once, no hang (proves no orphaning *through the command
   surface*).
 - **Inv 2 — effects + collision:** re-`XADD` pending key → new id, old id `XRANGE`→nil, `XLEN`
-  unchanged; re-`XADD` claimed key → rejected; `XACK` superseded id → `-ERR pqueue superseded`.
+  unchanged; re-`XADD` claimed key → rejected; `XACK` superseded id → `-ERR fireweed superseded`.
   (Atomicity itself is proven by **engine-level** tests — the stock client cannot observe it.)
 - **Cursor:** `XAUTOCLAIM 0-0`→…→`0-0` pagination loop terminates and covers the whole PEL.
 - **Race:** upsert concurrent with claim on the same key (engine-level + a best-effort e2e).
 - **Crash recovery:** kill a consumer mid-PEL, reclaim via `XAUTOCLAIM`, no lost/double work.
-- **Fence:** operator stale → staled worker's `XACK` returns `-ERR pqueue stale_lease`.
+- **Fence:** operator stale → staled worker's `XACK` returns `-ERR fireweed stale_lease`.
 - **Intra-group exclusion:** two consumers, concurrent `XREADGROUP >`, never the same item.
 
 ## 4. Legacy teardown — ALL touchpoints (no stubs/fallbacks)
@@ -156,7 +156,7 @@ objectlog; delete service/client/kafka.
 
 **4c. Docs:** SUPERSEDE ADR-005. REWRITE API-001 (neutral + RESP binding), TP-001. ADD ADR-007;
 KEEP TD-006 aligned with §3 — it records the launch `{RESP-stock, library}` matrix, excludes required
-`PQ*` commands, specifies `-ERR pqueue stale_lease`, and documents the `XAUTOCLAIM` cursor caveat.
+`PQ*` commands, specifies `-ERR fireweed stale_lease`, and documents the `XAUTOCLAIM` cursor caveat.
 AUTHOR **TD-007** (two-class durability, ReclaimDriver, UpsertPort,
 durable-state schema/retention/compaction/replay). KEEP+update ADR-001/2/3/4/6, TD-001/2/3/4/5,
 TP-002/3.
@@ -206,10 +206,10 @@ image + health probe); none halted.
   cohort/group, purge, `command_position` monotonicity) has an engine-level test.
 - **ReclaimDriver test:** item reclaimed/expired with zero intervening client commands on its queue.
 - e2e RESP suite green with pinned off-the-shelf client(s): drain-reconcile, cursor loop, crash
-  recovery, fence=`-ERR pqueue stale_lease`, upsert effects+collision+superseded, intra-group exclusion.
+  recovery, fence=`-ERR fireweed stale_lease`, upsert effects+collision+superseded, intra-group exclusion.
 - One conformance suite green on memory+sqlite+postgres+objectlog; eventual-apply asserts the *weaker*
   guarantee; pure lagging-projection eventual-apply profiles keep
-  `upsert-on-eventual-apply` at `-ERR pqueue unavailable`, while the hybrid
+  `upsert-on-eventual-apply` at `-ERR fireweed unavailable`, while the hybrid
   profiles may lift the ban only after TD-004 proves deterministic
   apply-time re-validation with ack-after-apply.
 - Two driving adapters + one composition root; **dependency-direction test passes**.

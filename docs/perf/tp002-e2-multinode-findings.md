@@ -146,7 +146,7 @@ reproducible margin). This narrows — but does not move — the ceiling: it is 
 `lease_decide_acquire` is intentionally non-idempotent (it bumps `assignment_epoch` on **every** call). The
 server's `ensure_epoch` had no per-queue serialization on the cold-start (`Unassigned`) path, so two
 concurrent first-writes to an unowned queue could **each** acquire — double-bumping the epoch and fencing the
-laggard with `-ERR pqueue epoch_stale`. Rare under the slow apply-under-mutex path (the first push finishes
+laggard with `-ERR fireweed epoch_stale`. Rare under the slow apply-under-mutex path (the first push finishes
 its acquire before the second resolves), it surfaces reliably under any faster ingest path. **Fix
 (`crates/pqueue-server/src/lib.rs`):** a per-queue acquire gate serializes the cold-start acquisition (taken
 ONLY on the unowned path — the hot already-owned path stays lock-free); a concurrent first-writer that loses
@@ -245,7 +245,7 @@ bug, now fixed (`pqueue-79178303`):
 - Each node is the SOLE owner of its disjoint queues (its own `InMemoryControlPlane`). Under load the
   background `renew_sessions` task ran late → the 15s lease lapsed → the node re-acquired its OWN lease →
   `lease_decide_acquire` UNCONDITIONALLY bumped `assignment_epoch` → that fenced the node's OWN in-flight
-  writes (`EpochFenced` / `-ERR pqueue epoch_stale`) → client retry storm → repeat → ~36× collapse. A
+  writes (`EpochFenced` / `-ERR fireweed epoch_stale`) → client retry storm → repeat → ~36× collapse. A
   *slow-but-alive* sole owner fenced *itself*. The pre-fix "coin-flip" was simply whether a lease happened
   to lapse during the timed window.
 - **Fix:** same-owner re-affirmation of an uncontested lease PRESERVES the fence epoch (refresh the deadline

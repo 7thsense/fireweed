@@ -27,12 +27,12 @@ use fireweed_core::{
     TenantId, UtcTimestamp,
 };
 use fireweed_engine::{
-    Backend, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, ClaimByQueryContext,
-    CommitCapabilities, CommitEntryOutcome, CommitRecovery, CommitTransition, CommitTransitionPort,
-    DiscoveryGranularity, DiscoveryPort, DurabilityClass, HistoricalProjectionRead,
-    HotProjectionQueryPort, IndexHit, IndexQueryPort, PayloadUpdate, RawCommitOutcome,
-    RawCommitRequest, ReclaimPort, RecoveryReadPort, ReschedulePort, ScheduleUpdate,
-    SetGatesCommand, SetGatesPort, UpdateFieldsPort,
+    Backend, BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BoundedMutationContext,
+    ClaimByQueryContext, CommitCapabilities, CommitEntryOutcome, CommitRecovery, CommitTransition,
+    CommitTransitionPort, DiscoveryGranularity, DiscoveryPort, DurabilityClass,
+    HistoricalProjectionRead, HotProjectionQueryPort, IndexHit, IndexQueryPort, PayloadUpdate,
+    RawCommitOutcome, RawCommitRequest, ReclaimPort, RecoveryReadPort, ReschedulePort,
+    ScheduleUpdate, SetGatesCommand, SetGatesPort, UpdateFieldsPort,
 };
 use fireweed_engine::{
     ClaimPort, ClaimRequest, Claimed, ClaimedItem, CommandPosition, ControlPlaneStore,
@@ -1205,11 +1205,12 @@ where
         &self,
         shard: &QueueKey,
         request: BoundedMutationRequest,
+        context: BoundedMutationContext,
     ) -> impl Future<Output = EngineResult<BoundedMutationResponse>> + Send {
         let shard = shard.clone();
         let inner = self.arc_for(&shard);
         self.dispatch(shard.clone(), move || async move {
-            inner.bounded_mutation(&shard, request).await
+            inner.bounded_mutation(&shard, request, context).await
         })
     }
 

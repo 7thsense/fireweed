@@ -20,13 +20,18 @@ use fireweed_core::{
     DeclaredBucketSegmentResponse, GroupedAggregateRequest, GroupedAggregateResponse,
     MetricsByQueryRequest, QueryCapabilityFlags, RangeScanRequest, RangeScanResponse,
 };
-use fireweed_core::{ClientItemKey, ItemId, ItemState, LeaseToken, QueueDefinition, UtcTimestamp};
+use fireweed_core::{
+    ClientItemKey, CohortId, GroupKey, ItemId, ItemState, LeaseToken, MetadataValue,
+    QueueDefinition, UtcTimestamp,
+};
 use fireweed_engine::{
-    AsOfProjectionStore, ClaimRef, ClaimedItem, CommandEnvelope, CommandPage, CommandPosition,
-    EngineError, EngineResult, ExpiredLeaseCursor, ExpiredLeasePage, FinalizeOutcome,
-    InProcessLogStore, InProcessProjectionStore, IndexHit, ItemView, LeaseView, LiveItemView,
-    LogStore, PendingPage, PendingSummary, ProjectionSnapshot, ProjectionStore, PushItem,
-    QueueCounters, QueueKey, QueueMetrics, SnapshotRef, TerminalEmissionMetrics,
+    ActiveScope, AsOfProjectionStore, BatchUpdateItemRef, BatchUpdateSnapshotItem,
+    BoundedMutationPlan, ClaimCompatibility, ClaimRef, ClaimUnit, ClaimedItem, CommandEnvelope,
+    CommandPage, CommandPosition, DiscoveryGranularity, EngineError, EngineResult,
+    ExpiredLeaseCursor, ExpiredLeasePage, FinalizeOutcome, InProcessLogStore,
+    InProcessProjectionStore, IndexHit, ItemView, LeaseView, LiveItemView, LogStore, PendingPage,
+    PendingSummary, ProjectionSnapshot, ProjectionStore, PushItem, QueueCounters, QueueKey,
+    QueueMetrics, RichClaimSelection, SnapshotRef, TerminalEmissionMetrics, UpdateFieldsCommand,
 };
 
 use crate::{LogData, ProjectionData, ProjectionImage};
@@ -214,9 +219,225 @@ impl InMemoryProjection {
         self.get(shard)?.observe_item_counters(shard, counters);
         Ok(())
     }
+
+    fn metadata_matches(
+        projection: &ProjectionData,
+        item_id: &ItemId,
+        required: &BTreeMap<String, MetadataValue>,
+    ) -> bool {
+        projection.items.get(item_id).is_some_and(|item| {
+            required
+                .iter()
+                .all(|(key, value)| item.metadata.get(key) == Some(value))
+        })
+    }
+
+    fn select_group_batching(
+        projection: &ProjectionData,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> EngineResult<Vec<ItemId>> {
+        let max_groups = compatibility
+            .group_batching
+            .as_ref()
+            .map(|batching| batching.max_groups as usize)
+            .unwrap_or(0);
+        if max_groups == 0 || max_items == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut groups = Vec::<(GroupKey, Vec<ItemId>)>::new();
+        for item_id in projection.eligible_candidates(now, usize::MAX) {
+            let item = projection
+                .items
+                .get(&item_id)
+                .expect("eligibility index references a live item");
+            let Some(group_key) = item.group_key.clone() else {
+                continue;
+            };
+            if item.cohort_size.is_some()
+                || !Self::metadata_matches(projection, &item_id, &compatibility.metadata_equals)
+            {
+                continue;
+            }
+            if projection.items.values().any(|member| {
+                member.group_key.as_ref() == Some(&group_key)
+                    && member.cohort_size.is_none()
+                    && !member.superseded
+                    && member.state == ItemState::Leased
+            }) {
+                continue;
+            }
+            match groups.iter_mut().find(|(group, _)| group == &group_key) {
+                Some((_, items)) => items.push(item_id),
+                None => groups.push((group_key, vec![item_id])),
+            }
+        }
+
+        let mut selected = Vec::new();
+        for (_, group) in groups.into_iter().take(max_groups) {
+            if group.len() > max_items {
+                return Err(EngineError::BatchTooLarge);
+            }
+            if selected.len().saturating_add(group.len()) > max_items {
+                break;
+            }
+            selected.extend(group);
+        }
+        Ok(selected)
+    }
+
+    fn select_same_group(
+        projection: &ProjectionData,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> Vec<ItemId> {
+        let mut selected_group = None::<GroupKey>;
+        let mut selected = Vec::new();
+        for item_id in projection.eligible_candidates(now, usize::MAX) {
+            let item = projection
+                .items
+                .get(&item_id)
+                .expect("eligibility index references a live item");
+            let Some(group_key) = item.group_key.as_ref() else {
+                continue;
+            };
+            if item.cohort_size.is_some()
+                || compatibility
+                    .group_key
+                    .as_ref()
+                    .is_some_and(|required| required != group_key)
+                || !Self::metadata_matches(projection, &item_id, &compatibility.metadata_equals)
+            {
+                continue;
+            }
+            match &selected_group {
+                None => selected_group = Some(group_key.clone()),
+                Some(selected) if selected != group_key => continue,
+                Some(_) => {}
+            }
+            selected.push(item_id);
+            if selected.len() == max_items {
+                break;
+            }
+        }
+        selected
+    }
+
+    fn select_whole_cohort(
+        projection: &ProjectionData,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> EngineResult<RichClaimSelection> {
+        if projection.paused {
+            return Ok(RichClaimSelection::default());
+        }
+        let eligible = projection
+            .eligible_candidates(now, usize::MAX)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut cohorts = BTreeMap::<GroupKey, Vec<_>>::new();
+        for item in projection.items.values().filter(|item| {
+            !item.superseded && !item.state.is_terminal() && item.cohort_size.is_some()
+        }) {
+            let Some(group) = item.group_key.clone() else {
+                continue;
+            };
+            cohorts.entry(group).or_default().push(item);
+        }
+        let mut complete = cohorts
+            .into_iter()
+            .filter_map(|(group, mut members)| {
+                members.sort_by_key(|item| item.created_seq);
+                let declared = members.first()?.cohort_size?;
+                let complete = members.len() as u64 == declared
+                    && members.iter().all(|item| {
+                        item.cohort_size == Some(declared)
+                            && eligible.contains(&item.item_id)
+                            && Self::metadata_matches(
+                                projection,
+                                &item.item_id,
+                                &compatibility.metadata_equals,
+                            )
+                    });
+                complete.then(|| (members[0].created_seq, group, members))
+            })
+            .collect::<Vec<_>>();
+        complete.sort_by(|(left_seq, left_group, _), (right_seq, right_group, _)| {
+            left_seq
+                .cmp(right_seq)
+                .then_with(|| left_group.cmp(right_group))
+        });
+        let Some((created_seq, group, members)) = complete.into_iter().next() else {
+            return Ok(RichClaimSelection::default());
+        };
+        if members.len() > max_items {
+            return Err(EngineError::BatchTooLarge);
+        }
+        let cohort_id = CohortId::new(format!("coh:{}:{created_seq}", group.as_str()))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let member_ids = members
+            .into_iter()
+            .map(|member| member.item_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let item_ids = projection
+            .eligible_candidates(now, usize::MAX)
+            .into_iter()
+            .filter(|item_id| member_ids.contains(item_id))
+            .collect();
+        Ok(RichClaimSelection {
+            item_ids,
+            cohort_id: Some(cohort_id),
+        })
+    }
 }
 
 impl ProjectionStore for InMemoryProjection {
+    fn supports_gates(&self) -> bool {
+        true
+    }
+
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        Ok(self
+            .get(shard)?
+            .discover_active_scopes(shard.queue_id.as_str(), granularity, now))
+    }
+
+    fn select_rich_claim(
+        &self,
+        shard: &QueueKey,
+        unit: ClaimUnit,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> EngineResult<RichClaimSelection> {
+        let projection = self.get(shard)?;
+        let item_ids = match unit {
+            ClaimUnit::Item => return Err(EngineError::Unavailable),
+            ClaimUnit::WholeGroup => {
+                Self::select_group_batching(projection, compatibility, now, max_items)?
+            }
+            ClaimUnit::SameGroupKey => {
+                Self::select_same_group(projection, compatibility, now, max_items)
+            }
+            ClaimUnit::WholeCohort => {
+                return Self::select_whole_cohort(projection, compatibility, now, max_items);
+            }
+        };
+        Ok(RichClaimSelection {
+            item_ids,
+            cohort_id: None,
+        })
+    }
+
     fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
         QueryCapabilityFlags {
             range_scan: true,
@@ -325,6 +546,22 @@ impl ProjectionStore for InMemoryProjection {
 
     fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
         Ok(self.get(shard)?.item_version(id))
+    }
+
+    fn batch_update_snapshot(
+        &self,
+        shard: &QueueKey,
+        refs: &[BatchUpdateItemRef],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        Ok(self.get(shard)?.batch_update_snapshot(refs))
+    }
+
+    fn batch_update_preflight(
+        &self,
+        shard: &QueueKey,
+        commands: &[UpdateFieldsCommand],
+    ) -> EngineResult<Vec<bool>> {
+        self.get(shard)?.batch_update_preflight(commands)
     }
 
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
@@ -643,6 +880,14 @@ impl ProjectionStore for InMemoryProjection {
         request: BoundedMutationRequest,
     ) -> EngineResult<BoundedMutationResponse> {
         self.get_mut(shard)?.bounded_mutation(request)
+    }
+
+    fn plan_bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationPlan> {
+        self.get(shard)?.plan_bounded_mutation(request)
     }
 
     fn index_get_unique(

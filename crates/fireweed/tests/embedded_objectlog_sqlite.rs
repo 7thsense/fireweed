@@ -1,5 +1,6 @@
 #![cfg(all(feature = "objectlog", feature = "sqlite"))]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -7,16 +8,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
-    Bytes, ClaimByQueryAt, ClaimByQueryRequest, ClaimRef, Clock, CommitCapabilities, CommitEntry,
-    CommitRequest, CompoundIndexDef, CompoundIndexField, EligibilityPolicy,
-    EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
+    BoundedMutationRequest, Bytes, ClaimByQueryAt, ClaimByQueryRequest, ClaimRef, Clock,
+    CommitCapabilities, CommitEntry, CommitRequest, CompoundIndexDef, CompoundIndexField,
+    EligibilityPolicy, EmbeddedDurabilityConfig, EmbeddedObjectLogConfig, EmbeddedProjectionConfig,
     EmbeddedRecoveryPolicy, EmbeddedResponseBarrier, EmbeddedSecret, EmbeddedSegmentConfig,
     EngineError, EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration, IndexType, InstanceFence,
     LeaseToken, MetricsByQueryRequest, MultiClaimCommitEntry, MultiClaimCommitRequest, NewItem,
     OrderField, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex, QueueKey,
-    RecurrencePolicy, RequestId, RetryPolicy, SideRecord, SortDirection, TenantId, TypedValue,
-    UtcTimestamp,
+    RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SideRecord, SortDirection,
+    TenantId, TypedValue, UtcTimestamp,
 };
 use fireweed_engine::DurabilityClass;
 use fireweed_memory::ManualClock;
@@ -330,6 +331,82 @@ fn public_objectlog_sqlite_delete_and_rehydrate() {
         vec![first, second]
     );
     drop(reopened);
+    let _ = fs::remove_dir_all(fixture);
+}
+
+#[test]
+fn public_objectlog_sqlite_bounded_mutation_replays_from_authoritative_log() {
+    let fixture = std::env::temp_dir().join(format!("fireweed-public-mutation-{}", nonce()));
+    let config = local_config(&fixture.join("objects"), &fixture.join("projection.sqlite"));
+    let pq = fireweed::open_embedded_sqlite(config, Arc::new(ManualClock::at(1_000))).unwrap();
+    let key = queue("durable-mutation");
+    let mut queue_definition = definition("durable-mutation");
+    queue_definition.typed_indexes = vec![QueueIndex {
+        name: "by_kind_suppressed".into(),
+        declaration: IndexDeclaration::Compound(CompoundIndexDef {
+            fields: vec![
+                CompoundIndexField {
+                    field: "kind".into(),
+                    index_type: IndexType::String,
+                },
+                CompoundIndexField {
+                    field: "suppressed".into(),
+                    index_type: IndexType::Boolean,
+                },
+            ],
+            unique: false,
+        }),
+    }];
+    block_on(pq.create_queue(queue_definition)).unwrap();
+    let item_id = block_on(pq.push(
+        &key,
+        NewItem {
+            entity: Some(serde_json::json!({ "kind": "effect", "suppressed": false })),
+            ..NewItem::default()
+        },
+    ))
+    .unwrap();
+    let mut set_fields = BTreeMap::new();
+    set_fields.insert("suppressed".into(), TypedValue::Bool(true));
+    let result = block_on(pq.bounded_mutation(
+        &key,
+        BoundedMutationRequest {
+            index: Some("by_kind_suppressed".into()),
+            filters: vec![QueryFilter {
+                field: "kind".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("effect".into()),
+            }],
+            set_fields,
+            max_scan_rows: 100,
+        },
+    ))
+    .unwrap();
+    assert_eq!(result.results[0].item_id, item_id);
+
+    block_on(pq.delete_projection()).unwrap();
+    block_on(pq.rehydrate_projection()).unwrap();
+    let rows = block_on(pq.range_scan(
+        &key,
+        RangeScanRequest {
+            index: Some("by_kind_suppressed".into()),
+            filters: vec![QueryFilter {
+                field: "suppressed".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::Bool(true),
+            }],
+            order_by: vec![OrderField {
+                field: "suppressed".into(),
+                direction: SortDirection::Ascending,
+            }],
+            page_size: 10,
+            cursor: None,
+        },
+    ))
+    .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].item_id, item_id);
+    drop(pq);
     let _ = fs::remove_dir_all(fixture);
 }
 

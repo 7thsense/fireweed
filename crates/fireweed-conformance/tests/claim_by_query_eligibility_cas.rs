@@ -76,6 +76,7 @@ fn query_context(now: i64) -> ClaimByQueryContext {
     ClaimByQueryContext {
         now: ts(now),
         eligibility_time: None,
+        expected_epoch: None,
     }
 }
 

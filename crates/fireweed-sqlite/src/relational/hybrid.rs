@@ -9,12 +9,14 @@ use fireweed_core::{
     RangeScanResponse, UtcTimestamp,
 };
 use fireweed_engine::TerminalEmissionMetrics;
-use fireweed_engine::{AsOfProjectionStore, ProjectionSnapshot, ProjectionStore};
 use fireweed_engine::{
-    ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogLineageIdentity, PendingPage,
-    PendingSummary, PushItem, QueueKey, QueueMetrics,
+    ActiveScope, BatchUpdateItemRef, BatchUpdateSnapshotItem, ClaimCompatibility, ClaimRef,
+    ClaimUnit, ClaimedItem, CommandEnvelope, CommandPosition, DiscoveryGranularity, EngineError,
+    EngineResult, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, LogLineageIdentity,
+    PendingPage, PendingSummary, PushItem, QueueKey, QueueMetrics, RichClaimSelection,
+    UpdateFieldsCommand,
 };
+use fireweed_engine::{AsOfProjectionStore, ProjectionSnapshot, ProjectionStore};
 use fireweed_projection::InMemoryProjection;
 
 use super::*;
@@ -606,12 +608,39 @@ impl HybridProjectionStore {
 }
 
 impl ProjectionStore for HybridProjectionStore {
+    fn supports_gates(&self) -> bool {
+        self.poisoned.is_none() && self.memory.supports_gates()
+    }
+
     fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
         if self.poisoned.is_some() {
             QueryCapabilityFlags::default()
         } else {
             self.memory.hot_projection_capabilities()
         }
+    }
+
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        self.require_hydrated(shard)?;
+        self.memory.discover_active_scopes(shard, granularity, now)
+    }
+
+    fn select_rich_claim(
+        &self,
+        shard: &QueueKey,
+        unit: ClaimUnit,
+        compatibility: &ClaimCompatibility,
+        now: UtcTimestamp,
+        max_items: usize,
+    ) -> EngineResult<RichClaimSelection> {
+        self.require_hydrated(shard)?;
+        self.memory
+            .select_rich_claim(shard, unit, compatibility, now, max_items)
     }
 
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
@@ -1073,6 +1102,24 @@ impl ProjectionStore for HybridProjectionStore {
         self.memory.item_version(shard, id)
     }
 
+    fn batch_update_snapshot(
+        &self,
+        shard: &QueueKey,
+        refs: &[BatchUpdateItemRef],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        self.require_hydrated(shard)?;
+        self.memory.batch_update_snapshot(shard, refs)
+    }
+
+    fn batch_update_preflight(
+        &self,
+        shard: &QueueKey,
+        commands: &[UpdateFieldsCommand],
+    ) -> EngineResult<Vec<bool>> {
+        self.require_hydrated(shard)?;
+        self.memory.batch_update_preflight(shard, commands)
+    }
+
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
         self.require_hydrated(shard)?;
         self.memory.expired_leases(shard, now)
@@ -1310,6 +1357,15 @@ impl ProjectionStore for HybridProjectionStore {
     ) -> EngineResult<DeclaredBucketSegmentResponse> {
         self.require_hydrated(shard)?;
         self.memory.declared_bucket_segment(shard, request)
+    }
+
+    fn plan_bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::BoundedMutationRequest,
+    ) -> EngineResult<fireweed_engine::BoundedMutationPlan> {
+        self.require_hydrated(shard)?;
+        self.memory.plan_bounded_mutation(shard, request)
     }
 
     fn index_get_unique(

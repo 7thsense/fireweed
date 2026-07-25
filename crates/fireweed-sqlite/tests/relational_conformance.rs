@@ -20,7 +20,7 @@ use bytes::Bytes;
 use fireweed_conformance::{claim_req, commit, envelope, item, qdef, qkey, shard};
 use fireweed_core::{
     ClientItemKey, CohortId, CohortOnIncomplete, CohortPolicy, GroupKey, ItemId, LeaseToken,
-    PriorityValue, QueueDefinition, UtcTimestamp, WorkerId,
+    Metadata, MetadataValue, PriorityValue, QueueDefinition, UtcTimestamp, WorkerId,
 };
 use fireweed_engine::{
     ActiveScope, ClaimCompatibility, ClaimPort, ClaimRequest, CohortExpiredCommand,
@@ -28,8 +28,9 @@ use fireweed_engine::{
     DiscoveryGranularity, DiscoveryPort, EngineError, FenceLeaseCommand, FinalizeKind,
     FinalizeOutcome, FinalizePort, GroupBatching, HistoricalProjectionRead, PauseQueueCommand,
     PayloadUpdate, ProjectionRead, PurgePort, PushCommand, PushItem, PushPort, PushSpec,
-    QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, SetGatesCommand,
-    UnfenceLeaseCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort,
+    QueueCommand, ReassignLeasePort, ReclaimDriver, RenewLeasePort, ScheduleUpdate,
+    SetGatesCommand, UnfenceLeaseCommand, UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome,
+    UpsertPort,
 };
 use fireweed_sqlite::SqliteRelationalBackend;
 
@@ -97,6 +98,51 @@ fn claim_req_compat(
 
 fn make() -> SqliteRelationalBackend {
     SqliteRelationalBackend::in_memory().expect("open in-memory relational backend")
+}
+
+#[tokio::test]
+async fn api001_update_command_applies_every_replacement_field() {
+    let backend = make();
+    backend.create_queue(qdef()).await.unwrap();
+    let item_id = backend
+        .push(&shard(), vec![PushSpec::default()], ts(0), None)
+        .await
+        .unwrap()[0];
+    let mut fields = BTreeMap::new();
+    fields.insert("replacement".into(), Bytes::from_static(b"value"));
+    let mut metadata = Metadata::new();
+    metadata.insert("source", MetadataValue::String("batch".into()));
+    commit(
+        &backend,
+        envelope(
+            QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id,
+                field_ops: BTreeMap::new(),
+                payload: PayloadUpdate::Set(Some(Bytes::from_static(b"payload"))),
+                set_priority: ScheduleUpdate::Set(Some(PriorityValue::Int64(7))),
+                set_not_before: ScheduleUpdate::Keep,
+                set_entity_document: None,
+                set_fields: Some(fields.clone()),
+                set_metadata: Some(metadata.clone()),
+                set_gate_keys: Some(vec!["gate-a".into()]),
+                api001_batch: true,
+            }),
+            vec![item_id],
+        ),
+    )
+    .await;
+
+    let claimed = backend.claim(claim_req(1, 60, 1)).await.unwrap();
+    let row = &claimed.items[0];
+    assert_eq!(row.fields, fields);
+    assert_eq!(row.metadata, metadata);
+    assert_eq!(row.gate_keys, vec!["gate-a"]);
+    assert_eq!(row.payload.as_deref(), Some(&b"payload"[..]));
+    assert_eq!(row.priority, Some(PriorityValue::Int64(7)));
+    assert_eq!(
+        row.item_version, 3,
+        "update and claim each bump the version"
+    );
 }
 
 fn ts(s: i64) -> UtcTimestamp {

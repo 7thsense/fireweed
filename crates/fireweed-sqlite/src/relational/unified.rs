@@ -2,19 +2,25 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use fireweed_core::{ClientItemKey, ItemId, ItemState, LeaseToken, QueueDefinition, UtcTimestamp};
+use fireweed_core::{
+    ClientItemKey, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse,
+    GroupedAggregateRequest, GroupedAggregateResponse, ItemId, ItemState, LeaseToken,
+    MetricsByQueryRequest, QueryCapabilityFlags, QueueDefinition, RangeScanRequest,
+    RangeScanResponse, RequestId, UtcTimestamp,
+};
 use fireweed_engine::ClaimUnit;
 use fireweed_engine::TerminalEmissionMetrics;
 use fireweed_engine::{
-    ActiveScope, AsOfProjectionStore, ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope,
-    CommandPosition, DiscoveryGranularity, DurabilityClass, EngineError, EngineResult,
-    FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary,
-    PushItem, QueueKey, QueueMetrics,
+    ActiveScope, AsOfProjectionStore, BatchUpdateItemRef, BatchUpdateSnapshotItem,
+    ClaimCompatibility, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
+    DiscoveryGranularity, DurabilityClass, EngineError, EngineResult, FinalizeOutcome, IndexHit,
+    ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary, PushItem, PushSpec, QueueKey,
+    QueueMetrics, UpdateFieldsCommand,
 };
 use fireweed_engine::{
     CommandPage, LogStore, ProjectionSnapshot, ProjectionStore, RichClaimSelection, SnapshotRef,
 };
-use fireweed_projection::InMemoryProjection;
+use fireweed_projection::{InMemoryProjection, ProjectionData};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::*;
@@ -252,10 +258,176 @@ impl LogStore for SqliteRelational {
 }
 
 impl ProjectionStore for SqliteRelational {
+    fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
+        QueryCapabilityFlags {
+            range_scan: true,
+            grouped_aggregate: true,
+            declared_bucket_segment: true,
+            bounded_mutation: true,
+            claim_by_query: true,
+            side_record_query: false,
+        }
+    }
+
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         let mut g = self.lock();
         create_queue_sql(&mut g, definition.clone())?;
         Ok(())
+    }
+
+    fn replay_durable_push(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        items: &[PushSpec],
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<Vec<ItemId>>> {
+        let fingerprint = fireweed_engine::push_specs_fingerprint_sha256(items)?;
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        let result = check_request_idempotency(
+            &tx,
+            shard,
+            IDEMPOTENCY_OPERATION_PUSH,
+            request_id,
+            &fingerprint,
+            ts_nanos(now),
+        );
+        if result.is_ok() {
+            st(tx.commit())?;
+        }
+        result
+    }
+
+    fn replay_durable_batch_update(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<fireweed_engine::BatchUpdateResponse>> {
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        let (tenant, queue) = parts(shard);
+        let prior: Option<(Vec<u8>, String, i64)> = st(tx
+            .query_row(
+                "SELECT request_fingerprint,response_payload,expires_at \
+                 FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_BATCH_UPDATE,
+                    request_id.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional())?;
+        let Some((stored_fingerprint, response_payload, expires_at)) = prior else {
+            st(tx.commit())?;
+            return Ok(None);
+        };
+        if expires_at <= ts_nanos(now) {
+            st(tx.execute(
+                "DELETE FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_BATCH_UPDATE,
+                    request_id.as_str()
+                ],
+            ))?;
+            st(tx.commit())?;
+            return Ok(None);
+        }
+        if stored_fingerprint != fingerprint.to_be_bytes() {
+            return Err(EngineError::RequestIdConflict);
+        }
+        let response = serde_json::from_str(&response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        st(tx.commit())?;
+        Ok(Some(response))
+    }
+
+    fn replay_durable_commit(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>> {
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        let (tenant, queue) = parts(shard);
+        let prior: Option<(Vec<u8>, String, i64)> = st(tx
+            .query_row(
+                "SELECT request_fingerprint,response_payload,expires_at \
+                 FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_COMMIT,
+                    request_id.as_str()
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional())?;
+        let Some((stored_fingerprint, response_payload, expires_at)) = prior else {
+            st(tx.commit())?;
+            return Ok(None);
+        };
+        if expires_at <= ts_nanos(now) {
+            st(tx.execute(
+                "DELETE FROM pqueue_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_COMMIT,
+                    request_id.as_str()
+                ],
+            ))?;
+            st(tx.commit())?;
+            return Ok(None);
+        }
+        if stored_fingerprint != fingerprint.to_be_bytes() {
+            return Err(EngineError::RequestIdConflict);
+        }
+        let entries = serde_json::from_str(&response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        st(tx.commit())?;
+        Ok(Some(entries))
+    }
+
+    fn read_durable_commit(
+        &self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+    ) -> EngineResult<Option<Vec<fireweed_engine::CommitOutcomeEntry>>> {
+        let g = self.lock();
+        let (tenant, queue) = parts(shard);
+        let response_payload: Option<String> = st(g
+            .conn
+            .query_row(
+                "SELECT response_payload FROM pqueue_request_idempotency \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND operation=?3 AND request_id=?4",
+                params![
+                    tenant,
+                    queue,
+                    IDEMPOTENCY_OPERATION_COMMIT,
+                    request_id.as_str()
+                ],
+                |row| row.get(0),
+            )
+            .optional())?;
+        response_payload
+            .map(|payload| {
+                serde_json::from_str(&payload)
+                    .map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .transpose()
     }
 
     fn apply(
@@ -443,6 +615,22 @@ impl ProjectionStore for SqliteRelational {
 
     fn item_version(&self, shard: &QueueKey, id: &ItemId) -> EngineResult<Option<u64>> {
         item_version_sql(&self.lock().conn, shard, id)
+    }
+
+    fn batch_update_snapshot(
+        &self,
+        shard: &QueueKey,
+        refs: &[BatchUpdateItemRef],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        batch_update_snapshot_sql(&self.lock().conn, shard, refs)
+    }
+
+    fn batch_update_preflight(
+        &self,
+        _shard: &QueueKey,
+        commands: &[UpdateFieldsCommand],
+    ) -> EngineResult<Vec<bool>> {
+        Ok(vec![true; commands.len()])
     }
 
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
@@ -646,6 +834,46 @@ impl ProjectionStore for SqliteRelational {
         metrics_sql(&self.lock().conn, shard)
     }
 
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> EngineResult<RangeScanResponse> {
+        projection_data(&self.lock(), shard)?.range_scan(request)
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        projection_data(&self.lock(), shard)?.grouped_aggregate(request)
+    }
+
+    fn metrics_by_query(
+        &self,
+        shard: &QueueKey,
+        request: MetricsByQueryRequest,
+    ) -> EngineResult<QueueMetrics> {
+        projection_data(&self.lock(), shard)?.metrics_by_query(request)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        projection_data(&self.lock(), shard)?.declared_bucket_segment(request)
+    }
+
+    fn plan_bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: fireweed_core::BoundedMutationRequest,
+    ) -> EngineResult<fireweed_engine::BoundedMutationPlan> {
+        projection_data(&self.lock(), shard)?.plan_bounded_mutation(request)
+    }
+
     fn terminal_emission_metrics(
         &self,
         shard: &QueueKey,
@@ -693,21 +921,31 @@ impl ProjectionStore for SqliteRelational {
 
     fn index_get_unique(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> EngineResult<Option<IndexHit>> {
-        Err(EngineError::Unavailable)
+        projection_data(&self.lock(), shard)?.index_get_unique(index, key)
     }
 
     fn index_lookup(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
-        Err(EngineError::Unavailable)
+        projection_data(&self.lock(), shard)?.index_lookup(index, key)
     }
+}
+
+fn projection_data(inner: &Inner, shard: &QueueKey) -> EngineResult<ProjectionData> {
+    let definition = inner
+        .queues
+        .get(shard)
+        .cloned()
+        .ok_or(EngineError::NotFound)?;
+    let image = export_projection_image_sql(&inner.conn, shard)?;
+    ProjectionData::from_image(&definition, image)
 }
 
 impl AsOfProjectionStore for SqliteRelational {

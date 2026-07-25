@@ -34,7 +34,7 @@ use crate::hash_slot;
 
 /// The routing outcome for one queue-addressed command (TD-006 §1A). The server maps these to the wire:
 /// `Serve` → run the command; `Moved` → `-MOVED <slot> <host:port>`; `NoPerm` → `-NOPERM`; `Unavailable` →
-/// `-ERR pqueue unavailable` (retryable).
+/// `-ERR fireweed unavailable` (retryable).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDecision {
     /// This node owns the queue at the current epoch — serve locally.

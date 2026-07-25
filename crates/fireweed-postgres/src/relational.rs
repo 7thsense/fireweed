@@ -51,15 +51,19 @@ use std::sync::{Arc, Mutex};
 use axon_esf::CompiledSchema;
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, CohortId, FilterOp, GroupKey, IndexDeclaration, IndexType, ItemId, ItemState,
-    LeaseToken, Metadata, MetricsByQueryRequest, PriorityModel, PriorityValue, QueryFilter,
-    QueueDefinition, QueueId, QueueIndex, RequestId, TenantId, TypedValue, UtcTimestamp,
+    BoundedMutationRequest, BoundedMutationResponse, ClaimByQueryRequest, ClientItemKey, CohortId,
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
+    GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexType, ItemId,
+    ItemState, LeaseToken, Metadata, MetricsByQueryRequest, MutationOutcome, MutationResult,
+    PriorityModel, PriorityValue, QueryCapabilityFlags, QueryFilter, QueueDefinition, QueueId,
+    QueueIndex, RangeScanRequest, RangeScanResponse, RequestId, TenantId, TypedValue, UtcTimestamp,
     is_retry_exhausted, priority_sort,
 };
 use fireweed_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, Backend, BatchUpdateItemRef, BatchUpdateOutcome,
-    BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, ClaimCommand,
-    ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit, Claimed, ClaimedItem,
+    BatchUpdatePort, BatchUpdateRequest, BatchUpdateResponse, BatchUpdateSnapshotItem,
+    BatchUpdateValue, BoundedMutationPlan, BoundedMutationUpdate, ClaimByQueryContext,
+    ClaimCommand, ClaimCompatibility, ClaimPort, ClaimRequest, ClaimUnit, Claimed, ClaimedItem,
     CohortClaimCommand, CohortExpiredCommand, CohortFinalizeCommand, CohortFinalizePort,
     CohortLeaseTarget, CohortRenewLeaseCommand, CohortRenewLeasePort, CommandChecksum,
     CommandEnvelope, CommandId, CommandPosition, CommitCapabilities, CommitEntryOutcome,
@@ -72,11 +76,12 @@ use fireweed_engine::{
     ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushFingerprint, PushItem, PushPort,
     PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
     ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand,
-    RenewLeasePort, ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand,
-    SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
-    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema,
-    project_scopes, validate_api001_reserved_write_fields, validate_claim_compatibility,
-    validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
+    RenewLeasePort, ReplacePendingCommand, RequestOutcome, ReschedulePort, ScheduleUpdate,
+    SetGatesCommand, SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
+    compile_entity_schema, generate_query_lease_token, project_scopes,
+    validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
+    validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use fireweed_engine::{
     AsOfProjectionStore, CommandPage, LogLineageIdentity, LogRead, LogStore, ProjectionSnapshot,
@@ -86,6 +91,8 @@ use postgres::error::SqlState;
 use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
 use sha2::{Digest, Sha256};
+
+use fireweed_projection::query_projection_from_index_keys;
 
 use crate::{PostgresConnectConfig, connect};
 
@@ -181,6 +188,7 @@ CREATE TABLE IF NOT EXISTS pqueue_items (
     payload BYTEA,
     fields TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}',
+    entity_document TEXT,
     retry_count BIGINT NOT NULL DEFAULT 0,
     item_version BIGINT NOT NULL,
     lease_token_hash BYTEA,
@@ -756,6 +764,7 @@ fn verify_group_summary_indexes(client: &mut Client, fresh: bool) -> EngineResul
 const COHORT_EXPIRY_SWEEP_LIMIT: i64 = 128;
 const GLOBAL_EXPIRY_SWEEP_LIMIT: i64 = 128;
 const IDEMPOTENCY_OPERATION_PUSH: &str = "push";
+const IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY: &str = "claim_by_query";
 
 /// The serialized claim CTE (TD-002 `BatchClaim`): select the eligible candidates under a real
 /// `FOR UPDATE SKIP LOCKED` row lock and lease them in ONE statement, RETURNING the rich claimed rows.
@@ -801,7 +810,20 @@ const ASYNC_EXPIRED_LEASES_BOUNDED_SQL: &str = "SELECT item_id FROM pqueue_items
 // ---------------------------------------------------------------------------
 
 fn st<T>(r: Result<T, postgres::Error>) -> EngineResult<T> {
-    r.map_err(|e| EngineError::Storage(e.to_string()))
+    r.map_err(|error| {
+        let message = error.as_db_error().map_or_else(
+            || error.to_string(),
+            |database| {
+                let mut message = format!("{} ({})", database.message(), database.code().code());
+                if let Some(detail) = database.detail() {
+                    message.push_str(": ");
+                    message.push_str(detail);
+                }
+                message
+            },
+        );
+        EngineError::Storage(message)
+    })
 }
 
 fn to_json<T: serde::Serialize>(value: &T) -> EngineResult<String> {
@@ -2391,11 +2413,12 @@ struct ItemRow {
     payload: Option<Vec<u8>>,
     fields: String,
     metadata: String,
+    entity_document: Option<String>,
     max_attempts: i64,
     created_seq: i64,
 }
 
-/// Max `pqueue_items` rows per INSERT statement: 13 bound params/row + 4 shared; 1000 rows ≈ 13k params,
+/// Max `pqueue_items` rows per INSERT statement: 14 bound params/row + 4 shared; 1000 rows ≈ 14k params,
 /// well under postgres' 65535 bound-parameter ceiling.
 const PG_INSERT_CHUNK: usize = 1000;
 
@@ -2436,6 +2459,7 @@ fn insert_items(
             payload: item.payload.as_ref().map(|b| b.to_vec()),
             fields: fields_to_json(&item.fields)?,
             metadata: metadata_to_json(&item.metadata)?,
+            entity_document: item.entity_document.as_ref().map(to_json).transpose()?,
             max_attempts: item.max_attempts as i64,
             created_seq: base_seq + i as i64,
         });
@@ -2444,19 +2468,19 @@ fn insert_items(
         let mut sql = String::from(
             "INSERT INTO pqueue_items \
              (tenant_id,queue_id,item_id,client_item_key,lifecycle_state,priority,priority_sort,\
-              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,retry_count,\
+              not_before,eligible_since,group_key,cohort_size,payload,fields,metadata,entity_document,retry_count,\
               item_version,lease_token_hash,lease_expires_at,worker_id,last_command_sequence,created_at,\
               updated_at,terminal_at,fenced,superseded,max_attempts,created_seq) VALUES ",
         );
         let mut params: Vec<&(dyn ToSql + Sync)> = vec![&t, &q, &seqi, &now_n];
         for (r, row) in chunk.iter().enumerate() {
-            let b = 5 + r * 13;
+            let b = 5 + r * 14;
             if r > 0 {
                 sql.push(',');
             }
             sql.push_str(&format!(
-                "($1,$2,${},${},'Pending',${},${},${},${},${},${},${},${},${},0,1,NULL,NULL,NULL,\
-                 $3,$4,$4,NULL,false,false,${},${})",
+                "($1,$2,${},${},'Pending',${},${},${},${},${},${},${},${},${},${},\
+                 0,1,NULL,NULL,NULL,$3,$4,$4,NULL,false,false,${},${})",
                 b,
                 b + 1,
                 b + 2,
@@ -2470,6 +2494,7 @@ fn insert_items(
                 b + 10,
                 b + 11,
                 b + 12,
+                b + 13,
             ));
             params.push(&row.item_id);
             params.push(&row.key);
@@ -2482,6 +2507,7 @@ fn insert_items(
             params.push(&row.payload);
             params.push(&row.fields);
             params.push(&row.metadata);
+            params.push(&row.entity_document);
             params.push(&row.max_attempts);
             params.push(&row.created_seq);
         }
@@ -2954,6 +2980,12 @@ fn apply_command_sql(
             // ADR-011: if a new entity document was supplied, re-index this item. Delete the
             // old rows first so the unique slot is freed before the conflict check fires.
             if let Some(ref doc) = c.set_entity_document {
+                let entity_document = to_json(doc)?;
+                st(tx.execute(
+                    "UPDATE pqueue_items SET entity_document=$4 \
+                     WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                    &[&t, &q, &item_id, &entity_document],
+                ))?;
                 let typed_indexes = queues
                     .get(shard)
                     .map(|d| d.typed_indexes.as_slice())
@@ -3815,6 +3847,10 @@ fn peek_sql(client: &mut Client, shard: &QueueKey, limit: usize) -> EngineResult
     let rows = st(client.query(
         "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
          WHERE tenant_id=$1 AND queue_id=$2 AND lifecycle_state='Pending' AND superseded=false \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+           ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+           WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+           AND ig.item_id=pqueue_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT $3",
         &[&t, &q, &lim],
     ))?;
@@ -4465,6 +4501,350 @@ fn metrics_by_query_sql(
     Ok(metrics)
 }
 
+/// Load the canonical key for one declared index and rebuild the shared query-only projection. The LEFT
+/// JOIN retains sparse rows so declared bucket segmentation can report its required null bucket.
+fn hot_query_projection_sql(
+    client: &mut Client,
+    definition: &QueueDefinition,
+    shard: &QueueKey,
+    index_name: Option<&str>,
+) -> EngineResult<fireweed_projection::ProjectionData> {
+    let resolved_name = match index_name {
+        Some(name) => {
+            if !definition
+                .typed_indexes
+                .iter()
+                .any(|index| index.name == name)
+            {
+                return Err(EngineError::Invalid("unknown secondary index"));
+            }
+            name
+        }
+        None => definition
+            .typed_indexes
+            .first()
+            .map(|index| index.name.as_str())
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+    };
+    let (tenant, queue) = parts(shard);
+    let rows = st(client.query(
+        "SELECT i.item_id,idx.index_key FROM pqueue_items i \
+         LEFT JOIN pqueue_item_index idx \
+           ON idx.tenant_id=i.tenant_id AND idx.queue_id=i.queue_id AND idx.item_id=i.item_id \
+          AND idx.index_name=$3 \
+         WHERE i.tenant_id=$1 AND i.queue_id=$2 AND i.superseded=false \
+         ORDER BY i.item_id",
+        &[&tenant, &queue, &resolved_name],
+    ))?;
+    let records = rows
+        .into_iter()
+        .map(|row| {
+            Ok((
+                ItemId::new(row.get::<_, String>(0))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                row.get::<_, Option<Vec<u8>>>(1),
+            ))
+        })
+        .collect::<EngineResult<Vec<_>>>()?;
+    query_projection_from_index_keys(definition, Some(resolved_name), records)
+}
+
+fn query_typed_value_json(value: &TypedValue) -> EngineResult<serde_json::Value> {
+    Ok(match value {
+        TypedValue::String(value) => serde_json::Value::String(value.clone()),
+        TypedValue::Integer(value) => (*value).into(),
+        TypedValue::Float(value) => serde_json::Number::from_f64(*value)
+            .map(serde_json::Value::Number)
+            .ok_or(EngineError::Invalid(
+                "typed index value is not valid for declared type",
+            ))?,
+        TypedValue::Bool(value) => (*value).into(),
+        TypedValue::DateTime(value) => value.seconds.into(),
+    })
+}
+
+fn bounded_mutation_plan_sql(
+    inner: &mut Inner,
+    shard: &QueueKey,
+    request: BoundedMutationRequest,
+) -> EngineResult<BoundedMutationPlan> {
+    if request.max_scan_rows == 0 {
+        return Err(EngineError::Invalid("invalid page size"));
+    }
+    let definition = inner
+        .queues
+        .get(shard)
+        .ok_or(EngineError::NotFound)?
+        .clone();
+    let mut query = hot_query_projection_sql(
+        &mut inner.client,
+        &definition,
+        shard,
+        request.index.as_deref(),
+    )?;
+    let matches = query.bounded_mutation(request.clone())?;
+    let (tenant, queue) = parts(shard);
+    let mut results = Vec::with_capacity(matches.results.len());
+    let mut updates = Vec::new();
+    for candidate in matches.results {
+        let row = st(inner.client.query_opt(
+            "SELECT lifecycle_state,fenced,superseded,entity_document,fields,item_version \
+             FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+            &[&tenant, &queue, &candidate.item_id.to_string()],
+        ))?;
+        let Some(row) = row else {
+            results.push(MutationResult {
+                item_id: candidate.item_id,
+                outcome: MutationOutcome::NotFound,
+            });
+            continue;
+        };
+        let state: String = row.get(0);
+        let fenced: bool = row.get(1);
+        let superseded: bool = row.get(2);
+        if state != "Pending" || fenced || superseded {
+            results.push(MutationResult {
+                item_id: candidate.item_id,
+                outcome: MutationOutcome::Conflict,
+            });
+            continue;
+        }
+        let entity_json: Option<String> = row.get(3);
+        let mut entity = entity_json
+            .map(|json| serde_json::from_str::<serde_json::Value>(&json))
+            .transpose()
+            .map_err(|error| EngineError::Storage(error.to_string()))?
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+        let object = entity
+            .as_object_mut()
+            .ok_or(EngineError::Invalid("typed index entity is not an object"))?;
+        let mut fields = fields_from_json(row.get(4))?;
+        let expected_item_version = row.get::<_, i64>(5) as u64;
+        for (field, value) in &request.set_fields {
+            object.insert(field.clone(), query_typed_value_json(value)?);
+            fields.insert(
+                field.clone(),
+                Bytes::from(
+                    serde_json::to_vec(value)
+                        .map_err(|error| EngineError::Storage(error.to_string()))?,
+                ),
+            );
+        }
+        validate_entity(inner.schemas.get(shard), Some(&entity))?;
+        let command = UpdateFieldsCommand {
+            item_id: candidate.item_id,
+            field_ops: BTreeMap::new(),
+            payload: PayloadUpdate::Keep,
+            set_priority: ScheduleUpdate::Keep,
+            set_not_before: ScheduleUpdate::Keep,
+            set_entity_document: Some(entity),
+            set_fields: Some(fields),
+            set_metadata: None,
+            set_gate_keys: None,
+            api001_batch: false,
+        };
+        updates.push(BoundedMutationUpdate {
+            command,
+            expected_item_version,
+        });
+        results.push(MutationResult {
+            item_id: candidate.item_id,
+            outcome: MutationOutcome::Updated,
+        });
+    }
+    results.sort_by_key(|result| result.item_id);
+    Ok(BoundedMutationPlan {
+        response: BoundedMutationResponse { results },
+        updates,
+    })
+}
+
+fn projection_store_now() -> UtcTimestamp {
+    let duration = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    UtcTimestamp::new(duration.as_secs() as i64, duration.subsec_nanos()).expect("valid timestamp")
+}
+
+fn bounded_mutation_sql(
+    inner: &mut Inner,
+    shard: &QueueKey,
+    request: BoundedMutationRequest,
+    context: fireweed_engine::BoundedMutationContext,
+) -> EngineResult<BoundedMutationResponse> {
+    let plan = bounded_mutation_plan_sql(inner, shard, request)?;
+    for update in plan.updates {
+        inner.commit_command(
+            shard,
+            QueueCommand::UpdateFields(update.command),
+            context.now,
+            context.expected_epoch,
+        )?;
+    }
+    Ok(plan.response)
+}
+
+fn claim_by_query_sql(
+    inner: &mut Inner,
+    shard: &QueueKey,
+    request: ClaimByQueryRequest,
+    context: ClaimByQueryContext,
+) -> EngineResult<Claimed> {
+    let definition = inner
+        .queues
+        .get(shard)
+        .ok_or(EngineError::NotFound)?
+        .clone();
+    if request.max_items == 0 || u64::from(request.max_items) > definition.max_claim_batch_size {
+        return Err(EngineError::Invalid("invalid claim_by_query max_items"));
+    }
+    if request.lease_duration_ms == 0
+        || request.lease_duration_ms > definition.max_lease_duration_ms
+    {
+        return Err(EngineError::Invalid(
+            "invalid claim_by_query lease_duration_ms",
+        ));
+    }
+    let request_id = request
+        .request_id
+        .clone()
+        .ok_or(EngineError::Invalid("claim_by_query request_id required"))?;
+    let fingerprint = serde_json::to_vec(&request)
+        .map(|bytes| Sha256::digest(bytes).to_vec())
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    if queue_paused(&mut inner.client, shard)? {
+        return Ok(Claimed::default());
+    }
+    let query = hot_query_projection_sql(
+        &mut inner.client,
+        &definition,
+        shard,
+        request.index.as_deref(),
+    )?;
+    let mut ordered_rows = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = query.range_scan(RangeScanRequest {
+            index: request.index.clone(),
+            filters: request.filters.clone(),
+            order_by: vec![request.order_by.clone()],
+            page_size: 1_000,
+            cursor,
+        })?;
+        ordered_rows.extend(page.rows);
+        let Some(next) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next);
+    }
+    let (tenant, queue) = parts(shard);
+    let expires_at = request_expires_at(&inner.queues, shard, context.now)?;
+    let lease_token = generate_query_lease_token()?;
+    let lease_expires_at = context.lease_expires_at(request.lease_duration_ms);
+    let eligibility_nanos = ts_nanos(context.eligibility_at());
+    let Inner {
+        client,
+        queues,
+        live_tokens,
+        ..
+    } = inner;
+    let mut tx = st(client.transaction())?;
+    let epoch: i64 = st(tx.query_one(
+        "SELECT assignment_epoch FROM relational_cursor WHERE tenant=$1 AND queue=$2 FOR UPDATE",
+        &[&tenant, &queue],
+    ))?
+    .get(0);
+    if context
+        .expected_epoch
+        .is_some_and(|expected| expected != epoch as u64)
+    {
+        return Err(EngineError::EpochFenced);
+    }
+    if let Some(ids) = check_request_idempotency(
+        &mut tx,
+        shard,
+        IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY,
+        &request_id,
+        &fingerprint,
+        ts_nanos(context.now),
+    )? {
+        drop(tx);
+        let items = render_claimed(client, shard, &ids, |id| live_tokens.get(id).cloned())?;
+        if items.len() != ids.len() {
+            return Err(EngineError::RequestExpired);
+        }
+        return Ok(Claimed {
+            items,
+            ..Default::default()
+        });
+    }
+    let mut selected = Vec::new();
+    for row in ordered_rows {
+        if selected.len() >= request.max_items as usize {
+            break;
+        }
+        let id = row.item_id.to_string();
+        if st(tx.query_opt(
+            "SELECT item_id FROM pqueue_items i WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 \
+             AND lifecycle_state='Pending' AND fenced=false AND superseded=false \
+             AND (not_before IS NULL OR not_before<=$4) \
+             AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+               ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+               WHERE ig.tenant_id=i.tenant_id AND ig.queue_id=i.queue_id AND ig.item_id=i.item_id) \
+             FOR UPDATE SKIP LOCKED",
+            &[&tenant, &queue, &id, &eligibility_nanos],
+        ))?
+        .is_some()
+        {
+            selected.push(row.item_id);
+        }
+    }
+    if selected.is_empty() {
+        return Ok(Claimed::default());
+    }
+    let seq = alloc_seq(&mut tx, &tenant, &queue)?;
+    let command = QueueCommand::Claim(ClaimCommand {
+        item_ids: selected.clone(),
+        lease_token: lease_token.clone(),
+        lease_expires_at,
+        worker_id: Some(request.worker_id),
+    });
+    let position = CommandPosition::new(shard.clone(), epoch as u64, seq);
+    let envelope = direct_command_envelope(shard, command, context.now, epoch as u64, seq);
+    persist_command_envelopes(
+        &mut tx,
+        std::slice::from_ref(&position),
+        std::slice::from_ref(&envelope),
+    )?;
+    let mut token_ops = Vec::new();
+    apply_command_sql(
+        &mut tx,
+        queues,
+        &mut token_ops,
+        shard,
+        seq,
+        context.now,
+        &envelope.command,
+    )?;
+    record_request_idempotency(
+        &mut tx,
+        shard,
+        IDEMPOTENCY_OPERATION_CLAIM_BY_QUERY,
+        &request_id,
+        &fingerprint,
+        &selected,
+        context.now,
+        expires_at,
+    )?;
+    st(tx.commit())?;
+    apply_token_ops(live_tokens, token_ops);
+    let items = render_claimed(client, shard, &selected, |id| live_tokens.get(id).cloned())?;
+    Ok(Claimed {
+        items,
+        ..Default::default()
+    })
+}
+
 /// Lifecycle state + flags for a BATCH of items in ONE round-trip (was one SELECT per id), keyed by
 /// `item_id` string. Absent ids are simply missing from the map (the per-id classifier treats a miss as
 /// `NotFound`). Replaces the former per-item `item_flags` helper.
@@ -4765,6 +5145,7 @@ impl PostgresRelationalBackend {
                 "ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS fields TEXT NOT NULL DEFAULT '{}';\
                  ALTER TABLE queues ADD COLUMN IF NOT EXISTS pause_drain_intake BOOLEAN NOT NULL DEFAULT false;\
                  ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS metadata TEXT NOT NULL DEFAULT '{}';\
+                 ALTER TABLE pqueue_items ADD COLUMN IF NOT EXISTS entity_document TEXT;\
                  ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS cohort_id TEXT;\
              ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS member_count BIGINT NOT NULL DEFAULT 0;\
              ALTER TABLE pqueue_cohorts ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'forming';\
@@ -6018,6 +6399,103 @@ impl ProjectionRead for PostgresRelationalBackend {
 }
 
 /// ADR-011 (pqueue-f4ffd679): typed secondary index queries backed by `pqueue_item_index`.
+fn index_get_unique_sql(
+    client: &mut Client,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    index: &str,
+    key: &[Vec<u8>],
+) -> EngineResult<Option<IndexHit>> {
+    let qi = queues
+        .get(shard)
+        .and_then(|definition| definition.typed_indexes.iter().find(|qi| qi.name == index))
+        .ok_or(EngineError::Invalid("unknown secondary index"))?
+        .clone();
+    if !index_is_unique(&qi) {
+        return Err(EngineError::Invalid("secondary index is not unique"));
+    }
+    let expected_arity = match &qi.declaration {
+        IndexDeclaration::Single(_) => 1,
+        IndexDeclaration::Compound(definition) => definition.fields.len(),
+    };
+    if key.len() != expected_arity {
+        return Err(EngineError::Invalid("secondary index key arity mismatch"));
+    }
+    let canonical = typed_lookup_canonical_key(&qi, key)?;
+    let (tenant, queue) = parts(shard);
+    let row = st(client.query_opt(
+        "SELECT i.item_id, i.client_item_key, i.item_version \
+         FROM pqueue_item_index idx \
+         JOIN pqueue_items i \
+           ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
+          AND i.item_id=idx.item_id \
+         WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
+           AND idx.index_name=$3 AND idx.index_key=$4 \
+         LIMIT 1",
+        &[&tenant, &queue, &index, &canonical.as_slice()],
+    ))?;
+    row.map(|row| {
+        let id: String = row.get(0);
+        let client_key: String = row.get(1);
+        let version: i64 = row.get(2);
+        Ok(IndexHit {
+            item_id: ItemId::new(id).map_err(|error| EngineError::Storage(error.to_string()))?,
+            client_item_key: ClientItemKey::new(client_key)
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            item_version: version as u64,
+        })
+    })
+    .transpose()
+}
+
+fn index_lookup_sql(
+    client: &mut Client,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    shard: &QueueKey,
+    index: &str,
+    key: &[Vec<u8>],
+) -> EngineResult<Vec<IndexHit>> {
+    let qi = queues
+        .get(shard)
+        .and_then(|definition| definition.typed_indexes.iter().find(|qi| qi.name == index))
+        .ok_or(EngineError::Invalid("unknown secondary index"))?
+        .clone();
+    let expected_arity = match &qi.declaration {
+        IndexDeclaration::Single(_) => 1,
+        IndexDeclaration::Compound(definition) => definition.fields.len(),
+    };
+    if key.len() != expected_arity {
+        return Err(EngineError::Invalid("secondary index key arity mismatch"));
+    }
+    let canonical = typed_lookup_canonical_key(&qi, key)?;
+    let (tenant, queue) = parts(shard);
+    let rows = st(client.query(
+        "SELECT i.item_id, i.client_item_key, i.item_version \
+         FROM pqueue_item_index idx \
+         JOIN pqueue_items i \
+           ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
+          AND i.item_id=idx.item_id \
+         WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
+           AND idx.index_name=$3 AND idx.index_key=$4 \
+         ORDER BY i.item_id",
+        &[&tenant, &queue, &index, &canonical.as_slice()],
+    ))?;
+    rows.into_iter()
+        .map(|row| {
+            let id: String = row.get(0);
+            let client_key: String = row.get(1);
+            let version: i64 = row.get(2);
+            Ok(IndexHit {
+                item_id: ItemId::new(id)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                client_item_key: ClientItemKey::new(client_key)
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                item_version: version as u64,
+            })
+        })
+        .collect()
+}
+
 impl IndexQueryPort for PostgresRelationalBackend {
     fn index_get_unique(
         &self,
@@ -6025,49 +6503,11 @@ impl IndexQueryPort for PostgresRelationalBackend {
         index: &str,
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Option<IndexHit>>> + Send {
-        let result = (|| {
-            let mut g = self.inner.lock().expect("projection store poisoned");
-            let qi = g
-                .queues
-                .get(shard)
-                .and_then(|d| d.typed_indexes.iter().find(|qi| qi.name == index))
-                .ok_or(EngineError::Invalid("unknown secondary index"))?
-                .clone();
-            if !index_is_unique(&qi) {
-                return Err(EngineError::Invalid("secondary index is not unique"));
-            }
-            let expected_arity = match &qi.declaration {
-                IndexDeclaration::Single(_) => 1,
-                IndexDeclaration::Compound(def) => def.fields.len(),
-            };
-            if key.len() != expected_arity {
-                return Err(EngineError::Invalid("secondary index key arity mismatch"));
-            }
-            let canonical = typed_lookup_canonical_key(&qi, key)?;
-            let (t, q) = parts(shard);
-            let row = st(g.client.query_opt(
-                "SELECT i.item_id, i.client_item_key, i.item_version \
-                 FROM pqueue_item_index idx \
-                 JOIN pqueue_items i \
-                   ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
-                  AND i.item_id=idx.item_id \
-                 WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
-                   AND idx.index_name=$3 AND idx.index_key=$4 \
-                 LIMIT 1",
-                &[&t, &q, &index, &canonical.as_slice()],
-            ))?;
-            Ok(row.map(|row| {
-                let id_str: String = row.get(0);
-                let ck_str: String = row.get(1);
-                let ver: i64 = row.get(2);
-                IndexHit {
-                    item_id: ItemId::new(id_str).expect("valid stored item_id"),
-                    client_item_key: ClientItemKey::new(ck_str)
-                        .expect("valid stored client_item_key"),
-                    item_version: ver as u64,
-                }
-            }))
-        })();
+        let result = {
+            let mut guard = self.inner.lock().expect("projection store poisoned");
+            let Inner { client, queues, .. } = &mut *guard;
+            index_get_unique_sql(client, queues, shard, index, key)
+        };
         std::future::ready(result)
     }
 
@@ -6077,49 +6517,11 @@ impl IndexQueryPort for PostgresRelationalBackend {
         index: &str,
         key: &[Vec<u8>],
     ) -> impl std::future::Future<Output = EngineResult<Vec<IndexHit>>> + Send {
-        let result = (|| {
-            let mut g = self.inner.lock().expect("projection store poisoned");
-            let qi = g
-                .queues
-                .get(shard)
-                .and_then(|d| d.typed_indexes.iter().find(|qi| qi.name == index))
-                .ok_or(EngineError::Invalid("unknown secondary index"))?
-                .clone();
-            let expected_arity = match &qi.declaration {
-                IndexDeclaration::Single(_) => 1,
-                IndexDeclaration::Compound(def) => def.fields.len(),
-            };
-            if key.len() != expected_arity {
-                return Err(EngineError::Invalid("secondary index key arity mismatch"));
-            }
-            let canonical = typed_lookup_canonical_key(&qi, key)?;
-            let (t, q) = parts(shard);
-            let rows = st(g.client.query(
-                "SELECT i.item_id, i.client_item_key, i.item_version \
-                 FROM pqueue_item_index idx \
-                 JOIN pqueue_items i \
-                   ON i.tenant_id=idx.tenant_id AND i.queue_id=idx.queue_id \
-                  AND i.item_id=idx.item_id \
-                 WHERE idx.tenant_id=$1 AND idx.queue_id=$2 \
-                   AND idx.index_name=$3 AND idx.index_key=$4 \
-                 ORDER BY i.item_id",
-                &[&t, &q, &index, &canonical.as_slice()],
-            ))?;
-            let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                let id_str: String = row.get(0);
-                let ck_str: String = row.get(1);
-                let ver: i64 = row.get(2);
-                out.push(IndexHit {
-                    item_id: ItemId::new(id_str)
-                        .map_err(|e| EngineError::Storage(e.to_string()))?,
-                    client_item_key: ClientItemKey::new(ck_str)
-                        .map_err(|e| EngineError::Storage(e.to_string()))?,
-                    item_version: ver as u64,
-                });
-            }
-            Ok(out)
-        })();
+        let result = {
+            let mut guard = self.inner.lock().expect("projection store poisoned");
+            let Inner { client, queues, .. } = &mut *guard;
+            index_lookup_sql(client, queues, shard, index, key)
+        };
         std::future::ready(result)
     }
 }
@@ -6400,8 +6802,6 @@ impl PushPort for PostgresRelationalBackend {
         std::future::ready(result)
     }
 }
-
-impl fireweed_engine::ReschedulePort for PostgresRelationalBackend {}
 
 impl SetGatesPort for PostgresRelationalBackend {
     fn set_gates(
@@ -7077,6 +7477,45 @@ impl RecoveryReadPort for PostgresRelationalBackend {
 }
 
 impl fireweed_engine::HotProjectionQueryPort for PostgresRelationalBackend {
+    fn hot_projection_capabilities(&self, _shard: &QueueKey) -> QueryCapabilityFlags {
+        QueryCapabilityFlags {
+            range_scan: true,
+            grouped_aggregate: true,
+            declared_bucket_segment: true,
+            bounded_mutation: true,
+            claim_by_query: true,
+            side_record_query: false,
+        }
+    }
+
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> impl std::future::Future<Output = EngineResult<RangeScanResponse>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?.clone();
+            hot_query_projection_sql(&mut g.client, &definition, shard, request.index.as_deref())?
+                .range_scan(request)
+        })();
+        std::future::ready(result)
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> impl std::future::Future<Output = EngineResult<GroupedAggregateResponse>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?.clone();
+            hot_query_projection_sql(&mut g.client, &definition, shard, request.index.as_deref())?
+                .grouped_aggregate(request)
+        })();
+        std::future::ready(result)
+    }
+
     fn metrics_by_query(
         &self,
         shard: &QueueKey,
@@ -7092,6 +7531,46 @@ impl fireweed_engine::HotProjectionQueryPort for PostgresRelationalBackend {
                 .clone();
             metrics_by_query_sql(&mut g.client, &typed_indexes, shard, request)
         })();
+        std::future::ready(result)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> impl std::future::Future<Output = EngineResult<DeclaredBucketSegmentResponse>> + Send {
+        let result = (|| {
+            let mut g = self.inner.lock().expect("poisoned");
+            let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?.clone();
+            hot_query_projection_sql(&mut g.client, &definition, shard, request.index.as_deref())?
+                .declared_bucket_segment(request)
+        })();
+        std::future::ready(result)
+    }
+
+    fn bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+        context: fireweed_engine::BoundedMutationContext,
+    ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            bounded_mutation_sql(&mut g, shard, request, context)
+        };
+        std::future::ready(result)
+    }
+
+    fn claim_by_query(
+        &self,
+        shard: &QueueKey,
+        request: ClaimByQueryRequest,
+        context: ClaimByQueryContext,
+    ) -> impl std::future::Future<Output = EngineResult<Claimed>> + Send {
+        let result = {
+            let mut g = self.inner.lock().expect("poisoned");
+            claim_by_query_sql(&mut g, shard, request, context)
+        };
         std::future::ready(result)
     }
 }
@@ -7201,6 +7680,72 @@ impl CohortRenewLeasePort for PostgresRelationalBackend {
                 expected_epoch,
             )?;
             Ok(())
+        })();
+        std::future::ready(result)
+    }
+}
+
+impl ReschedulePort for PostgresRelationalBackend {
+    fn reschedule(
+        &self,
+        shard: &QueueKey,
+        item_id: ItemId,
+        set_priority: ScheduleUpdate<PriorityValue>,
+        set_not_before: ScheduleUpdate<UtcTimestamp>,
+        expected_item_version: Option<u64>,
+        now: UtcTimestamp,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<u64>> + Send {
+        let result = (|| {
+            let (tenant, queue) = parts(shard);
+            let item_id_text = item_id.to_string();
+            let mut inner = self.inner.lock().expect("poisoned");
+            let row = st(inner.client.query_opt(
+                "SELECT lifecycle_state, superseded, fenced, item_version FROM pqueue_items \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                &[&tenant, &queue, &item_id_text],
+            ))?
+            .ok_or(EngineError::NotFound)?;
+            let state = parse_state(&row.get::<_, String>(0))?;
+            let superseded: bool = row.get(1);
+            let fenced: bool = row.get(2);
+            let version: i64 = row.get(3);
+            if fenced {
+                return Err(EngineError::StaleLease);
+            }
+            if state.is_terminal() {
+                return Err(EngineError::Terminal);
+            }
+            if superseded {
+                return Err(EngineError::Superseded);
+            }
+            if expected_item_version.is_some_and(|expected| expected != version as u64) {
+                return Err(EngineError::Conflict);
+            }
+            inner.commit_command(
+                shard,
+                QueueCommand::UpdateFields(UpdateFieldsCommand {
+                    item_id,
+                    field_ops: BTreeMap::new(),
+                    payload: PayloadUpdate::Keep,
+                    set_priority,
+                    set_not_before,
+                    set_entity_document: None,
+                    set_fields: None,
+                    set_metadata: None,
+                    set_gate_keys: None,
+                    api001_batch: false,
+                }),
+                now,
+                expected_epoch,
+            )?;
+            let new_version: i64 = st(inner.client.query_one(
+                "SELECT item_version FROM pqueue_items \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3",
+                &[&tenant, &queue, &item_id_text],
+            ))?
+            .get(0);
+            Ok(new_version as u64)
         })();
         std::future::ready(result)
     }
@@ -8108,6 +8653,55 @@ fn lookup_active_by_key(
         ItemId::new(row.get::<_, String>(0)).map_err(|e| EngineError::Storage(e.to_string()))
     })
     .transpose()
+}
+
+const BATCH_UPDATE_SNAPSHOT_SQL: &str = "SELECT item_id,client_item_key,lifecycle_state,item_version,fenced,superseded \
+     FROM pqueue_items WHERE tenant_id=$1 AND queue_id=$2 \
+     AND (item_id=ANY($3) OR client_item_key=ANY($4))";
+
+fn batch_update_snapshot_sql(
+    client: &mut Client,
+    shard: &QueueKey,
+    refs: &[BatchUpdateItemRef],
+) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+    let (tenant, queue) = parts(shard);
+    let mut ids = HashSet::new();
+    let mut keys = HashSet::new();
+    for item_ref in refs {
+        match item_ref {
+            BatchUpdateItemRef::ItemId(item_id) => {
+                ids.insert(item_id.to_string());
+            }
+            BatchUpdateItemRef::ClientItemKey(key) => {
+                keys.insert(key.as_str().to_owned());
+            }
+            BatchUpdateItemRef::Both {
+                item_id,
+                client_item_key,
+            } => {
+                ids.insert(item_id.to_string());
+                keys.insert(client_item_key.as_str().to_owned());
+            }
+        }
+    }
+    let ids = ids.into_iter().collect::<Vec<_>>();
+    let keys = keys.into_iter().collect::<Vec<_>>();
+    let rows = st(client.query(BATCH_UPDATE_SNAPSHOT_SQL, &[&tenant, &queue, &ids, &keys]))?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(BatchUpdateSnapshotItem {
+                item_id: ItemId::new(row.get::<_, String>(0))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                client_item_key: ClientItemKey::new(row.get::<_, String>(1))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                state: parse_state(&row.get::<_, String>(2))?,
+                item_version: u64::try_from(row.get::<_, i64>(3))
+                    .map_err(|error| EngineError::Storage(error.to_string()))?,
+                fenced: row.get(4),
+                superseded: row.get(5),
+            })
+        })
+        .collect()
 }
 
 /// Lifecycle state of `id`, or `None` if absent.
@@ -9027,6 +9621,17 @@ impl HistoricalProjectionRead for PostgresRelationalBackend {
 }
 
 impl ProjectionStore for PostgresRelational {
+    fn hot_projection_capabilities(&self) -> QueryCapabilityFlags {
+        QueryCapabilityFlags {
+            range_scan: true,
+            grouped_aggregate: true,
+            declared_bucket_segment: true,
+            bounded_mutation: true,
+            claim_by_query: true,
+            side_record_query: false,
+        }
+    }
+
     fn ensure_shard(&mut self, definition: &QueueDefinition) -> EngineResult<()> {
         let mut g = self.lock();
         let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
@@ -9371,6 +9976,22 @@ impl ProjectionStore for PostgresRelational {
         item_version_sql(&mut self.lock().client, shard, id)
     }
 
+    fn batch_update_snapshot(
+        &self,
+        shard: &QueueKey,
+        refs: &[BatchUpdateItemRef],
+    ) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+        batch_update_snapshot_sql(&mut self.lock().client, shard, refs)
+    }
+
+    fn batch_update_preflight(
+        &self,
+        _shard: &QueueKey,
+        commands: &[UpdateFieldsCommand],
+    ) -> EngineResult<Vec<bool>> {
+        Ok(vec![true; commands.len()])
+    }
+
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
         expired_leases_sql(&mut self.lock().client, shard, now)
     }
@@ -9538,6 +10159,28 @@ impl ProjectionStore for PostgresRelational {
         metrics_sql(&mut self.lock().client, shard)
     }
 
+    fn range_scan(
+        &self,
+        shard: &QueueKey,
+        request: RangeScanRequest,
+    ) -> EngineResult<RangeScanResponse> {
+        let mut g = self.lock();
+        let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?.clone();
+        hot_query_projection_sql(&mut g.client, &definition, shard, request.index.as_deref())?
+            .range_scan(request)
+    }
+
+    fn grouped_aggregate(
+        &self,
+        shard: &QueueKey,
+        request: GroupedAggregateRequest,
+    ) -> EngineResult<GroupedAggregateResponse> {
+        let mut g = self.lock();
+        let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?.clone();
+        hot_query_projection_sql(&mut g.client, &definition, shard, request.index.as_deref())?
+            .grouped_aggregate(request)
+    }
+
     fn metrics_by_query(
         &self,
         shard: &QueueKey,
@@ -9551,6 +10194,41 @@ impl ProjectionStore for PostgresRelational {
             .typed_indexes
             .clone();
         metrics_by_query_sql(&mut g.client, &typed_indexes, shard, request)
+    }
+
+    fn declared_bucket_segment(
+        &self,
+        shard: &QueueKey,
+        request: DeclaredBucketSegmentRequest,
+    ) -> EngineResult<DeclaredBucketSegmentResponse> {
+        let mut g = self.lock();
+        let definition = g.queues.get(shard).ok_or(EngineError::NotFound)?.clone();
+        hot_query_projection_sql(&mut g.client, &definition, shard, request.index.as_deref())?
+            .declared_bucket_segment(request)
+    }
+
+    fn bounded_mutation(
+        &mut self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationResponse> {
+        bounded_mutation_sql(
+            &mut self.lock(),
+            shard,
+            request,
+            fireweed_engine::BoundedMutationContext {
+                now: projection_store_now(),
+                expected_epoch: None,
+            },
+        )
+    }
+
+    fn plan_bounded_mutation(
+        &self,
+        shard: &QueueKey,
+        request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationPlan> {
+        bounded_mutation_plan_sql(&mut self.lock(), shard, request)
     }
 
     fn terminal_emission_metrics(
@@ -9613,20 +10291,33 @@ impl ProjectionStore for PostgresRelational {
 
     fn index_get_unique(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> EngineResult<Option<IndexHit>> {
-        Err(EngineError::Unavailable)
+        let mut guard = self.lock();
+        let Inner { client, queues, .. } = &mut *guard;
+        index_get_unique_sql(client, queues, shard, index, key)
     }
 
     fn index_lookup(
         &self,
-        _shard: &QueueKey,
-        _index: &str,
-        _key: &[Vec<u8>],
+        shard: &QueueKey,
+        index: &str,
+        key: &[Vec<u8>],
     ) -> EngineResult<Vec<IndexHit>> {
-        Err(EngineError::Unavailable)
+        let mut guard = self.lock();
+        let Inner { client, queues, .. } = &mut *guard;
+        index_lookup_sql(client, queues, shard, index, key)
+    }
+
+    fn discover_active_scopes(
+        &self,
+        shard: &QueueKey,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> EngineResult<Vec<ActiveScope>> {
+        discover_active_scopes_sql(&mut self.lock().client, shard, granularity, now)
     }
 }
 
@@ -9682,6 +10373,13 @@ mod sql_shape_tests {
     }
 
     #[test]
+    fn batch_update_snapshot_is_one_set_oriented_select() {
+        assert_eq!(BATCH_UPDATE_SNAPSHOT_SQL.matches("SELECT").count(), 1);
+        assert!(BATCH_UPDATE_SNAPSHOT_SQL.contains("item_id=ANY($3)"));
+        assert!(BATCH_UPDATE_SNAPSHOT_SQL.contains("client_item_key=ANY($4)"));
+    }
+
+    #[test]
     fn claim_cte_uses_for_update_skip_locked() {
         assert!(
             CLAIM_CTE.contains("FOR UPDATE SKIP LOCKED"),
@@ -9705,6 +10403,21 @@ mod sql_shape_tests {
             CLAIM_CTE.contains("pqueue_item_gates") && CLAIM_CTE.contains("pqueue_gate_state"),
             "BQ-14d: item-level claim MUST anti-join blocked gates (a blocked gate hides its items)"
         );
+    }
+
+    #[test]
+    fn peek_excludes_items_held_by_blocked_gates() {
+        let source = include_str!("relational.rs");
+        let peek = source
+            .split("fn peek_sql(")
+            .nth(1)
+            .unwrap()
+            .split("/// B-011")
+            .next()
+            .unwrap();
+        assert!(peek.contains("pqueue_item_gates"));
+        assert!(peek.contains("pqueue_gate_state"));
+        assert!(peek.contains("NOT EXISTS"));
     }
 
     #[test]
@@ -10231,6 +10944,101 @@ mod gated_group_summary_tests {
             )
             .unwrap()
             .get(0)
+    }
+
+    #[test]
+    fn projection_store_exposes_indexes_and_exact_discovery() {
+        let Ok(url) = std::env::var("FIREWEED_PG_TEST_URL") else {
+            eprintln!(
+                "POSTGRES RELATIONAL SKIPPED (projection_store_exposes_indexes_and_exact_discovery) — set FIREWEED_PG_TEST_URL"
+            );
+            return;
+        };
+        let schema = format!("fw_projection_ports_{}", std::process::id());
+        let mut cleanup = Client::connect(&url, NoTls).expect("connect");
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop schema");
+        drop(cleanup);
+
+        let mut definition = qdef();
+        definition.typed_indexes = vec![
+            QueueIndex {
+                name: "by_email".into(),
+                declaration: IndexDeclaration::Single(axon_esf::IndexDef {
+                    field: "email".into(),
+                    index_type: IndexType::String,
+                    unique: true,
+                }),
+            },
+            QueueIndex {
+                name: "by_kind".into(),
+                declaration: IndexDeclaration::Single(axon_esf::IndexDef {
+                    field: "kind".into(),
+                    index_type: IndexType::String,
+                    unique: false,
+                }),
+            },
+        ];
+        let backend = PostgresRelationalBackend::connect_in_schema(&url, &schema).expect("connect");
+        block_on(backend.create_queue(definition)).unwrap();
+        let ids = block_on(backend.push(
+            &shard(),
+            vec![
+                PushSpec {
+                    entity: Some(serde_json::json!({"email":"alice@example.com","kind":"work"})),
+                    ..Default::default()
+                },
+                PushSpec {
+                    group_key: Some(GroupKey::new("g1").unwrap()),
+                    entity: Some(serde_json::json!({"email":"bob@example.com","kind":"work"})),
+                    ..Default::default()
+                },
+            ],
+            ts(10),
+            None,
+        ))
+        .unwrap();
+        drop(backend);
+
+        let projection = PostgresRelational::connect_in_schema(&url, &schema).expect("reopen");
+        let unique = ProjectionStore::index_get_unique(
+            &projection,
+            &shard(),
+            "by_email",
+            &[b"alice@example.com".to_vec()],
+        )
+        .unwrap()
+        .expect("unique hit");
+        assert_eq!(unique.item_id, ids[0]);
+        let lookup =
+            ProjectionStore::index_lookup(&projection, &shard(), "by_kind", &[b"work".to_vec()])
+                .unwrap();
+        assert_eq!(
+            lookup.iter().map(|hit| hit.item_id).collect::<Vec<_>>(),
+            ids,
+            "non-unique lookup preserves deterministic item-id order"
+        );
+        let scopes = ProjectionStore::discover_active_scopes(
+            &projection,
+            &shard(),
+            DiscoveryGranularity::Group,
+            ts(1000),
+        )
+        .unwrap();
+        assert_eq!(
+            scopes
+                .iter()
+                .map(|scope| scope.group_key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None, Some("g1")]
+        );
+        assert!(scopes.iter().all(|scope| scope.eligible_count == Some(1)));
+        drop(projection);
+        let mut cleanup = Client::connect(&url, NoTls).expect("reconnect for cleanup");
+        cleanup
+            .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+            .expect("drop test schema");
     }
 
     #[test]

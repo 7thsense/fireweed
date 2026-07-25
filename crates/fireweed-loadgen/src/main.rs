@@ -313,7 +313,7 @@ fn extract_ids(v: &Val) -> Vec<String> {
 
 /// A transient owner-epoch fence: under heavy CPU contention an owner's lease can momentarily flap, the next
 /// write re-acquires at a bumped epoch, and in-flight commands cached at the old epoch are fenced
-/// (`-ERR pqueue epoch_stale`) or briefly see no owner (`-ERR ... unavailable`). A real client re-resolves
+/// (`-ERR fireweed epoch_stale`) or briefly see no owner (`-ERR ... unavailable`). A real client re-resolves
 /// and retries; we do the same (the retry cost stays INSIDE the timed window, so throughput stays honest).
 fn is_transient_fence(e: &str) -> bool {
     let e = e.to_ascii_lowercase();
@@ -610,7 +610,7 @@ where
 /// Establish durable ownership of every queue WITHOUT concurrency, BEFORE the timed phases. The first WRITE
 /// to an unowned queue triggers a non-idempotent cold-start epoch acquire; when many connections race that
 /// first write, a connection can observe the freshly-bumped control-plane epoch before the backend's durable
-/// epoch catches up and fence itself (`-ERR pqueue epoch_stale`). A single serial connection per queue
+/// epoch catches up and fence itself (`-ERR fireweed epoch_stale`). A single serial connection per queue
 /// (push one item, then drain+ack it) forces the acquire to complete durably with no race and leaves the
 /// queue empty + owned, so the concurrent timed phases measure steady-state throughput on an owned queue.
 /// Warm-up runs one thread PER QUEUE (queues are independent owners), but only ONE connection per queue.

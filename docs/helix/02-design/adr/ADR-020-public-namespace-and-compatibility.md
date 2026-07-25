@@ -5,14 +5,17 @@ ddx:
     - name-and-positioning-analysis
   links:
     - {kind: informed_by, to: name-and-positioning-analysis}
-  status: accepted
+  status: superseded
 ---
 
 # ADR-020: Public namespace and compatibility policy for Fireweed Queue
 
 | Date | Status | Deciders | Related |
 |------|--------|----------|---------|
-| 2026-07-23 | Accepted | Project maintainers | name-and-positioning-analysis |
+| 2026-07-23 | Superseded by ADR-023 | Project maintainers | name-and-positioning-analysis |
+
+> Superseded on 2026-07-25 by ADR-023. Fireweed is pre-release; the compatibility period and retained
+> runtime/persistence namespaces specified here do not apply.
 
 ## Context
 

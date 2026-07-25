@@ -9,7 +9,7 @@ use bytes::Bytes;
 use fireweed::{
     ClaimAt, ClaimRef, CommitEntry, CommitRequest, ControlPlaneConfig, DiscoveryGranularity,
     EngineError, FinalizeKind, GateKeyPolicy, GroupKey, MetadataValue, Nack, NewItem, OwnerId,
-    PayloadUpdate, Pqueue, RequestId, UtcTimestamp,
+    PayloadUpdate, RequestId, RuntimeCore, UtcTimestamp,
 };
 use fireweed_core::{
     ClientItemKey, EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel,
@@ -97,7 +97,7 @@ impl fireweed::Clock for GuardedClock {
 async fn push_claim_ack_nack_lifecycle_over_memory() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
@@ -156,7 +156,7 @@ async fn push_claim_ack_nack_lifecycle_over_memory() {
 #[tokio::test]
 async fn lifecycle_aliases_preserve_batch_state_and_structured_errors() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock);
+    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
@@ -191,7 +191,7 @@ async fn lifecycle_aliases_preserve_batch_state_and_structured_errors() {
 #[tokio::test]
 async fn retry_aliases_match_absolute_relative_and_exhaustion_behavior() {
     let clock = Arc::new(ManualClock::at(100));
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
+    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     let mut definition = qdef();
     definition.retry_policy.max_attempts = 2;
@@ -261,7 +261,7 @@ async fn discover_alias_preserves_exact_scope_order() {
         std::process::id()
     ));
     let backend = Arc::new(SqliteRelationalBackend::open(path.to_str().unwrap()).unwrap());
-    let pq = Pqueue::new(backend, clock.clone());
+    let pq = RuntimeCore::new(backend, clock.clone());
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
@@ -348,7 +348,7 @@ async fn request_id_push_replays_over_sqlite_relational_facade() {
         .to_string();
     let _ = std::fs::remove_file(&path);
     let backend = Arc::new(SqliteRelationalBackend::open(&path).unwrap());
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     let request_id = RequestId::new("push-req-1").unwrap();
@@ -376,7 +376,7 @@ async fn request_id_push_is_idempotent_on_memory_backend() {
     // `tests/request_id_idempotency.rs`.
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
@@ -399,7 +399,7 @@ async fn request_id_push_is_idempotent_on_memory_backend() {
 async fn claimed_item_exposes_api001_shape_over_facade() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(100));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     let mut def = qdef();
     def.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
@@ -451,7 +451,7 @@ async fn claimed_item_exposes_api001_shape_over_facade() {
 async fn upsert_dedups_on_client_item_key_over_memory() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
@@ -481,7 +481,7 @@ async fn objectlog_push_works_but_upsert_is_unavailable() {
     let _ = std::fs::remove_dir_all(&root);
     let backend = Arc::new(ObjectLogBackend::open(&root).unwrap());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 
@@ -501,12 +501,12 @@ async fn objectlog_push_works_but_upsert_is_unavailable() {
 
 #[tokio::test]
 async fn two_handles_on_one_backend_do_not_collide_ids() {
-    // B2 regression: ids are backend-assigned (not a per-handle counter), so two `Pqueue` handles
+    // B2 regression: ids are backend-assigned (not a per-handle counter), so two `RuntimeCore` handles
     // sharing one backend mint DISTINCT item ids and both items coexist.
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let a = Pqueue::new(backend.clone(), clock.clone());
-    let b = Pqueue::new(backend.clone(), clock);
+    let a = RuntimeCore::new(backend.clone(), clock.clone());
+    let b = RuntimeCore::new(backend.clone(), clock);
     let q = qkey();
     a.create_queue(qdef()).await.unwrap();
 
@@ -523,7 +523,7 @@ async fn two_handles_on_one_backend_do_not_collide_ids() {
 #[tokio::test]
 async fn ack_of_non_leased_id_is_a_structured_error() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     let id = pq.push(&q, at(5)).await.unwrap(); // pending, never claimed
@@ -538,7 +538,7 @@ async fn ack_of_non_leased_id_is_a_structured_error() {
 #[tokio::test]
 async fn fail_dead_letters_a_claimed_item() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
@@ -558,7 +558,7 @@ async fn fail_dead_letters_a_claimed_item() {
 async fn renew_extends_lease_without_charging_a_delivery() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
@@ -581,7 +581,7 @@ async fn renew_extends_lease_without_charging_a_delivery() {
 #[tokio::test]
 async fn reassign_transfers_and_charges_one_delivery() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
@@ -604,7 +604,7 @@ async fn reassign_transfers_and_charges_one_delivery() {
 #[tokio::test]
 async fn rearm_resets_attempt_and_requeues_the_item() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
@@ -627,7 +627,7 @@ async fn rearm_resets_attempt_and_requeues_the_item() {
 #[tokio::test]
 async fn purge_force_removes_a_leased_item_and_gates_without_force() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     pq.push(&q, at(5)).await.unwrap();
@@ -648,7 +648,7 @@ async fn purge_force_removes_a_leased_item_and_gates_without_force() {
 #[tokio::test]
 async fn claimed_renders_only_leased_items() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     let lo = pq.push(&q, at(5)).await.unwrap(); // top priority
@@ -681,7 +681,7 @@ fn with_fields(priority: i64, fields: &[(&str, &[u8])], payload: &[u8]) -> NewIt
 /// bumps `item_version`, and honors the optimistic `expected_item_version` CAS.
 #[tokio::test]
 async fn update_fields_merges_versions_and_cas_over_memory() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -744,7 +744,7 @@ async fn update_fields_merges_versions_and_cas_over_memory() {
 /// FAC-1: a terminal item rejects `update_fields` with the structured `Terminal` (parity with finalize).
 #[tokio::test]
 async fn update_fields_rejects_terminal_over_memory() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -762,7 +762,7 @@ async fn update_fields_rejects_terminal_over_memory() {
 /// API-001: reserved write-field names are blocked before the library facade dispatches to the backend.
 #[tokio::test]
 async fn api001_reservation_policy_is_recorded_or_enforced() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -819,7 +819,7 @@ async fn update_fields_unavailable_over_objectlog() {
     use fireweed_objectlog::ObjectLogBackend;
     let root = std::env::temp_dir().join(format!("pqueue-facade-uf-objlog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(ObjectLogBackend::open(&root).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -838,7 +838,7 @@ async fn update_fields_unavailable_over_objectlog() {
 #[tokio::test]
 async fn reclaim_expired_convenience_uses_handle_clock() {
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(Arc::new(composed_memory_backend()), clock.clone());
+    let pq = RuntimeCore::new(Arc::new(composed_memory_backend()), clock.clone());
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
     let id = pq.push(&q, at(5)).await.unwrap();
@@ -865,7 +865,7 @@ async fn reclaim_expired_convenience_uses_handle_clock() {
 async fn reclaim_expired_at_honors_caller_time_without_reading_handle_clock() {
     let clock = Arc::new(GuardedClock::at(0));
     let backend = Arc::new(composed_memory_backend());
-    let setup = Pqueue::new(backend.clone(), clock.clone());
+    let setup = RuntimeCore::new(backend.clone(), clock.clone());
     let q = qkey();
     setup.create_queue(qdef()).await.unwrap();
     let id = setup.push(&q, at(5)).await.unwrap();
@@ -883,7 +883,7 @@ async fn reclaim_expired_at_honors_caller_time_without_reading_handle_clock() {
     let control_plane: Arc<dyn fireweed_engine::QueueControlPlane> = Arc::new(
         fireweed_engine::InMemoryControlPlane::new(ControlPlaneConfig::default()),
     );
-    let pq = Pqueue::with_control_plane_in_process(
+    let pq = RuntimeCore::with_control_plane_in_process(
         backend,
         clock.clone(),
         OwnerId::new("reclaim-owner").unwrap(),
@@ -908,8 +908,8 @@ async fn reclaim_expired_at_honors_caller_time_without_reading_handle_clock() {
 async fn reclaim_expired_at_is_deterministic_under_divergent_frozen_clocks() {
     let left_clock = Arc::new(ManualClock::at(0));
     let right_clock = Arc::new(ManualClock::at(0));
-    let left = Pqueue::new(Arc::new(composed_memory_backend()), left_clock.clone());
-    let right = Pqueue::new(Arc::new(composed_memory_backend()), right_clock.clone());
+    let left = RuntimeCore::new(Arc::new(composed_memory_backend()), left_clock.clone());
+    let right = RuntimeCore::new(Arc::new(composed_memory_backend()), right_clock.clone());
     let q = qkey();
 
     for pq in [&left, &right] {
@@ -946,7 +946,7 @@ async fn reclaim_expired_at_is_deterministic_under_divergent_frozen_clocks() {
 /// this test pins that contract so a future typed-payload refactor cannot silently break them.
 #[tokio::test]
 async fn legacy_bytes_items_push_claim_roundtrip() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -989,7 +989,7 @@ async fn legacy_bytes_items_push_claim_roundtrip() {
 /// representation survives both paths identically: the bytes carrier is agnostic to payload content.
 #[tokio::test]
 async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
-    let pq = Pqueue::new(
+    let pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -1083,7 +1083,7 @@ async fn typed_json_payload_round_trips_push_claim_and_commit_lifecycle() {
 async fn claim_at_resolves_eligibility_at_an_explicit_epoch_over_memory() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0)); // operational time: ts(0), and it stays there
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     let q = qkey();
     pq.create_queue(qdef()).await.unwrap();
 

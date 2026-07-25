@@ -1,4 +1,4 @@
-//! Engine error model. The RESP adapter maps these to the canonical `-ERR pqueue ...` replies
+//! Engine error model. The RESP adapter maps these to the canonical `-ERR fireweed ...` replies
 //! (TD-006 section 7; asserted verbatim by conformance).
 
 /// Stable stage of a durable-object integrity failure. Adapters carry this
@@ -62,41 +62,41 @@ pub enum EngineError {
     /// Queue already exists with an incompatible definition.
     QueueDefinitionConflict,
     /// A lifecycle transition is not allowed on the target (e.g. upsert of a claimed item).
-    /// Maps to `-ERR pqueue invalid`.
+    /// Maps to `-ERR fireweed invalid`.
     Invalid(&'static str),
-    /// The target item is terminal. Maps to `-ERR pqueue terminal`.
+    /// The target item is terminal. Maps to `-ERR fireweed terminal`.
     Terminal,
-    /// The lease has been operator-fenced (stale generation). Maps to `-ERR pqueue stale_lease`.
+    /// The lease has been operator-fenced (stale generation). Maps to `-ERR fireweed stale_lease`.
     StaleLease,
-    /// The addressed id was superseded by a pending-item replacement. Maps to `-ERR pqueue superseded`.
+    /// The addressed id was superseded by a pending-item replacement. Maps to `-ERR fireweed superseded`.
     Superseded,
     /// The operation is unavailable on this backend's durability class (e.g. upsert on
-    /// eventual-apply). Maps to `-ERR pqueue unavailable`.
+    /// eventual-apply). Maps to `-ERR fireweed unavailable`.
     Unavailable,
-    /// An optimistic-concurrency or cohort conflict. Maps to `-ERR pqueue conflict`.
+    /// An optimistic-concurrency or cohort conflict. Maps to `-ERR fireweed conflict`.
     Conflict,
     /// A claim/cohort/group unit would exceed `max_items` (API-001 `batch-too-large`).
-    /// Maps to `-ERR pqueue batch_too_large`.
+    /// Maps to `-ERR fireweed batch_too_large`.
     BatchTooLarge,
     /// A retried `request_id` carried a different body (API-001 `request-id-conflict`).
-    /// Distinct from the generic `Conflict`. Maps to `-ERR pqueue request_id_conflict`.
+    /// Distinct from the generic `Conflict`. Maps to `-ERR fireweed request_id_conflict`.
     RequestIdConflict,
     /// Intake is blocked by a paused queue. The `drain_intake` flag distinguishes the fully-quiesced
     /// branch-prep mode from the legacy "claims stop, pushes still land" pause.
     Paused { drain_intake: bool },
     /// A `request_id` replay arrived after its retention window (API-001 `request-expired`).
-    /// Maps to `-ERR pqueue request_expired`.
+    /// Maps to `-ERR fireweed request_expired`.
     RequestExpired,
     /// An append/claim carried an `expected_epoch` that is not the queue's current durable
     /// `assignment_epoch` — a stale (superseded) owner was fenced (TD-003 Single Authoritative Fencing
-    /// Rule, `queue-epoch-stale`). Maps to `-ERR pqueue epoch_stale`.
+    /// Rule, `queue-epoch-stale`). Maps to `-ERR fireweed epoch_stale`.
     EpochFenced,
     /// The principal is not authorized (cross-tenant or missing operator privilege). The RESP
-    /// adapter maps this to `-NOPERM` (TD-006 section 2); not an `-ERR pqueue ...` reply.
+    /// adapter maps this to `-NOPERM` (TD-006 section 2); not an `-ERR fireweed ...` reply.
     Forbidden(&'static str),
     /// The item's entity document violates the queue's compiled entity schema (ADR-011). Rejection
     /// happens before log append, idempotency recording, SQL mutation, or projection apply.
-    /// Maps to `-ERR pqueue entity_schema_violation`.
+    /// Maps to `-ERR fireweed entity_schema_violation`.
     EntitySchemaViolation(String),
     /// A single request can never fit a configured hard resource limit. This is a permanent invalid request.
     RequestTooLarge { requested: usize, limit: usize },
@@ -114,25 +114,25 @@ pub enum EngineError {
 }
 
 impl EngineError {
-    /// The canonical `-ERR pqueue ...` token a RESP adapter emits for this error, or `None` for
+    /// The canonical `-ERR fireweed ...` token a RESP adapter emits for this error, or `None` for
     /// errors that have a non-`-ERR` mapping (e.g. `NotFound` to nil) handled by the adapter.
     pub fn resp_token(&self) -> Option<&'static str> {
         match self {
-            EngineError::Invalid(_) => Some("-ERR pqueue invalid"),
-            EngineError::Terminal => Some("-ERR pqueue terminal"),
-            EngineError::StaleLease => Some("-ERR pqueue stale_lease"),
-            EngineError::Superseded => Some("-ERR pqueue superseded"),
-            EngineError::Unavailable => Some("-ERR pqueue unavailable"),
-            EngineError::Conflict => Some("-ERR pqueue conflict"),
-            EngineError::BatchTooLarge => Some("-ERR pqueue batch_too_large"),
-            EngineError::RequestIdConflict => Some("-ERR pqueue request_id_conflict"),
-            EngineError::Paused { .. } => Some("-ERR pqueue paused"),
-            EngineError::RequestExpired => Some("-ERR pqueue request_expired"),
-            EngineError::EpochFenced => Some("-ERR pqueue epoch_stale"),
-            EngineError::EntitySchemaViolation(_) => Some("-ERR pqueue entity_schema_violation"),
-            EngineError::RequestTooLarge { .. } => Some("-ERR pqueue invalid"),
-            EngineError::Backpressure { .. } => Some("-ERR pqueue unavailable"),
-            // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR pqueue` mappings handled by the adapter.
+            EngineError::Invalid(_) => Some("-ERR fireweed invalid"),
+            EngineError::Terminal => Some("-ERR fireweed terminal"),
+            EngineError::StaleLease => Some("-ERR fireweed stale_lease"),
+            EngineError::Superseded => Some("-ERR fireweed superseded"),
+            EngineError::Unavailable => Some("-ERR fireweed unavailable"),
+            EngineError::Conflict => Some("-ERR fireweed conflict"),
+            EngineError::BatchTooLarge => Some("-ERR fireweed batch_too_large"),
+            EngineError::RequestIdConflict => Some("-ERR fireweed request_id_conflict"),
+            EngineError::Paused { .. } => Some("-ERR fireweed paused"),
+            EngineError::RequestExpired => Some("-ERR fireweed request_expired"),
+            EngineError::EpochFenced => Some("-ERR fireweed epoch_stale"),
+            EngineError::EntitySchemaViolation(_) => Some("-ERR fireweed entity_schema_violation"),
+            EngineError::RequestTooLarge { .. } => Some("-ERR fireweed invalid"),
+            EngineError::Backpressure { .. } => Some("-ERR fireweed unavailable"),
+            // Forbidden -> `-NOPERM`, NotFound -> nil: non-`-ERR fireweed` mappings handled by the adapter.
             EngineError::NotFound
             | EngineError::QueueDefinitionConflict
             | EngineError::Forbidden(_)

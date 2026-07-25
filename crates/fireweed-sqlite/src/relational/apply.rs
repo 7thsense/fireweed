@@ -8,7 +8,7 @@ use fireweed_core::{
 };
 use fireweed_engine::{
     CommandPosition, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    PayloadUpdate, PushItem, QueueCommand, QueueKey, compile_entity_schema,
+    PayloadUpdate, PushItem, QueueCommand, QueueKey, ScheduleUpdate, compile_entity_schema,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -1020,17 +1020,26 @@ pub(crate) fn apply_command_sql(
             // `fields_from_json`), apply the per-key delta, then UPDATE within this transaction. The caller
             // pre-validated, so the row is live (Pending/Leased, not superseded/fenced); if it is gone here
             // (a divergence) we apply nothing rather than fault, mirroring the in-memory `debug_assert`.
-            let current: Option<String> = st(tx
+            let current: Option<(String, String, Option<String>, Option<i64>, i64, Option<Vec<u8>>, String)> = st(tx
                 .query_row(
-                    "SELECT fields FROM pqueue_items \
+                    "SELECT fields,lifecycle_state,priority,not_before,eligible_since,payload,metadata FROM pqueue_items \
                      WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
                      AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
                     params![t, q, c.item_id.to_string()],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
                 )
                 .optional())?;
-            if let Some(raw) = current {
-                let mut fields = fields_from_json(raw)?;
+            if let Some((
+                raw,
+                _lifecycle_state,
+                mut priority_json,
+                mut not_before,
+                mut eligible_since,
+                mut payload,
+                mut metadata_json,
+            )) = current
+            {
+                let mut fields = c.set_fields.clone().unwrap_or(fields_from_json(raw)?);
                 for (k, op) in &c.field_ops {
                     match op {
                         Some(v) => {
@@ -1042,34 +1051,52 @@ pub(crate) fn apply_command_sql(
                     }
                 }
                 let fields_json = fields_to_json(&fields)?;
-                match &c.payload {
-                    // Keep: leave `payload` untouched (fields-only update).
-                    PayloadUpdate::Keep => {
-                        st(tx.execute(
-                            "UPDATE pqueue_items SET fields=?4, item_version=item_version+1, \
-                             updated_at=?5, last_command_sequence=?6 \
-                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
-                             AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
-                            params![t, q, c.item_id.to_string(), fields_json, now_n, seq as i64],
-                        ))?;
+                if let PayloadUpdate::Set(next) = &c.payload {
+                    payload = next.as_ref().map(|bytes| bytes.to_vec());
+                }
+                if let Some(metadata) = &c.set_metadata {
+                    metadata_json = metadata_to_json(metadata)?;
+                }
+                if let ScheduleUpdate::Set(next) = &c.set_priority {
+                    priority_json = next.as_ref().map(to_json).transpose()?;
+                }
+                if let ScheduleUpdate::Set(next) = &c.set_not_before {
+                    not_before = (*next).map(ts_nanos);
+                    if !c.api001_batch {
+                        eligible_since = not_before.unwrap_or(now_n).max(now_n);
                     }
-                    // Set(Some)=replace BLOB, Set(None)=NULL.
-                    PayloadUpdate::Set(p) => {
-                        let payload = p.as_ref().map(|b| b.to_vec());
+                }
+                let priority = priority_json
+                    .as_deref()
+                    .map(|raw| {
+                        serde_json::from_str(raw)
+                            .map_err(|error| EngineError::Storage(error.to_string()))
+                    })
+                    .transpose()?;
+                let priority_sort = elig_sort(
+                    &priority,
+                    &queues
+                        .get(shard)
+                        .ok_or(EngineError::NotFound)?
+                        .priority_model,
+                );
+                st(tx.execute(
+                    "UPDATE pqueue_items SET fields=?4,payload=?5,metadata=?6,priority=?7,priority_sort=?8, \
+                     not_before=?9,eligible_since=?10,item_version=item_version+1,updated_at=?11,last_command_sequence=?12 \
+                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
+                     AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
+                    params![t, q, c.item_id.to_string(), fields_json, payload, metadata_json,
+                        priority_json, priority_sort, not_before, eligible_since, now_n, seq as i64],
+                ))?;
+                if let Some(gate_keys) = &c.set_gate_keys {
+                    st(tx.execute(
+                        "DELETE FROM pqueue_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                        params![t, q, c.item_id.to_string()],
+                    ))?;
+                    for gate_key in gate_keys {
                         st(tx.execute(
-                            "UPDATE pqueue_items SET fields=?4, payload=?5, item_version=item_version+1, \
-                             updated_at=?6, last_command_sequence=?7 \
-                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 \
-                             AND lifecycle_state IN ('Pending','Leased') AND superseded=0 AND fenced=0",
-                            params![
-                                t,
-                                q,
-                                c.item_id.to_string(),
-                                fields_json,
-                                payload,
-                                now_n,
-                                seq as i64,
-                            ],
+                            "INSERT OR IGNORE INTO pqueue_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4)",
+                            params![t, q, c.item_id.to_string(), gate_key],
                         ))?;
                     }
                 }

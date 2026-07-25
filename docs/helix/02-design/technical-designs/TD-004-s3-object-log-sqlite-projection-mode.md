@@ -413,7 +413,7 @@ For mutable item changes, the ban is profile-specific rather than universal:
 mutable-write closure runs deterministic apply-time re-validation in the same
 ack-after-apply unit of work. Pure lagging-projection log-then-apply profiles
 remain unable to close the same race and must keep the
-`-ERR pqueue unavailable` behavior.
+`-ERR fireweed unavailable` behavior.
 
 ### `objectlog/hybrid-strict` apply path
 

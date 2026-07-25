@@ -95,7 +95,7 @@ impl WorkerPool {
         for index in 0..worker_count {
             let (sender, receiver) = mpsc::sync_channel::<Job>(pending_per_worker);
             let worker = match std::thread::Builder::new()
-                .name(format!("pqueue-library-io-{index}"))
+                .name(format!("fireweed-library-io-{index}"))
                 .spawn(move || {
                     while let Ok(job) = receiver.recv() {
                         job();
@@ -117,7 +117,7 @@ impl WorkerPool {
         let coordination_sender = {
             let (sender, receiver) = mpsc::sync_channel::<Job>(pending_per_worker);
             let coordination_worker = match std::thread::Builder::new()
-                .name("pqueue-library-coordination".into())
+                .name("fireweed-library-coordination".into())
                 .spawn(move || {
                     while let Ok(job) = receiver.recv() {
                         job();
@@ -289,7 +289,7 @@ impl<B: super::LibBackend + 'static> BlockingLibBackend<B> {
 
     fn global_queue(seed: impl Into<String>) -> QueueKey {
         QueueKey::new(
-            TenantId::new("pqueue-internal").expect("valid tenant"),
+            TenantId::new("fireweed-internal").expect("valid tenant"),
             QueueId::new(seed).expect("valid queue"),
         )
     }
@@ -847,10 +847,11 @@ impl<B: super::LibBackend + 'static> HotProjectionQueryPort for BlockingLibBacke
         &self,
         shard: &QueueKey,
         request: BoundedMutationRequest,
+        context: BoundedMutationContext,
     ) -> impl Future<Output = EngineResult<BoundedMutationResponse>> + Send {
         let q = shard.clone();
         self.dispatch(q.clone(), move |i| async move {
-            i.bounded_mutation(&q, request).await
+            i.bounded_mutation(&q, request, context).await
         })
     }
     fn claim_by_query(

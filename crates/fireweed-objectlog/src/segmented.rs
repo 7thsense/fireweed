@@ -48,8 +48,7 @@ use crate::segment_integrity::{
 };
 use fireweed_core::QueueDefinition;
 use fireweed_engine::{
-    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, QueueCommand,
-    QueueKey, validate_gate_command,
+    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, QueueKey,
 };
 use sha2::{Digest, Sha256};
 
@@ -4123,17 +4122,14 @@ impl<S: BlobStore> SegmentedObjectLog<S> {
         expected_epoch: u64,
         now_ms: i64,
     ) -> EngineResult<(EnqueueOutcome, Vec<CommandEnvelope>)> {
-        // Class ban + gate validation BEFORE buffering (parity with the file reference write path).
+        // Projection-dependent validation belongs at the composed engine boundary. The log axis records
+        // every valid queue command without deciding which projection capabilities are available.
         for command in &commands {
-            validate_gate_command(false, &command.envelope.command)?;
             if command.record.len() > crate::segment_integrity::MAX_RECORD_BYTES {
                 return Err(EngineError::RequestTooLarge {
                     requested: command.record.len(),
                     limit: crate::segment_integrity::MAX_RECORD_BYTES,
                 });
-            }
-            if matches!(command.envelope.command, QueueCommand::ReplacePending(_)) {
-                return Err(EngineError::Unavailable);
             }
         }
         let incoming_frame_len = crate::segment_integrity::encoded_len(
@@ -10055,7 +10051,7 @@ mod manifest_deletion_watermark_tests {
     use fireweed_conformance::{
         envelope, item, qdef as conformance_qdef, shard as conformance_shard,
     };
-    use fireweed_engine::PushCommand;
+    use fireweed_engine::{PushCommand, QueueCommand};
     use std::sync::atomic::{
         AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering, Ordering,
     };

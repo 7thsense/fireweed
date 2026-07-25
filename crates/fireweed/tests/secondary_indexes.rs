@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use fireweed::{NewItem, PayloadUpdate, Pqueue};
+use fireweed::{NewItem, PayloadUpdate, RuntimeCore};
 use fireweed_core::{
     ClientItemKey, CompoundIndexDef, CompoundIndexField, EligibilityPolicy, IndexDeclaration,
     IndexDef, IndexSpec, IndexType, OrderingMode, PriorityDirection, PriorityModel,
@@ -126,18 +126,18 @@ fn key(parts: &[&str]) -> Vec<Vec<u8>> {
     parts.iter().map(|p| p.as_bytes().to_vec()).collect()
 }
 
-async fn new_pq() -> Pqueue<ComposedMemoryBackend> {
+async fn new_pq() -> RuntimeCore<ComposedMemoryBackend> {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     pq.create_queue(queue_definition()).await.unwrap();
     pq
 }
 
-async fn new_sqlite_relational_pq() -> Pqueue<SqliteRelationalBackend> {
+async fn new_sqlite_relational_pq() -> RuntimeCore<SqliteRelationalBackend> {
     let backend = Arc::new(SqliteRelationalBackend::in_memory().unwrap());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     pq.create_queue(queue_definition()).await.unwrap();
     pq
 }
@@ -670,7 +670,7 @@ async fn secondary_indexes_string_typed_field_with_numeric_looking_value_is_quer
 async fn secondary_indexes_legacy_index_is_byte_exact_for_invalid_utf8() {
     let backend = Arc::new(composed_memory_backend());
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
 
     let def = QueueDefinition {
         secondary_indexes: vec![IndexSpec {
@@ -791,7 +791,7 @@ async fn secondary_indexes_sqlite_log_replay_upsert_insert_and_update_typed_uniq
 
     let backend = Arc::new(composed_sqlite_backend_in_memory().expect("sqlite in-memory"));
     let clock = Arc::new(ManualClock::at(0));
-    let pq = Pqueue::new(backend, clock);
+    let pq = RuntimeCore::new(backend, clock);
     pq.create_queue(queue_definition()).await.unwrap();
     let q = qkey();
 

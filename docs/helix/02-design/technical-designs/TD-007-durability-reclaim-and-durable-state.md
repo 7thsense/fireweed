@@ -81,11 +81,11 @@ unit of work** as candidate selection — no item is selected-but-not-leased.
 - If the colliding item is **pending**: atomically supersede the old entry id and append the new one;
   return the new monotonic id. The old id thereafter reads as deleted (`XRANGE`→nil); `XLEN` nets
   unchanged.
-- If the colliding item is **claimed (leased, non-terminal)**: reject with `-ERR pqueue invalid`
+- If the colliding item is **claimed (leased, non-terminal)**: reject with `-ERR fireweed invalid`
   (lifecycle transition not allowed on in-flight work). If the colliding item is **terminal**: reject
-  with `-ERR pqueue terminal`. Never desync a PEL entry. (Mirrored verbatim in TD-006 §3 `XADD`.)
+  with `-ERR fireweed terminal`. Never desync a PEL entry. (Mirrored verbatim in TD-006 §3 `XADD`.)
 - On **log-then-apply** backends whose serving projection may lag the validation projection:
-  colliding-key replacement is unavailable and the engine returns `-ERR pqueue unavailable` for a
+  colliding-key replacement is unavailable and the engine returns `-ERR fireweed unavailable` for a
   colliding-key `XADD`.
 - On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, colliding-key `XADD`,
   `update_fields`, and `reschedule` MAY be admitted only after TD-004 proves the
@@ -95,7 +95,7 @@ unit of work** as candidate selection — no item is selected-but-not-leased.
   that makes success visible; a command that loses the claim race fails closed
   and replay re-derives the same rejection.
 - (Absent `client_item_key` ⇒ plain append on all backends.)
-- A later `XACK`/`XCLAIM` of a **superseded** old id returns `-ERR pqueue superseded` — never a silent
+- A later `XACK`/`XCLAIM` of a **superseded** old id returns `-ERR fireweed superseded` — never a silent
   `nil` (preserves at-least-once "no silent drop"; TD-006 §3).
 
 ## 3. ReclaimDriver
@@ -149,11 +149,11 @@ key→shard routing to keep it local, and no multi-shard uniqueness concern.
 
 - **Reclaim-no-traffic:** an item is reclaimed/expired with zero client commands on its queue (§3).
 - **Upsert↔claim exclusion:** concurrent `replace_if_pending` and claim on one item never both
-  succeed; superseded-id `XACK` returns `-ERR pqueue superseded`.
+  succeed; superseded-id `XACK` returns `-ERR fireweed superseded`.
 - **Class guarantees:** atomic and log-then-apply backends both satisfy API-001's external transaction
   contract. Log-then-apply additionally proves its response barrier, crash-point matrix, and
   `request_id` replay behavior; pure lagging-projection log-then-apply profiles keep colliding-key
-  `XADD` at `-ERR pqueue unavailable`, while `objectlog/hybrid-strict` and `objectlog/hybrid-async`
+  `XADD` at `-ERR fireweed unavailable`, while `objectlog/hybrid-strict` and `objectlog/hybrid-async`
   must prove the replacement/update/reschedule race-closure scenarios in TD-004 before they lift the
   ban.
 - **Mutable-write race closure:** profiles that admit mutable writes

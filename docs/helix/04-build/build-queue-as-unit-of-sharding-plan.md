@@ -134,7 +134,7 @@ review → commit → `ddx bead close`.
   live-current-epoch-lease; authz-before-redirect (`-NOPERM` before `-MOVED`); fence-safe staleness. *Acc:*
   AC-ROUTE-1 (one-hop convergence; misrouted write fenced; read bounded-stale).
 - **BQ-32 drain command-split.** In-flight (XACK/same-consumer XCLAIM/own-PEL XAUTOCLAIM/renew) stay;
-  new claims (`XREADGROUP >`/cross-consumer XCLAIM) get retryable `-ERR pqueue unavailable` until handoff.
+  new claims (`XREADGROUP >`/cross-consumer XCLAIM) get retryable `-ERR fireweed unavailable` until handoff.
   *Acc:* drain redirect test; no worker redirected mid-lease.
 
 ### P4 — Cross-queue scale evidence (TP-002)

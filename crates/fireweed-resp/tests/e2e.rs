@@ -54,7 +54,7 @@ fn shard() -> QueueKey {
 }
 
 /// Operator-fence a leased item directly on the backend (no RESP operator surface yet), so the e2e can
-/// prove a fenced holder's XACK is refused with `-ERR pqueue stale_lease`.
+/// prove a fenced holder's XACK is refused with `-ERR fireweed stale_lease`.
 async fn fence(backend: &ComposedMemoryBackend, id: &str) {
     let item = ItemId::new(id).unwrap();
     let env = CommandEnvelope {
@@ -1242,7 +1242,7 @@ async fn xpending_lists_leased_then_shrinks_on_ack() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fenced_lease_xack_is_stale_over_the_wire() {
-    // Operator fences a leased item; the holder's XACK must surface `-ERR pqueue stale_lease` to the
+    // Operator fences a leased item; the holder's XACK must surface `-ERR fireweed stale_lease` to the
     // stock client (TD-006 §3/§7) — not a silent success.
     let (mut con, backend) = setup().await;
     let _: String = redis::cmd("XADD")
@@ -1276,14 +1276,14 @@ async fn fenced_lease_xack_is_stale_over_the_wire() {
     let err = res.expect_err("fenced XACK must be an error reply");
     assert!(
         err.to_string().contains("stale_lease"),
-        "expected -ERR pqueue stale_lease, got: {err}"
+        "expected -ERR fireweed stale_lease, got: {err}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xack_of_superseded_id_is_superseded_over_the_wire() {
     // After an XADD-on-key upsert, the OLD id is superseded; acking it must surface
-    // `-ERR pqueue superseded` (TD-006 §3/§6.5), NOT the generic `-ERR pqueue invalid`.
+    // `-ERR fireweed superseded` (TD-006 §3/§6.5), NOT the generic `-ERR fireweed invalid`.
     let (mut con, _backend) = setup().await;
     let old_id: String = redis::cmd("XADD")
         .arg("t1:q1")
@@ -1316,7 +1316,7 @@ async fn xack_of_superseded_id_is_superseded_over_the_wire() {
     let err = res.expect_err("acking a superseded id must be an error reply");
     assert!(
         err.to_string().contains("superseded"),
-        "expected -ERR pqueue superseded, got: {err}"
+        "expected -ERR fireweed superseded, got: {err}"
     );
 }
 
@@ -1502,8 +1502,8 @@ async fn crash_recovery_rebuilds_durable_state_over_the_wire() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn xadd_collision_with_leased_then_terminal_is_an_error() {
-    // I4: XADD-on-key against an IN-FLIGHT item → `-ERR pqueue invalid`; against a TERMINAL item →
-    // `-ERR pqueue terminal` (TD-006 §3 collision contract), never a silent success.
+    // I4: XADD-on-key against an IN-FLIGHT item → `-ERR fireweed invalid`; against a TERMINAL item →
+    // `-ERR fireweed terminal` (TD-006 §3 collision contract), never a silent success.
     let (mut con, _b) = setup().await;
     let a: String = redis::cmd("XADD")
         .arg("t1:q1")
@@ -1539,7 +1539,7 @@ async fn xadd_collision_with_leased_then_terminal_is_an_error() {
         .await;
     assert!(
         res.unwrap_err().to_string().contains("invalid"),
-        "leased collision → -ERR pqueue invalid"
+        "leased collision → -ERR fireweed invalid"
     );
     // Ack → terminal. Same-key XADD → terminal collision.
     let _: i64 = redis::cmd("XACK")
@@ -1560,7 +1560,7 @@ async fn xadd_collision_with_leased_then_terminal_is_an_error() {
         .await;
     assert!(
         res.unwrap_err().to_string().contains("terminal"),
-        "terminal collision → -ERR pqueue terminal"
+        "terminal collision → -ERR fireweed terminal"
     );
 }
 

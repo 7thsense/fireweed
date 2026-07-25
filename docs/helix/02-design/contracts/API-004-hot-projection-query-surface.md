@@ -21,12 +21,8 @@ ddx:
 **Contract ID**: API-004
 **Type**: native query contract (transport-neutral)
 **Version**: v1 (draft)
-**Status**: **Descoped (draft, not built).** The implementing work item
-(`pqueue-630dbeaa`, "Add hot indexed projection query surface for Snorri workflow visibility") was
-**cancelled**; this contract is retained as a design record but is **not part of the shipped
-surface**. The shipped read surface remains API-001 (`peek`, `claimed`, `live_items`, `metrics`, and
-exact typed-index lookup via `IndexQueryPort`). Re-scope or re-open via a new tracked bead before
-building against this contract.
+**Status**: accepted. API-005 exposes this surface through `Fireweed`; every
+supported storage composition implements the complete capability set below.
 **Related**: PRD (FR-44..47 Seventh Sense validation), API-001 (native client interface, claimed-item
 shape, Eligibility Precedence), ADR-008 (queue as shard unit), ADR-011 (typed indexes via `axon-esf`),
 epic pqueue-45e13e4d (ship Snorri hot projection query substrate)
@@ -51,7 +47,7 @@ into pqueue.
 
 ## Scope and Boundaries
 
-- In scope: capability names and their advertised availability per backend; the typed indexed record
+- In scope: capability names and execution characteristics; the typed indexed record
   shape; range-scan, grouping, cursor-pagination, bounded-mutation, and claim-by-query operation
   shapes; consistency/watermark rules; cursor invalidation; declared-bucket segmentation including null
   handling; aggregate limits; side/projection record semantics (declared, not implemented, in this
@@ -97,10 +93,10 @@ Use MUST, MUST NOT, MAY, and SHOULD intentionally.
 
 ### Query Capability Names
 
-pqueue advertises a fixed, versioned set of hot-projection query capabilities per queue/backend. A
-backend or queue that does not advertise a capability MUST reject a request for it with a structured
-`capability-unavailable` error naming the missing capability; it MUST NOT silently degrade to a full
-scan or partial result.
+Fireweed advertises a fixed, versioned set of hot-projection query execution
+characteristics per queue. Every supported storage composition implements the
+complete set. Capability values MUST NOT be used to excuse a missing operation,
+silently degrade to a full scan, or return a partial result.
 
 | Capability | Meaning | v1 status |
 |------------|---------|-----------|
@@ -111,10 +107,11 @@ scan or partial result.
 | `claim_by_query` | Claiming due work selected by a range-scan predicate instead of the default priority-ordered claim (see Claim By Query). | Required. |
 | `side_record_query` | Querying non-claimable side/projection records (see Side/Projection Records). | **Deferred beyond this epic (pqueue-45e13e4d).** Every backend MUST advertise this capability as unavailable and MUST return `capability-unavailable("side_record_query")` for any request naming it. |
 
-A backend that advertises any of `range_scan`, `grouped_aggregate`, `declared_bucket_segment`,
-`bounded_mutation`, or `claim_by_query` MUST advertise all of them; this contract does not define a
-partial-capability backend for those five. `side_record_query` is independently gated per the row
-above.
+Every supported backend implements `range_scan`, `grouped_aggregate`,
+`declared_bucket_segment`, `bounded_mutation`, and `claim_by_query` together;
+this contract does not define a partial-capability backend for those five.
+`side_record_query` is independently deferred per the row above because it is
+not an operation on the API-005 `Fireweed` facade.
 
 ### Consistency and Watermark Rules
 

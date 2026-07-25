@@ -142,7 +142,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
     with an in-mem projection — correct + durable + reuses the core, but a relational queryable
     sqlite-projection is deferred. Flag in the summary so the user can redirect if they want relational first.
 - **After sqlite:** postgres (`ClaimPort`, concurrent-claim races, intra-group exclusion), then objectlog
-  (eventual-apply class, upsert banned → `-ERR pqueue unavailable`). Conformance green on each.
+  (eventual-apply class, upsert banned → `-ERR fireweed unavailable`). Conformance green on each.
 
 ## Checklist
 
@@ -172,7 +172,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   deletes from service WITH the operator-op-store unit (it reuses this cache).
 - [x] §4a unit: **queue pause/resume + lease fencing** (durable) → new `FinalizePort` (pre-commit
   validation: Leased+!fenced else StaleLease/Terminal/Invalid, no log/projection divergence); RESP
-  XACK wired to it (fenced → `-ERR pqueue stale_lease`); pause gates claim/select_eligible/peek; tests
+  XACK wired to it (fenced → `-ERR fireweed stale_lease`); pause gates claim/select_eligible/peek; tests
   incl. a log-replay reconstruction of pause+fence. Fixed B1 (commit_locked divergence) for finalize.
 - [x] §4a unit: command_position high-water + item_version (durable, TD-007 §4) — high-water already
   advanced on every commit; added 3 conformance tests (advances-on-commit, item_version monotonic
@@ -180,7 +180,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   over already-reviewed code paths.
 - [x] §4a unit: **claim-compatibility validation** (most load-bearing) → `pqueue-engine::claim_validation`
   (`validate_claim_compatibility` → ClaimUnit; charset re-check since GroupKey newtype only checks
-  non-empty; structured `EngineError::BatchTooLarge` added → `-ERR pqueue batch_too_large`). 7 engine
+  non-empty; structured `EngineError::BatchTooLarge` added → `-ERR fireweed batch_too_large`). 7 engine
   tests, parity-reviewed vs original (rule-by-rule GO). Deleted from service.
 - [x] §4a unit: **finalize/rearm/purge validation** → `pqueue-engine::finalize_validation`
   (validate_finalize_targeting, validate_rearm [Invalid/Terminal], validate_purge_targeting,
@@ -454,7 +454,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   error From-shim is transitional dead code in the EXCLUDED crate; SURVIVING adapters (RESP/library)
   map `Forbidden`→`-NOPERM` uniformly with NO string dispatch. Durable §4a units
   (idempotency/fence/pause) MUST use STRUCTURED engine errors, not string-sniffing (review B2).
-- 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR pqueue {stale_lease,superseded,unavailable}.
+- 2026-06-23: Plan v4 converged (3 review rounds, GO). Single-shard launch; ReclaimDriver; UpsertPort; semantic-fidelity RESP (Inv 1&2); zero required PQ*; -ERR fireweed {stale_lease,superseded,unavailable}.
 
 ## Review ledger (append per chunk)
 - 2026-06-24 Phase 7 reconciliation report: adversarial audit of the report against the actual tree →
@@ -608,7 +608,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   Verified non-tautological. Memory 19 tests + clippy green.
 - 2026-06-23 Phase 2 §4a pause/fence: fresh-eyes review GO-with-conditions (one BLOCKING). Confirmed:
   fence check is pre-append + same-lock (no TOCTOU); pause gates claim+select_eligible; fenced XACK →
-  `-ERR pqueue stale_lease` (not 0); all-or-nothing honestly marked. Fixes applied — (B1) `finalize`
+  `-ERR fireweed stale_lease` (not 0); all-or-nothing honestly marked. Fixes applied — (B1) `finalize`
   now pre-validates each item is Leased+!fenced so apply is infallible (commit_locked has no
   rollback); added a test that a rejected finalize appends NO log command; (I1) added a log-replay
   reconstruction test proving pause+fence survive a rebuild (TD-007 §4); gated `peek` by pause; (I2)
@@ -616,7 +616,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   Engine 12 + memory 16 + resp 1+1 green, clippy clean.
 - 2026-06-23 Phase 2 §4a idempotency: fresh-eyes review **NO-GO** → fixed to convergence. The review
   caught 4 real issues, all addressed: (B1) collapsing request-id-conflict onto generic `Conflict` →
-  added distinct `EngineError::RequestIdConflict` + `RequestExpired` with their own `-ERR pqueue …`
+  added distinct `EngineError::RequestIdConflict` + `RequestExpired` with their own `-ERR fireweed …`
   tokens (and resp_token tests); (I1) "expired→Proceed" erased API-001 `request-expired` → added an
   `Expired` decision variant the caller maps per-op (push→Proceed, claim→RequestExpired); (I2)
   dishonest key scope → renamed `QueueIdempotencyCache` with a "one instance per (tenant,queue,shard)"
@@ -629,7 +629,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   parity, tenant set-membership + operator-prefix rules exact, durability classification correct,
   workspace default-members topology correct/non-orphaning. Fixes applied — (B3, REAL BUG) RESP
   `err_reply` now maps `Forbidden`→`-NOPERM` and `NotFound`→`-ERR no such queue` instead of a generic
-  `-ERR pqueue error`, with a unit test; (I1) added `Forbidden.resp_token()==None` assertion.
+  `-ERR fireweed error`, with a unit test; (I1) added `Forbidden.resp_token()==None` assertion.
   Recorded deviation for B1/B2 (service delegation shim — see decisions log; logic lives only in
   engine, durable units will use structured errors). Engine 6 + RESP lib 1 + e2e 1 green, clippy clean.
 - 2026-06-23 Phase 1d (minimal RESP smoke front): implemented `pqueue-resp` as a driving adapter over
@@ -659,7 +659,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
 - 2026-06-23 Phase 1b (pqueue-memory): fresh-eyes review GO-with-conditions. Confirmed correct:
   priority ordering (both directions), transition() eligibility re-add on retry (Invariant 1, no
   orphan/dup), version/attempt semantics, disjoint-borrow UoW. Fixes applied — (1) transition()
-  rejects superseded items (`-ERR pqueue superseded`, prevents state corruption); (2) select_eligible
+  rejects superseded items (`-ERR fireweed superseded`, prevents state corruption); (2) select_eligible
   /peek O(n²)→O(1) via items HashMap (EligKey.item String→ItemId); (3) added `group_key` to engine
   `PushItem`, populated it, so `CohortExpired` is functional (was a dead no-op). Open: shard
   cross-routing assertion in apply (deferred, single-shard launch); ReplacePending-of-claimed gating
@@ -672,7 +672,7 @@ test/realign → update this file → continue. Update the **Cursor** and the ch
   as disjoint fields (M2). Build+3 tests+clippy green.
 - 2026-06-23 Phase 0 doc convergence: GO-with-conditions. Fixes applied — (1) operator-op store
   deferred to Phase 2 w/ full API-002 async shape referenced; (2) upsert collision mapping pinned:
-  claimed→`-ERR pqueue invalid`, terminal→`-ERR pqueue terminal` (TD-007 §2.3 + TD-006 §3);
+  claimed→`-ERR fireweed invalid`, terminal→`-ERR fireweed terminal` (TD-007 §2.3 + TD-006 §3);
   (3) D2→progress_bound meter-only at launch; (4) command_position high-water persisted in
   snapshot (replay monotonic under compaction); (5) cohort deadline defined per API-001. ADR-007
   clean as-is. Review-hash stamping left to ddx tooling.

@@ -60,52 +60,6 @@ path = "src/bin/fireweed-verify-e0-e1-evidence.rs"
 name = "fireweed-verify-e2-scale-evidence"
 path = "src/bin/fireweed-verify-e2-scale-evidence.rs"
 
-# ADR-020 v0.20.0 compatibility entrypoints. These execute the Fireweed implementations and are retired
-# only after the migration inventory confirms no remaining consumers.
-[[bin]]
-name = "pqueue-verify-ledger"
-path = "src/bin/fireweed-verify-ledger.rs"
-
-[[bin]]
-name = "pqueue-verify-evidence-attestation"
-path = "src/bin/fireweed-verify-evidence-attestation.rs"
-
-[[bin]]
-name = "pqueue-verify-transaction-evidence"
-path = "src/bin/fireweed-verify-transaction-evidence.rs"
-
-[[bin]]
-name = "pqueue-verify-e2-failover"
-path = "src/bin/fireweed-verify-e2-failover.rs"
-
-[[bin]]
-name = "pqueue-verify-e3-contract"
-path = "src/bin/fireweed-verify-e3-contract.rs"
-
-[[bin]]
-name = "pqueue-build-e3-contract"
-path = "src/bin/fireweed-build-e3-contract.rs"
-
-[[bin]]
-name = "pqueue-cost-model"
-path = "src/bin/fireweed-cost-model.rs"
-
-[[bin]]
-name = "pqueue-build-evidence-attestation"
-path = "src/bin/fireweed-build-evidence-attestation.rs"
-
-[[bin]]
-name = "pqueue-verify-density-evidence"
-path = "src/bin/fireweed-verify-density-evidence.rs"
-
-[[bin]]
-name = "pqueue-verify-e0-e1-evidence"
-path = "src/bin/fireweed-verify-e0-e1-evidence.rs"
-
-[[bin]]
-name = "pqueue-verify-e2-scale-evidence"
-path = "src/bin/fireweed-verify-e2-scale-evidence.rs"
-
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

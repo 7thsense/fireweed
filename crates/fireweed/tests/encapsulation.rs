@@ -1,7 +1,7 @@
 //! B3 (ADR-009 §4a / L6): the published library is the only blessed surface to the engine.
 //!
 //! Two guarantees:
-//! 1. `open_*` builds a usable `Pqueue` WITHOUT the client ever naming a concrete backend or a port.
+//! 1. `open_*` builds a usable `RuntimeCore` WITHOUT the client ever naming a concrete backend or a port.
 //! 2. A local source-scan guard catches accidental port re-exports and backend accessors quickly.
 //!    `scripts/verify-public-crate-boundary.sh` separately compiles a downstream crate and proves that
 //!    ports, internal crates, and the wrapped backend are unreachable through the supported dependency.
@@ -224,7 +224,7 @@ fn facade_exports_queue_definition_construction_surface() {
 }
 
 /// The blessed construction path: `fireweed::open_memory` yields a usable handle with no concrete backend
-/// type named by the caller (the returned type is `Pqueue<impl LibBackend>`).
+/// type named by the caller (the returned type is `RuntimeCore<impl LibBackend>`).
 #[tokio::test]
 async fn open_memory_builds_a_usable_pqueue() {
     let pq = fireweed::open_memory(Arc::new(ManualClock::at(0)));
@@ -318,7 +318,7 @@ fn public_surface_exposes_no_port_or_backend() {
                 assert!(
                     !tok.ends_with("Port"),
                     "fireweed must not re-export the port trait `{tok}` on its public surface — clients must \
-                     use `Pqueue`, never the raw ports (ADR-009 L6 / B3)"
+                     use `RuntimeCore`, never the raw ports (ADR-009 L6 / B3)"
                 );
             }
             if line.contains(';') {
@@ -327,13 +327,13 @@ fn public_surface_exposes_no_port_or_backend() {
         }
     }
 
-    // No public backend accessor — `Pqueue` must never hand back the port-bearing backend it wraps.
+    // No public backend accessor — `RuntimeCore` must never hand back the port-bearing backend it wraps.
     assert!(
         !src.contains("pub fn backend"),
-        "Pqueue must not expose a backend accessor (it would leak a port-bearing handle)"
+        "RuntimeCore must not expose a backend accessor (it would leak a port-bearing handle)"
     );
 
-    // The backend-injection constructor `Pqueue::new(Arc<B>, …)` must stay `#[doc(hidden)]` so the
+    // The backend-injection constructor `RuntimeCore::new(Arc<B>, …)` must stay `#[doc(hidden)]` so the
     // documented construction surface is only the `open_*` builders (which never expose a backend type).
     let lines: Vec<&str> = src.lines().collect();
     let new_is_hidden = lines
@@ -341,6 +341,6 @@ fn public_surface_exposes_no_port_or_backend() {
         .any(|w| w[0].trim() == "#[doc(hidden)]" && w[1].trim_start().starts_with("pub fn new("));
     assert!(
         new_is_hidden,
-        "Pqueue::new must be #[doc(hidden)] — open_* is the only documented construction path (ADR-009 L6)"
+        "RuntimeCore::new must be #[doc(hidden)] — open_* is the only documented construction path (ADR-009 L6)"
     );
 }

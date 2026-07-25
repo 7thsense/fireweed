@@ -11,21 +11,24 @@ ddx:
 
 ## Testing strategy
 
-This plan verifies the v0.20 Rust facade and its first downstream consumer. It
-does not certify new storage semantics. Existing backend and recovery suites
-remain authoritative for those behaviors.
+This plan verifies the Rust facade, its first downstream consumer, and
+per-constructor behavioral parity. Existing backend and recovery suites remain
+supporting evidence; they do not substitute for running one capability-complete
+suite through every public constructor.
 
 **Goals**: exact API-005 signature/export closure; concrete-handle parity;
+full operation-family parity across every supported constructor;
 Snorri compilation and semantic acceptance against the same Fireweed revision;
 tagged GitHub-source consumption evidence for the release candidate
-**Out of scope**: new backend guarantees, performance qualification, non-Cargo
+**Out of scope**: non-Cargo
 release artifacts, and runtime-hardening work not exposed by API-005
 **Traceability source**: ADR-022 and API-005
 
 | Level | Coverage target | Priority |
 | --- | --- | --- |
 | Contract compile | 100% of API-005 constructors, Snorri methods, named types, and forbidden legacy Rust names | P0 |
-| Fireweed integration | At least one successful call from every queue-operation family on `Fireweed` | P0 |
+| Fireweed integration | The same capability-complete operation suite succeeds through every supported constructor | P0 |
+| Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 through every supported constructor | P0 |
 | Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
 | Garage integration | SQLite and PostgreSQL projection lifecycle plus retry/idempotency run against Garage on `eldir` without skips | P0 |
 | Published-source consumption | Snorri resolves the tagged public `telepathdata/fireweed` repository rather than a workspace-internal crate | P0 |
@@ -45,6 +48,7 @@ required.
 | API-005 Snorri method signatures | 100% compile referenced | 100% | downstream compile fixture blocks |
 | API-005 Snorri named types | 100% importable from `fireweed` | 100% | single-package fixture blocks |
 | Construction-only composition boundary | 100% of enabled constructors | 100% | public-API and compile-fail tests block |
+| Per-constructor operation parity | Every inherent `Fireweed` method family succeeds; zero construction-dependent `Unavailable` results | 100% | shared conformance matrix blocks |
 | Legacy Rust facade/config names | 0 externally constructible | 0 | compile-fail fixture blocks |
 
 ## Fireweed gates
@@ -58,8 +62,16 @@ required.
    `Pqueue`, `Pqueue::new`, `EmbeddedPqueue`, `EmbeddedHandle`, `LibBackend`,
    or any `Embedded*` configuration name. ADR-020 package aliases do not exempt
    these Rust symbols.
-5. Memory and SQLite smoke tests create a queue, append, claim, mutate or
-   commit, query, and finalize through `Fireweed`.
+5. One shared suite creates a queue, appends, claims, mutates, commits, queries,
+   and finalizes through every supported constructor. It MUST include
+   `batch_update` and `live_items`; `Unavailable`, a skip, or substituting a
+   different method is failure. Merely receiving `Ok` is not evidence: every
+   operation asserts its returned value and an independent observable
+   postcondition. Empty claim results may not skip finalize/renew/reassign
+   assertions; empty query, discovery, index, mutation, commit, or recovery
+   results fail when seeded data requires a non-empty result. Gate coverage
+   uses an item with real gate membership and proves both blocked and unblocked
+   claim behavior.
 6. Plain profiles return `None` from `projection_control`. Object-log plus
    disposable-projection profiles return `Some` and retain existing lifecycle
    verification/delete/rebuild tests.
@@ -83,6 +95,17 @@ scripts/verify-public-crate-boundary.sh
 scripts/verify-public-artifact-topology.sh
 git diff --check
 ```
+
+10. Only after the complete shared functional suite and every durability row
+    pass with zero skips and zero construction-dependent `Unavailable`
+    results, run the TP-005 `million-cycle-v1` gate. A constructor that has
+    not passed those prerequisites is ineligible for performance testing, not
+    a slower or reduced benchmark cell. Each eligible constructor must insert
+    1,000,000 keyed items in at most 9 seconds, batch-update 500,000 in at most
+    9 seconds, and read plus verify 1,000,000 in at most 9 seconds. Durable
+    constructors additionally close, reopen, and verify the exact final image
+    outside timed phases. No row may skip an operation or report
+    `Unavailable`.
 
 Crates.io package closure is a separate follow-up. The v0.20 GitHub release
 MUST NOT publish repository-only internal crates merely to make the facade's
@@ -168,7 +191,8 @@ passing evidence.
 | Requirement source | Primary layer | Blocking evidence |
 | --- | --- | --- |
 | ADR-022 concrete ownership | Contract compile | One non-generic `Fireweed`; forbidden legacy names fail to compile |
-| API-005 full facade closure | Fireweed integration | Normalized public-API comparison plus one representative call per family |
+| API-005 full facade closure | Fireweed integration | Normalized public-API comparison plus the complete shared suite on every constructor |
+| API-005 per-constructor parity | Fireweed integration + local performance | Zero `Unavailable` results; exact million-cycle outcomes and phase ceilings for every constructor |
 | API-005 Snorri slice | Downstream integration | Independent feature checks and semantic tests above |
 | API-005 projection control | Fireweed + Snorri object-log integration | Borrowed control verify/delete/rebuild and reassignment tests |
 | API-005 opaque composition | Contract compile | Construction selects composition; the live facade cannot disclose it |
@@ -179,12 +203,15 @@ passing evidence.
 
 1. Add compile-success/compile-fail and opaque-composition tests before
    completing facade forwarding; these tests define the supported closure.
-2. Complete all `Fireweed` forwarding and role-named configuration.
-3. Run Fireweed profile tests and boundary scripts.
-4. Migrate Snorri against the exact local commit and run independent feature
+2. Add the zero-skip shared functional and durability matrix.
+3. Complete all `Fireweed` forwarding and backend implementations until that
+   matrix is green.
+4. Run Fireweed profile tests and boundary scripts.
+5. Run TP-005 performance gates only for the already-green matrix.
+6. Migrate Snorri against the exact local commit and run independent feature
    checks before semantic tests.
-5. Run the no-skip Garage matrix on `eldir` against the release candidate.
-6. Publish the GitHub tag/release, then repeat dependency identity and the full
+7. Run the no-skip Garage matrix on `eldir` against the release candidate.
+8. Publish the GitHub tag/release, then repeat dependency identity and the full
    Snorri gates against that public tag.
 
 Local developer runs may report PostgreSQL rows as `not run` when the URL is
@@ -197,6 +224,7 @@ environment-gated row may be skipped there.
 | --- | --- | --- |
 | Snorri resolves its old git pin | High | Record `cargo tree` and lockfile source before accepting results |
 | Only the Snorri slice is forwarded | High | Full normalized public-API closure blocks independently |
+| A method exists on `Fireweed` but only some constructors install it | Critical | Shared per-constructor suite and million-cycle gate treat `Unavailable` as failure |
 | Compile-fail and compatibility policy disagree | High | API-005 makes legacy Rust types unavailable; ADR-020 aliases are package-only |
 | PostgreSQL is silently skipped | Medium | Report as `not run`; never count as a pass |
 | Garage credentials leak into evidence | High | Source host-managed secrets and reject credential values in logs |

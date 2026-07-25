@@ -9,9 +9,10 @@
 //! restart (the gap ADR-012 P2 closes). The db path is keyed by the test's thread id (see reconnect_smoke).
 
 use fireweed_conformance::{qdef, shard, ts};
-use fireweed_core::{ItemId, PriorityValue, QueueId, RequestId, TenantId};
+use fireweed_core::{GateKeyPolicy, GroupKey, ItemId, PriorityValue, QueueId, RequestId, TenantId};
 use fireweed_engine::{
-    ChangeRecordSink, ControlPlaneStore, EngineError, LogStore, ProjectionRead, PushPort, PushSpec,
+    Backend, ChangeRecordSink, ClaimPort, ControlPlaneStore, DiscoveryGranularity, DiscoveryPort,
+    EngineError, LogStore, ProjectionRead, PushPort, PushSpec, SetGatesCommand, SetGatesPort,
 };
 use fireweed_sqlite::composed_sqlite_backend;
 use std::cell::Cell;
@@ -203,6 +204,142 @@ async fn request_id_replay_and_conflict_survive_composed_sqlite_log_reopen() {
         .await;
     assert_eq!(conflict, Err(EngineError::RequestIdConflict));
     assert_eq!(reopened.metrics(&shard()).await.unwrap().pending, 1);
+
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn gate_state_and_item_membership_survive_log_replay() {
+    let path = unique_path("gates-reopen");
+    let _ = std::fs::remove_file(&path);
+    let item_id = {
+        let backend = composed_sqlite_backend(&path).expect("open composed sqlite-log db");
+        let mut definition = qdef();
+        definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+        definition.eligibility_policy.max_gate_keys_per_item = Some(4);
+        definition.eligibility_policy.max_gates_per_request = Some(4);
+        backend.create_queue(definition).await.unwrap();
+        assert!(backend.supports_gates());
+        let id = backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    gate_keys: vec!["hold".to_string()],
+                    ..Default::default()
+                }],
+                ts(0),
+                None,
+            )
+            .await
+            .unwrap()[0];
+        backend
+            .set_gates(
+                &shard(),
+                SetGatesCommand {
+                    gate_keys: vec!["hold".to_string()],
+                    blocked: true,
+                },
+                ts(1),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            backend
+                .claim(fireweed_conformance::claim_req(1, 60, 2))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        id
+    };
+
+    let reopened = composed_sqlite_backend(&path).expect("reopen composed sqlite-log db");
+    assert!(reopened.supports_gates());
+    assert!(
+        reopened
+            .claim(fireweed_conformance::claim_req(1, 60, 3))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    reopened
+        .set_gates(
+            &shard(),
+            SetGatesCommand {
+                gate_keys: vec!["hold".to_string()],
+                blocked: false,
+            },
+            ts(4),
+            None,
+        )
+        .await
+        .unwrap();
+    let claimed = reopened
+        .claim(fireweed_conformance::claim_req(1, 60, 5))
+        .await
+        .unwrap();
+    assert_eq!(claimed.items.len(), 1);
+    assert_eq!(claimed.items[0].item_id, item_id);
+    drop(reopened);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn active_scope_timestamps_and_counts_survive_log_replay() {
+    let path = unique_path("discovery-reopen");
+    let _ = std::fs::remove_file(&path);
+    {
+        let backend = composed_sqlite_backend(&path).expect("open composed sqlite-log db");
+        backend.create_queue(qdef()).await.unwrap();
+        backend
+            .push(
+                &shard(),
+                vec![
+                    PushSpec {
+                        group_key: Some(GroupKey::new("older").unwrap()),
+                        ..Default::default()
+                    },
+                    PushSpec {
+                        group_key: Some(GroupKey::new("older").unwrap()),
+                        ..Default::default()
+                    },
+                ],
+                ts(10),
+                None,
+            )
+            .await
+            .unwrap();
+        backend
+            .push(
+                &shard(),
+                vec![PushSpec {
+                    group_key: Some(GroupKey::new("scheduled").unwrap()),
+                    not_before: Some(ts(50)),
+                    ..Default::default()
+                }],
+                ts(20),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let reopened = composed_sqlite_backend(&path).expect("reopen composed sqlite-log db");
+    let scopes = reopened
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Group, ts(100))
+        .await
+        .unwrap();
+    assert_eq!(scopes.len(), 2);
+    assert_eq!(scopes[0].group_key.as_deref(), Some("older"));
+    assert_eq!(scopes[0].oldest_eligible_age_ms, 90_000);
+    assert_eq!(scopes[0].eligible_count, Some(2));
+    assert_eq!(scopes[1].group_key.as_deref(), Some("scheduled"));
+    assert_eq!(scopes[1].oldest_eligible_age_ms, 50_000);
+    assert_eq!(scopes[1].eligible_count, Some(1));
 
     drop(reopened);
     std::fs::remove_file(path).unwrap();

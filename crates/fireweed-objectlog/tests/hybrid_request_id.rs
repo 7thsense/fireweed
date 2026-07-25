@@ -1,13 +1,16 @@
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed_core::{
-    EligibilityPolicy, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RequestId,
-    RetryPolicy, TenantId, UtcTimestamp,
+    BoundedMutationRequest, CompoundIndexDef, CompoundIndexField, EligibilityPolicy, FilterOp,
+    IndexDeclaration, IndexType, OrderField, OrderingMode, PriorityDirection, PriorityModel,
+    PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryFilter, QueueDefinition, QueueId,
+    QueueIndex, RangeScanRequest, RecurrencePolicy, RequestId, RetryPolicy, SortDirection,
+    TenantId, TypedValue, UtcTimestamp,
 };
 use fireweed_engine::{
-    ComposedBackend, ControlPlaneStore, EngineError, InProcessControlPlane, LogStore,
-    ProjectionRead, PushPort, PushSpec, QueueKey, RequestOutcome,
+    ComposedBackend, ControlPlaneStore, EngineError, HotProjectionQueryPort, InProcessControlPlane,
+    LogStore, ProjectionRead, PushPort, PushSpec, QueueKey, RequestOutcome,
 };
 use fireweed_objectlog::{ObjectLog, SegmentConfig};
 use fireweed_sqlite::HybridProjectionStore;
@@ -63,6 +66,28 @@ fn qdef() -> QueueDefinition {
     }
 }
 
+fn mutation_qdef() -> QueueDefinition {
+    QueueDefinition {
+        typed_indexes: vec![QueueIndex {
+            name: "by_kind_suppressed".into(),
+            declaration: IndexDeclaration::Compound(CompoundIndexDef {
+                fields: vec![
+                    CompoundIndexField {
+                        field: "kind".into(),
+                        index_type: IndexType::String,
+                    },
+                    CompoundIndexField {
+                        field: "suppressed".into(),
+                        index_type: IndexType::Boolean,
+                    },
+                ],
+                unique: false,
+            }),
+        }],
+        ..qdef()
+    }
+}
+
 fn ts(secs: i64) -> UtcTimestamp {
     UtcTimestamp::new(secs, 0).unwrap()
 }
@@ -79,6 +104,17 @@ fn open_hybrid(root: &std::path::Path, sqlite_path: &std::path::Path) -> HybridB
         InProcessControlPlane::new(),
     )
     .with_group_commit(true)
+    .recover()
+    .expect("recover hybrid backend")
+}
+
+fn open_immediate_hybrid(root: &std::path::Path, sqlite_path: &std::path::Path) -> HybridBackend {
+    ComposedBackend::new(
+        ObjectLog::open(root).expect("open object log"),
+        HybridProjectionStore::open(sqlite_path.to_str().expect("utf8 sqlite path"))
+            .expect("open hybrid projection"),
+        InProcessControlPlane::new(),
+    )
     .recover()
     .expect("recover hybrid backend")
 }
@@ -162,6 +198,80 @@ async fn hybrid_request_id_push_replays_after_restart_and_conflicts_on_body_chan
         "a request id never committed before restart is fresh"
     );
     assert_eq!(reopened.metrics(&queue).await.unwrap().pending, 2);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn bounded_mutation_is_replayed_from_object_log_after_projection_reopen() {
+    let root = tmp_root("bounded-mutation");
+    let sqlite_path = root.join("projection.sqlite");
+    let queue = shard();
+    let item_id = {
+        let backend = open_immediate_hybrid(&root, &sqlite_path);
+        backend.create_queue(mutation_qdef()).await.unwrap();
+        let item_id = backend
+            .push(
+                &queue,
+                vec![PushSpec {
+                    entity: Some(serde_json::json!({ "kind": "effect", "suppressed": false })),
+                    ..PushSpec::default()
+                }],
+                ts(1),
+                None,
+            )
+            .await
+            .unwrap()[0];
+        let mut set_fields = BTreeMap::new();
+        set_fields.insert("suppressed".into(), TypedValue::Bool(true));
+        let result = backend
+            .bounded_mutation(
+                &queue,
+                BoundedMutationRequest {
+                    index: Some("by_kind_suppressed".into()),
+                    filters: vec![QueryFilter {
+                        field: "kind".into(),
+                        op: FilterOp::Eq,
+                        value: TypedValue::String("effect".into()),
+                    }],
+                    set_fields,
+                    max_scan_rows: 100,
+                },
+                fireweed_engine::BoundedMutationContext {
+                    now: ts(2),
+                    expected_epoch: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.results[0].item_id, item_id);
+        item_id
+    };
+
+    std::fs::remove_file(&sqlite_path).expect("delete rebuildable projection");
+    let reopened = open_immediate_hybrid(&root, &sqlite_path);
+    let rows = reopened
+        .range_scan(
+            &queue,
+            RangeScanRequest {
+                index: Some("by_kind_suppressed".into()),
+                filters: vec![QueryFilter {
+                    field: "suppressed".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::Bool(true),
+                }],
+                order_by: vec![OrderField {
+                    field: "suppressed".into(),
+                    direction: SortDirection::Ascending,
+                }],
+                page_size: 10,
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(rows.rows[0].item_id, item_id);
 
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -64,7 +64,7 @@ All target crates exist with the prescribed roles and outward deps **except post
   `IdGen` exists as a port but the RESP/facade currently generate ids themselves (see Owed Item C).
 - **§2.2 Two-class durability** — **Atomic** (memory lock, sqlite txn): append+apply commit together;
   Invariants 1&2 strong. **Eventual-apply** (objectlog): upsert **forbidden** → `EngineError::Unavailable`
-  (`-ERR pqueue unavailable`), enforced at BOTH the `replace_if_pending` port and the durable write
+  (`-ERR fireweed unavailable`), enforced at BOTH the `replace_if_pending` port and the durable write
   chokepoint. **DONE** — `pqueue-conformance::eventual_apply_suite!` + `upsert_is_unavailable` scenario;
   objectlog `DurabilityClass::EventualApply`.
 - **§2.3 Single logical claim path** — claim authority is the engine; backends select eligible candidates
@@ -88,11 +88,11 @@ All target crates exist with the prescribed roles and outward deps **except post
   empty → delivered-set == produced-set, each once, no hang, cross-batch priority bands).
 - **Invariant 2** (upsert = atomic XDEL+XADD, pending-only, atomic-class-only) — **DONE.** e2e
   `xadd_on_client_item_key_upserts_not_appends` (effects), `xadd_collision_with_leased_then_terminal_is_an_error`
-  (collision → invalid/terminal), `xack_of_superseded_id_is_superseded_over_the_wire` (`-ERR pqueue
+  (collision → invalid/terminal), `xack_of_superseded_id_is_superseded_over_the_wire` (`-ERR fireweed
   superseded`, fixed a shared `finalize_validate` bug). Atomicity proven at engine level (conformance).
 
 **Stock commands implemented + tested:** `XADD` (upsert-on-key), `XREADGROUP >` (priority delivery,
-cursorless), `XACK` (complete; operator-fenced → `-ERR pqueue stale_lease` via
+cursorless), `XACK` (complete; operator-fenced → `-ERR fireweed stale_lease` via
 `fenced_lease_xack_is_stale_over_the_wire`), `XPENDING` (summary + extended, count + numeric id order +
 idle), `XAUTOCLAIM` (tick-reclaim + redeliver; `xautoclaim_redelivers_expired_leases`). Canonical error
 tokens asserted verbatim (`EngineError::resp_token` + e2e substring assertions). **DONE.**

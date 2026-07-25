@@ -1425,7 +1425,7 @@ pub async fn adr011_typed_schema_less_queue_unaffected<B: Adr011ConformanceBacke
 
 /// Eventual-apply backends MUST refuse upsert (Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD
 /// `replace_if_pending` is offered only on the atomic durability class). The refusal is the structured
-/// `Unavailable` (RESP `-ERR pqueue unavailable`). Used by the eventual-apply conformance variant in
+/// `Unavailable` (RESP `-ERR fireweed unavailable`). Used by the eventual-apply conformance variant in
 /// place of the three atomic-class upsert scenarios.
 pub async fn upsert_is_unavailable<B: ConformanceCore>(make: impl Fn() -> B) {
     let b = make();

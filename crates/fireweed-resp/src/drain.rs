@@ -8,7 +8,7 @@
 //!   finalizations MAY also continue (TD-003 §Graceful Drain step 2), so `XADD` (push) is served; `XDEL`
 //!   (a mutation) is likewise not a NEW CLAIM and so is not refused by the drain split.
 //! - **NEW claims are NOT started**: `XREADGROUP >`, a CROSS-consumer `XCLAIM` (a new delivery), and
-//!   `XAUTOCLAIM` (see below) get a retryable `-ERR pqueue unavailable` until handoff completes (then the
+//!   `XAUTOCLAIM` (see below) get a retryable `-ERR fireweed unavailable` until handoff completes (then the
 //!   BQ-31 `MOVED`-on-miss redirects new claims to the new owner).
 //!
 //! This classifier feeds [`crate::route`]'s `is_new_claim`. Two pqueue-specific subtleties (in pqueue "the
@@ -27,7 +27,7 @@
 /// The drain-split class of a queue-addressed command (TD-006 §1A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainClass {
-    /// A NEW delivery — a draining owner refuses it (`-ERR pqueue unavailable`). `XREADGROUP >`, and
+    /// A NEW delivery — a draining owner refuses it (`-ERR fireweed unavailable`). `XREADGROUP >`, and
     /// `XAUTOCLAIM` (which in pqueue always re-delivers idle/expired entries).
     NewClaim,
     /// In-flight or a push/mutation — a draining owner SERVES it (leases finalize; pushes/updates continue

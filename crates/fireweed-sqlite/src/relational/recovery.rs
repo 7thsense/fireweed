@@ -1,17 +1,20 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bytes::Bytes;
 use fireweed_core::{
     ClientItemKey, GroupKey, ItemId, QueueDefinition, QueueId, RequestId, TenantId, WorkerId,
 };
 use fireweed_engine::{
-    CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, QueueCommand,
-    QueueCounters, QueueKey, RequestOutcome, compile_entity_schema, push_items_fingerprint_sha256,
+    BatchUpdateResponse, CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError,
+    EngineResult, QueueCommand, QueueCounters, QueueKey, RequestOutcome, compile_entity_schema,
+    push_items_fingerprint_sha256,
 };
 use fireweed_projection::{ProjectionImage, ProjectionImageItem};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::*;
+
+pub(crate) const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
 
 /// Advance the durable per-queue item-id high-water past the greatest of `reaped` (ADR-009 mint-counter
 /// recovery floor). MONOTONIC by `(epoch, counter)`: a reap that deletes only lower-id rows never lowers the
@@ -175,6 +178,80 @@ pub(crate) fn persist_request_outcome_sql(
     env: &CommandEnvelope,
     pos: &CommandPosition,
 ) -> EngineResult<()> {
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::BatchUpdate { response_payload }),
+    ) = (
+        env.request_id.as_ref(),
+        env.request_fingerprint,
+        env.request_outcome.as_ref(),
+    ) {
+        let _: BatchUpdateResponse = serde_json::from_str(response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let expires_at = request_expires_at(queues, shard, env.created_at)?;
+        let (tenant, queue) = parts(shard);
+        st(tx.execute(
+            "INSERT INTO pqueue_request_idempotency \
+             (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+              command_positions,expires_at,created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+             ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+              request_fingerprint=excluded.request_fingerprint, \
+              response_payload=excluded.response_payload, \
+              command_positions=excluded.command_positions, \
+              expires_at=excluded.expires_at",
+            params![
+                tenant,
+                queue,
+                IDEMPOTENCY_OPERATION_BATCH_UPDATE,
+                request_id.as_str(),
+                fingerprint.to_be_bytes().as_slice(),
+                response_payload,
+                positions_to_json(std::slice::from_ref(pos))?,
+                expires_at,
+                ts_nanos(env.created_at),
+            ],
+        ))?;
+        return Ok(());
+    }
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::CommitTransition { entries }),
+    ) = (
+        env.request_id.as_ref(),
+        env.request_fingerprint,
+        env.request_outcome.as_ref(),
+    ) {
+        let response_payload = serde_json::to_string(entries)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let expires_at = request_expires_at(queues, shard, env.created_at)?;
+        let (tenant, queue) = parts(shard);
+        st(tx.execute(
+            "INSERT INTO pqueue_request_idempotency \
+             (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+              command_positions,expires_at,created_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+             ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+              request_fingerprint=excluded.request_fingerprint, \
+              response_payload=excluded.response_payload, \
+              command_positions=excluded.command_positions, \
+              expires_at=excluded.expires_at",
+            params![
+                tenant,
+                queue,
+                IDEMPOTENCY_OPERATION_COMMIT,
+                request_id.as_str(),
+                fingerprint.to_be_bytes().as_slice(),
+                response_payload,
+                positions_to_json(std::slice::from_ref(pos))?,
+                expires_at,
+                ts_nanos(env.created_at),
+            ],
+        ))?;
+        return Ok(());
+    }
     let QueueCommand::Push(push) = &env.command else {
         return Ok(());
     };
@@ -520,7 +597,7 @@ pub(crate) fn export_projection_image_sql(
 
     let mut gate_keys_by_item = item_gate_key_map(conn, shard)?;
     let mut stmt = st(conn.prepare(
-        "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,group_key,cohort_size,payload,\
+        "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
          fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,fenced,\
          superseded,max_attempts,created_seq \
          FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
@@ -532,20 +609,21 @@ pub(crate) fn export_projection_image_sql(
             row.get::<_, String>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<i64>>(4)?,
-            row.get::<_, Option<String>>(5)?,
-            row.get::<_, Option<i64>>(6)?,
-            row.get::<_, Option<Vec<u8>>>(7)?,
-            row.get::<_, String>(8)?,
+            row.get::<_, i64>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<i64>>(7)?,
+            row.get::<_, Option<Vec<u8>>>(8)?,
             row.get::<_, String>(9)?,
-            row.get::<_, Option<String>>(10)?,
-            row.get::<_, i64>(11)?,
+            row.get::<_, String>(10)?,
+            row.get::<_, Option<String>>(11)?,
             row.get::<_, i64>(12)?,
-            row.get::<_, Option<i64>>(13)?,
-            row.get::<_, Option<String>>(14)?,
-            row.get::<_, i64>(15)?,
+            row.get::<_, i64>(13)?,
+            row.get::<_, Option<i64>>(14)?,
+            row.get::<_, Option<String>>(15)?,
             row.get::<_, i64>(16)?,
             row.get::<_, i64>(17)?,
             row.get::<_, i64>(18)?,
+            row.get::<_, i64>(19)?,
         ))
     }))?;
     let mut items = Vec::new();
@@ -556,6 +634,7 @@ pub(crate) fn export_projection_image_sql(
             lifecycle_state,
             priority,
             not_before,
+            eligible_since,
             group_key,
             cohort_size,
             payload,
@@ -575,16 +654,21 @@ pub(crate) fn export_projection_image_sql(
         let entity_document = entity_document
             .map(|raw| serde_json::from_str(&raw).map_err(|e| EngineError::Storage(e.to_string())))
             .transpose()?;
+        let cohort_size = cohort_size.map(u64::try_from).transpose().map_err(|_| {
+            EngineError::Storage("negative cohort_size in sqlite projection".into())
+        })?;
         items.push(ProjectionImageItem {
             item_id,
             client_item_key: ClientItemKey::new(client_item_key)
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             priority: parse_priority(priority)?,
             not_before: not_before.map(nanos_ts),
+            eligible_since: Some(nanos_ts(eligible_since)),
             group_key: group_key
                 .map(GroupKey::new)
                 .transpose()
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
+            cohort_size,
             payload: payload.map(Bytes::from),
             fields: fields_from_json(fields)?,
             metadata: metadata_from_json(metadata)?,
@@ -634,6 +718,15 @@ pub(crate) fn export_projection_image_sql(
         let (key, fence) = st(row)?;
         instance_fences.insert(key, fence as u64);
     }
+    let mut blocked_gates = BTreeSet::new();
+    let mut stmt = st(conn.prepare(
+        "SELECT gate_key FROM pqueue_gate_state \
+         WHERE tenant_id=?1 AND queue_id=?2 ORDER BY gate_key",
+    ))?;
+    let rows = st(stmt.query_map(params![t, q], |row| row.get::<_, String>(0)))?;
+    for row in rows {
+        blocked_gates.insert(st(row)?);
+    }
 
     let high_water = (next_seq > 0)
         .then(|| CommandPosition::new(shard.clone(), assignment_epoch as u64, next_seq as u64 - 1));
@@ -641,6 +734,7 @@ pub(crate) fn export_projection_image_sql(
         high_water,
         paused: paused != 0,
         pause_drain_intake: pause_drain_intake != 0,
+        blocked_gates,
         next_seq: next_item_seq as u64,
         items,
         side_records,

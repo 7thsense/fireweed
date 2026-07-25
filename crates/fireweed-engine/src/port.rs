@@ -1235,16 +1235,12 @@ pub trait ReclaimPort: Send + Sync {
 /// truncation, and any `queue_id`/`group_key` filtering.
 ///
 /// PAUSE: discovery reports INTRINSIC eligibility and does not short-circuit on a paused queue (it shows
-/// pause-induced buildup, mirroring the pause-agnostic summary) — a deliberate divergence from the claim
-/// path. KNOWN LIMITATION: read-only discovery cannot refresh groups made eligible by pure time passage, so
-/// it can under-report time-triggered starvation until a mutation or background due-sweep refreshes them.
-///
-/// RELATIONAL-ONLY: the in-memory log-replay family maintains no per-group summary, so it does not
-/// implement this port (a relational-class feature, kept out of the shared core suite — parity preserved).
+/// pause-induced buildup) — a deliberate divergence from the claim path. Implementations derive exact
+/// read-time eligibility either from live items or an equivalently exact relational query, so a pure
+/// `not_before` time crossing is visible without a write.
 pub trait DiscoveryPort: Send + Sync {
-    /// The default impl returns [`EngineError::Unavailable`] so the in-memory / log-replay family (which
-    /// maintains no per-group summary) refuses discovery rather than fabricating an empty result — the
-    /// relational family overrides it with the real `pqueue_group_summary` rollup.
+    /// The default impl returns [`EngineError::Unavailable`]; projections that maintain enough item or
+    /// summary state override it with an exact rollup.
     fn discover_active_scopes(
         &self,
         _shard: &QueueKey,
@@ -1269,12 +1265,23 @@ pub trait DiscoveryPort: Send + Sync {
 /// backend (API-004 Side/Projection Records) — no override in this epic may advertise it `true`.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundedMutationContext {
+    /// Server-owned operational time used to stamp every committed update.
+    pub now: UtcTimestamp,
+    /// Cached coordinated-owner fence epoch. `None` is the sole-owner path.
+    pub expected_epoch: Option<u64>,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClaimByQueryContext {
     /// Server-owned operational time used to stamp the lease and idempotency retention window.
     pub now: UtcTimestamp,
     /// Optional caller-selected eligibility epoch. This can widen/narrow due selection, but never changes
     /// the operational lease start; public facade calls leave it absent and use the injected clock for both.
     pub eligibility_time: Option<UtcTimestamp>,
+    /// Cached coordinated-owner fence epoch. `None` is the sole-owner path.
+    pub expected_epoch: Option<u64>,
 }
 
 impl ClaimByQueryContext {
@@ -1369,6 +1376,7 @@ pub trait HotProjectionQueryPort: Send + Sync {
         &self,
         _shard: &QueueKey,
         _request: BoundedMutationRequest,
+        _context: BoundedMutationContext,
     ) -> impl std::future::Future<Output = EngineResult<BoundedMutationResponse>> + Send {
         std::future::ready(Err(EngineError::Unavailable))
     }

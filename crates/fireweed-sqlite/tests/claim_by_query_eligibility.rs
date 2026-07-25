@@ -104,6 +104,7 @@ fn query_context(now: i64) -> ClaimByQueryContext {
     ClaimByQueryContext {
         now: ts(now),
         eligibility_time: None,
+        expected_epoch: None,
     }
 }
 
@@ -474,6 +475,7 @@ async fn claim_by_query_validates_and_durably_replays_the_api_envelope() {
         let context = ClaimByQueryContext {
             now: ts(100),
             eligibility_time: Some(ts(200)),
+            expected_epoch: None,
         };
         let first = backend
             .claim_by_query(&shard(), query_request("durable-replay"), context)

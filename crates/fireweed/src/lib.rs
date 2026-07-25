@@ -59,9 +59,9 @@ use fireweed_engine::{
 };
 
 // ---------------------------------------------------------------------------
-// PUBLIC DEPENDENCY SURFACE (ADR-009): a consumer depends on `pqueue` ALONE and can name every type its
+// PUBLIC DEPENDENCY SURFACE (ADR-009): a consumer depends on `fireweed` alone and can name every type its
 // calls need — no direct dependency on `fireweed-core` / `fireweed-engine` required. Everything that appears in
-// a public `Pqueue` signature is re-exported here.
+// the public `Fireweed` interface is re-exported here.
 // ---------------------------------------------------------------------------
 pub use bytes::Bytes;
 pub use fireweed_core::{
@@ -756,7 +756,7 @@ use sha2::{Digest, Sha256};
 
 #[cfg(all(feature = "objectlog", feature = "postgres"))]
 fn derived_postgres_schema_name(namespace: &str) -> String {
-    const PREFIX: &str = "pq_";
+    const PREFIX: &str = "fw_";
     const HASH_BYTES: usize = 30;
 
     let digest = Sha256::digest(namespace.as_bytes());
@@ -1165,18 +1165,17 @@ impl EmbeddedHandle {
     }
 }
 
-/// An embedded pqueue paired with its opaque durability lifecycle handle.
+/// An embedded runtime paired with its opaque durability lifecycle handle.
 ///
-/// Queue operations are available directly through [`Deref`] to [`Pqueue`]; projection maintenance is
-/// intentionally exposed only through the stable lifecycle value types below.
+/// Private composition helper that pairs the internal runtime with its projection lifecycle handle.
 #[doc(hidden)]
-pub(crate) struct EmbeddedPqueue<B> {
-    pqueue: Pqueue<B>,
+pub(crate) struct EmbeddedRuntime<B> {
+    runtime: RuntimeCore<B>,
     lifecycle: EmbeddedHandle,
 }
 
-#[allow(dead_code)] // Legacy wrapper remains private solely to preserve internal regression coverage.
-impl<B> EmbeddedPqueue<B> {
+#[allow(dead_code)] // Private wrapper retained solely for internal regression coverage.
+impl<B> EmbeddedRuntime<B> {
     pub fn lifecycle_capabilities(&self) -> EmbeddedLifecycleCapabilities {
         self.lifecycle.lifecycle_capabilities()
     }
@@ -1205,17 +1204,17 @@ impl<B> EmbeddedPqueue<B> {
 
     fn into_fireweed(self) -> Fireweed
     where
-        B: LibBackend + 'static,
+        B: LibBackend + BatchUpdatePort + 'static,
     {
-        Fireweed::from_pqueue_with_projection(self.pqueue, self.lifecycle)
+        Fireweed::from_runtime_with_projection(self.runtime, self.lifecycle)
     }
 }
 
-impl<B> Deref for EmbeddedPqueue<B> {
-    type Target = Pqueue<B>;
+impl<B> Deref for EmbeddedRuntime<B> {
+    type Target = RuntimeCore<B>;
 
     fn deref(&self) -> &Self::Target {
-        &self.pqueue
+        &self.runtime
     }
 }
 
@@ -1422,7 +1421,7 @@ impl EmbeddedLifecycle for ObjectLogPostgresLifecycle {
             // `postgres::Client::drop` drives its private runtime. Keep the final
             // backend drop off any ambient Tokio runtime just as construction is.
             let _ = std::thread::Builder::new()
-                .name("pqueue-embedded-postgres-drop".to_owned())
+                .name("fireweed-embedded-postgres-drop".to_owned())
                 .spawn(move || drop(backend))
                 .and_then(|thread| {
                     thread
@@ -2148,7 +2147,7 @@ pub enum EntryOutcome {
     Rejected(EngineError),
 }
 
-/// How a [`Pqueue`] handle coordinates ownership (ADR-009 / TD-003 In-Process Library Owner-Runtime).
+/// How a [`RuntimeCore`] handle coordinates ownership (ADR-009 / TD-003 In-Process Library Owner-Runtime).
 enum Coordination {
     /// Degenerate sole-owner: no control plane, constant ownership, never fences (`expected_epoch = None`).
     /// This is the default and keeps single-instance behaviour byte-identical.
@@ -2194,8 +2193,43 @@ trait OwnedControlPlaneRuntime: Send + Sync {
 #[cfg(any(feature = "postgres", test))]
 struct BlockingControlPlaneRuntime<B: LibBackend + 'static> {
     backend: Arc<B>,
-    control_plane: Arc<dyn QueueControlPlane>,
+    control_plane: Mutex<Option<Arc<dyn QueueControlPlane>>>,
     executor: blocking_backend::OwnedBlockingExecutor,
+}
+
+#[cfg(any(feature = "postgres", test))]
+impl<B: LibBackend + 'static> BlockingControlPlaneRuntime<B> {
+    fn control_plane(&self) -> Arc<dyn QueueControlPlane> {
+        Arc::clone(
+            self.control_plane
+                .lock()
+                .expect("control-plane runtime poisoned")
+                .as_ref()
+                .expect("control-plane runtime is active"),
+        )
+    }
+}
+
+#[cfg(any(feature = "postgres", test))]
+impl<B: LibBackend + 'static> Drop for BlockingControlPlaneRuntime<B> {
+    fn drop(&mut self) {
+        let Some(control_plane) = self
+            .control_plane
+            .lock()
+            .expect("control-plane runtime poisoned")
+            .take()
+        else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("fireweed-control-plane-drop".to_owned())
+            .spawn(move || drop(control_plane))
+            .and_then(|thread| {
+                thread
+                    .join()
+                    .map_err(|_| std::io::Error::other("control-plane drop thread panicked"))
+            });
+    }
 }
 
 #[cfg(any(feature = "postgres", test))]
@@ -2207,7 +2241,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
         now: UtcTimestamp,
     ) -> OwnedControlPlaneFuture<'_, OwnershipOutcome> {
         let backend = Arc::clone(&self.backend);
-        let control_plane = Arc::clone(&self.control_plane);
+        let control_plane = self.control_plane();
         let executor = self.executor.clone();
         Box::pin(async move {
             executor
@@ -2241,7 +2275,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
         queue: QueueKey,
         now: UtcTimestamp,
     ) -> OwnedControlPlaneFuture<'_, fireweed_engine::OwnerResolution> {
-        let control_plane = Arc::clone(&self.control_plane);
+        let control_plane = self.control_plane();
         let executor = self.executor.clone();
         Box::pin(async move {
             executor
@@ -2258,7 +2292,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
         renewals: Vec<fireweed_engine::LeaseRenewal>,
         now: UtcTimestamp,
     ) -> EngineResult<Vec<fireweed_engine::LeaseRenewalOutcome>> {
-        let control_plane = Arc::clone(&self.control_plane);
+        let control_plane = self.control_plane();
         futures::executor::block_on(self.executor.run_control_plane(move || {
             control_plane.heartbeat(&owner, now)?;
             control_plane.renew_queue_leases(&renewals, now)
@@ -2268,7 +2302,7 @@ impl<B: LibBackend + 'static> OwnedControlPlaneRuntime for BlockingControlPlaneR
 
 /// The ergonomic library handle. Holds an injected backend + clock; generates ids/lease tokens.
 #[doc(hidden)]
-pub(crate) struct Pqueue<B> {
+pub(crate) struct RuntimeCore<B> {
     backend: Arc<B>,
     clock: Arc<dyn Clock>,
     ids: AtomicU64,
@@ -2307,7 +2341,7 @@ fn apply_owned_renewal_outcomes(
     first_error.map_or(Ok(()), Err)
 }
 
-impl<B: LibBackend> Pqueue<B> {
+impl<B: LibBackend> RuntimeCore<B> {
     /// Low-level backend-injection constructor for a **sole-owner** handle. Hidden from the published
     /// surface (ADR-009 §4a / L6): external clients build via [`open_memory`]/[`open_sqlite`]/
     /// [`open_sqlite_relational`]/
@@ -2325,7 +2359,7 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// A **durable multi-instance** coordinated owner over a shared control plane (ADR-009 / TD-003).
     /// `instance_id` is THIS instance's unique id — passing it *declares a multi-instance deployment*
-    /// (omit it, via [`Pqueue::new`]/`open_*`, for a single-instance deployment). Every queue-addressed op
+    /// (omit it, via [`RuntimeCore::new`]/`open_*`, for a single-instance deployment). Every queue-addressed op
     /// resolves ownership and operates under an acquired, epoch-fenced session, so a superseded instance is
     /// rejected `EpochFenced` at commit.
     ///
@@ -2359,7 +2393,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// In-process coordinated owner **without** the durable-capability check — for in-process coordination
     /// *logic* (tests, single-process multi-handle), where the in-memory reference control plane is
     /// admissible non-durably (N4a). Hidden from the published surface; durable deployments use
-    /// [`Pqueue::with_control_plane`].
+    /// [`RuntimeCore::with_control_plane`].
     #[doc(hidden)]
     #[allow(dead_code)] // Private compatibility constructor exercised only by crate-internal tests.
     pub fn with_control_plane_in_process(
@@ -2396,7 +2430,7 @@ impl<B: LibBackend> Pqueue<B> {
         let control_plane_runtime: Arc<dyn OwnedControlPlaneRuntime> =
             Arc::new(BlockingControlPlaneRuntime {
                 backend: Arc::clone(&backend),
-                control_plane: Arc::clone(&control_plane),
+                control_plane: Mutex::new(Some(Arc::clone(&control_plane))),
                 executor: control_plane_executor,
             });
         Self {
@@ -2747,7 +2781,7 @@ impl<B: LibBackend> Pqueue<B> {
     }
 
     /// Upsert on a caller-supplied `client_item_key` (Invariant 2). Replaces a pending item with the
-    /// same key; refused (`Unavailable`) on the eventual-apply class.
+    /// same key through the active composition's authoritative mutation boundary.
     pub async fn upsert(
         &self,
         queue: &QueueKey,
@@ -2788,8 +2822,8 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Claim with API-001 compatibility options (group_batching / whole_cohort / same_group_key /
     /// group_key / metadata_equals). `ClaimCompatibility::default()` is the item-level claim (see
-    /// [`claim`](Self::claim)); backends that do not implement a requested non-item unit refuse it with
-    /// the structured `Unavailable` rather than silently downgrading to item-level delivery.
+    /// [`claim`](Self::claim)). Every supported composition implements each declared claim unit without
+    /// silently downgrading to item-level delivery.
     pub async fn claim_with(
         &self,
         queue: &QueueKey,
@@ -3115,8 +3149,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// finalizes the input claim — atomically per entry. `request_id` gives the whole body retained
     /// replay/conflict/expired semantics, so a retried transition returns the prior outcomes without
     /// double-writing. Per-entry [`EntryOutcome`]s are independent (all-or-nothing is NOT required across
-    /// entries). Use [`Fireweed::commit_multi_claim`] when one entry must consume multiple claims. Backends
-    /// without an atomic transition boundary reject with [`EngineError::Unavailable`].
+    /// entries). Use [`Fireweed::commit_multi_claim`] when one entry must consume multiple claims.
     pub async fn commit(
         &self,
         queue: &QueueKey,
@@ -3231,8 +3264,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// transition addressed by `request_id` — the consumed input id, the advanced instance fence, the
     /// side-record keys, the lifecycle item ids, and per-entry status — from the retained commit idempotency
     /// record plus current durable state. `Ok(None)` when no such record is retained. Proves committed
-    /// state/audit remains recoverable after the input is finalized. Backends without an authoritative commit
-    /// boundary reject with [`EngineError::Unavailable`].
+    /// state/audit remains recoverable after the input is finalized.
     pub async fn explain_commit(
         &self,
         queue: &QueueKey,
@@ -3244,8 +3276,7 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Read one opaque non-work side record by key (epic pqueue-2201fd37 acceptance #5). Side records are
     /// disjoint from work items, so this never reflects claimable work and survives input finalization.
-    /// `Ok(None)` if unwritten. Backends without an authoritative commit boundary reject with
-    /// [`EngineError::Unavailable`].
+    /// `Ok(None)` if unwritten.
     pub async fn side_record(&self, queue: &QueueKey, key: &[u8]) -> EngineResult<Option<Bytes>> {
         let r = self.backend.side_record(queue, key).await;
         self.note(queue, r)
@@ -3289,8 +3320,8 @@ impl<B: LibBackend> Pqueue<B> {
     /// AUTHZ (ADR-002): this trusted library facade has **no principal** — it returns the UNFILTERED ranked
     /// discovery for the addressed queue. Excluding scopes a caller is not authorized to see is the
     /// **auth layer's** concern (the RESP/server front stamps the principal and filters); it is deliberately
-    /// not invented here. RELATIONAL-class: the per-group summary exists only on the relational family; the
-    /// in-memory / log-replay family returns [`EngineError::Unavailable`].
+    /// not invented here. Every projection axis maintains the exact grouping, eligibility timestamp, and
+    /// gate state required for this result.
     pub async fn discover_active_scopes(
         &self,
         queue: &QueueKey,
@@ -3354,8 +3385,7 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// Exact composite-key get on a UNIQUE secondary index (ADR-010). `key` is the per-field value bytes
     /// in the index's declared field order. Returns the single [`IndexHit`] holding the key, or `None`.
-    /// Pure read (no epoch/fence). `EngineError::Invalid` if `index` is not a unique index on this queue;
-    /// `EngineError::Unavailable` on a relational backend (Phase 2).
+    /// Pure read (no epoch/fence). `EngineError::Invalid` if `index` is not a unique index on this queue.
     ///
     /// For typed (ADR-011 [`QueueIndex`]) indexes, prefer [`Fireweed::query_index_unique_typed`] — it
     /// accepts [`serde_json::Value`]s directly and validates the type encoding at the API boundary.
@@ -3393,7 +3423,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// format (strings/datetimes as raw UTF-8; numbers and booleans as JSON bytes) before lookup; a
     /// wrong-type value returns [`EngineError::Invalid`].
     /// Pure read (no epoch/fence). `EngineError::Invalid` for an unknown index name, non-unique index, or
-    /// arity mismatch; `EngineError::Unavailable` on a relational backend (Phase 2).
+    /// arity mismatch.
     pub async fn query_index_unique_typed(
         &self,
         queue: &QueueKey,
@@ -3502,13 +3532,13 @@ impl<B: LibBackend> Pqueue<B> {
 
     /// In-place merge of a **live** item's hot-storage `fields`/`payload` (FAC-1) — the write half of the
     /// [`live_item`](Self::live_item) map, so an owner-runtime can keep compound per-item work state in
-    /// pqueue instead of a side shadow store. Field names reserved by API-001 are rejected before the
+    /// Fireweed instead of a side shadow store. Field names reserved by API-001 are rejected before the
     /// backend sees the write; legal only while the item is Pending OR Leased; touches neither lifecycle
     /// state nor the lease. `field_ops`: `Some(bytes)` sets/overwrites a key, `None` removes it.
     /// `payload`: [`PayloadUpdate::Keep`] leaves the body, `Set(_)` replaces (`Set(None)` clears).
     /// `expected_item_version`: optional CAS — a mismatch rejects with [`EngineError::Conflict`] and commits
     /// nothing (for rolling concurrent updates). Bumps and returns the new `item_version`. Fenced by the
-    /// owner's epoch. Atomic class only: an eventual-apply backend rejects with [`EngineError::Unavailable`].
+    /// owner's epoch and recorded in the authoritative log when the projection is rebuildable.
     pub async fn update_fields(
         &self,
         queue: &QueueKey,
@@ -3572,8 +3602,7 @@ impl<B: LibBackend> Pqueue<B> {
     /// order; a `not_before` change re-gates its eligibility (so a deferred item leaves the claimable set
     /// until its new time). Legal while the item is Pending OR Leased; pre-validated like `update_fields`
     /// (absent/terminal/superseded id → reject; `expected_item_version` mismatch → [`EngineError::Conflict`]),
-    /// fenced by the owner's epoch. Bumps and returns the new `item_version`. Atomic class only — the
-    /// eventual-apply object-log family and the relational family return [`EngineError::Unavailable`].
+    /// fenced by the owner's epoch. Bumps and returns the new `item_version`.
     pub async fn update(
         &self,
         queue: &QueueKey,
@@ -3604,10 +3633,8 @@ impl<B: LibBackend> Pqueue<B> {
     /// unblocked (the relational eligibility predicate anti-joins item gate keys against the queue's gate
     /// state); `blocked = false` restores eligibility. Operator-driven (drains/holds a class of work).
     ///
-    /// SCOPE (TD-002 §gate): gates are a RELATIONAL-mode feature. A gate-capable backend (the relational
-    /// family) enforces this; the log-replay / in-memory family stores no gate state and rejects it with
-    /// [`EngineError::Unavailable`] (carrying a gate key on a log-replay queue is already rejected at push).
-    /// Fenced by the owner's epoch.
+    /// Every supported projection axis persists or reconstructs gate state and membership. The mutation is
+    /// fenced by the owner's epoch.
     pub async fn set_gates(
         &self,
         queue: &QueueKey,
@@ -3776,7 +3803,20 @@ impl<B: LibBackend> Pqueue<B> {
         queue: &QueueKey,
         request: BoundedMutationRequest,
     ) -> EngineResult<BoundedMutationResponse> {
-        self.backend.bounded_mutation(queue, request).await
+        let now = self.clock.now();
+        let expected_epoch = self.session_epoch_at(queue, now).await?;
+        let result = self
+            .backend
+            .bounded_mutation(
+                queue,
+                request,
+                fireweed_engine::BoundedMutationContext {
+                    now,
+                    expected_epoch,
+                },
+            )
+            .await;
+        self.note(queue, result)
     }
 
     /// Claim due records selected by a declared-index predicate instead of the queue's default
@@ -3803,22 +3843,29 @@ impl<B: LibBackend> Pqueue<B> {
         request: ClaimByQueryRequest,
         at: ClaimByQueryAt,
     ) -> EngineResult<Claimed> {
+        if self.is_draining(queue) {
+            return Err(EngineError::Unavailable);
+        }
         let lease_time = at.lease_time.unwrap_or_else(|| self.clock.now());
-        self.backend
+        let expected_epoch = self.session_epoch_at(queue, lease_time).await?;
+        let result = self
+            .backend
             .claim_by_query(
                 queue,
                 request,
                 fireweed_engine::ClaimByQueryContext {
                     now: lease_time,
                     eligibility_time: at.eligibility_time,
+                    expected_epoch,
                 },
             )
-            .await
+            .await;
+        self.note(queue, result)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Public constructors — the blessed way to build a Pqueue WITHOUT naming a backend (ADR-009 §4a / B3).
+// Public constructors — the blessed way to build a RuntimeCore WITHOUT naming a backend (ADR-009 §4a / B3).
 // The concrete backend is built internally and erased behind `impl LibBackend`, so a client of the
 // published crate never holds a port-bearing handle. Reaching a raw port requires deliberately depending
 // on an internal crate (strong-by-default, not absolute — OD-6).
@@ -3828,21 +3875,18 @@ impl<B: LibBackend> Pqueue<B> {
 /// Requires the `memory` feature (default).
 #[cfg(feature = "memory")]
 pub fn open_memory(clock: Arc<dyn Clock>) -> Fireweed {
-    Fireweed::from_pqueue(Pqueue::new(
+    Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(fireweed_memory::composed_memory_backend()),
         clock,
     ))
 }
 
-/// Open a **sole-owner**, SQLite-backed Fireweed handle (durable log + in-memory projection rebuilt from the log) at
-/// `path`. This log-replay family does not maintain relational active-scope summaries, so
-/// [`Fireweed::discover_active_scopes`] returns [`EngineError::Unavailable`]. Use
-/// [`open_sqlite_relational`] when durable relational discovery is required. Requires the `sqlite` feature
-/// (default).
+/// Open a **sole-owner**, SQLite-backed Fireweed handle with a durable command log and an in-memory
+/// projection rebuilt from that log at `path`. Requires the `sqlite` feature (default).
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_backend(path)?);
-    Ok(Fireweed::from_pqueue(Pqueue::new(
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
     )))
@@ -3855,21 +3899,22 @@ pub fn open_sqlite(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> 
 #[cfg(feature = "sqlite")]
 pub fn open_sqlite_relational(path: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
     let backend = Arc::new(fireweed_sqlite::composed_sqlite_relational(path)?);
-    Ok(Fireweed::from_pqueue(Pqueue::new(
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
     )))
 }
 
-/// Open a **sole-owner**, object-log Fireweed handle (eventual-apply class) rooted at `root`. Requires the
-/// `objectlog` feature (default).
+/// Open a **sole-owner**, object-log Fireweed handle rooted at `root`, using the shared composed engine
+/// with an in-memory projection rebuilt from the authoritative log. Requires the `objectlog` feature
+/// (default).
 #[cfg(feature = "objectlog")]
 pub fn open_objectlog(
     root: impl Into<std::path::PathBuf>,
     clock: Arc<dyn Clock>,
 ) -> EngineResult<Fireweed> {
-    let backend = Arc::new(fireweed_objectlog::ObjectLogBackend::open(root)?);
-    Ok(Fireweed::from_pqueue(Pqueue::new(
+    let backend = Arc::new(fireweed_objectlog::composed_objectlog_backend(root)?);
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
     )))
@@ -3892,7 +3937,7 @@ pub(crate) fn open_embedded(
             "open_objectlog_postgres cannot run inside a Tokio runtime; use open_objectlog_postgres_async",
         ));
     }
-    open_embedded_postgres_blocking(config, clock).map(EmbeddedPqueue::into_fireweed)
+    open_embedded_postgres_blocking(config, clock).map(EmbeddedRuntime::into_fireweed)
 }
 
 /// Async-safe variant of [`open_embedded`] for callers already running on Tokio.
@@ -3910,7 +3955,7 @@ pub(crate) async fn open_embedded_async(
         .map_err(|error| {
             EngineError::Storage(format!("object-log PostgreSQL open task failed: {error}"))
         })?
-        .map(EmbeddedPqueue::into_fireweed)
+        .map(EmbeddedRuntime::into_fireweed)
 }
 
 /// Open an authoritative object log with a disposable PostgreSQL projection.
@@ -3935,7 +3980,7 @@ pub async fn open_objectlog_postgres_async(
 fn open_embedded_postgres_blocking(
     config: EmbeddedDurabilityConfig,
     clock: Arc<dyn Clock>,
-) -> EngineResult<EmbeddedPqueue<blocking_backend::BlockingLibBackend<ObjectLogPostgresBackend>>> {
+) -> EngineResult<EmbeddedRuntime<blocking_backend::BlockingLibBackend<ObjectLogPostgresBackend>>> {
     use fireweed_engine::{ComposedBackend, InProcessControlPlane};
 
     config.validate()?;
@@ -3971,7 +4016,7 @@ fn open_embedded_postgres_blocking(
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
     let flusher = std::thread::Builder::new()
-        .name(format!("pqueue-embedded-{}", config.namespace))
+        .name(format!("fireweed-embedded-{}", config.namespace))
         .spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 std::thread::sleep(std::time::Duration::from_millis(flush_interval));
@@ -3999,8 +4044,8 @@ fn open_embedded_postgres_blocking(
             }),
         }),
     };
-    Ok(EmbeddedPqueue {
-        pqueue: Pqueue::new(Arc::new(blocking_backend), clock),
+    Ok(EmbeddedRuntime {
+        runtime: RuntimeCore::new(Arc::new(blocking_backend), clock),
         lifecycle,
     })
 }
@@ -4065,7 +4110,7 @@ pub(crate) fn open_embedded_sqlite(
     let weak_backend = Arc::downgrade(&backend);
     let thread_stop = Arc::clone(&stop);
     let flusher = std::thread::Builder::new()
-        .name(format!("pqueue-embedded-{}", config.namespace))
+        .name(format!("fireweed-embedded-{}", config.namespace))
         .spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 std::thread::sleep(std::time::Duration::from_millis(flush_interval));
@@ -4094,8 +4139,8 @@ pub(crate) fn open_embedded_sqlite(
             }),
         }),
     };
-    Ok(EmbeddedPqueue {
-        pqueue: Pqueue::new(Arc::new(blocking_backend), clock),
+    Ok(EmbeddedRuntime {
+        runtime: RuntimeCore::new(Arc::new(blocking_backend), clock),
         lifecycle,
     }
     .into_fireweed())
@@ -4114,8 +4159,8 @@ pub fn open_objectlog_sqlite(
 /// feature (opt-in). For a durable **multi-instance** deployment use [`open_postgres_coordinated`].
 #[cfg(feature = "postgres")]
 pub fn open_postgres(url: &str, clock: Arc<dyn Clock>) -> EngineResult<Fireweed> {
-    let backend = Arc::new(fireweed_postgres::PostgresBackend::connect(url)?);
-    Ok(Fireweed::from_pqueue(Pqueue::new(
+    let backend = Arc::new(fireweed_postgres::composed_postgres_backend(url)?);
+    Ok(Fireweed::from_runtime(RuntimeCore::new(
         Arc::new(blocking_backend::BlockingLibBackend::new(backend)?),
         clock,
     )))
@@ -4147,8 +4192,10 @@ pub fn open_postgres_runtime(
     match mode {
         PostgresMode::LogReplay => {
             let backend = match schema.as_deref() {
-                Some(schema) => fireweed_postgres::PostgresBackend::connect_in_schema(url, schema)?,
-                None => fireweed_postgres::PostgresBackend::connect(url)?,
+                Some(schema) => {
+                    fireweed_postgres::composed_postgres_backend_in_schema(url, schema)?
+                }
+                None => fireweed_postgres::composed_postgres_backend(url)?,
             };
             let backend = Arc::new(match node_id {
                 Some(node_id) => backend.with_node_id(node_id),
@@ -4172,8 +4219,8 @@ pub fn open_postgres_runtime(
                             )?,
                         });
                     let executor = backend.executor();
-                    Ok(Fireweed::from_pqueue(
-                        Pqueue::with_owned_control_plane_executor(
+                    Ok(Fireweed::from_runtime(
+                        RuntimeCore::with_owned_control_plane_executor(
                             backend,
                             clock,
                             coordination.instance_id,
@@ -4182,7 +4229,7 @@ pub fn open_postgres_runtime(
                         ),
                     ))
                 }
-                None => Ok(Fireweed::from_pqueue(Pqueue::new(backend, clock))),
+                None => Ok(Fireweed::from_runtime(RuntimeCore::new(backend, clock))),
             }
         }
         PostgresMode::Relational => {
@@ -4214,7 +4261,7 @@ pub fn open_postgres_runtime(
                             )?,
                         });
                     let executor = backend.executor();
-                    Pqueue::with_owned_control_plane_executor(
+                    RuntimeCore::with_owned_control_plane_executor(
                         backend,
                         clock,
                         coordination.instance_id,
@@ -4222,9 +4269,9 @@ pub fn open_postgres_runtime(
                         executor,
                     )
                 }
-                None => Pqueue::new(backend, clock),
+                None => RuntimeCore::new(backend, clock),
             };
-            Ok(Fireweed::from_batch_pqueue(queue))
+            Ok(Fireweed::from_runtime(queue))
         }
     }
 }
@@ -4253,14 +4300,14 @@ pub fn open_postgres_coordinated(
     instance_id: OwnerId,
     control_plane_config: fireweed_engine::ControlPlaneConfig,
 ) -> EngineResult<Fireweed> {
-    let backend = Arc::new(fireweed_postgres::PostgresBackend::connect(url)?);
+    let backend = Arc::new(fireweed_postgres::composed_postgres_backend(url)?);
     let control_plane: Arc<dyn QueueControlPlane> = Arc::new(
         fireweed_postgres::PostgresControlPlane::connect(url, control_plane_config)?,
     );
     let backend = Arc::new(blocking_backend::BlockingLibBackend::new(backend)?);
     let control_plane_executor = backend.executor();
-    Ok(Fireweed::from_pqueue(
-        Pqueue::with_owned_control_plane_executor(
+    Ok(Fireweed::from_runtime(
+        RuntimeCore::with_owned_control_plane_executor(
             backend,
             clock,
             instance_id,
@@ -4285,7 +4332,7 @@ mod tests {
         SortDirection, TenantId, TypedValue, UtcTimestamp, WorkerId,
     };
 
-    use super::{ClaimByQueryAt, NewItem, Pqueue, SystemClock, apply_owned_renewal_outcomes};
+    use super::{ClaimByQueryAt, NewItem, RuntimeCore, SystemClock, apply_owned_renewal_outcomes};
     use crate::EngineResult;
     use fireweed_engine::{
         Clock, EngineError, InMemoryControlPlane, LeaseRenewalOutcome, LeaseState, OwnedSession,
@@ -4299,7 +4346,7 @@ mod tests {
         let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
         let executor = bounded.executor();
         let control_plane = Arc::new(InMemoryControlPlane::default());
-        let pq = Pqueue::with_owned_control_plane_executor(
+        let pq = RuntimeCore::with_owned_control_plane_executor(
             bounded,
             Arc::new(SystemClock),
             OwnerId::new("coordinated-owner").unwrap(),
@@ -4331,7 +4378,7 @@ mod tests {
             let backend = Arc::clone(&bounded);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
-                let pq = Pqueue::new(backend, Arc::new(SystemClock));
+                let pq = RuntimeCore::new(backend, Arc::new(SystemClock));
                 barrier.wait();
                 futures::executor::block_on(pq.create_queue(query_definition()))
             }));
@@ -4355,7 +4402,7 @@ mod tests {
         let raw = Arc::new(fireweed_memory::composed_memory_backend());
         let bounded = Arc::new(crate::blocking_backend::BlockingLibBackend::new(raw)?);
         futures::executor::block_on(
-            Pqueue::new(Arc::clone(&bounded), Arc::new(SystemClock))
+            RuntimeCore::new(Arc::clone(&bounded), Arc::new(SystemClock))
                 .create_queue(query_definition()),
         )?;
 
@@ -4365,7 +4412,7 @@ mod tests {
             let backend = Arc::clone(&bounded);
             let barrier = Arc::clone(&barrier);
             handles.push(std::thread::spawn(move || {
-                let pq = Pqueue::new(backend, Arc::new(SystemClock));
+                let pq = RuntimeCore::new(backend, Arc::new(SystemClock));
                 let mut definition = query_definition();
                 definition.ordering_mode = OrderingMode::BoundedRelaxed;
                 barrier.wait();
@@ -4391,7 +4438,7 @@ mod tests {
         let raw = Arc::new(fireweed_memory::composed_memory_backend());
         let definition = query_definition();
         let queue = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-        Pqueue::new(Arc::clone(&raw), Arc::new(SystemClock))
+        RuntimeCore::new(Arc::clone(&raw), Arc::new(SystemClock))
             .create_queue(definition)
             .await?;
 
@@ -4415,7 +4462,7 @@ mod tests {
 
         let control_plane = Arc::new(InMemoryControlPlane::default());
         let owner = OwnerId::new("cancelled-waiter-owner").unwrap();
-        let pq = Pqueue::with_owned_control_plane_executor(
+        let pq = RuntimeCore::with_owned_control_plane_executor(
             bounded,
             Arc::new(SystemClock),
             owner.clone(),
@@ -4640,7 +4687,7 @@ mod tests {
     #[tokio::test]
     async fn claim_by_query_at_uses_explicit_times_and_bypasses_clock() -> EngineResult<()> {
         let backend = Arc::new(fireweed_memory::composed_memory_backend());
-        let setup = Pqueue::new(Arc::clone(&backend), Arc::new(SystemClock));
+        let setup = RuntimeCore::new(Arc::clone(&backend), Arc::new(SystemClock));
         setup.create_queue(query_definition()).await?;
         let shard = fireweed_engine::QueueKey::new(
             TenantId::new("t1").unwrap(),
@@ -4659,7 +4706,7 @@ mod tests {
             ..Default::default()
         };
         let pushed = setup.push_batch(&shard, vec![due, later]).await?;
-        let pq = Pqueue::new(backend, Arc::new(PanicClock::new()));
+        let pq = RuntimeCore::new(backend, Arc::new(PanicClock::new()));
 
         let claimed = pq
             .claim_by_query_at(
@@ -4681,7 +4728,7 @@ mod tests {
     #[tokio::test]
     async fn facade_enforces_persisted_push_and_claim_batch_limits() -> EngineResult<()> {
         let backend = Arc::new(fireweed_memory::composed_memory_backend());
-        let pq = Pqueue::new(backend, Arc::new(SystemClock));
+        let pq = RuntimeCore::new(backend, Arc::new(SystemClock));
         let mut definition = query_definition();
         definition.max_push_batch_size = 2;
         definition.max_claim_batch_size = 2;

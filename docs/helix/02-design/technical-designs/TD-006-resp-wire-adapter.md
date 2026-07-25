@@ -93,7 +93,7 @@ begins redirecting. Within that window:
 | Command class | On a deposed/stale owner, within the renew window |
 |---|---|
 | **Durable writes** (`XADD`; the `append_batch` of any mutating command) | **Cannot corrupt state.** The TD-003 Single Authoritative Fencing Rule rejects an append whose `expected_epoch` is not the current control-plane epoch, the instant the epoch advances — so a misrouted write is rejected and the client retries against the current owner. `client_item_key` makes the `XADD` retry converge. |
-| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver before commit, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On a log-then-apply backend (`objectlog`) any tentative delivery before the claim command commits is non-authoritative: if the `BatchClaim` append is fenced, **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced -> `-ERR pqueue stale_lease` (§3). In `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the hot projection is current on the success path, so the claim/upsert race can be closed by the backend's own response barrier; stock `XREADGROUP` still carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection, while library/native paths use `request_id` replay (§4). |
+| **Claims / delivery** (`XREADGROUP >`; cross-consumer `XCLAIM`) | **May redundantly deliver before commit, but cannot durably double-claim.** On an atomic backend (TD-007) select+append commit together, so a deposed owner's claim is fenced atomically and hands out nothing. On a log-then-apply backend (`objectlog`) any tentative delivery before the claim command commits is non-authoritative: if the `BatchClaim` append is fenced, **no durable lease is created**, and the worker's later `XACK`/finalize on the deposed owner is epoch-fenced -> `-ERR fireweed stale_lease` (§3). In `objectlog/hybrid-strict` and `objectlog/hybrid-async`, the hot projection is current on the success path, so the claim/upsert race can be closed by the backend's own response barrier; stock `XREADGROUP` still carries no `request_id`, so convergence on the stock path rests on the fence + at-least-once + the `stale_lease` ack rejection, while library/native paths use `request_id` replay (§4). |
 | **Pure reads** (`XLEN`, `XINFO`, `XPENDING`, `XRANGE`) | **Bounded-stale, never authoritative.** A read has no `append_batch` and is not epoch-fenced; a deposed owner that has not yet failed a renew MAY serve a read from its frozen local projection. Such reads are best-effort and bounded-stale by the lease/renew interval and any documented unrelated-operation apply budget. A client needing an authoritative read MUST reach the current owner (follow the redirect). The read guarantee is "bounded staleness," not "fresh-or-fenced"; a node MUST still redirect once it has learned it is not the owner. |
 
 ### Reassignment (drain) on the wire
@@ -108,7 +108,7 @@ node" does NOT apply (the target cannot serve yet). Instead the command set spli
   finalize (TD-003 drain MUST NOT cancel in-flight worker leases). A worker is never redirected
   mid-lease.
 - **New claims are not started**: `XREADGROUP >` and cross-consumer `XCLAIM` (a new delivery) MUST NOT
-  be served by the draining owner; it returns a retryable `-ERR pqueue unavailable` until handoff
+  be served by the draining owner; it returns a retryable `-ERR fireweed unavailable` until handoff
   completes. Once the new owner has acquired (queue `assigned` to the target), the normal MOVED-on-miss
   path redirects new claims to it.
 
@@ -160,13 +160,13 @@ Rules:
   pending-item replacement: old id is superseded, a new monotonic id is returned, and `XLEN` nets
   unchanged.
 - If the key collides with **claimed (leased, non-terminal)** work, the call returns
-  `-ERR pqueue invalid` (no lifecycle transition on in-flight work). If it collides with **terminal**
-  work, the call returns `-ERR pqueue terminal`. (Mapping pinned in TD-007 §2.3.)
+  `-ERR fireweed invalid` (no lifecycle transition on in-flight work). If it collides with **terminal**
+  work, the call returns `-ERR fireweed terminal`. (Mapping pinned in TD-007 §2.3.)
 - On pure lagging-projection log-then-apply backends, replacement is unavailable and returns
-  `-ERR pqueue unavailable`.
+  `-ERR fireweed unavailable`.
 - On `objectlog/hybrid-strict` and `objectlog/hybrid-async`, replacement MAY be enabled only after
   TD-004 proves deterministic apply-time re-validation with ack-after-apply. Until that proof lands,
-  they also return `-ERR pqueue unavailable`.
+  they also return `-ERR fireweed unavailable`.
 - Non-reserved field/value pairs are stored as structured item fields. `payload` is stored separately as
   the existing opaque payload slot. Claims and `PQ.*` reads return both.
 
@@ -190,8 +190,8 @@ Rules:
 
 - `XACK` succeeds only for work still owned by the caller's group/consumer lease generation.
 - If an operator/library repair action has stale-fenced the lease, `XACK` returns
-  `-ERR pqueue stale_lease`.
-- If the id was superseded by pending-item replacement, `XACK` returns `-ERR pqueue superseded`.
+  `-ERR fireweed stale_lease`.
+- If the id was superseded by pending-item replacement, `XACK` returns `-ERR fireweed superseded`.
 - A `0` count must not be used to hide stale or superseded lease failures.
 
 ### `XCLAIM` and `XAUTOCLAIM`
@@ -222,7 +222,7 @@ Rules:
 
 - Rich metrics, lifecycle state, operator inspection, and force purge are library-only.
 - `XDEL` of active or terminal work follows the engine's lifecycle rules; invalid state returns
-  `-ERR pqueue invalid` rather than silently violating delivery invariants.
+  `-ERR fireweed invalid` rather than silently violating delivery invariants.
 
 ## 3A. pqueue-native Live Item Reads
 
@@ -298,11 +298,11 @@ Launch custom RESP commands are read-only and scoped to live item access.
 2. **Per-item delivery tracking.** Low-id, low-priority work is not orphaned by a high-id claim.
 3. **`XAUTOCLAIM` cursor order remains entry-id order.** Reclaim pagination is cursor-faithful; it is
    not priority-ordered.
-4. **Fenced `XACK`.** A stale lease returns `-ERR pqueue stale_lease`; it does not silently return `0`.
+4. **Fenced `XACK`.** A stale lease returns `-ERR fireweed stale_lease`; it does not silently return `0`.
 5. **Superseded ids are explicit failures.** `XACK`/`XCLAIM` of a superseded id returns
-   `-ERR pqueue superseded`.
+   `-ERR fireweed superseded`.
 6. **Log-then-apply backends preserve the same durable queue contract through a response barrier.**
-   Pure lagging-projection profiles still return `-ERR pqueue unavailable` for pending-item
+   Pure lagging-projection profiles still return `-ERR fireweed unavailable` for pending-item
    replacement; `objectlog/hybrid-strict` and `objectlog/hybrid-async` lift that ban only after they
    prove deterministic apply-time re-validation with ack-after-apply in TD-004.
 7. **`PQ.H*` commands are pqueue live-item reads, not Redis hashes.** They emulate Redis hash read
@@ -315,11 +315,11 @@ Conformance tests assert these exact error prefixes:
 
 | Condition | Error |
 |---|---|
-| stale operator-fenced lease | `-ERR pqueue stale_lease` |
-| superseded entry id | `-ERR pqueue superseded` |
-| unsupported on backend durability class | `-ERR pqueue unavailable` |
-| terminal lifecycle state | `-ERR pqueue terminal` |
-| invalid command or lifecycle transition | `-ERR pqueue invalid` |
+| stale operator-fenced lease | `-ERR fireweed stale_lease` |
+| superseded entry id | `-ERR fireweed superseded` |
+| unsupported on backend durability class | `-ERR fireweed unavailable` |
+| terminal lifecycle state | `-ERR fireweed terminal` |
+| invalid command or lifecycle transition | `-ERR fireweed invalid` |
 | authorization failure | `-NOPERM` |
 
 ## 8. Required Conformance Tests
@@ -331,11 +331,11 @@ Run each applicable test against the RESP adapter with at least one pinned off-t
 - **Pending replacement**: re-`XADD` a pending `client_item_key`, assert new id, old id superseded,
   and stable logical depth.
 - **Claim collision**: re-`XADD` a claimed `client_item_key`, assert rejection.
-- **Superseded ack**: `XACK` an old superseded id, assert `-ERR pqueue superseded`.
+- **Superseded ack**: `XACK` an old superseded id, assert `-ERR fireweed superseded`.
 - **Cursor reclaim**: page `XAUTOCLAIM` from `0-0` until completion, assert the whole PEL is covered.
 - **Crash recovery**: kill a consumer after claim, reclaim after expiry, assert no lost or double work.
 - **Fence**: stale a lease through the library/operator surface, then assert stock `XACK` returns
-  `-ERR pqueue stale_lease`.
+  `-ERR fireweed stale_lease`.
 - **Intra-group exclusion**: two consumers concurrently call `XREADGROUP >`; assert no item is claimed
   twice.
 - **Quiet-queue reclaim driver**: without intervening client commands on the queue, assert expired

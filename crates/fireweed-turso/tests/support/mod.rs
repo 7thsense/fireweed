@@ -249,7 +249,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
 
     let rows = store
         .query(
-            "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,group_key,cohort_size,payload,\
+            "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
              fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,\
              fenced,superseded,max_attempts,created_seq FROM pqueue_items \
              WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
@@ -268,23 +268,25 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
                 state: parse_state(&text(&values[2])).unwrap(),
                 priority: parse_priority(optional_text(&values[3])).unwrap(),
                 not_before: optional_integer(&values[4]).map(nanos),
-                group_key: optional_text(&values[5]).map(|value| GroupKey::new(value).unwrap()),
-                payload: optional_blob(&values[7]),
-                fields: fields_from_json(text(&values[8])).unwrap(),
-                metadata: metadata_from_json(text(&values[9])).unwrap(),
+                eligible_since: optional_integer(&values[5]).map(nanos),
+                group_key: optional_text(&values[6]).map(|value| GroupKey::new(value).unwrap()),
+                cohort_size: optional_integer(&values[7]).map(|value| value as u64),
+                payload: optional_blob(&values[8]),
+                fields: fields_from_json(text(&values[9])).unwrap(),
+                metadata: metadata_from_json(text(&values[10])).unwrap(),
                 gate_keys: gates.remove(&item_id_text).unwrap_or_default(),
-                entity_document: optional_text(&values[10])
+                entity_document: optional_text(&values[11])
                     .map(|value| serde_json::from_str(&value).unwrap()),
-                attempt_count: integer(&values[11]) as u32,
-                item_version: integer(&values[12]) as u64,
+                attempt_count: integer(&values[12]) as u32,
+                item_version: integer(&values[13]) as u64,
                 lease_token: None,
-                lease_expires_at: optional_integer(&values[13]).map(nanos),
-                lease_is_cohort: optional_integer(&values[6]).is_some(),
-                worker_id: optional_text(&values[14]).map(|value| WorkerId::new(value).unwrap()),
-                fenced: integer(&values[15]) != 0,
-                superseded: integer(&values[16]) != 0,
-                max_attempts: integer(&values[17]) as u32,
-                created_seq: integer(&values[18]) as u64,
+                lease_expires_at: optional_integer(&values[14]).map(nanos),
+                lease_is_cohort: optional_integer(&values[7]).is_some(),
+                worker_id: optional_text(&values[15]).map(|value| WorkerId::new(value).unwrap()),
+                fenced: integer(&values[16]) != 0,
+                superseded: integer(&values[17]) != 0,
+                max_attempts: integer(&values[18]) as u32,
+                created_seq: integer(&values[19]) as u64,
                 terminal_at: None,
                 terminal_position: None,
             }
@@ -325,6 +327,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
         }),
         paused: integer(&queue_row[0]) != 0,
         pause_drain_intake: integer(&queue_row[1]) != 0,
+        blocked_gates: Default::default(),
         next_seq: next_item_seq,
         items,
         side_records,

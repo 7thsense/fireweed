@@ -128,14 +128,14 @@ fn composed_memory_concurrent_incompatible_losers_conflict() {
 /// `MemoryBackend`. The shared conformance suite above already covers the data-plane ports; these
 /// white-box tests cover the commit-class ports the monolith implements that the composition previously
 /// took `Unavailable` defaults for — the Snorri authoritative vectorized commit boundary + its recovery
-/// reads, reschedule, and the relational-only refusals (set_gates / discover) — run against
+/// reads, reschedule, shared gate support, and exact active-scope discovery — run against
 /// `composed_memory_backend()`.
 mod composed_capability_parity {
     use super::*;
     use crate::composed_memory_backend;
     use bytes::Bytes;
     use fireweed_conformance::{claim_req, qdef, qkey, shard};
-    use fireweed_core::{PriorityValue, RequestId};
+    use fireweed_core::{GateKeyPolicy, GroupKey, PriorityValue, RequestId};
     use fireweed_engine::{
         Backend, ClaimPort, ClaimRef, CommitTransition, CommitTransitionEntry,
         CommitTransitionPort, ControlPlaneStore, DiscoveryGranularity, DiscoveryPort, EngineError,
@@ -300,27 +300,118 @@ mod composed_capability_parity {
         assert!(v1 > v0, "reschedule bumps the item version");
     }
 
-    /// The relational-only ports stay refused on the log-replay composition, exactly like `MemoryBackend`.
+    /// Shared projection gates hide gated work without disturbing ungated work,
+    /// and clearing a gate restores the same pending item.
     #[tokio::test]
-    async fn set_gates_and_discover_are_unavailable() {
+    async fn set_gates_blocks_and_restores_eligibility() {
         let b = composed_memory_backend();
-        b.create_queue(qdef()).await.unwrap();
-        let set_gates = b
-            .set_gates(
+        let mut definition = qdef();
+        definition.eligibility_policy.gate_keys = GateKeyPolicy::Dynamic;
+        definition.eligibility_policy.max_gate_keys_per_item = Some(4);
+        definition.eligibility_policy.max_gates_per_request = Some(4);
+        b.create_queue(definition).await.unwrap();
+        assert!(b.supports_gates());
+        let ids = b
+            .push(
                 &shard(),
-                SetGatesCommand {
-                    gate_keys: vec!["hold".to_string()],
-                    blocked: true,
-                },
+                vec![
+                    PushSpec {
+                        gate_keys: vec!["hold".to_string()],
+                        ..Default::default()
+                    },
+                    PushSpec::default(),
+                ],
                 ts(0),
                 None,
             )
-            .await;
-        assert_eq!(set_gates, Err(EngineError::Unavailable));
-        let discover = b
-            .discover_active_scopes(&qkey(), DiscoveryGranularity::Queue, ts(0))
-            .await;
-        assert!(matches!(discover, Err(EngineError::Unavailable)));
+            .await
+            .unwrap();
+        b.set_gates(
+            &shard(),
+            SetGatesCommand {
+                gate_keys: vec!["hold".to_string()],
+                blocked: true,
+            },
+            ts(1),
+            None,
+        )
+        .await
+        .unwrap();
+        let scopes = b
+            .discover_active_scopes(&qkey(), DiscoveryGranularity::Queue, ts(2))
+            .await
+            .unwrap();
+        assert_eq!(scopes[0].eligible_count, Some(1));
+        let claimed = b.claim(claim_req(10, 60, 2)).await.unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        assert_eq!(claimed.items[0].item_id, ids[1]);
+        b.set_gates(
+            &shard(),
+            SetGatesCommand {
+                gate_keys: vec!["hold".to_string()],
+                blocked: false,
+            },
+            ts(3),
+            None,
+        )
+        .await
+        .unwrap();
+        let scopes = b
+            .discover_active_scopes(&qkey(), DiscoveryGranularity::Queue, ts(3))
+            .await
+            .unwrap();
+        assert_eq!(scopes[0].eligible_count, Some(1));
+        assert_eq!(scopes[0].oldest_eligible_age_ms, 3_000);
+        let claimed = b.claim(claim_req(10, 60, 4)).await.unwrap();
+        assert_eq!(claimed.items.len(), 1);
+        assert_eq!(claimed.items[0].item_id, ids[0]);
+    }
+
+    #[tokio::test]
+    async fn discover_reports_exact_live_scopes() {
+        let b = composed_memory_backend();
+        b.create_queue(qdef()).await.unwrap();
+        b.push(
+            &shard(),
+            vec![
+                PushSpec {
+                    group_key: Some(GroupKey::new("g1").unwrap()),
+                    ..Default::default()
+                },
+                PushSpec {
+                    group_key: Some(GroupKey::new("g1").unwrap()),
+                    ..Default::default()
+                },
+                PushSpec {
+                    group_key: Some(GroupKey::new("future").unwrap()),
+                    not_before: Some(ts(200)),
+                    ..Default::default()
+                },
+            ],
+            ts(10),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let groups = b
+            .discover_active_scopes(&qkey(), DiscoveryGranularity::Group, ts(100))
+            .await
+            .unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_key.as_deref(), Some("g1"));
+        assert_eq!(groups[0].oldest_eligible_age_ms, 90_000);
+        assert_eq!(groups[0].eligible_count, Some(2));
+        assert_eq!(groups[0].progress_bound_risk_count, None);
+
+        let queue = b
+            .discover_active_scopes(&qkey(), DiscoveryGranularity::Queue, ts(250))
+            .await
+            .unwrap();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].group_key, None);
+        assert_eq!(queue[0].oldest_eligible_age_ms, 240_000);
+        assert_eq!(queue[0].eligible_count, Some(3));
     }
 
     /// The commit envelope's request id propagates into every appended commit-path command (acceptance #4),

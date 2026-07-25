@@ -8,9 +8,9 @@ use fireweed::{
     AggregateGroup, BoundedMutationRequest, ClaimByQueryRequest, ClaimRef, CommitEntry,
     CommitRequest, DeclaredBucketSegmentRequest, EligibilityPolicy, FilterOp, FinalizeKind,
     GroupByField, GroupedAggregateRequest, ItemId, LibBackend, MutationOutcome, NewItem,
-    OrderField, OrderingMode, Pqueue, PriorityDirection, PriorityModel, PriorityModelKind,
+    OrderField, OrderingMode, PriorityDirection, PriorityModel, PriorityModelKind,
     PriorityTieBreaker, QueryFilter, QueueDefinition, QueueId, RangeScanRequest, RangeScanRow,
-    RecurrencePolicy, RetryPolicy, SortDirection, TenantId, TypedValue, UtcTimestamp,
+    RecurrencePolicy, RetryPolicy, RuntimeCore, SortDirection, TenantId, TypedValue, UtcTimestamp,
 };
 use fireweed_core::{
     CompoundIndexDef, CompoundIndexField, IndexDeclaration, IndexType, QueueIndex,
@@ -162,7 +162,7 @@ fn claim_due_scheduled_actions_request() -> ClaimByQueryRequest {
 
 #[tokio::test]
 async fn safe_recycling_rule_update_marks_only_act_001() {
-    let memory_pq = Pqueue::new(
+    let memory_pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -177,7 +177,7 @@ async fn safe_recycling_rule_update_marks_only_act_001() {
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = Pqueue::new(
+    let sqlite_pq = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -186,7 +186,7 @@ async fn safe_recycling_rule_update_marks_only_act_001() {
 
 #[tokio::test]
 async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
-    let memory_pq = Pqueue::new(
+    let memory_pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -201,7 +201,7 @@ async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = Pqueue::new(
+    let sqlite_pq = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -210,7 +210,7 @@ async fn bounded_mutation_rejects_claimed_records_without_losing_the_claim() {
 
 #[tokio::test]
 async fn claim_due_scheduled_actions_by_query() {
-    let memory_pq = Pqueue::new(
+    let memory_pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -225,7 +225,7 @@ async fn claim_due_scheduled_actions_by_query() {
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = Pqueue::new(
+    let sqlite_pq = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -234,7 +234,7 @@ async fn claim_due_scheduled_actions_by_query() {
 
 #[tokio::test]
 async fn hourly_distribution_by_status() {
-    let memory_pq = Pqueue::new(
+    let memory_pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -249,7 +249,7 @@ async fn hourly_distribution_by_status() {
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = Pqueue::new(
+    let sqlite_pq = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -258,7 +258,7 @@ async fn hourly_distribution_by_status() {
 
 #[tokio::test]
 async fn recycling_preview_by_hour() {
-    let memory_pq = Pqueue::new(
+    let memory_pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -273,7 +273,7 @@ async fn recycling_preview_by_hour() {
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = Pqueue::new(
+    let sqlite_pq = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -282,7 +282,7 @@ async fn recycling_preview_by_hour() {
 
 #[tokio::test]
 async fn engagement_probability_segments() {
-    let memory_pq = Pqueue::new(
+    let memory_pq = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -297,7 +297,7 @@ async fn engagement_probability_segments() {
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite_pq = Pqueue::new(
+    let sqlite_pq = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -583,7 +583,9 @@ fn assert_grouped_recycling_counts(
     assert_eq!(actual, expected);
 }
 
-async fn seed_scheduled_action_fixture<B: LibBackend>(pq: &Pqueue<B>) -> Vec<(ItemId, String)> {
+async fn seed_scheduled_action_fixture<B: LibBackend>(
+    pq: &RuntimeCore<B>,
+) -> Vec<(ItemId, String)> {
     let q = qkey();
     pq.create_queue(scheduled_action_queue_definition())
         .await
@@ -597,7 +599,7 @@ async fn seed_scheduled_action_fixture<B: LibBackend>(pq: &Pqueue<B>) -> Vec<(It
     ids
 }
 
-async fn assert_hourly_distribution_by_status_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+async fn assert_hourly_distribution_by_status_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
     let q = qkey();
     let _ = seed_scheduled_action_fixture(pq).await;
     let response = pq
@@ -635,7 +637,7 @@ async fn assert_hourly_distribution_by_status_on_backend<B: LibBackend>(pq: &Pqu
     );
 }
 
-async fn assert_recycling_preview_by_hour_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+async fn assert_recycling_preview_by_hour_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
     let q = qkey();
     let _ = seed_scheduled_action_fixture(pq).await;
     let response = pq
@@ -678,7 +680,7 @@ async fn assert_recycling_preview_by_hour_on_backend<B: LibBackend>(pq: &Pqueue<
     );
 }
 
-async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
     let q = qkey();
     let _ = seed_scheduled_action_fixture(pq).await;
     let response = pq
@@ -710,7 +712,7 @@ async fn assert_engagement_probability_segments_on_backend<B: LibBackend>(pq: &P
     );
 }
 
-async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &RuntimeCore<B>) {
     let q = qkey();
     seed_scheduled_action_fixture(pq).await;
     let before = pq
@@ -754,7 +756,7 @@ async fn assert_safe_recycling_rule_update_on_backend<B: LibBackend>(pq: &Pqueue
 }
 
 async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_claim<B: LibBackend>(
-    pq: &Pqueue<B>,
+    pq: &RuntimeCore<B>,
 ) {
     let q = qkey();
     seed_scheduled_action_fixture(pq).await;
@@ -788,7 +790,9 @@ async fn assert_bounded_mutation_rejects_claimed_records_without_losing_the_clai
     assert_eq!(still_claimed[0].item_version, claimed_version);
 }
 
-async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(pq: &Pqueue<B>) {
+async fn assert_claim_due_scheduled_actions_by_query_on_backend<B: LibBackend>(
+    pq: &RuntimeCore<B>,
+) {
     let q = qkey();
     let ids = seed_scheduled_action_fixture(pq).await;
     let ordinarily_claimed = pq.claim(&q, 1, 60_000).await.unwrap();
@@ -894,7 +898,7 @@ async fn backend_capability_advertising_is_explicit() {
         side_record_query: false,
     };
 
-    let memory = Pqueue::new(
+    let memory = RuntimeCore::new(
         Arc::new(composed_memory_backend()),
         Arc::new(ManualClock::at(0)),
     );
@@ -915,7 +919,7 @@ async fn backend_capability_advertising_is_explicit() {
         .unwrap()
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
-    let sqlite = Pqueue::new(
+    let sqlite = RuntimeCore::new(
         Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap()),
         Arc::new(ManualClock::at(0)),
     );
@@ -963,7 +967,14 @@ async fn backend_capability_advertising_is_explicit() {
     );
     assert_eq!(
         unsupported
-            .bounded_mutation(&q, bounded_mutation_request())
+            .bounded_mutation(
+                &q,
+                bounded_mutation_request(),
+                fireweed_engine::BoundedMutationContext {
+                    now: UtcTimestamp::new(0, 0).unwrap(),
+                    expected_epoch: None,
+                },
+            )
             .await,
         Err(EngineError::Unavailable)
     );
@@ -975,6 +986,7 @@ async fn backend_capability_advertising_is_explicit() {
                 fireweed_engine::ClaimByQueryContext {
                     now: UtcTimestamp::new(0, 0).unwrap(),
                     eligibility_time: None,
+                    expected_epoch: None,
                 },
             )
             .await,
@@ -1145,7 +1157,7 @@ fn action_id_map(ids: &[(ItemId, String)], rows: &[RangeScanRow]) -> Vec<String>
 async fn ordered_cursor_pagination_is_stable() {
     let q = qkey();
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     pq.create_queue(scheduled_action_queue_definition())
         .await
         .unwrap();
@@ -1279,7 +1291,7 @@ async fn detail_range_filter_by_run_status_and_schedule() {
         .to_string();
     let _ = std::fs::remove_file(&sqlite_path);
     let backend = Arc::new(SqliteRelationalBackend::open(&sqlite_path).unwrap());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     pq.create_queue(scheduled_action_queue_definition())
         .await
         .unwrap();
@@ -1347,7 +1359,7 @@ async fn detail_range_filter_by_run_status_and_schedule() {
 #[tokio::test]
 async fn hot_projection_fixture_seeds_six_claimable_records_and_resolves_target_key_lookup() {
     let backend = Arc::new(composed_memory_backend());
-    let pq = Pqueue::new(backend, Arc::new(ManualClock::at(0)));
+    let pq = RuntimeCore::new(backend, Arc::new(ManualClock::at(0)));
     let q = qkey();
     pq.create_queue(scheduled_action_queue_definition())
         .await

@@ -6,9 +6,9 @@ use fireweed_core::{
     UtcTimestamp,
 };
 use fireweed_engine::{
-    ActiveScope, ClaimCompatibility, ClaimedItem, CohortLeaseTarget, DiscoveryGranularity,
-    EngineError, EngineResult, ItemView, LeaseView, LiveItemView, PendingPage, PendingSummary,
-    QueueKey, QueueMetrics, project_scopes,
+    ActiveScope, BatchUpdateItemRef, BatchUpdateSnapshotItem, ClaimCompatibility, ClaimedItem,
+    CohortLeaseTarget, DiscoveryGranularity, EngineError, EngineResult, ItemView, LeaseView,
+    LiveItemView, PendingPage, PendingSummary, QueueKey, QueueMetrics, project_scopes,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -18,6 +18,71 @@ use super::*;
 // ---------------------------------------------------------------------------
 // read queries (SQL over pqueue_items)
 // ---------------------------------------------------------------------------
+
+pub(crate) fn batch_update_snapshot_sql(
+    conn: &Connection,
+    shard: &QueueKey,
+    refs: &[BatchUpdateItemRef],
+) -> EngineResult<Vec<BatchUpdateSnapshotItem>> {
+    let (tenant, queue) = parts(shard);
+    let mut ids = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    for item_ref in refs {
+        match item_ref {
+            BatchUpdateItemRef::ItemId(item_id) => {
+                ids.insert(item_id.to_string());
+            }
+            BatchUpdateItemRef::ClientItemKey(key) => {
+                keys.insert(key.as_str().to_owned());
+            }
+            BatchUpdateItemRef::Both {
+                item_id,
+                client_item_key,
+            } => {
+                ids.insert(item_id.to_string());
+                keys.insert(client_item_key.as_str().to_owned());
+            }
+        }
+    }
+    let ids_json =
+        serde_json::to_string(&ids).map_err(|error| EngineError::Storage(error.to_string()))?;
+    let keys_json =
+        serde_json::to_string(&keys).map_err(|error| EngineError::Storage(error.to_string()))?;
+    let mut stmt = st(conn.prepare(
+        "SELECT item_id,client_item_key,lifecycle_state,item_version,fenced,superseded \
+         FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND (\
+         item_id IN (SELECT value FROM json_each(?3)) OR \
+         client_item_key IN (SELECT value FROM json_each(?4)))",
+    ))?;
+    let rows = st(
+        stmt.query_map(params![tenant, queue, ids_json, keys_json], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        }),
+    )?;
+    let mut snapshot = Vec::new();
+    for row in rows {
+        let (item_id, client_item_key, state, item_version, fenced, superseded) = st(row)?;
+        snapshot.push(BatchUpdateSnapshotItem {
+            item_id: ItemId::new(item_id)
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            client_item_key: ClientItemKey::new(client_item_key)
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            state: parse_state(&state)?,
+            item_version: u64::try_from(item_version)
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            fenced: fenced != 0,
+            superseded: superseded != 0,
+        });
+    }
+    Ok(snapshot)
+}
 
 pub(crate) fn queue_paused(conn: &Connection, shard: &QueueKey) -> EngineResult<bool> {
     let (t, q) = parts(shard);
@@ -531,6 +596,10 @@ pub(crate) fn peek_sql(
     let mut stmt = st(conn.prepare(
         "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+           ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+           WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+           AND ig.item_id=pqueue_items.item_id) \
          ORDER BY priority_sort, created_seq LIMIT ?3",
     ))?;
     let rows = st(stmt.query_map(params![t, q, limit as i64], |row| {
@@ -567,10 +636,18 @@ pub(crate) fn peek_page_sql(
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
            AND (priority_sort, created_seq, item_id) > (SELECT priority_sort, created_seq, item_id \
              FROM pqueue_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3) \
+           AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+             ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+             WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+             AND ig.item_id=pqueue_items.item_id) \
          ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
     } else {
         "SELECT item_id, client_item_key, priority, item_version FROM pqueue_items \
          WHERE tenant_id=?1 AND queue_id=?2 AND lifecycle_state='Pending' AND superseded=0 \
+         AND NOT EXISTS (SELECT 1 FROM pqueue_item_gates ig JOIN pqueue_gate_state gs \
+           ON gs.tenant_id=ig.tenant_id AND gs.queue_id=ig.queue_id AND gs.gate_key=ig.gate_key \
+           WHERE ig.tenant_id=pqueue_items.tenant_id AND ig.queue_id=pqueue_items.queue_id \
+           AND ig.item_id=pqueue_items.item_id) \
          ORDER BY priority_sort, created_seq, item_id LIMIT ?4"
     };
     let mut stmt = st(conn.prepare(sql))?;
@@ -1511,6 +1588,65 @@ mod reclaim_page_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static RECLAIM_SELECTS: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn batch_update_snapshot_resolves_ids_and_keys_in_one_query() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE pqueue_items (
+                tenant_id TEXT NOT NULL,
+                queue_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                client_item_key TEXT NOT NULL,
+                lifecycle_state TEXT NOT NULL,
+                item_version INTEGER NOT NULL,
+                fenced INTEGER NOT NULL,
+                superseded INTEGER NOT NULL
+             );",
+        )
+        .unwrap();
+        let shard = QueueKey::new(
+            TenantId::new("tenant").unwrap(),
+            QueueId::new("queue").unwrap(),
+        );
+        let first = ItemId::from_u64(1);
+        let second = ItemId::from_u64(2);
+        conn.execute(
+            "INSERT INTO pqueue_items VALUES (?1,?2,?3,'key-1','Pending',4,0,0)",
+            params![
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                first.to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO pqueue_items VALUES (?1,?2,?3,'key-2','Leased',7,1,0)",
+            params![
+                shard.tenant_id.as_str(),
+                shard.queue_id.as_str(),
+                second.to_string()
+            ],
+        )
+        .unwrap();
+
+        let mut rows = batch_update_snapshot_sql(
+            &conn,
+            &shard,
+            &[
+                BatchUpdateItemRef::ItemId(first),
+                BatchUpdateItemRef::ClientItemKey(ClientItemKey::new("key-2").unwrap()),
+            ],
+        )
+        .unwrap();
+        rows.sort_by_key(|row| row.item_id);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].item_version, 4);
+        assert_eq!(rows[0].state, ItemState::Pending);
+        assert_eq!(rows[1].item_version, 7);
+        assert_eq!(rows[1].state, ItemState::Leased);
+        assert!(rows[1].fenced);
+    }
 
     fn count_reclaim_select(statement: &str) {
         if statement

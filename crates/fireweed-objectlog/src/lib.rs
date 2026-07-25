@@ -7,7 +7,7 @@
 //! [`fireweed_projection::ProjectionData`] materialization, **rebuilt from the object log** on open.
 //!
 //! Class semantics (TD-007 §2 / Invariant 2): upsert (the atomic XDEL+XADD `replace_if_pending`) is NOT
-//! offered on this class — it returns [`EngineError::Unavailable`] (`-ERR pqueue unavailable`). The
+//! offered on this class — it returns [`EngineError::Unavailable`] (`-ERR fireweed unavailable`). The
 //! durability boundary is the object write; the in-memory projection is a derived view reconstructed by
 //! replaying the objects, so a lost/late projection update is always recoverable from the durable log.
 //!
@@ -1064,7 +1064,7 @@ impl UpsertPort for ObjectLogBackend {
         _expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<UpsertOutcome>> + Send {
         // Invariant 2 / TD-007 §2.3: the atomic XDEL+XADD upsert is not offered on the eventual-apply
-        // class. Refuse with the structured `Unavailable` (`-ERR pqueue unavailable`).
+        // class. Refuse with the structured `Unavailable` (`-ERR fireweed unavailable`).
         std::future::ready(Err(EngineError::Unavailable))
     }
 }
@@ -1085,7 +1085,7 @@ impl UpdateFieldsPort for ObjectLogBackend {
         // FAC-1: in-place field/payload merge is a read-your-write mutation that returns the new
         // `item_version` from a state this class cannot serve (the durable boundary is the object write;
         // the projection is a derived, possibly-late view). Like `replace_if_pending`, refuse with the
-        // structured `Unavailable` (`-ERR pqueue unavailable`) BEFORE committing anything.
+        // structured `Unavailable` (`-ERR fireweed unavailable`) BEFORE committing anything.
         std::future::ready(Err(EngineError::Unavailable))
     }
 }

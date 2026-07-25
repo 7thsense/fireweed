@@ -38,10 +38,12 @@ use fireweed_core::{
     apply_transition, failure_event, priority_sort,
 };
 use fireweed_engine::{
-    ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition, EngineError, EngineResult,
-    FinalizeKind, FinalizeOutcome, IndexHit, ItemView, LeaseView, LiveItemView, PayloadUpdate,
-    PendingPage, PendingSummary, ProjectionSnapshot, PushItem, QueueCommand, QueueCounters,
-    QueueKey, QueueMetrics, ScheduleUpdate, SnapshotRef, TerminalEmissionMetrics,
+    ActiveScope, BatchUpdateItemRef, BatchUpdateSnapshotItem, BoundedMutationPlan,
+    BoundedMutationUpdate, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
+    DiscoveryGranularity, EngineError, EngineResult, FinalizeKind, FinalizeOutcome, IndexHit,
+    ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary,
+    ProjectionSnapshot, PushItem, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    ScheduleUpdate, SnapshotRef, TerminalEmissionMetrics, UpdateFieldsCommand, project_scopes,
 };
 use serde_json::Value;
 
@@ -57,7 +59,11 @@ struct ItemRecord {
     explicit_client_item_key: Option<ClientItemKey>,
     priority: Option<PriorityValue>,
     not_before: Option<UtcTimestamp>,
+    /// When the item most recently became eligible under scheduling semantics. Gate state and `now`
+    /// are applied at read time, so blocking/unblocking a gate does not rewrite this timestamp.
+    eligible_since: UtcTimestamp,
     group_key: Option<GroupKey>,
+    cohort_size: Option<u64>,
     payload: Option<Bytes>,
     fields: BTreeMap<String, Bytes>,
     metadata: Metadata,
@@ -90,7 +96,13 @@ pub struct ProjectionImageItem {
     pub client_item_key: ClientItemKey,
     pub priority: Option<PriorityValue>,
     pub not_before: Option<UtcTimestamp>,
+    /// Optional only for backwards compatibility with snapshots written before active-scope discovery
+    /// was materialized by the shared projection.
+    #[serde(default)]
+    pub eligible_since: Option<UtcTimestamp>,
     pub group_key: Option<GroupKey>,
+    #[serde(default)]
+    pub cohort_size: Option<u64>,
     pub payload: Option<Bytes>,
     pub fields: BTreeMap<String, Bytes>,
     pub metadata: Metadata,
@@ -122,7 +134,9 @@ impl From<&ItemRecord> for ProjectionImageItem {
             client_item_key: rec.client_item_key(),
             priority: rec.priority.clone(),
             not_before: rec.not_before,
+            eligible_since: Some(rec.eligible_since),
             group_key: rec.group_key.clone(),
+            cohort_size: rec.cohort_size,
             payload: rec.payload.clone(),
             fields: rec.fields.clone(),
             metadata: rec.metadata.clone(),
@@ -153,7 +167,15 @@ impl From<ProjectionImageItem> for ItemRecord {
             explicit_client_item_key,
             priority: item.priority,
             not_before: item.not_before,
+            eligible_since: item
+                .eligible_since
+                .or(item.not_before)
+                .unwrap_or(UtcTimestamp {
+                    seconds: 0,
+                    nanoseconds: 0,
+                }),
             group_key: item.group_key,
+            cohort_size: item.cohort_size,
             payload: item.payload,
             fields: item.fields,
             metadata: item.metadata,
@@ -186,6 +208,9 @@ pub struct ProjectionImage {
     pub paused: bool,
     #[serde(default)]
     pub pause_drain_intake: bool,
+    /// Operator-blocked dynamic gate keys. Default keeps older snapshots readable.
+    #[serde(default)]
+    pub blocked_gates: BTreeSet<String>,
     pub next_seq: u64,
     pub items: Vec<ProjectionImageItem>,
     pub side_records: BTreeMap<Vec<u8>, Bytes>,
@@ -494,6 +519,10 @@ fn locality_key(key: &EligKey) -> (bool, Option<&GroupKey>) {
 
 fn due_at(key: &EligKey, now: UtcTimestamp) -> bool {
     key.not_before.map(|nb| nb <= now).unwrap_or(true)
+}
+
+fn gate_keys_blocked(blocked_gates: &BTreeSet<String>, gate_keys: &[String]) -> bool {
+    gate_keys.iter().any(|key| blocked_gates.contains(key))
 }
 
 fn timestamp_to_ms(ts: UtcTimestamp) -> i128 {
@@ -1191,6 +1220,165 @@ pub fn filtered_lifecycle_metrics_by_index_key<'a>(
     Ok(metrics)
 }
 
+/// Reconstruct the smallest projection image needed to evaluate API-004 read queries from the canonical
+/// typed keys persisted by a relational adapter.
+///
+/// Relational projections deliberately persist the canonical index representation rather than a second
+/// copy of the caller's entity document. This adapter keeps the query semantics in one place: backends load
+/// `(item_id, index_key)` rows, this function decodes only the selected declaration, and callers invoke the
+/// ordinary [`ProjectionData`] range/group/bucket evaluators. A missing key represents a sparse/null row.
+pub fn query_projection_from_index_keys(
+    definition: &QueueDefinition,
+    index_name: Option<&str>,
+    records: impl IntoIterator<Item = (ItemId, Option<Vec<u8>>)>,
+) -> EngineResult<ProjectionData> {
+    let spec = match index_name {
+        Some(name) => definition
+            .typed_indexes
+            .iter()
+            .find(|spec| spec.name == name)
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+        None => definition
+            .typed_indexes
+            .first()
+            .ok_or(EngineError::Invalid("unknown secondary index"))?,
+    };
+    let fields = index_fields(spec);
+
+    fn decode_component(bytes: &[u8], index_type: &IndexType) -> EngineResult<TypedValue> {
+        let storage = || EngineError::Storage("invalid canonical index key".into());
+        Ok(match index_type {
+            IndexType::String => TypedValue::String(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| storage())?
+                    .to_owned(),
+            ),
+            IndexType::Integer => {
+                let encoded = u64::from_be_bytes(bytes.try_into().map_err(|_| storage())?);
+                TypedValue::Integer((encoded ^ (1_u64 << 63)) as i64)
+            }
+            IndexType::Float => {
+                let encoded = u64::from_be_bytes(bytes.try_into().map_err(|_| storage())?);
+                let bits = if encoded & (1_u64 << 63) != 0 {
+                    encoded & !(1_u64 << 63)
+                } else {
+                    !encoded
+                };
+                TypedValue::Float(f64::from_bits(bits))
+            }
+            IndexType::Boolean => match bytes {
+                [0] => TypedValue::Bool(false),
+                [1] => TypedValue::Bool(true),
+                _ => return Err(storage()),
+            },
+            IndexType::Datetime => {
+                let encoded = u64::from_be_bytes(bytes.try_into().map_err(|_| storage())?);
+                let nanos = (encoded ^ (1_u64 << 63)) as i64;
+                TypedValue::DateTime(UtcTimestamp {
+                    seconds: nanos.div_euclid(1_000_000_000),
+                    nanoseconds: nanos.rem_euclid(1_000_000_000) as u32,
+                })
+            }
+        })
+    }
+
+    fn insert_dotted(root: &mut Value, path: &str, value: Value) -> EngineResult<()> {
+        // ProjectionData's query evaluator addresses declared names directly while Axon's index-key
+        // builder resolves dotted paths. Retain both views in this transient document.
+        root.as_object_mut()
+            .ok_or_else(|| EngineError::Storage("typed index entity is not an object".into()))?
+            .insert(path.to_owned(), value.clone());
+        let mut cursor = root;
+        let mut parts = path.split('.').peekable();
+        while let Some(part) = parts.next() {
+            let object = cursor
+                .as_object_mut()
+                .ok_or_else(|| EngineError::Storage("overlapping typed index paths".into()))?;
+            if parts.peek().is_none() {
+                object.insert(part.to_owned(), value);
+                return Ok(());
+            }
+            cursor = object
+                .entry(part)
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        }
+        Err(EngineError::Storage("empty typed index path".into()))
+    }
+
+    let mut items = Vec::new();
+    for (created_seq, (item_id, key)) in records.into_iter().enumerate() {
+        let mut entity = Value::Object(serde_json::Map::new());
+        if let Some(key) = key {
+            let mut offset = 0usize;
+            for (field, index_type) in &fields {
+                let length_bytes: [u8; 4] = key
+                    .get(offset..offset + 4)
+                    .ok_or_else(|| EngineError::Storage("invalid canonical index key".into()))?
+                    .try_into()
+                    .expect("four-byte length slice");
+                offset += 4;
+                let length = u32::from_be_bytes(length_bytes) as usize;
+                let component = key
+                    .get(offset..offset + length)
+                    .ok_or_else(|| EngineError::Storage("invalid canonical index key".into()))?;
+                offset += length;
+                let typed = decode_component(component, index_type)?;
+                insert_dotted(&mut entity, field, typed_value_to_json(&typed)?)?;
+            }
+            if offset != key.len() {
+                return Err(EngineError::Storage("invalid canonical index key".into()));
+            }
+        }
+        items.push(ProjectionImageItem {
+            item_id,
+            client_item_key: ClientItemKey::new(format!("query-{item_id}"))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            priority: None,
+            not_before: None,
+            eligible_since: Some(UtcTimestamp {
+                seconds: 0,
+                nanoseconds: 0,
+            }),
+            group_key: None,
+            cohort_size: None,
+            payload: None,
+            fields: BTreeMap::new(),
+            metadata: Metadata::default(),
+            gate_keys: Vec::new(),
+            entity_document: Some(entity),
+            state: ItemState::Pending,
+            item_version: 1,
+            attempt_count: 0,
+            max_attempts: 1,
+            created_seq: created_seq as u64,
+            lease_token: None,
+            lease_expires_at: None,
+            lease_is_cohort: false,
+            worker_id: None,
+            fenced: false,
+            superseded: false,
+            terminal_at: None,
+            terminal_position: None,
+        });
+    }
+    let mut query_definition = definition.clone();
+    query_definition.typed_indexes = vec![spec.clone()];
+    ProjectionData::from_image(
+        &query_definition,
+        ProjectionImage {
+            high_water: None,
+            paused: false,
+            pause_drain_intake: false,
+            blocked_gates: BTreeSet::new(),
+            next_seq: items.len() as u64,
+            items,
+            side_records: BTreeMap::new(),
+            instance_fences: BTreeMap::new(),
+            metrics: QueueMetrics::default(),
+        },
+    )
+}
+
 fn typed_value_to_json(value: &TypedValue) -> EngineResult<Value> {
     Ok(match value {
         TypedValue::String(v) => Value::String(v.clone()),
@@ -1422,6 +1610,12 @@ pub struct ProjectionData {
     recurrence: RecurrencePolicy,
     paused: bool,
     pause_drain_intake: bool,
+    /// Dynamic operator gate state. A pending item is indexed as eligible only
+    /// when none of its `gate_keys` are present here.
+    blocked_gates: BTreeSet<String>,
+    /// Reverse membership index keeps a gate flip proportional to items using
+    /// the named gates rather than total resident queue cardinality.
+    gate_members: FastHashMap<String, BTreeSet<ItemId>>,
     /// Per-queue secondary indexes, keyed by declaration name. Built once from the queue's specs and
     /// maintained in the same `apply_command` arms that maintain `eligible`.
     indexes: BTreeMap<String, SecondaryIndex>,
@@ -1472,6 +1666,8 @@ impl ProjectionData {
             recurrence,
             paused: false,
             pause_drain_intake: false,
+            blocked_gates: BTreeSet::new(),
+            gate_members: FastHashMap::default(),
             indexes,
             index_specs: specs.to_vec(),
             typed_index_specs: Vec::new(),
@@ -1507,6 +1703,7 @@ impl ProjectionData {
             high_water,
             paused: self.paused,
             pause_drain_intake: self.pause_drain_intake,
+            blocked_gates: self.blocked_gates.clone(),
             next_seq: self.next_seq,
             items,
             side_records: self.side_records.clone(),
@@ -1528,12 +1725,20 @@ impl ProjectionData {
         .with_typed_indexes(&definition.typed_indexes);
         projection.paused = image.paused;
         projection.pause_drain_intake = image.pause_drain_intake;
+        projection.blocked_gates = image.blocked_gates;
         projection.next_seq = image.next_seq;
         projection.side_records = image.side_records;
         projection.instance_fences = image.instance_fences;
 
         for item in image.items {
             let rec = ItemRecord::from(item);
+            for gate_key in &rec.gate_keys {
+                projection
+                    .gate_members
+                    .entry(gate_key.clone())
+                    .or_default()
+                    .insert(rec.item_id);
+            }
             if !rec.superseded {
                 if let Some(key) = rec.explicit_client_item_key.clone() {
                     projection.by_key.insert(key, rec.item_id);
@@ -1542,7 +1747,10 @@ impl ProjectionData {
                     projection.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
                 projection.index_insert_keys(rec.item_id, &keys);
             }
-            if rec.state == ItemState::Pending && !rec.superseded {
+            if rec.state == ItemState::Pending
+                && !rec.superseded
+                && !gate_keys_blocked(&projection.blocked_gates, &rec.gate_keys)
+            {
                 projection
                     .eligible
                     .insert(&rec, &projection.items, &projection.priority_model);
@@ -1618,6 +1826,23 @@ impl ProjectionData {
         }
     }
 
+    fn replace_gate_memberships(&mut self, item_id: ItemId, old: &[String], new: &[String]) {
+        for key in old.iter().filter(|key| !new.contains(key)) {
+            if let Some(items) = self.gate_members.get_mut(key) {
+                items.remove(&item_id);
+                if items.is_empty() {
+                    self.gate_members.remove(key);
+                }
+            }
+        }
+        for key in new.iter().filter(|key| !old.contains(key)) {
+            self.gate_members
+                .entry(key.clone())
+                .or_default()
+                .insert(item_id);
+        }
+    }
+
     fn record_index_keys(
         &self,
         fields: &BTreeMap<String, Bytes>,
@@ -1628,9 +1853,20 @@ impl ProjectionData {
         Ok(keys)
     }
 
-    fn insert_pending(&mut self, item: PushItem) -> EngineResult<()> {
+    fn insert_pending(
+        &mut self,
+        item: PushItem,
+        command_at: Option<UtcTimestamp>,
+    ) -> EngineResult<()> {
         let seq = self.next_seq;
         self.next_seq += 1;
+        let command_at = command_at.unwrap_or(UtcTimestamp {
+            seconds: 0,
+            nanoseconds: 0,
+        });
+        // Relational parity: a deferred push ages from its scheduled time; an immediate push ages from
+        // command creation. A past `not_before` remains the authoritative eligible-since timestamp.
+        let eligible_since = item.not_before.unwrap_or(command_at);
         let rec = ItemRecord {
             item_id: item.item_id,
             explicit_client_item_key: explicit_client_item_key(
@@ -1639,7 +1875,9 @@ impl ProjectionData {
             ),
             priority: item.priority,
             not_before: item.not_before,
+            eligible_since,
             group_key: item.group_key,
+            cohort_size: item.cohort_size,
             payload: item.payload,
             fields: item.fields,
             metadata: item.metadata,
@@ -1659,10 +1897,18 @@ impl ProjectionData {
             terminal_at: None,
             terminal_position: None,
         };
-        self.eligible
-            .insert(&rec, &self.items, &self.priority_model);
+        if !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys) {
+            self.eligible
+                .insert(&rec, &self.items, &self.priority_model);
+        }
         if let Some(key) = rec.explicit_client_item_key.clone() {
             self.by_key.insert(key, rec.item_id);
+        }
+        for gate_key in &rec.gate_keys {
+            self.gate_members
+                .entry(gate_key.clone())
+                .or_default()
+                .insert(rec.item_id);
         }
         let keys = self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
         self.index_insert_keys(rec.item_id, &keys);
@@ -1723,13 +1969,14 @@ impl ProjectionData {
         let (old_key, new_key, old_state, new_state, old_token, old_expiry) = {
             let rec = self.items.get_mut(id).ok_or(EngineError::NotFound)?;
             // A superseded id (replaced by upsert) must never re-enter eligible or mutate
-            // (TD-007 §2.3): the orchestration ports map this to `-ERR pqueue superseded`.
+            // (TD-007 §2.3): the orchestration ports map this to `-ERR fireweed superseded`.
             if rec.superseded {
                 return Err(EngineError::Superseded);
             }
             let old_state = rec.state;
-            let old =
-                (old_state == ItemState::Pending).then(|| EligibilityIndex::token(rec, &model));
+            let old = (old_state == ItemState::Pending
+                && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
+            .then(|| EligibilityIndex::token(rec, &model));
             let new = apply_transition(old_state, ev)
                 .map_err(|_| EngineError::Invalid("illegal lifecycle transition"))?;
             rec.state = new;
@@ -1744,7 +1991,9 @@ impl ProjectionData {
                 rec.terminal_at = None;
                 rec.terminal_position = None;
             }
-            let nk = (new == ItemState::Pending).then(|| EligibilityIndex::token(rec, &model));
+            let nk = (new == ItemState::Pending
+                && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
+            .then(|| EligibilityIndex::token(rec, &model));
             (
                 old,
                 nk,
@@ -1803,7 +2052,7 @@ impl ProjectionData {
                         .count(),
                 );
                 for it in &c.items {
-                    self.insert_pending(it.clone())?;
+                    self.insert_pending(it.clone(), terminal_at)?;
                 }
                 Ok(())
             }
@@ -1922,7 +2171,7 @@ impl ProjectionData {
             }
             QueueCommand::UpdateFields(c) => {
                 let model = self.priority_model;
-                let (old_keys, old_elig, new_keys, new_elig) = {
+                let (old_keys, old_elig, new_keys, new_elig, old_gate_keys, new_gate_keys) = {
                     let rec = self.items.get(&c.item_id).ok_or(EngineError::NotFound)?;
                     // A field/payload merge and/or a priority/not_before reschedule (no lifecycle change),
                     // so it relies on `update_fields_validate` having run pre-commit.
@@ -1934,11 +2183,15 @@ impl ProjectionData {
                         self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
                     let repricing = matches!(c.set_priority, ScheduleUpdate::Set(_))
                         || matches!(c.set_not_before, ScheduleUpdate::Set(_));
+                    let eligibility_changed = repricing || c.set_gate_keys.is_some();
                     let was_pending = rec.state == ItemState::Pending;
-                    let old_elig =
-                        (repricing && was_pending).then(|| EligibilityIndex::token(rec, &model));
+                    let old_elig = (eligibility_changed
+                        && was_pending
+                        && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
+                    .then(|| EligibilityIndex::token(rec, &model));
 
-                    let mut next_fields = rec.fields.clone();
+                    let mut next_fields =
+                        c.set_fields.clone().unwrap_or_else(|| rec.fields.clone());
                     for (k, op) in &c.field_ops {
                         match op {
                             Some(v) => {
@@ -1963,6 +2216,9 @@ impl ProjectionData {
                     if let PayloadUpdate::Set(p) = &c.payload {
                         next_rec.payload = p.clone();
                     }
+                    if let Some(gate_keys) = &c.set_gate_keys {
+                        next_rec.gate_keys = gate_keys.clone();
+                    }
                     if let ScheduleUpdate::Set(p) = &c.set_priority {
                         next_rec.priority = p.clone();
                     }
@@ -1970,14 +2226,26 @@ impl ProjectionData {
                         next_rec.not_before = *nb;
                     }
                     next_rec.item_version += 1;
-                    let new_elig = (repricing && was_pending)
-                        .then(|| EligibilityIndex::token(&next_rec, &model));
-                    (old_keys, old_elig, new_keys, new_elig)
+                    let new_elig = (eligibility_changed
+                        && was_pending
+                        && !gate_keys_blocked(&self.blocked_gates, &next_rec.gate_keys))
+                    .then(|| EligibilityIndex::token(&next_rec, &model));
+                    (
+                        old_keys,
+                        old_elig,
+                        new_keys,
+                        new_elig,
+                        rec.gate_keys.clone(),
+                        next_rec.gate_keys,
+                    )
                 };
                 let rec = self
                     .items
                     .get_mut(&c.item_id)
                     .ok_or(EngineError::NotFound)?;
+                if let Some(fields) = &c.set_fields {
+                    rec.fields = fields.clone();
+                }
                 for (k, op) in &c.field_ops {
                     match op {
                         Some(v) => {
@@ -1992,6 +2260,12 @@ impl ProjectionData {
                     PayloadUpdate::Keep => {}
                     PayloadUpdate::Set(p) => rec.payload = p.clone(),
                 }
+                if let Some(metadata) = &c.set_metadata {
+                    rec.metadata = metadata.clone();
+                }
+                if let Some(gate_keys) = &c.set_gate_keys {
+                    rec.gate_keys = gate_keys.clone();
+                }
                 if c.set_entity_document.is_some() {
                     rec.entity_document = c.set_entity_document.clone();
                 }
@@ -2000,6 +2274,10 @@ impl ProjectionData {
                 }
                 if let ScheduleUpdate::Set(nb) = &c.set_not_before {
                     rec.not_before = *nb;
+                    if !c.api001_batch {
+                        let now = terminal_at.unwrap_or(rec.eligible_since);
+                        rec.eligible_since = nb.unwrap_or(now).max(now);
+                    }
                 }
                 rec.item_version += 1;
                 let item_id = c.item_id;
@@ -2015,6 +2293,7 @@ impl ProjectionData {
                     .collect();
                 self.index_remove_keys(item_id, &removed);
                 self.index_insert_keys(item_id, &added);
+                self.replace_gate_memberships(item_id, &old_gate_keys, &new_gate_keys);
                 // Re-key the eligibility index for a repriced/rescheduled Pending item (no-op otherwise —
                 // a non-reprice/non-reschedule or a Leased item leaves the eligibility set unchanged).
                 if let Some(old) = old_elig {
@@ -2079,7 +2358,9 @@ impl ProjectionData {
                         // A rearm that returned to Pending (within `until`) resets the delivery count and,
                         // when the caller supplied the next-occurrence time, defers re-eligibility to that
                         // new `not_before` (the idle interval). Re-key after the record mutation.
-                        let old_elig = (rec.state == ItemState::Pending).then(|| {
+                        let old_elig = (rec.state == ItemState::Pending
+                            && !gate_keys_blocked(&self.blocked_gates, &rec.gate_keys))
+                        .then(|| {
                             let model = self.priority_model;
                             EligibilityIndex::token(rec, &model)
                         });
@@ -2089,6 +2370,8 @@ impl ProjectionData {
                             if let Some(nb) = o.not_before {
                                 rec.not_before = Some(nb);
                             }
+                            let now = terminal_at.unwrap_or(rec.eligible_since);
+                            rec.eligible_since = o.not_before.unwrap_or(now).max(now);
                         }
                         // Queue-native retry backoff: a Retry that returned the item to Pending (still under
                         // the attempt bound) defers its re-eligibility to `not_before`. Guarded on Pending so
@@ -2098,6 +2381,7 @@ impl ProjectionData {
                             && let Some(nb) = o.not_before
                         {
                             rec.not_before = Some(nb);
+                            rec.eligible_since = nb;
                         }
                         if let Some(old) = old_elig {
                             let model = self.priority_model;
@@ -2130,6 +2414,11 @@ impl ProjectionData {
                     .get(&c.superseded_item_id)
                     .map(|rec| self.record_index_keys(&rec.fields, rec.entity_document.as_ref()))
                     .transpose()?;
+                let superseded_gate_keys = self
+                    .items
+                    .get(&c.superseded_item_id)
+                    .map(|rec| rec.gate_keys.clone())
+                    .unwrap_or_default();
                 if let Some(rec) = self.items.get_mut(&c.superseded_item_id) {
                     let old = (rec.state == ItemState::Pending)
                         .then(|| EligibilityIndex::token(rec, &model));
@@ -2146,8 +2435,9 @@ impl ProjectionData {
                 if let Some(keys) = superseded_keys {
                     self.index_remove_keys(c.superseded_item_id, &keys);
                 }
+                self.replace_gate_memberships(c.superseded_item_id, &superseded_gate_keys, &[]);
                 self.by_key.remove(&c.client_item_key);
-                self.insert_pending(c.replacement.clone())?;
+                self.insert_pending(c.replacement.clone(), terminal_at)?;
                 Ok(())
             }
             QueueCommand::LeaseExpired(c) => {
@@ -2233,9 +2523,53 @@ impl ProjectionData {
                 self.pause_drain_intake = false;
                 Ok(())
             }
-            // Gates (BQ-14d) are a relational-mode feature; the in-memory family stores no gate state and
-            // no item gate keys, so a gate flip is a no-op here (the log-replay backends replay it as such).
-            QueueCommand::SetGates(_) => Ok(()),
+            QueueCommand::SetGates(c) => {
+                // Capture eligibility under the old gate state, then update the
+                // derived eligibility index only for items whose blocked state changed.
+                let affected = c
+                    .gate_keys
+                    .iter()
+                    .filter_map(|key| self.gate_members.get(key))
+                    .flatten()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let old = affected
+                    .into_iter()
+                    .filter_map(|item_id| {
+                        self.items.get(&item_id).and_then(|record| {
+                            (record.state == ItemState::Pending && !record.superseded).then(|| {
+                                (
+                                    item_id,
+                                    gate_keys_blocked(&self.blocked_gates, &record.gate_keys),
+                                )
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                for key in &c.gate_keys {
+                    if c.blocked {
+                        self.blocked_gates.insert(key.clone());
+                    } else {
+                        self.blocked_gates.remove(key);
+                    }
+                }
+                for (item_id, was_blocked) in old {
+                    let record = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
+                    let is_blocked = gate_keys_blocked(&self.blocked_gates, &record.gate_keys);
+                    match (was_blocked, is_blocked) {
+                        (false, true) => {
+                            let token = EligibilityIndex::token(record, &self.priority_model);
+                            self.eligible.remove(token);
+                        }
+                        (true, false) => {
+                            self.eligible
+                                .insert(record, &self.items, &self.priority_model);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
             // Opaque non-work side records (Snorri authoritative-commit boundary): write each key -> payload
             // into the SEPARATE side-record map. Deliberately touches NOTHING in the work-item projection —
             // not `items`, `eligible`, `by_key`, the secondary indexes, nor metrics — so a side record is
@@ -2277,6 +2611,63 @@ impl ProjectionData {
 
     pub fn is_intake_blocked(&self) -> bool {
         self.paused && self.pause_drain_intake
+    }
+
+    /// Exact intrinsic active-scope discovery over the shared projection. This intentionally ignores the
+    /// queue pause flag (operators still need to see pause-induced buildup), but applies every item-level
+    /// eligibility predicate at `now`, including due time, supersession, lifecycle, and dynamic gates.
+    pub fn discover_active_scopes(
+        &self,
+        queue_id: &str,
+        granularity: DiscoveryGranularity,
+        now: UtcTimestamp,
+    ) -> Vec<ActiveScope> {
+        let mut groups: BTreeMap<Option<String>, (UtcTimestamp, u64)> = BTreeMap::new();
+        for record in self.items.values().filter(|record| {
+            record.state == ItemState::Pending
+                && !record.superseded
+                && record.not_before.is_none_or(|not_before| not_before <= now)
+                && !gate_keys_blocked(&self.blocked_gates, &record.gate_keys)
+        }) {
+            groups
+                .entry(record.group_key.as_ref().map(|key| key.as_str().to_owned()))
+                .and_modify(|(oldest, count)| {
+                    *oldest = (*oldest).min(record.eligible_since);
+                    *count = count.saturating_add(1);
+                })
+                .or_insert((record.eligible_since, 1));
+        }
+
+        let now_ns = i128::from(now.seconds) * 1_000_000_000 + i128::from(now.nanoseconds);
+        let mut source = groups
+            .into_iter()
+            .map(|(group_key, (oldest, count))| {
+                let oldest_ns =
+                    i128::from(oldest.seconds) * 1_000_000_000 + i128::from(oldest.nanoseconds);
+                (
+                    oldest,
+                    ActiveScope {
+                        queue_id: queue_id.to_owned(),
+                        group_key,
+                        oldest_eligible_age_ms: now_ns.saturating_sub(oldest_ns).max(0) as u64
+                            / 1_000_000,
+                        eligible_count: Some(count),
+                        progress_bound_risk_count: None,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        // Relational parity: oldest timestamp first; equal timestamps put the ungrouped scope first,
+        // followed by lexical group key.
+        source.sort_by(|(left_time, left), (right_time, right)| {
+            left_time
+                .cmp(right_time)
+                .then_with(|| left.group_key.cmp(&right.group_key))
+        });
+        project_scopes(
+            source.into_iter().map(|(_, scope)| scope).collect(),
+            granularity,
+        )
     }
 
     /// Priority-ordered eligible candidates (pending, not superseded, due at `now`), capped at `max`.
@@ -2494,6 +2885,7 @@ impl ProjectionData {
         if let Some(key) = &rec.explicit_client_item_key {
             self.by_key.remove(key);
         }
+        self.replace_gate_memberships(rec.item_id, &rec.gate_keys, &[]);
         if rec.state == ItemState::Pending {
             self.eligible
                 .remove(EligibilityIndex::token(&rec, &self.priority_model));
@@ -2646,6 +3038,109 @@ impl ProjectionData {
     /// The item id currently mapped to `client_item_key`, if any (upsert collision lookup).
     pub fn lookup_by_key(&self, client_item_key: &ClientItemKey) -> Option<ItemId> {
         self.item_id_for_client_key(client_item_key).copied()
+    }
+
+    /// Resolve all BatchUpdate references from this immutable projection image in one call.
+    pub fn batch_update_snapshot(
+        &self,
+        refs: &[BatchUpdateItemRef],
+    ) -> Vec<BatchUpdateSnapshotItem> {
+        let mut ids = BTreeSet::new();
+        for item_ref in refs {
+            match item_ref {
+                BatchUpdateItemRef::ItemId(item_id) => {
+                    ids.insert(*item_id);
+                }
+                BatchUpdateItemRef::ClientItemKey(key) => {
+                    if let Some(item_id) = self.item_id_for_client_key(key) {
+                        ids.insert(*item_id);
+                    }
+                }
+                BatchUpdateItemRef::Both {
+                    item_id,
+                    client_item_key,
+                } => {
+                    ids.insert(*item_id);
+                    if let Some(key_item_id) = self.item_id_for_client_key(client_item_key) {
+                        ids.insert(*key_item_id);
+                    }
+                }
+            }
+        }
+        ids.into_iter()
+            .filter_map(|item_id| {
+                self.items
+                    .get(&item_id)
+                    .map(|record| BatchUpdateSnapshotItem {
+                        item_id,
+                        client_item_key: record.client_item_key(),
+                        state: record.state,
+                        item_version: record.item_version,
+                        fenced: record.fenced,
+                        superseded: record.superseded,
+                    })
+            })
+            .collect()
+    }
+
+    /// Validate replacement commands without mutating the projection. Unique-index violations are
+    /// entry-local; two siblings claiming the same new unique key invalidate both.
+    pub fn batch_update_preflight(
+        &self,
+        commands: &[UpdateFieldsCommand],
+    ) -> EngineResult<Vec<bool>> {
+        let mut accepted = vec![true; commands.len()];
+        let mut batch_unique: BTreeMap<(String, Vec<u8>), usize> = BTreeMap::new();
+        for (index, command) in commands.iter().enumerate() {
+            let Some(record) = self.items.get(&command.item_id) else {
+                accepted[index] = false;
+                continue;
+            };
+            if record.state != ItemState::Pending
+                || record.fenced
+                || record.superseded
+                || record.state.is_terminal()
+            {
+                accepted[index] = false;
+                continue;
+            }
+            let mut fields = command
+                .set_fields
+                .clone()
+                .unwrap_or_else(|| record.fields.clone());
+            for (name, operation) in &command.field_ops {
+                match operation {
+                    Some(value) => {
+                        fields.insert(name.clone(), value.clone());
+                    }
+                    None => {
+                        fields.remove(name);
+                    }
+                }
+            }
+            let entity = command
+                .set_entity_document
+                .as_ref()
+                .or(record.entity_document.as_ref());
+            match self.index_validate_with_entity(&command.item_id, &fields, entity, None) {
+                Ok(()) => {}
+                Err(EngineError::Conflict) => {
+                    accepted[index] = false;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            for (name, key) in self.record_index_keys(&fields, entity)? {
+                if !matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_))) {
+                    continue;
+                }
+                if let Some(previous) = batch_unique.insert((name, key), index) {
+                    accepted[previous] = false;
+                    accepted[index] = false;
+                }
+            }
+        }
+        Ok(accepted)
     }
 
     fn item_id_for_client_key(&self, client_item_key: &ClientItemKey) -> Option<&ItemId> {
@@ -3331,6 +3826,19 @@ impl ProjectionData {
         &mut self,
         request: BoundedMutationRequest,
     ) -> EngineResult<BoundedMutationResponse> {
+        let plan = self.plan_bounded_mutation(request)?;
+        for update in plan.updates {
+            self.apply_command(&QueueCommand::UpdateFields(update.command))?;
+        }
+        Ok(plan.response)
+    }
+
+    /// Produce version-fenced update commands without changing the projection. This is the authoritative
+    /// planning seam for log-backed compositions: append each command first, then apply it normally.
+    pub fn plan_bounded_mutation(
+        &self,
+        request: BoundedMutationRequest,
+    ) -> EngineResult<BoundedMutationPlan> {
         if request.max_scan_rows == 0 {
             return Err(EngineError::Invalid("invalid page size"));
         }
@@ -3352,6 +3860,8 @@ impl ProjectionData {
         matches.sort_by_key(|(item_id, _)| *item_id);
 
         let mut results = Vec::with_capacity(matches.len());
+        let mut updates = Vec::new();
+        let mut reservations: BTreeMap<(String, Vec<u8>), ItemId> = BTreeMap::new();
         for (item_id, seen_version) in matches {
             let outcome = match self.items.get(&item_id) {
                 None => MutationOutcome::NotFound,
@@ -3374,33 +3884,47 @@ impl ProjectionData {
                         Some(&new_entity),
                         None,
                     )?;
-                    let old_keys =
-                        self.record_index_keys(&rec.fields, rec.entity_document.as_ref())?;
                     let new_keys = self.record_index_keys(&new_fields, Some(&new_entity))?;
-
-                    let rec = self.items.get_mut(&item_id).ok_or(EngineError::NotFound)?;
-                    rec.fields = new_fields;
-                    rec.entity_document = Some(new_entity);
-                    rec.item_version += 1;
-                    let removed: Vec<(String, Vec<u8>)> = old_keys
-                        .iter()
-                        .filter(|key| !new_keys.contains(key))
-                        .cloned()
-                        .collect();
-                    let added: Vec<(String, Vec<u8>)> = new_keys
-                        .iter()
-                        .filter(|key| !old_keys.contains(key))
-                        .cloned()
-                        .collect();
-                    self.index_remove_keys(item_id, &removed);
-                    self.index_insert_keys(item_id, &added);
-                    MutationOutcome::Updated
+                    let reservation_conflict = new_keys.iter().any(|(name, key)| {
+                        matches!(self.indexes.get(name), Some(SecondaryIndex::Unique(_)))
+                            && reservations
+                                .get(&(name.clone(), key.clone()))
+                                .is_some_and(|holder| *holder != item_id)
+                    });
+                    if reservation_conflict {
+                        MutationOutcome::Conflict
+                    } else {
+                        for (name, key) in &new_keys {
+                            if matches!(self.indexes.get(name), Some(SecondaryIndex::Unique(_))) {
+                                reservations.insert((name.clone(), key.clone()), item_id);
+                            }
+                        }
+                        updates.push(BoundedMutationUpdate {
+                            command: UpdateFieldsCommand {
+                                item_id,
+                                field_ops: BTreeMap::new(),
+                                payload: PayloadUpdate::Keep,
+                                set_priority: ScheduleUpdate::Keep,
+                                set_not_before: ScheduleUpdate::Keep,
+                                set_entity_document: Some(new_entity),
+                                set_fields: Some(new_fields),
+                                set_metadata: None,
+                                set_gate_keys: None,
+                                api001_batch: false,
+                            },
+                            expected_item_version: seen_version,
+                        });
+                        MutationOutcome::Updated
+                    }
                 }
             };
             results.push(MutationResult { item_id, outcome });
         }
 
-        Ok(BoundedMutationResponse { results })
+        Ok(BoundedMutationPlan {
+            response: BoundedMutationResponse { results },
+            updates,
+        })
     }
 
     /// Shared "every id is present + Leased + not fenced + not superseded" check used by finalize/renew.
@@ -3491,6 +4015,7 @@ mod tests {
     //! White-box tests over the projection's private state (item_version, log compaction). Behavioral
     //! port-level conformance is exercised against the backends in `fireweed-conformance`.
     use super::*;
+    use axon_esf::IndexDef;
     use fireweed_core::{
         CohortId, CohortPolicy, EligibilityPolicy, IndexSpec, MetadataValue, PriorityDirection,
         PriorityModelKind, PriorityTieBreaker, QueueDefinition, QueueId, RetryPolicy, TenantId,
@@ -3670,6 +4195,111 @@ mod tests {
         qdef_with_emit_change_records(true)
     }
 
+    #[test]
+    fn canonical_index_keys_reuse_shared_range_group_and_bucket_semantics() {
+        let spec = QueueIndex {
+            name: "by_score".into(),
+            declaration: IndexDeclaration::Single(IndexDef {
+                field: "score".into(),
+                index_type: IndexType::Integer,
+                unique: false,
+            }),
+        };
+        let mut definition = qdef();
+        definition.typed_indexes = vec![spec.clone()];
+        let key = |score: i64| match &spec.declaration {
+            IndexDeclaration::Single(index) => index
+                .index_key(&serde_json::json!({ "score": score }))
+                .unwrap()
+                .unwrap(),
+            IndexDeclaration::Compound(_) => unreachable!(),
+        };
+        let mut projection = query_projection_from_index_keys(
+            &definition,
+            Some("by_score"),
+            vec![
+                (iid("2"), Some(key(2))),
+                (iid("1"), Some(key(1))),
+                (iid("3"), None),
+            ],
+        )
+        .unwrap();
+
+        let range = projection
+            .range_scan(RangeScanRequest {
+                index: Some("by_score".into()),
+                filters: vec![QueryFilter {
+                    field: "score".into(),
+                    op: FilterOp::Gte,
+                    value: TypedValue::Integer(1),
+                }],
+                order_by: vec![OrderField {
+                    field: "score".into(),
+                    direction: SortDirection::Ascending,
+                }],
+                page_size: 10,
+                cursor: None,
+            })
+            .unwrap();
+        assert_eq!(
+            range.rows.iter().map(|row| row.item_id).collect::<Vec<_>>(),
+            vec![iid("1"), iid("2")]
+        );
+
+        let grouped = projection
+            .grouped_aggregate(GroupedAggregateRequest {
+                index: Some("by_score".into()),
+                filters: Vec::new(),
+                group_by: vec![fireweed_core::GroupByField {
+                    field: "score".into(),
+                    time_bucket: None,
+                }],
+                max_groups: 10,
+            })
+            .unwrap();
+        assert_eq!(grouped.groups.len(), 2);
+
+        let bucketed = projection
+            .declared_bucket_segment(DeclaredBucketSegmentRequest {
+                index: Some("by_score".into()),
+                filters: Vec::new(),
+                field: "score".into(),
+                buckets: vec![fireweed_core::BucketRule {
+                    label: "one".into(),
+                    exact: Some(1.0),
+                    gt: None,
+                    gte: None,
+                    lt: None,
+                    lte: None,
+                }],
+                null_bucket_label: "missing".into(),
+            })
+            .unwrap();
+        assert_eq!(bucketed.buckets[0].count, 1);
+        assert_eq!(bucketed.buckets[1].count, 1);
+
+        let mut set_fields = BTreeMap::new();
+        set_fields.insert("score".into(), TypedValue::Integer(3));
+        let plan = projection
+            .plan_bounded_mutation(BoundedMutationRequest {
+                index: Some("by_score".into()),
+                filters: vec![QueryFilter {
+                    field: "score".into(),
+                    op: FilterOp::Eq,
+                    value: TypedValue::Integer(1),
+                }],
+                set_fields,
+                max_scan_rows: 10,
+            })
+            .unwrap();
+        assert_eq!(plan.updates.len(), 1);
+        assert_eq!(projection.items.get(&iid("1")).unwrap().item_version, 1);
+        projection
+            .apply_command(&QueueCommand::UpdateFields(plan.updates[0].command.clone()))
+            .unwrap();
+        assert_eq!(projection.items.get(&iid("1")).unwrap().item_version, 2);
+    }
+
     fn qdef_with_emit_change_records(emit_change_records: bool) -> QueueDefinition {
         QueueDefinition {
             tenant_id: shard().tenant_id,
@@ -3827,6 +4457,7 @@ mod tests {
             explicit_client_item_key: None,
             priority: None,
             not_before: None,
+            eligible_since: ts(0),
             group_key: None,
             payload: None,
             fields: BTreeMap::new(),
@@ -4003,6 +4634,7 @@ mod tests {
             explicit_client_item_key: None,
             priority: None,
             not_before: None,
+            eligible_since: ts(0),
             group_key: None,
             payload: None,
             fields: BTreeMap::new(),
@@ -4936,12 +5568,71 @@ mod tests {
     }
 
     #[test]
+    fn api001_update_command_applies_full_replacements() {
+        let mut log = LogData::default();
+        let mut proj = ProjectionData::new(
+            model(),
+            OrderingMode::Strict,
+            0,
+            RecurrencePolicy::default(),
+            &[],
+        );
+        commit(
+            &mut log,
+            &mut proj,
+            &shard(),
+            env(QueueCommand::Push(PushCommand {
+                items: vec![push_item("1", "k1", 1)],
+            })),
+            None,
+        )
+        .unwrap();
+
+        let mut fields = BTreeMap::new();
+        fields.insert("replacement".into(), Bytes::from_static(b"value"));
+        let mut metadata = Metadata::new();
+        metadata.insert("source", MetadataValue::String("batch".into()));
+        commit(
+            &mut log,
+            &mut proj,
+            &shard(),
+            env(QueueCommand::UpdateFields(UpdateFieldsCommand {
+                item_id: iid("1"),
+                field_ops: BTreeMap::new(),
+                payload: PayloadUpdate::Set(Some(Bytes::from_static(b"payload"))),
+                set_priority: ScheduleUpdate::Keep,
+                set_not_before: ScheduleUpdate::Keep,
+                set_entity_document: None,
+                set_fields: Some(fields.clone()),
+                set_metadata: Some(metadata.clone()),
+                set_gate_keys: Some(vec!["gate-a".into()]),
+                api001_batch: true,
+            })),
+            None,
+        )
+        .unwrap();
+
+        let row = proj
+            .live_items_by_key(&[ClientItemKey::new("k1").unwrap()])
+            .pop()
+            .flatten()
+            .unwrap();
+        assert_eq!(row.fields, fields);
+        assert_eq!(row.payload.as_deref(), Some(&b"payload"[..]));
+        assert_eq!(row.item_version, 2);
+        let stored = proj.items.get(&iid("1")).unwrap();
+        assert_eq!(stored.metadata, metadata);
+        assert_eq!(stored.gate_keys, vec!["gate-a"]);
+    }
+
+    #[test]
     fn projection_image_does_not_rehydrate_superseded_pending_as_eligible() {
         let definition = qdef();
         let mut image = ProjectionImage {
             high_water: None,
             paused: false,
             pause_drain_intake: false,
+            blocked_gates: BTreeSet::new(),
             next_seq: 2,
             items: vec![
                 ProjectionImageItem {
@@ -4949,7 +5640,9 @@ mod tests {
                     client_item_key: ClientItemKey::new("k-old").unwrap(),
                     priority: Some(PriorityValue::Int64(1)),
                     not_before: None,
+                    eligible_since: Some(ts(0)),
                     group_key: None,
+                    cohort_size: None,
                     payload: None,
                     fields: BTreeMap::new(),
                     metadata: Metadata::default(),
@@ -4974,7 +5667,9 @@ mod tests {
                     client_item_key: ClientItemKey::new("k-live").unwrap(),
                     priority: Some(PriorityValue::Int64(2)),
                     not_before: None,
+                    eligible_since: Some(ts(0)),
                     group_key: None,
+                    cohort_size: None,
                     payload: None,
                     fields: BTreeMap::new(),
                     metadata: Metadata::default(),

@@ -33,7 +33,7 @@ pub fn validate_finalize_targeting(t: FinalizeTargeting) -> EngineResult<()> {
 }
 
 /// Rearm rules (API-001): requires a recurring queue + a `not_before`. A `not_before` past
-/// `recurrence.until` makes the item **Terminal** (`-ERR pqueue terminal`) rather than re-arming.
+/// `recurrence.until` makes the item **Terminal** (`-ERR fireweed terminal`) rather than re-arming.
 pub fn validate_rearm(
     rearm_not_before: Option<UtcTimestamp>,
     queue: &QueueDefinition,

@@ -4,6 +4,7 @@ ddx:
   depends_on:
     - prd
     - api-fireweed-rust-facade
+    - tp-fireweed-facade-and-snorri-acceptance
     - adr-cqrs-log-projection-storage-model
     - adr-orthogonal-log-projection-composition
     - td-storage-architecture-backend-contracts
@@ -22,10 +23,16 @@ measure the public facade rather than internal storage ports; preserve raw
 samples and correctness evidence; distinguish comparable common-path results
 from configuration-specific recovery and maintenance results.
 
-**Out of scope**: Portable throughput SLAs; cloud-provider certification;
+**Out of scope**: Cloud-provider certification;
 multi-node scale-out, which remains governed by TP-002 E2; extrapolation from
-this host to another host; GitHub-hosted performance execution; treating an
-unsupported composition as a failed implementation.
+this host to another host; GitHub-hosted performance execution.
+
+Performance qualification has a hard functional prerequisite. A matrix cell
+MUST first pass TP-004's complete public-operation conformance suite and its
+documented durability verification with zero skips and zero
+construction-dependent `EngineError::Unavailable` results. An incomplete cell
+is release-blocking and ineligible for performance execution; the runner MUST
+NOT spend benchmark time characterizing it.
 
 **Traceability source**: PRD scale substantiation; ADR-001 storage profiles;
 ADR-012 orthogonal log/projection composition; API-005 construction boundary;
@@ -52,13 +59,45 @@ recovery, or exact-tag release requirements.
 | `recovery` | Close, reopen, rebuild, and verify durable state | Only among cells with the same recovery contract | Host-bound recovery profile |
 | `maintenance` | Verify, delete, and rebuild disposable projections | Only among cells exposing `projection_control()` | Host-bound maintenance profile |
 | `smoke` | Fast runner and schema validation | No | None |
+| `million-cycle-v1` | Insert 1M, modify 500K, read and verify 1M through every supported constructor | No; each constructor is gated independently | P0 per-constructor functionality and host-bound performance gate |
+
+### Targeted million-item lifecycle gate
+
+`million-cycle-v1` is a fail-closed gate, not a comparative benchmark. For
+every supported matrix cell it performs the same public-facade lifecycle:
+
+1. Create one queue with a maximum push batch of 1,000.
+2. Insert exactly 1,000,000 deterministic items with unique
+   `ClientItemKey`s, in batches of 1,000. The timed insert phase MUST complete
+   in at most 9 seconds.
+3. Modify exactly the first 500,000 items using API-001 `BatchUpdate`, in
+   batches of 1,000. Every outcome MUST be `Updated`; the timed modify phase
+   MUST complete in at most 9 seconds.
+4. Read exactly 1,000,000 items using `live_items` in key-order batches of
+   1,000. The timed read phase includes value/version verification and MUST
+   complete in at most 9 seconds.
+5. Verify an exact deterministic digest: 500,000 updated rows at version 2 and
+   500,000 untouched rows at version 1. Missing, duplicate, reordered,
+   incorrectly updated, or extra rows fail.
+6. For every durable constructor, close and reopen after modification, then
+   repeat the exact read/digest verification outside the timed phase. Volatile
+   memory records `durability=volatile`; every other cell must record and prove
+   its documented durability boundary.
+
+Queue creation, one bounded 10,000-item warmup, close/reopen, service setup,
+and cleanup are outside phase timings and recorded separately. Item/request
+construction remains inside each timed phase because the gate represents the
+caller-observed public operation. `EngineError::Unavailable`, an omitted cell,
+a skip, or a reduced item count is a P0 failure. The authoritative gate runs on
+controlled local hardware and is forbidden in CI.
 
 ### Matrix
 
 Each cell has a stable identifier. `required` means failure or omission makes a
 full local run fail. `conditional` means the cell is required when its declared
 service configuration is supplied; otherwise the result is `not_configured`,
-never `pass` or a silent skip. `unsupported` is an explicit product boundary.
+never `pass` or a silent skip. These requirement states describe infrastructure
+availability only; they never excuse missing Fireweed functionality.
 
 | Cell | Construction | Authority | Projection / barrier | Requirement |
 | --- | --- | --- | --- | --- |
@@ -144,6 +183,7 @@ before warm-up.
 | Contract | 100% of matrix cell IDs, evidence fields, and failure semantics | P0 |
 | Integration | Every configured cell constructs through API-005 and reconciles exact state | P0 |
 | Performance | Five measured repetitions per common-path workload after warm-up | P0 |
+| Targeted lifecycle | Exact 1M/500K/1M cycle and three 9-second phase ceilings on every supported constructor | P0 |
 | Recovery | Every durable configured cell reopens and reconciles exact state | P0 |
 | Maintenance | Every configured disposable-projection cell verifies and rebuilds | P0 |
 | Smoke | One small repetition over local cells for developer feedback | P1 |
@@ -200,6 +240,9 @@ percentiles.
 | Environment provenance | complete required fields | 100% | Semantic verifier |
 | Source provenance | clean pushed commit | exact | Launch wrapper and verifier |
 | Secret leakage | zero credential values | zero | Redaction test and evidence scan |
+| Million-cycle functionality | insert + `batch_update` + `live_items` on every supported cell | 100%, zero `Unavailable` | Runner exits non-zero |
+| Million-cycle phase ceilings | insert ≤9 s; modify ≤9 s; read+verify ≤9 s | all three per cell | Runner and semantic verifier |
+| Million-cycle durable reopen | exact final digest after close/reopen for every durable cell | 100% | Runner and semantic verifier |
 
 ### Common-path protocol
 
@@ -464,7 +507,7 @@ output are recorded; raw output is retained separately after value redaction.
 | PostgreSQL residue or cross-run contention | Later cells become incomparable | Unique schemas, isolated database, explicit cleanup status |
 | Object namespace residue | Cost and list performance drift | Unique prefix per repetition and verified prefix cleanup |
 | Async projection reports success before catch-up | False reconciliation | Report response timing separately; bounded public verification catch-up blocks correctness |
-| Generic harness hides unsupported operations | Misleading zero or skip | Typed `not_applicable`, `not_configured`, and `unsupported` states |
+| Generic harness hides incomplete functionality | Misleading timing evidence | TP-004 functional and durability gates block the cell before any timed work |
 | Secrets reach evidence or logs | Credential disclosure | Redacted configuration types, field-name denylist, value scan before write |
 | Benchmark becomes a release bottleneck | Tests are avoided or run on CI | Separate smoke/full tiers; controlled-host execution; verifier remains fast |
 

@@ -285,28 +285,28 @@ trait FireweedBatchPlane: Send + Sync {
     ) -> FacadeFuture<'a, BatchUpdateResponse>;
 }
 
-impl<B: LibBackend + BatchUpdatePort + 'static> FireweedBatchPlane for Pqueue<B> {
+impl<B: LibBackend + BatchUpdatePort + 'static> FireweedBatchPlane for RuntimeCore<B> {
     fn batch_update<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: BatchUpdateRequest,
     ) -> FacadeFuture<'a, BatchUpdateResponse> {
-        Box::pin(Pqueue::batch_update(self, queue, request))
+        Box::pin(RuntimeCore::batch_update(self, queue, request))
     }
 }
 
-impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
+impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
     fn ownership<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, Ownership> {
-        Box::pin(Pqueue::ownership(self, queue))
+        Box::pin(RuntimeCore::ownership(self, queue))
     }
     fn renew_owned(&self) -> EngineResult<()> {
-        Pqueue::renew_owned(self)
+        RuntimeCore::renew_owned(self)
     }
     fn create_queue(&self, definition: QueueDefinition) -> FacadeFuture<'_, CreateQueueOutcome> {
-        Box::pin(Pqueue::create_queue(self, definition))
+        Box::pin(RuntimeCore::create_queue(self, definition))
     }
     fn queue_definition<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, QueueDefinition> {
-        Box::pin(Pqueue::queue_definition(self, queue))
+        Box::pin(RuntimeCore::queue_definition(self, queue))
     }
     fn ensure_queue<'a>(
         &'a self,
@@ -314,10 +314,10 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         template: &'a QueueTemplate,
     ) -> Pin<Box<dyn Future<Output = Result<EnsureQueueOutcome, EnsureQueueError>> + Send + 'a>>
     {
-        Box::pin(Pqueue::ensure_queue(self, queue, template))
+        Box::pin(RuntimeCore::ensure_queue(self, queue, template))
     }
     fn push<'a>(&'a self, queue: &'a QueueKey, item: NewItem) -> FacadeFuture<'a, ItemId> {
-        Box::pin(Pqueue::push(self, queue, item))
+        Box::pin(RuntimeCore::push(self, queue, item))
     }
     fn push_with_request_id<'a>(
         &'a self,
@@ -325,14 +325,16 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         request_id: RequestId,
         item: NewItem,
     ) -> FacadeFuture<'a, ItemId> {
-        Box::pin(Pqueue::push_with_request_id(self, queue, request_id, item))
+        Box::pin(RuntimeCore::push_with_request_id(
+            self, queue, request_id, item,
+        ))
     }
     fn push_batch<'a>(
         &'a self,
         queue: &'a QueueKey,
         items: Vec<NewItem>,
     ) -> FacadeFuture<'a, Vec<ItemId>> {
-        Box::pin(Pqueue::push_batch(self, queue, items))
+        Box::pin(RuntimeCore::push_batch(self, queue, items))
     }
     fn push_batch_with_request_id<'a>(
         &'a self,
@@ -340,7 +342,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         request_id: RequestId,
         items: Vec<NewItem>,
     ) -> FacadeFuture<'a, Vec<ItemId>> {
-        Box::pin(Pqueue::push_batch_with_request_id(
+        Box::pin(RuntimeCore::push_batch_with_request_id(
             self, queue, request_id, items,
         ))
     }
@@ -350,7 +352,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         key: ClientItemKey,
         item: NewItem,
     ) -> FacadeFuture<'a, UpsertOutcome> {
-        Box::pin(Pqueue::upsert(self, queue, key, item))
+        Box::pin(RuntimeCore::upsert(self, queue, key, item))
     }
     fn claim_with<'a>(
         &'a self,
@@ -359,7 +361,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         lease_ms: u64,
         compatibility: ClaimCompatibility,
     ) -> FacadeFuture<'a, Vec<ClaimedItem>> {
-        Box::pin(Pqueue::claim_with(
+        Box::pin(RuntimeCore::claim_with(
             self,
             queue,
             max,
@@ -373,7 +375,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         max: usize,
         lease_ms: u64,
     ) -> FacadeFuture<'a, Vec<ClaimedItem>> {
-        Box::pin(Pqueue::claim(self, queue, max, lease_ms))
+        Box::pin(RuntimeCore::claim(self, queue, max, lease_ms))
     }
     fn claim_response_with<'a>(
         &'a self,
@@ -382,7 +384,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         lease_ms: u64,
         compatibility: ClaimCompatibility,
     ) -> FacadeFuture<'a, Claimed> {
-        Box::pin(Pqueue::claim_response_with(
+        Box::pin(RuntimeCore::claim_response_with(
             self,
             queue,
             max,
@@ -395,28 +397,28 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         queue: &'a QueueKey,
         request: ClaimAt,
     ) -> FacadeFuture<'a, Vec<ClaimedItem>> {
-        Box::pin(Pqueue::claim_at(self, queue, request))
+        Box::pin(RuntimeCore::claim_at(self, queue, request))
     }
     fn claim_response_at<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: ClaimAt,
     ) -> FacadeFuture<'a, Claimed> {
-        Box::pin(Pqueue::claim_response_at(self, queue, request))
+        Box::pin(RuntimeCore::claim_response_at(self, queue, request))
     }
     fn claim_across_queues(
         &self,
         targets: Vec<MultiQueueClaimTarget>,
         limits: MultiQueueClaimLimits,
     ) -> FacadeFuture<'_, Vec<MultiQueueClaimResult>> {
-        Box::pin(Pqueue::claim_across_queues(self, targets, limits))
+        Box::pin(RuntimeCore::claim_across_queues(self, targets, limits))
     }
     fn claim_by_query<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: ClaimByQueryRequest,
     ) -> FacadeFuture<'a, Claimed> {
-        Box::pin(Pqueue::claim_by_query(self, queue, request))
+        Box::pin(RuntimeCore::claim_by_query(self, queue, request))
     }
     fn claim_by_query_at<'a>(
         &'a self,
@@ -424,13 +426,13 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         request: ClaimByQueryRequest,
         at: ClaimByQueryAt,
     ) -> FacadeFuture<'a, Claimed> {
-        Box::pin(Pqueue::claim_by_query_at(self, queue, request, at))
+        Box::pin(RuntimeCore::claim_by_query_at(self, queue, request, at))
     }
     fn ack<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::ack(self, queue, ids))
+        Box::pin(RuntimeCore::ack(self, queue, ids))
     }
     fn complete<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::complete(self, queue, ids))
+        Box::pin(RuntimeCore::complete(self, queue, ids))
     }
     fn nack<'a>(
         &'a self,
@@ -438,7 +440,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         how: Nack,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::nack(self, queue, ids, how))
+        Box::pin(RuntimeCore::nack(self, queue, ids, how))
     }
     fn retry<'a>(
         &'a self,
@@ -446,10 +448,10 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         not_before: Option<UtcTimestamp>,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::retry(self, queue, ids, not_before))
+        Box::pin(RuntimeCore::retry(self, queue, ids, not_before))
     }
     fn release<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::release(self, queue, ids))
+        Box::pin(RuntimeCore::release(self, queue, ids))
     }
     fn nack_retry_after<'a>(
         &'a self,
@@ -457,7 +459,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         delay_ms: u64,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::nack_retry_after(self, queue, ids, delay_ms))
+        Box::pin(RuntimeCore::nack_retry_after(self, queue, ids, delay_ms))
     }
     fn retry_after<'a>(
         &'a self,
@@ -465,58 +467,62 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         delay_ms: u64,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::retry_after(self, queue, ids, delay_ms))
+        Box::pin(RuntimeCore::retry_after(self, queue, ids, delay_ms))
     }
     fn commit<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: CommitRequest,
     ) -> FacadeFuture<'a, Vec<EntryOutcome>> {
-        Box::pin(Pqueue::commit(self, queue, request))
+        Box::pin(RuntimeCore::commit(self, queue, request))
     }
     fn commit_multi_claim<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: MultiClaimCommitRequest,
     ) -> FacadeFuture<'a, Vec<EntryOutcome>> {
-        Box::pin(Pqueue::commit_multi_claim(self, queue, request))
+        Box::pin(RuntimeCore::commit_multi_claim(self, queue, request))
     }
     fn commit_capabilities(&self, queue: &QueueKey) -> EngineResult<CommitCapabilities> {
-        Pqueue::commit_capabilities(self, queue)
+        RuntimeCore::commit_capabilities(self, queue)
     }
     fn explain_commit<'a>(
         &'a self,
         queue: &'a QueueKey,
         request_id: RequestId,
     ) -> FacadeFuture<'a, Option<CommitRecovery>> {
-        Box::pin(Pqueue::explain_commit(self, queue, request_id))
+        Box::pin(RuntimeCore::explain_commit(self, queue, request_id))
     }
     fn side_record<'a>(
         &'a self,
         queue: &'a QueueKey,
         key: &'a [u8],
     ) -> FacadeFuture<'a, Option<Bytes>> {
-        Box::pin(Pqueue::side_record(self, queue, key))
+        Box::pin(RuntimeCore::side_record(self, queue, key))
     }
     fn peek<'a>(&'a self, queue: &'a QueueKey, limit: usize) -> FacadeFuture<'a, Vec<ItemView>> {
-        Box::pin(Pqueue::peek(self, queue, limit))
+        Box::pin(RuntimeCore::peek(self, queue, limit))
     }
     fn current_position<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, CommandPosition> {
-        Box::pin(Pqueue::current_position(self, queue))
+        Box::pin(RuntimeCore::current_position(self, queue))
     }
     fn discover_active_scopes<'a>(
         &'a self,
         queue: &'a QueueKey,
         granularity: DiscoveryGranularity,
     ) -> FacadeFuture<'a, Vec<ActiveScope>> {
-        Box::pin(Pqueue::discover_active_scopes(self, queue, granularity))
+        Box::pin(RuntimeCore::discover_active_scopes(
+            self,
+            queue,
+            granularity,
+        ))
     }
     fn discover_active_scopes_stamped<'a>(
         &'a self,
         queue: &'a QueueKey,
         granularity: DiscoveryGranularity,
     ) -> FacadeFuture<'a, ActiveScopeDiscovery> {
-        Box::pin(Pqueue::discover_active_scopes_stamped(
+        Box::pin(RuntimeCore::discover_active_scopes_stamped(
             self,
             queue,
             granularity,
@@ -527,21 +533,21 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         queue: &'a QueueKey,
         granularity: DiscoveryGranularity,
     ) -> FacadeFuture<'a, Vec<ActiveScope>> {
-        Box::pin(Pqueue::discover(self, queue, granularity))
+        Box::pin(RuntimeCore::discover(self, queue, granularity))
     }
     fn live_item<'a>(
         &'a self,
         queue: &'a QueueKey,
         key: ClientItemKey,
     ) -> FacadeFuture<'a, Option<LiveItemView>> {
-        Box::pin(Pqueue::live_item(self, queue, key))
+        Box::pin(RuntimeCore::live_item(self, queue, key))
     }
     fn live_items<'a>(
         &'a self,
         queue: &'a QueueKey,
         keys: Vec<ClientItemKey>,
     ) -> FacadeFuture<'a, Vec<Option<LiveItemView>>> {
-        Box::pin(Pqueue::live_items(self, queue, keys))
+        Box::pin(RuntimeCore::live_items(self, queue, keys))
     }
     fn query_index_unique<'a>(
         &'a self,
@@ -549,7 +555,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         index: &'a str,
         key: Vec<Vec<u8>>,
     ) -> FacadeFuture<'a, Option<IndexHit>> {
-        Box::pin(Pqueue::query_index_unique(self, queue, index, key))
+        Box::pin(RuntimeCore::query_index_unique(self, queue, index, key))
     }
     fn query_index<'a>(
         &'a self,
@@ -557,7 +563,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         index: &'a str,
         key: Vec<Vec<u8>>,
     ) -> FacadeFuture<'a, Vec<IndexHit>> {
-        Box::pin(Pqueue::query_index(self, queue, index, key))
+        Box::pin(RuntimeCore::query_index(self, queue, index, key))
     }
     fn query_index_unique_typed<'a>(
         &'a self,
@@ -565,7 +571,9 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         index: &'a str,
         values: &'a [serde_json::Value],
     ) -> FacadeFuture<'a, Option<IndexHit>> {
-        Box::pin(Pqueue::query_index_unique_typed(self, queue, index, values))
+        Box::pin(RuntimeCore::query_index_unique_typed(
+            self, queue, index, values,
+        ))
     }
     fn query_index_typed<'a>(
         &'a self,
@@ -573,10 +581,10 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         index: &'a str,
         values: &'a [serde_json::Value],
     ) -> FacadeFuture<'a, Vec<IndexHit>> {
-        Box::pin(Pqueue::query_index_typed(self, queue, index, values))
+        Box::pin(RuntimeCore::query_index_typed(self, queue, index, values))
     }
     fn fail<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::fail(self, queue, ids))
+        Box::pin(RuntimeCore::fail(self, queue, ids))
     }
     fn renew<'a>(
         &'a self,
@@ -584,7 +592,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         lease_ms: u64,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::renew(self, queue, ids, lease_ms))
+        Box::pin(RuntimeCore::renew(self, queue, ids, lease_ms))
     }
     fn reassign<'a>(
         &'a self,
@@ -592,7 +600,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         lease_ms: u64,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::reassign(self, queue, ids, lease_ms))
+        Box::pin(RuntimeCore::reassign(self, queue, ids, lease_ms))
     }
     fn update_fields<'a>(
         &'a self,
@@ -603,7 +611,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         entity: Option<serde_json::Value>,
         expected_item_version: Option<u64>,
     ) -> FacadeFuture<'a, u64> {
-        Box::pin(Pqueue::update_fields(
+        Box::pin(RuntimeCore::update_fields(
             self,
             queue,
             item_id,
@@ -621,7 +629,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         not_before: ScheduleUpdate<UtcTimestamp>,
         expected_item_version: Option<u64>,
     ) -> FacadeFuture<'a, u64> {
-        Box::pin(Pqueue::update(
+        Box::pin(RuntimeCore::update(
             self,
             queue,
             item_id,
@@ -636,14 +644,14 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         gate_keys: Vec<String>,
         blocked: bool,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::set_gates(self, queue, gate_keys, blocked))
+        Box::pin(RuntimeCore::set_gates(self, queue, gate_keys, blocked))
     }
     fn reclaim_expired<'a>(
         &'a self,
         queue: &'a QueueKey,
         limit: Option<usize>,
     ) -> FacadeFuture<'a, Vec<ItemId>> {
-        Box::pin(Pqueue::reclaim_expired(self, queue, limit))
+        Box::pin(RuntimeCore::reclaim_expired(self, queue, limit))
     }
     fn reclaim_expired_at<'a>(
         &'a self,
@@ -651,10 +659,10 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         limit: Option<usize>,
         now: UtcTimestamp,
     ) -> FacadeFuture<'a, Vec<ItemId>> {
-        Box::pin(Pqueue::reclaim_expired_at(self, queue, limit, now))
+        Box::pin(RuntimeCore::reclaim_expired_at(self, queue, limit, now))
     }
     fn rearm<'a>(&'a self, queue: &'a QueueKey, ids: Vec<ItemId>) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::rearm(self, queue, ids))
+        Box::pin(RuntimeCore::rearm(self, queue, ids))
     }
     fn rearm_at<'a>(
         &'a self,
@@ -662,7 +670,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         not_before: UtcTimestamp,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::rearm_at(self, queue, ids, not_before))
+        Box::pin(RuntimeCore::rearm_at(self, queue, ids, not_before))
     }
     fn rearm_after<'a>(
         &'a self,
@@ -670,7 +678,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         delay_ms: u64,
     ) -> FacadeFuture<'a, ()> {
-        Box::pin(Pqueue::rearm_after(self, queue, ids, delay_ms))
+        Box::pin(RuntimeCore::rearm_after(self, queue, ids, delay_ms))
     }
     fn purge<'a>(
         &'a self,
@@ -678,62 +686,62 @@ impl<B: LibBackend + 'static> FireweedDataPlane for Pqueue<B> {
         ids: Vec<ItemId>,
         force: bool,
     ) -> FacadeFuture<'a, u64> {
-        Box::pin(Pqueue::purge(self, queue, ids, force))
+        Box::pin(RuntimeCore::purge(self, queue, ids, force))
     }
     fn claimed<'a>(
         &'a self,
         queue: &'a QueueKey,
         ids: &'a [ItemId],
     ) -> FacadeFuture<'a, Vec<ClaimedItem>> {
-        Box::pin(Pqueue::claimed(self, queue, ids))
+        Box::pin(RuntimeCore::claimed(self, queue, ids))
     }
     fn metrics<'a>(&'a self, queue: &'a QueueKey) -> FacadeFuture<'a, QueueMetrics> {
-        Box::pin(Pqueue::metrics(self, queue))
+        Box::pin(RuntimeCore::metrics(self, queue))
     }
     fn metrics_by_query<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: MetricsByQueryRequest,
     ) -> FacadeFuture<'a, QueueMetrics> {
-        Box::pin(Pqueue::metrics_by_query(self, queue, request))
+        Box::pin(RuntimeCore::metrics_by_query(self, queue, request))
     }
     fn hot_projection_capabilities(&self, queue: &QueueKey) -> QueryCapabilityFlags {
-        Pqueue::hot_projection_capabilities(self, queue)
+        RuntimeCore::hot_projection_capabilities(self, queue)
     }
     fn range_scan<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: RangeScanRequest,
     ) -> FacadeFuture<'a, RangeScanResponse> {
-        Box::pin(Pqueue::range_scan(self, queue, request))
+        Box::pin(RuntimeCore::range_scan(self, queue, request))
     }
     fn grouped_aggregate<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: GroupedAggregateRequest,
     ) -> FacadeFuture<'a, GroupedAggregateResponse> {
-        Box::pin(Pqueue::grouped_aggregate(self, queue, request))
+        Box::pin(RuntimeCore::grouped_aggregate(self, queue, request))
     }
     fn declared_bucket_segment<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: DeclaredBucketSegmentRequest,
     ) -> FacadeFuture<'a, DeclaredBucketSegmentResponse> {
-        Box::pin(Pqueue::declared_bucket_segment(self, queue, request))
+        Box::pin(RuntimeCore::declared_bucket_segment(self, queue, request))
     }
     fn bounded_mutation<'a>(
         &'a self,
         queue: &'a QueueKey,
         request: BoundedMutationRequest,
     ) -> FacadeFuture<'a, BoundedMutationResponse> {
-        Box::pin(Pqueue::bounded_mutation(self, queue, request))
+        Box::pin(RuntimeCore::bounded_mutation(self, queue, request))
     }
 }
 
 /// Concrete, backend-erased Fireweed library handle.
 pub struct Fireweed {
     inner: Arc<dyn FireweedDataPlane>,
-    batch: Option<Arc<dyn FireweedBatchPlane>>,
+    batch: Arc<dyn FireweedBatchPlane>,
     projection: Option<EmbeddedHandle>,
 }
 
@@ -744,34 +752,26 @@ impl fmt::Debug for Fireweed {
 }
 
 impl Fireweed {
-    pub(crate) fn from_pqueue<B: LibBackend + 'static>(queue: Pqueue<B>) -> Self {
-        Self {
-            inner: Arc::new(queue),
-            batch: None,
-            projection: None,
-        }
-    }
-
-    pub(crate) fn from_pqueue_with_projection<B: LibBackend + 'static>(
-        queue: Pqueue<B>,
-        projection: EmbeddedHandle,
-    ) -> Self {
-        Self {
-            inner: Arc::new(queue),
-            batch: None,
-            projection: Some(projection),
-        }
-    }
-
-    #[allow(dead_code)] // Used only when the optional relational PostgreSQL constructor is enabled.
-    pub(crate) fn from_batch_pqueue<B: LibBackend + BatchUpdatePort + 'static>(
-        queue: Pqueue<B>,
+    pub(crate) fn from_runtime<B: LibBackend + BatchUpdatePort + 'static>(
+        queue: RuntimeCore<B>,
     ) -> Self {
         let queue = Arc::new(queue);
         Self {
             inner: queue.clone(),
-            batch: Some(queue),
+            batch: queue,
             projection: None,
+        }
+    }
+
+    pub(crate) fn from_runtime_with_projection<B: LibBackend + BatchUpdatePort + 'static>(
+        queue: RuntimeCore<B>,
+        projection: EmbeddedHandle,
+    ) -> Self {
+        let queue = Arc::new(queue);
+        Self {
+            inner: queue.clone(),
+            batch: queue,
+            projection: Some(projection),
         }
     }
 
@@ -1174,10 +1174,7 @@ impl Fireweed {
         if request.updates.is_empty() {
             return Err(EngineError::Invalid("empty batch update"));
         }
-        match &self.batch {
-            Some(batch) => batch.batch_update(queue, request).await,
-            None => Err(EngineError::Unavailable),
-        }
+        self.batch.batch_update(queue, request).await
     }
     pub async fn update(
         &self,

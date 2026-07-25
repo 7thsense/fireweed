@@ -1,16 +1,18 @@
 //! B2a (ADR-009 / TD-003 In-Process Library Owner-Runtime): the library as a **coordinated owner**.
 //!
-//! A `Pqueue::with_control_plane` handle acquires-and-fences before each queue-addressed op and stamps its
+//! A `RuntimeCore::with_control_plane` handle acquires-and-fences before each queue-addressed op and stamps its
 //! cached acquire-time epoch, so over a shared backend a superseded instance self-fences on the data path.
-//! The sole-owner default (`Pqueue::new`) is unaffected — proven by the facade suite.
+//! The sole-owner default (`RuntimeCore::new`) is unaffected — proven by the facade suite.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use fireweed::{NewItem, Ownership, Pqueue};
+use fireweed::{BoundedMutationRequest, ClaimByQueryRequest, NewItem, Ownership, RuntimeCore};
 use fireweed_core::{
-    EligibilityPolicy, OrderingMode, OwnerId, PriorityDirection, PriorityModel, PriorityModelKind,
-    PriorityTieBreaker, PriorityValue, QueueDefinition, QueueId, RecurrencePolicy, RetryPolicy,
-    TenantId,
+    EligibilityPolicy, FilterOp, IndexDeclaration, IndexDef, IndexType, OrderField, OrderingMode,
+    OwnerId, PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker,
+    PriorityValue, QueryFilter, QueueDefinition, QueueId, QueueIndex, RecurrencePolicy, RequestId,
+    RetryPolicy, SortDirection, TenantId, TypedValue, WorkerId,
 };
 use fireweed_engine::{
     Clock, ControlPlaneConfig, EngineError, InMemoryControlPlane, QueueControlPlane, QueueKey,
@@ -58,6 +60,45 @@ fn item(priority: i64) -> NewItem {
     }
 }
 
+fn query_definition() -> QueueDefinition {
+    let mut definition = qdef();
+    definition.typed_indexes = vec![QueueIndex {
+        name: "by_rank".into(),
+        declaration: IndexDeclaration::Single(IndexDef {
+            field: "rank".into(),
+            index_type: IndexType::Integer,
+            unique: false,
+        }),
+    }];
+    definition
+}
+
+fn query_item(rank: i64) -> NewItem {
+    NewItem {
+        entity: Some(serde_json::json!({"rank": rank})),
+        ..item(rank)
+    }
+}
+
+fn query_request(request_id: &str) -> ClaimByQueryRequest {
+    ClaimByQueryRequest {
+        index: Some("by_rank".into()),
+        filters: vec![QueryFilter {
+            field: "rank".into(),
+            op: FilterOp::Gte,
+            value: TypedValue::Integer(0),
+        }],
+        order_by: OrderField {
+            field: "rank".into(),
+            direction: SortDirection::Ascending,
+        },
+        max_items: 10,
+        lease_duration_ms: 1_000,
+        worker_id: WorkerId::new("worker").unwrap(),
+        request_id: Some(RequestId::new(request_id).unwrap()),
+    }
+}
+
 /// A coordinated owner acquires + fences on first use and operates normally; the queue is served under a
 /// real (epoch >= 1) lease, not the degenerate sole-owner path.
 #[tokio::test]
@@ -66,7 +107,7 @@ async fn coordinated_owner_acquires_and_operates() {
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
-    let pq = Pqueue::with_control_plane_in_process(
+    let pq = RuntimeCore::with_control_plane_in_process(
         backend.clone(),
         clock.clone(),
         OwnerId::new("owner-A").unwrap(),
@@ -96,13 +137,13 @@ async fn superseded_owner_is_fenced_on_data_path() {
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
-    let a = Pqueue::with_control_plane_in_process(
+    let a = RuntimeCore::with_control_plane_in_process(
         backend.clone(),
         clock.clone(),
         OwnerId::new("owner-A").unwrap(),
         cp.clone(),
     );
-    let b = Pqueue::with_control_plane_in_process(
+    let b = RuntimeCore::with_control_plane_in_process(
         backend.clone(),
         clock.clone(),
         OwnerId::new("owner-B").unwrap(),
@@ -153,6 +194,60 @@ async fn superseded_owner_is_fenced_on_data_path() {
     b.push(&qkey(), item(9)).await.unwrap();
 }
 
+#[tokio::test]
+async fn superseded_owner_is_fenced_on_api004_mutation_and_query_claim() {
+    let backend = Arc::new(composed_memory_backend());
+    let clock = Arc::new(ManualClock::at(0));
+    let cp: Arc<dyn QueueControlPlane> =
+        Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
+    let owner_a = OwnerId::new("owner-A").unwrap();
+    let a_mutation = RuntimeCore::with_control_plane_in_process(
+        backend.clone(),
+        clock.clone(),
+        owner_a.clone(),
+        cp.clone(),
+    );
+    let a_claim = RuntimeCore::with_control_plane_in_process(
+        backend.clone(),
+        clock.clone(),
+        owner_a,
+        cp.clone(),
+    );
+    let b = RuntimeCore::with_control_plane_in_process(
+        backend,
+        clock.clone(),
+        OwnerId::new("owner-B").unwrap(),
+        cp,
+    );
+
+    a_mutation.create_queue(query_definition()).await.unwrap();
+    a_mutation.push(&qkey(), query_item(1)).await.unwrap();
+    a_claim.push(&qkey(), query_item(2)).await.unwrap();
+    clock.set(20);
+    b.push(&qkey(), query_item(3)).await.unwrap();
+
+    let mutation = BoundedMutationRequest {
+        index: Some("by_rank".into()),
+        filters: vec![QueryFilter {
+            field: "rank".into(),
+            op: FilterOp::Gte,
+            value: TypedValue::Integer(0),
+        }],
+        set_fields: BTreeMap::from([("rank".into(), TypedValue::Integer(10))]),
+        max_scan_rows: 100,
+    };
+    assert_eq!(
+        a_mutation.bounded_mutation(&qkey(), mutation).await,
+        Err(EngineError::EpochFenced)
+    );
+    assert!(matches!(
+        a_claim
+            .claim_by_query(&qkey(), query_request("stale-owner-query"))
+            .await,
+        Err(EngineError::EpochFenced)
+    ));
+}
+
 /// `ownership` is the value form of the redirect (ADR-009 L5): a sole-owner handle is always `Mine`; a
 /// coordinated handle reports `Mine` for the queues it owns and `Unowned` before any acquire.
 #[tokio::test]
@@ -161,7 +256,7 @@ async fn ownership_value_form() {
     let clock = Arc::new(ManualClock::at(0));
 
     // Sole-owner handle: always Mine.
-    let sole = Pqueue::new(backend.clone(), clock.clone());
+    let sole = RuntimeCore::new(backend.clone(), clock.clone());
     assert_eq!(
         sole.ownership(&qkey()).await.unwrap(),
         Ownership::Mine { epoch: None }
@@ -170,7 +265,7 @@ async fn ownership_value_form() {
     // Coordinated handle: Unowned before any op, Mine after acquiring.
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
-    let a = Pqueue::with_control_plane_in_process(
+    let a = RuntimeCore::with_control_plane_in_process(
         backend.clone(),
         clock.clone(),
         OwnerId::new("owner-A").unwrap(),
@@ -193,7 +288,7 @@ async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
     let clock = Arc::new(ManualClock::at(0));
     let cp: Arc<dyn QueueControlPlane> =
         Arc::new(InMemoryControlPlane::new(ControlPlaneConfig::default()));
-    let a = Pqueue::with_control_plane_in_process(
+    let a = RuntimeCore::with_control_plane_in_process(
         backend.clone(),
         clock.clone(),
         OwnerId::new("owner-A").unwrap(),
@@ -220,6 +315,14 @@ async fn draining_owner_refuses_new_claim_but_serves_in_flight() {
             Err(EngineError::Unavailable)
         ),
         "a draining owner refuses a new claim"
+    );
+    assert!(
+        matches!(
+            a.claim_by_query(&qkey(), query_request("draining-query"))
+                .await,
+            Err(EngineError::Unavailable)
+        ),
+        "a draining owner also refuses a new query-selected claim"
     );
     // ...but still serves in-flight work: finalizing the already-leased item, and pushes, continue.
     a.ack(&qkey(), [leased]).await.unwrap();

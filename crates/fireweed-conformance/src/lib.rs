@@ -609,7 +609,7 @@ mod storage_conformance {
         let err = validate_entity(Some(&cs), Some(&json!({}))).unwrap_err();
         assert_eq!(
             err.resp_token(),
-            Some("-ERR pqueue entity_schema_violation"),
+            Some("-ERR fireweed entity_schema_violation"),
             "RESP token must match ADR-011"
         );
     }

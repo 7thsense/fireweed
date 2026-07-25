@@ -1,10 +1,7 @@
 //! ComposedBackend feature-parity conformance (DDx B0.2 / B0.3 / B0.4): the rich (non-item) claim units,
-//! per-group active-scope discovery, and operator gate state are RELATIONAL-class capabilities the
-//! composition delegates to its projection axis. These scenarios exercise them on the **composed
-//! relational** backend (`ComposedBackend<SqliteRelational, SqliteRelational, _>`), which now reaches
-//! parity with the monolithic `SqliteRelationalBackend`, and confirm the **composed log-replay** backend
-//! (`ComposedBackend<SqliteLog, InMemoryProjection, _>`) still refuses them with the structured
-//! `Unavailable` (capability parity with the in-memory family), rather than silently downgrading.
+//! per-group active-scope discovery, and operator gate state are delegated to the projection axis. Rich
+//! claims and discovery remain relational-only. Gate state is shared by relational and in-memory/log-replay
+//! projections; focused coverage for the latter lives with memory and reconnect tests.
 
 use fireweed_conformance::{claim_req, qdef, qkey, shard};
 use fireweed_core::{
@@ -221,10 +218,9 @@ async fn composed_relational_same_group_key_claim_selects() {
     );
 }
 
-/// The composed LOG-REPLAY backend has no group/cohort projection, so every VALID non-item claim unit is
-/// refused with the structured `Unavailable` (not silently downgraded to an item claim).
+/// The composed log-replay backend uses the shared projection for every valid non-item claim unit.
 #[tokio::test]
-async fn composed_log_replay_claim_stays_unavailable_for_non_item_units() {
+async fn composed_log_replay_accepts_non_item_claim_units() {
     let b = composed_sqlite_backend_in_memory().unwrap();
     b.create_queue(qdef_rich()).await.unwrap();
     b.push(
@@ -236,11 +232,22 @@ async fn composed_log_replay_claim_stays_unavailable_for_non_item_units() {
     .await
     .unwrap();
 
+    let cohort = b
+        .claim(claim_req_compat(
+            10,
+            500,
+            100,
+            ClaimCompatibility {
+                whole_cohort: true,
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cohort.items.len(), 2);
+    assert!(cohort.cohort_id.is_some());
+
     for compat in [
-        ClaimCompatibility {
-            whole_cohort: true,
-            ..Default::default()
-        },
         ClaimCompatibility {
             same_group_key: true,
             ..Default::default()
@@ -251,18 +258,13 @@ async fn composed_log_replay_claim_stays_unavailable_for_non_item_units() {
         },
     ] {
         assert!(
-            matches!(
-                b.claim(claim_req_compat(10, 500, 100, compat)).await,
-                Err(EngineError::Unavailable)
-            ),
-            "the log-replay family refuses a valid non-item claim unit with Unavailable"
+            b.claim(claim_req_compat(10, 500, 100, compat))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
         );
     }
-    // The item-level (default) claim still works unchanged.
-    assert_eq!(
-        b.claim(claim_req(10, 500, 100)).await.unwrap().items.len(),
-        2
-    );
 }
 
 /// REGRESSION (fencing/rollback discipline): a rich claim that gets FENCED (stale epoch) must leave no
@@ -376,24 +378,22 @@ async fn composed_relational_discover_active_scopes_rolls_up() {
     assert_eq!(q.eligible_count, Some(3), "summed eligible counts (2 + 1)");
 }
 
-/// The composed LOG-REPLAY backend maintains no per-group summary, so discovery is refused with the
-/// structured `Unavailable` (parity with the in-memory family).
+/// The composed LOG-REPLAY backend derives exact active scopes from its shared in-memory projection.
 #[tokio::test]
-async fn composed_log_replay_discovery_stays_unavailable() {
+async fn composed_log_replay_discovers_active_scopes() {
     let b = composed_sqlite_backend_in_memory().unwrap();
     b.create_queue(qdef_rich()).await.unwrap();
     b.push(&shard(), vec![gspec(10, "g1")], ts(10), None)
         .await
         .unwrap();
 
-    assert!(
-        matches!(
-            b.discover_active_scopes(&shard(), DiscoveryGranularity::Queue, ts(1000))
-                .await,
-            Err(EngineError::Unavailable)
-        ),
-        "the log-replay family refuses discovery with Unavailable"
-    );
+    let scopes = b
+        .discover_active_scopes(&shard(), DiscoveryGranularity::Queue, ts(1000))
+        .await
+        .unwrap();
+    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes[0].oldest_eligible_age_ms, 990_000);
+    assert_eq!(scopes[0].eligible_count, Some(1));
 }
 
 // ---------------------------------------------------------------------------

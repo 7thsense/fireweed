@@ -55,7 +55,7 @@ kind enforces two fixes that turn that ceiling into a reproducible pass:
 ### Robustness: a single warm-up + bounded retry on transient epoch flaps (load-side only, server untouched)
 
 Under 8 CPU-limited pods a server's owner lease can momentarily flap, the next write re-acquires at a bumped
-epoch, and in-flight commands cached at the old epoch are briefly fenced (`-ERR pqueue epoch_stale`). The
+epoch, and in-flight commands cached at the old epoch are briefly fenced (`-ERR fireweed epoch_stale`). The
 generator handles this exactly as a real client would, **without changing any server code**: it (a) warms up
 each queue with one serial write + drain to establish durable ownership before the timed phases, and (b)
 bounded-retries a transiently-fenced `XADD`/`XREADGROUP`/`XACK`. The retry cost stays INSIDE the timed
