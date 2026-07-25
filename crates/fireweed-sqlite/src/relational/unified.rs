@@ -350,6 +350,58 @@ impl ProjectionStore for SqliteRelational {
         Ok(Some(response))
     }
 
+    fn replay_durable_item_mutation(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<fireweed_engine::ItemMutationResponse>> {
+        let mut g = self.lock();
+        let tx = st(g.conn.transaction())?;
+        let (tenant, queue) = parts(shard);
+        let prior: Option<(Vec<u8>, String, String, i64)> = st(tx
+            .query_row(
+                "SELECT request_fingerprint,response_payload,command_positions,expires_at \
+                 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![tenant, queue, IDEMPOTENCY_OPERATION_ITEM_MUTATION, request_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional())?;
+        let Some((stored_fingerprint, response_payload, positions_json, expires_at)) = prior else {
+            st(tx.commit())?;
+            return Ok(None);
+        };
+        if expires_at <= ts_nanos(now) {
+            st(tx.execute(
+                "DELETE FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation=?3 AND request_id=?4",
+                params![tenant, queue, IDEMPOTENCY_OPERATION_ITEM_MUTATION, request_id.as_str()],
+            ))?;
+            st(tx.commit())?;
+            return Ok(None);
+        }
+        if stored_fingerprint != fingerprint.to_be_bytes() {
+            return Err(EngineError::RequestIdConflict);
+        }
+        let mut response: fireweed_engine::ItemMutationResponse = serde_json::from_str(&response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let positions: Vec<CommandPosition> = serde_json::from_str(&positions_json)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        response.position = positions.last().cloned();
+        st(tx.commit())?;
+        Ok(Some(response))
+    }
+
+    fn plan_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request: &fireweed_engine::ItemMutationRequest,
+    ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
+        projection_data_sql(&self.lock(), shard)?.plan_item_mutation(request)
+    }
+
     fn replay_durable_commit(
         &mut self,
         shard: &QueueKey,
@@ -939,13 +991,7 @@ impl ProjectionStore for SqliteRelational {
 }
 
 fn projection_data(inner: &Inner, shard: &QueueKey) -> EngineResult<ProjectionData> {
-    let definition = inner
-        .queues
-        .get(shard)
-        .cloned()
-        .ok_or(EngineError::NotFound)?;
-    let image = export_projection_image_sql(&inner.conn, shard)?;
-    ProjectionData::from_image(&definition, image)
+    projection_data_sql(inner, shard)
 }
 
 impl AsOfProjectionStore for SqliteRelational {
