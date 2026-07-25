@@ -68,6 +68,10 @@ name = "concrete_fireweed"
 path = "tests/concrete_fireweed.rs"
 
 [[test]]
+name = "item_mutation"
+path = "tests/item_mutation.rs"
+
+[[test]]
 name = "sqlite_create_or_read"
 path = "tests/sqlite_create_or_read.rs"
 

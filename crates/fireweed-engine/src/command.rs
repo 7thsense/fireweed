@@ -52,6 +52,9 @@ pub enum QueueCommand {
     /// change (FAC-1, ADR-009). The write side of the `LiveItemView` map; bumps `item_version`. Atomic
     /// class only. Lets an owner-runtime keep compound per-item work state in fireweed instead of a shadow.
     UpdateFields(UpdateFieldsCommand),
+    /// One resolved, durable backend-erased mutation. Selector predicates are evaluated before append;
+    /// this command contains only exact item ids and complete post-mutation values.
+    MutateItems(MutateItemsCommand),
     // --- ReclaimDriver-fired (TD-007 §3) ---
     LeaseExpired(LeaseExpiredCommand),
     CohortExpired(CohortExpiredCommand),
@@ -89,6 +92,41 @@ pub struct CreateQueueCommand {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PushCommand {
     pub items: Vec<PushItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MutateItemsCommand {
+    pub items: Vec<ResolvedItemMutation>,
+    pub gate_changes: Vec<crate::port::GateChange>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResolvedItemMutation {
+    pub item_id: ItemId,
+    pub action: ResolvedItemMutationAction,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ResolvedItemMutationAction {
+    Purge,
+    Replace(ResolvedItemValues),
+}
+
+/// Complete post-mutation values. Applying this value is deterministic and performs exactly one version
+/// bump already chosen by the planner; replay never re-evaluates a selector or JSON pointer edit.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ResolvedItemValues {
+    pub state: ItemState,
+    pub item_version: u64,
+    pub priority: Option<PriorityValue>,
+    pub not_before: Option<UtcTimestamp>,
+    pub eligible_since: UtcTimestamp,
+    pub payload: Option<Bytes>,
+    pub fields: BTreeMap<String, Bytes>,
+    pub metadata: Metadata,
+    pub gate_keys: Vec<String>,
+    pub entity_document: Option<serde_json::Value>,
+    pub invalidate_lease: bool,
 }
 
 /// Build `PushItem`s + their ids for one push (ADR-009). Each id is minted **locally** as
@@ -564,6 +602,7 @@ pub enum ChangeRecordKind {
     CohortFinalize,
     ReplacePending,
     UpdateFields,
+    MutateItems,
     LeaseExpired,
     CohortExpired,
     FenceLease,
@@ -992,6 +1031,45 @@ pub fn command_envelope_change_records(
                 )
             })
             .collect(),
+        QueueCommand::MutateItems(c) => {
+            let mut records = c
+                .items
+                .iter()
+                .map(|mutation| {
+                    let (state, version, terminal_at) = match &mutation.action {
+                        ResolvedItemMutationAction::Purge => (None, None, Some(env.created_at)),
+                        ResolvedItemMutationAction::Replace(values) => (
+                            Some(change_record_state(values.state)),
+                            Some(values.item_version),
+                            values.state.is_terminal().then_some(env.created_at),
+                        ),
+                    };
+                    item_change_record(
+                        shard,
+                        mutation.item_id,
+                        position,
+                        ChangeRecordKind::MutateItems,
+                        state,
+                        version,
+                        terminal_at,
+                        emitted_at,
+                        source_owner_id.clone(),
+                        source_epoch,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !c.gate_changes.is_empty() {
+                records.push(queue_scoped_change_record(
+                    shard,
+                    position,
+                    ChangeRecordKind::MutateItems,
+                    emitted_at,
+                    source_owner_id,
+                    source_epoch,
+                ));
+            }
+            records
+        }
         QueueCommand::SetGates(_) => vec![queue_scoped_change_record(
             shard,
             position,
@@ -1038,6 +1116,11 @@ pub enum RequestOutcome {
     /// Serialized ordered API-001 BatchUpdate result vector. The payload is deliberately opaque to the
     /// command model; the owning backend decodes it into its public outcome type during idempotent replay.
     BatchUpdate {
+        response_payload: String,
+    },
+    /// Serialized ordered backend-erased mutation response. The durable envelope position is restored
+    /// from the enclosing log record on replay.
+    ItemMutation {
         response_payload: String,
     },
     /// Durable replay payload for API-004 ClaimByQuery. The clear lease token is part of the response and

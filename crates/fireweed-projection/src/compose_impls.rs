@@ -460,6 +460,7 @@ impl ProjectionStore for InMemoryProjection {
                 &definition.secondary_indexes,
             )
             .with_typed_indexes(&definition.typed_indexes)
+            .with_eligibility_policy(&definition.eligibility_policy)
         });
         Ok(())
     }
@@ -491,7 +492,8 @@ impl ProjectionStore for InMemoryProjection {
             definition.recurrence,
             &definition.secondary_indexes,
         )
-        .with_typed_indexes(&definition.typed_indexes);
+        .with_typed_indexes(&definition.typed_indexes)
+        .with_eligibility_policy(&definition.eligibility_policy);
         for (position, command) in positions.iter().zip(commands) {
             replacement.apply_command_at(
                 Some(command.created_at),
@@ -562,6 +564,14 @@ impl ProjectionStore for InMemoryProjection {
         commands: &[UpdateFieldsCommand],
     ) -> EngineResult<Vec<bool>> {
         self.get(shard)?.batch_update_preflight(commands)
+    }
+
+    fn plan_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request: &fireweed_engine::ItemMutationRequest,
+    ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
+        self.get(shard)?.plan_item_mutation(request)
     }
 
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {

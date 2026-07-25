@@ -1798,6 +1798,9 @@ fn command_item_ids(command: &QueueCommand) -> Vec<ItemId> {
         QueueCommand::UnfenceLease(command) => command.item_ids.clone(),
         QueueCommand::ReplacePending(command) => vec![command.replacement.item_id],
         QueueCommand::UpdateFields(command) => vec![command.item_id],
+        QueueCommand::MutateItems(command) => {
+            command.items.iter().map(|item| item.item_id).collect()
+        }
         QueueCommand::CreateQueue(_)
         | QueueCommand::PauseQueue(_)
         | QueueCommand::ResumeQueue
@@ -3483,6 +3486,9 @@ fn apply_command_sql(
             ))?;
             Ok(())
         }
+        // Planned/applied by the dedicated relational mutation slice. Its planning seam rejects before
+        // append until that implementation is linked.
+        QueueCommand::MutateItems(_) => Err(EngineError::Unavailable),
     }
 }
 
@@ -5434,6 +5440,7 @@ impl PostgresRelationalBackend {
                             )?;
                         }
                         RequestOutcome::ClaimByQuery { .. } => {}
+                        RequestOutcome::ItemMutation { .. } => {}
                     }
                 }
                 next += 1;
@@ -8361,6 +8368,20 @@ impl BatchUpdatePort for PostgresRelationalBackend {
             }
         })();
         std::future::ready(result)
+    }
+}
+
+// The dedicated PostgreSQL mutation implementation replaces this compile-time hook. Keeping the port
+// explicit makes the public facade type-check while ensuring no unresolved selector command can append.
+impl fireweed_engine::ItemMutationPort for PostgresRelationalBackend {
+    fn mutate_items(
+        &self,
+        _shard: &QueueKey,
+        _request: fireweed_engine::ItemMutationRequest,
+        _expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ItemMutationResponse>> + Send
+    {
+        std::future::ready(Err(EngineError::Unavailable))
     }
 }
 
