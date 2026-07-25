@@ -33,7 +33,7 @@ use fireweed_objectlog::segmented::{
     SegmentConfig, SegmentCounters, SegmentedObjectLog,
 };
 use fireweed_objectlog::{
-    LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands_for_format,
+    LocalObjectLog, ObjectLogByteAdmissionSnapshot, prepare_serialized_commands,
 };
 use fireweed_projection::ProjectionData;
 use fireweed_sqlite::SqliteProjectionStore;
@@ -1214,7 +1214,6 @@ pub struct SegmentedObjectLogSqliteBackend {
     idempotency: Mutex<HashMap<QueueKey, QueueIdempotencyCache<Vec<ItemId>>>>,
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
-    writer_format: fireweed_objectlog::SegmentWriterFormat,
 }
 
 fn ts_to_ms(now: UtcTimestamp) -> i64 {
@@ -1304,7 +1303,6 @@ impl SegmentedObjectLogSqliteBackend {
             idempotency: Mutex::new(HashMap::new()),
             byte_budget: default_objectlog_byte_budget(),
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
-            writer_format: config.writer_format(),
         })
     }
 
@@ -1543,10 +1541,9 @@ impl SegmentedObjectLogSqliteBackend {
             // Same-queue callers waiting for this lock own only their request envelope, never a global byte
             // permit or an extra serialized copy. Canonical encoding, queue reservation, and non-waiting
             // global admission linearize together under the coordinator lock.
-            let (serialized, charged_bytes) = prepare_serialized_commands_for_format(
+            let (serialized, charged_bytes) = prepare_serialized_commands(
                 vec![envelope],
                 self.byte_budget.config().global_limit(),
-                self.writer_format,
             )?;
             let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
             if !state.pending.is_empty()
@@ -1607,10 +1604,9 @@ impl SegmentedObjectLogSqliteBackend {
         {
             let mut state = coord.state.lock().await;
             for (index, envelope) in envelopes.into_iter().enumerate() {
-                let (serialized, charged_bytes) = match prepare_serialized_commands_for_format(
+                let (serialized, charged_bytes) = match prepare_serialized_commands(
                     vec![envelope],
                     self.byte_budget.config().global_limit(),
-                    self.writer_format,
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => {
@@ -2510,7 +2506,6 @@ pub struct SegmentedObjectLogInMemoryBackend {
     byte_budget: BufferedByteBudget,
     queue_byte_limit: usize,
     debug_segments: bool,
-    writer_format: fireweed_objectlog::SegmentWriterFormat,
 }
 
 impl SegmentedObjectLogInMemoryBackend {
@@ -2569,7 +2564,6 @@ impl SegmentedObjectLogInMemoryBackend {
             byte_budget: default_objectlog_byte_budget(),
             queue_byte_limit: crate::DEFAULT_OBJECTLOG_QUEUE_WAITING_BYTES,
             debug_segments: false,
-            writer_format: config.writer_format(),
         })
     }
 
@@ -2805,10 +2799,9 @@ impl SegmentedObjectLogInMemoryBackend {
         let (tx, rx) = oneshot::channel();
         {
             let mut state = coord.state.lock().await;
-            let (serialized, charged_bytes) = prepare_serialized_commands_for_format(
+            let (serialized, charged_bytes) = prepare_serialized_commands(
                 vec![envelope],
                 self.byte_budget.config().global_limit(),
-                self.writer_format,
             )?;
             let queue_bytes: usize = state.permits.iter().map(OwnedBytePermit::bytes).sum();
             if !state.pending.is_empty()
@@ -2864,10 +2857,9 @@ impl SegmentedObjectLogInMemoryBackend {
         {
             let mut state = coord.state.lock().await;
             for (index, envelope) in envelopes.into_iter().enumerate() {
-                let (serialized, charged_bytes) = match prepare_serialized_commands_for_format(
+                let (serialized, charged_bytes) = match prepare_serialized_commands(
                     vec![envelope],
                     self.byte_budget.config().global_limit(),
-                    self.writer_format,
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => {

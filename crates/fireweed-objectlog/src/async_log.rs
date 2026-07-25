@@ -434,10 +434,6 @@ impl AsyncObjectLog {
         self.actor.shared.log.shared_segment_target_bytes()
     }
 
-    pub(crate) fn segment_writer_format(&self) -> crate::SegmentWriterFormat {
-        self.actor.shared.log.shared_segment_writer_format()
-    }
-
     pub async fn open(root: impl Into<PathBuf>) -> EngineResult<Self> {
         Self::open_with_limits(
             root,

@@ -22,7 +22,7 @@ use fireweed_sqlite::{DEFAULT_DEFERRED_FLUSH_CHUNK, HybridAsyncThresholds};
 use crate::{
     BackendSpec, ChangeRecordSinkConfig, Config, ControlPlaneSpec, DEFAULT_RECOVERY_MAX_TAIL,
     EmbeddedFjordConfig, LogSpec, ObjectLogByteLimits, ObjectLogSpec, ProjectionSpec,
-    S3CredentialSource, SegmentConfig, SegmentWriterFormat, resolve_node_id,
+    S3CredentialSource, SegmentConfig, resolve_node_id,
     validated_owner_endpoint,
 };
 
@@ -216,23 +216,11 @@ fn parse_control_plane(
     }
 }
 
-/// The group-commit segment configuration for the segmented object-log families (byte-size + latency seal
-/// triggers), plus the rollout-safe writer format. Readers always accept both
-/// durable formats; release N defaults new writes to v2.
+/// The group-commit segment configuration for the segmented object-log families.
 fn segment_config(env: &BTreeMap<String, String>) -> Result<SegmentConfig, ConfigError> {
     let target_bytes = parse_usize(env, "FIREWEED_SEGMENT_TARGET_BYTES", 262_144);
     let max_latency_ms = parse_u64(env, "FIREWEED_SEGMENT_MAX_LATENCY_MS", 20);
-    let writer_format = match env_or(env, "FIREWEED_SEGMENT_WRITER_FORMAT", "v2").as_str() {
-        "v2" => SegmentWriterFormat::V2,
-        "v3" => SegmentWriterFormat::V3,
-        other => {
-            return Err(ConfigError::new(format!(
-                "unknown FIREWEED_SEGMENT_WRITER_FORMAT={other:?}; expected v2|v3"
-            )));
-        }
-    };
     SegmentConfig::new(target_bytes, max_latency_ms)
-        .map(|config| config.with_writer_format(writer_format))
         .map_err(|e| ConfigError::new(format!("invalid segment configuration: {e}")))
 }
 

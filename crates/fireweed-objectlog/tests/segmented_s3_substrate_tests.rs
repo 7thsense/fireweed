@@ -39,7 +39,7 @@ use fireweed_objectlog::object_store_observability::{
 };
 use fireweed_objectlog::segmented::{
     BlobStore, FaultCutPoint, FaultHook, InMemoryBlobStore, ManifestHeadBlob, ObjectStoreStats,
-    PartialExpireVisibility, S3BlobStore, SegmentConfig, SegmentWriterFormat, SegmentedObjectLog,
+    PartialExpireVisibility, S3BlobStore, SegmentConfig, SegmentedObjectLog,
 };
 
 /// `n` distinct push commands (one item each), so a segment can batch several commands.
@@ -8839,10 +8839,8 @@ fn TestObjectlogFireweedC33c367eInteractionRecorded() {
     TestObjectlogRetainedFloorHeadReplayStillSucceeds();
 }
 
-fn integrity_config(format: SegmentWriterFormat) -> SegmentConfig {
-    SegmentConfig::new(10_000_000, 100)
-        .unwrap()
-        .with_writer_format(format)
+fn integrity_config() -> SegmentConfig {
+    SegmentConfig::new(10_000_000, 100).unwrap()
 }
 
 #[test]
@@ -8855,78 +8853,61 @@ fn segment_configuration_rejects_targets_above_the_writable_frame_cap() {
 }
 
 #[test]
-fn segment_v2_v3_arbitrary_interleavings_replay_and_branch() {
-    // Exhaust every non-empty binary writer-format sequence through length six.
-    // Reopening at each seal proves dispatch follows each manifest entry rather
-    // than a process-wide reader setting.
+fn current_format_reopens_replay_and_branch() {
     for width in 1..=6_u32 {
-        for bits in 0..(1_u32 << width) {
-            let store = Arc::new(InMemoryBlobStore::new());
-            let definition = unique_qdef(&format!("mixed-{width}-{bits}"));
-            let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-            for offset in 0..width {
-                let format = if bits & (1 << offset) == 0 {
-                    SegmentWriterFormat::V2
-                } else {
-                    SegmentWriterFormat::V3
-                };
-                let log = SegmentedObjectLog::open(store.clone(), integrity_config(format));
-                log.create_queue(&definition).unwrap();
-                log.enqueue(&key, &pushes(1), 0, i64::from(offset)).unwrap();
-                log.seal(&key, 0, i64::from(offset) + 1).unwrap();
-            }
-            let reader =
-                SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V2));
-            reader.create_queue(&definition).unwrap();
-            let replay = reader.read_all(&key).unwrap();
-            assert_eq!(replay.len(), width as usize, "bits={bits:b}");
-            assert_eq!(
-                replay
-                    .iter()
-                    .map(|(position, _)| position.sequence)
-                    .collect::<Vec<_>>(),
-                (0..u64::from(width)).collect::<Vec<_>>()
-            );
-
-            let mut branch_definition = definition.clone();
-            branch_definition.queue_id =
-                QueueId::new(format!("branch-mixed-{width}-{bits}")).unwrap();
-            let cut = replay.last().unwrap().0.clone();
-            reader
-                .branch(&key, &branch_definition, &cut, 10_000, 100)
-                .unwrap();
-            let branch_key = QueueKey::new(
-                branch_definition.tenant_id.clone(),
-                branch_definition.queue_id.clone(),
-            );
-            assert_eq!(reader.read_all(&branch_key).unwrap().len(), width as usize);
+        let store = Arc::new(InMemoryBlobStore::new());
+        let definition = unique_qdef(&format!("current-{width}"));
+        let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        for offset in 0..width {
+            let log = SegmentedObjectLog::open(store.clone(), integrity_config());
+            log.create_queue(&definition).unwrap();
+            log.enqueue(&key, &pushes(1), 0, i64::from(offset)).unwrap();
+            log.seal(&key, 0, i64::from(offset) + 1).unwrap();
         }
+        let reader = SegmentedObjectLog::open(store.clone(), integrity_config());
+        reader.create_queue(&definition).unwrap();
+        let replay = reader.read_all(&key).unwrap();
+        assert_eq!(replay.len(), width as usize);
+        assert_eq!(
+            replay
+                .iter()
+                .map(|(position, _)| position.sequence)
+                .collect::<Vec<_>>(),
+            (0..u64::from(width)).collect::<Vec<_>>()
+        );
+
+        let mut branch_definition = definition.clone();
+        branch_definition.queue_id = QueueId::new(format!("branch-current-{width}")).unwrap();
+        let cut = replay.last().unwrap().0.clone();
+        reader
+            .branch(&key, &branch_definition, &cut, 10_000, 100)
+            .unwrap();
+        let branch_key = QueueKey::new(
+            branch_definition.tenant_id.clone(),
+            branch_definition.queue_id.clone(),
+        );
+        assert_eq!(reader.read_all(&branch_key).unwrap().len(), width as usize);
     }
 }
 
 #[test]
-fn mixed_v2_v3_retention_expiry_and_reopen_preserve_the_live_tail() {
+fn current_format_retention_expiry_and_reopen_preserve_the_live_tail() {
     let store = Arc::new(InMemoryBlobStore::new());
     let definition = unique_qdef("mixed-retention-reopen");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    for format in [
-        SegmentWriterFormat::V2,
-        SegmentWriterFormat::V3,
-        SegmentWriterFormat::V2,
-    ] {
-        let log = SegmentedObjectLog::open(store.clone(), integrity_config(format));
+    for _ in 0..3 {
+        let log = SegmentedObjectLog::open(store.clone(), integrity_config());
         log.create_queue(&definition).unwrap();
         log.enqueue(&key, &pushes(1), 0, 1).unwrap();
         log.seal(&key, 0, 2).unwrap();
     }
-    let maintenance =
-        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let maintenance = SegmentedObjectLog::open(store.clone(), integrity_config());
     maintenance.create_queue(&definition).unwrap();
     let epoch = advance_floor_as_local_owner(&maintenance, &key, 0, 10).unwrap();
     assert_eq!(maintenance.maintenance_owner_epoch(&key), Some(epoch));
     maintenance.expire_segments_through(&key, 0, 20).unwrap();
 
-    let reopened = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V2));
+    let reopened = SegmentedObjectLog::open(store, integrity_config());
     reopened.create_queue(&definition).unwrap();
     let tail = reopened.read_from_limited(&key, 1, 10).unwrap();
     assert_eq!(
@@ -8942,7 +8923,7 @@ fn shared_authority_fences_data_floor_watermark_reopen_keeps_index_and_sequence_
     let store = Arc::new(InMemoryBlobStore::new());
     let definition = unique_qdef("watermark-domain-separation");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let log = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let log = SegmentedObjectLog::open(store.clone(), integrity_config());
     log.create_queue(&definition).unwrap();
     for epoch in 1..=5 {
         log.fence_epoch(&key, epoch, epoch as i64).unwrap();
@@ -8959,7 +8940,7 @@ fn shared_authority_fences_data_floor_watermark_reopen_keeps_index_and_sequence_
             .is_some()
     );
 
-    let reopened = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V2));
+    let reopened = SegmentedObjectLog::open(store, integrity_config());
     reopened.create_queue(&definition).unwrap();
     assert_eq!(
         reopened
@@ -8983,7 +8964,7 @@ fn every_single_bit_v3_mutation_fails_with_typed_redacted_error() {
     let store = Arc::new(InMemoryBlobStore::new());
     let definition = unique_qdef("v3-bitflip");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let log = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let log = SegmentedObjectLog::open(store.clone(), integrity_config());
     log.create_queue(&definition).unwrap();
     log.enqueue(&key, &pushes(1), 0, 1).unwrap();
     log.seal(&key, 0, 2).unwrap();
@@ -9016,7 +8997,7 @@ fn v3_manifest_key_identity_mismatch_fails_closed() {
     let store = InstrumentedBlobStore::new(raw.clone(), recorder.clone(), BlobBackendKind::Memory);
     let definition = unique_qdef("v3-key-identity");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let log = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V3));
+    let log = SegmentedObjectLog::open(store, integrity_config());
     log.create_queue(&definition).unwrap();
     log.enqueue(&key, &pushes(1), 0, 1).unwrap();
     log.seal(&key, 0, 2).unwrap();
@@ -9132,7 +9113,7 @@ fn malformed_authority_candidate_reports_exact_index_and_one_logical_corrupt_eve
     let store = InstrumentedBlobStore::new(raw.clone(), recorder.clone(), BlobBackendKind::Memory);
     let definition = unique_qdef("malformed-candidate");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let log = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V3));
+    let log = SegmentedObjectLog::open(store, integrity_config());
     log.create_queue(&definition).unwrap();
     log.fence_epoch(&key, 1, 0).unwrap();
     log.enqueue(&key, &pushes(1), 1, 1).unwrap();
@@ -9178,7 +9159,7 @@ fn historical_v2_branch_without_segment_epoch_remains_readable() {
     let store = Arc::new(InMemoryBlobStore::new());
     let definition = unique_qdef("legacy-branch-epoch");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let log = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V2));
+    let log = SegmentedObjectLog::open(store.clone(), integrity_config());
     log.create_queue(&definition).unwrap();
     log.enqueue(&key, &pushes(2), 0, 1).unwrap();
     let positions = log.seal(&key, 0, 2).unwrap();
@@ -9234,12 +9215,12 @@ fn shared_identical_cas_loser_never_deletes_winning_v3_object() {
     let definition = unique_qdef("v3-identical-cas");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
     let initializer =
-        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+        SegmentedObjectLog::open(store.clone(), integrity_config());
     initializer.create_queue(&definition).unwrap();
     initializer.fence_epoch(&key, 1, 0).unwrap();
 
-    let winner = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
-    let loser = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let winner = SegmentedObjectLog::open(store.clone(), integrity_config());
+    let loser = SegmentedObjectLog::open(store.clone(), integrity_config());
     winner.create_queue(&definition).unwrap();
     loser.create_queue(&definition).unwrap();
     let commands = pushes(1);
@@ -9255,16 +9236,15 @@ fn losing_distinct_candidate_gc_preserves_shared_content_addressed_segment() {
     let store = Arc::new(InMemoryBlobStore::new());
     let definition = unique_qdef("v3-shared-segment-gc");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let initializer =
-        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let initializer = SegmentedObjectLog::open(store.clone(), integrity_config());
     initializer.create_queue(&definition).unwrap();
     initializer.fence_epoch(&key, 1, 0).unwrap();
 
     let loser = Arc::new(SegmentedObjectLog::open(
         store.clone(),
-        integrity_config(SegmentWriterFormat::V3),
+        integrity_config(),
     ));
-    let winner = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let winner = SegmentedObjectLog::open(store.clone(), integrity_config());
     loser.create_queue(&definition).unwrap();
     winner.create_queue(&definition).unwrap();
     let commands = pushes(1);
@@ -9300,16 +9280,15 @@ fn losing_distinct_content_candidate_gc_reclaims_only_the_loser_segment() {
     let store = Arc::new(InMemoryBlobStore::new());
     let definition = unique_qdef("v3-distinct-segment-gc");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let initializer =
-        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let initializer = SegmentedObjectLog::open(store.clone(), integrity_config());
     initializer.create_queue(&definition).unwrap();
     initializer.fence_epoch(&key, 1, 0).unwrap();
 
     let loser = Arc::new(SegmentedObjectLog::open(
         store.clone(),
-        integrity_config(SegmentWriterFormat::V3),
+        integrity_config(),
     ));
-    let winner = SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V3));
+    let winner = SegmentedObjectLog::open(store.clone(), integrity_config());
     loser.create_queue(&definition).unwrap();
     winner.create_queue(&definition).unwrap();
     loser.enqueue(&key, &pushes(1), 1, 1).unwrap();
@@ -9350,31 +9329,22 @@ fn losing_distinct_content_candidate_gc_reclaims_only_the_loser_segment() {
 }
 
 #[test]
-fn shared_authority_mixed_history_with_fences_pages_exactly() {
+fn shared_authority_history_with_fences_pages_exactly() {
     let store = Arc::new(InMemoryBlobStore::new());
     let definition = unique_qdef("shared-mixed");
     let key = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
-    let bootstrap =
-        SegmentedObjectLog::open(store.clone(), integrity_config(SegmentWriterFormat::V2));
+    let bootstrap = SegmentedObjectLog::open(store.clone(), integrity_config());
     bootstrap.create_queue(&definition).unwrap();
     bootstrap.fence_epoch(&key, 1, 0).unwrap();
 
     let mut epoch = 1;
-    for (index, format) in [
-        SegmentWriterFormat::V2,
-        SegmentWriterFormat::V3,
-        SegmentWriterFormat::V2,
-        SegmentWriterFormat::V3,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for index in 0..4 {
         if index == 2 {
-            let fence = SegmentedObjectLog::open(store.clone(), integrity_config(format));
+            let fence = SegmentedObjectLog::open(store.clone(), integrity_config());
             fence.create_queue(&definition).unwrap();
             epoch = fence.fence_epoch(&key, 2, 20).unwrap();
         }
-        let writer = SegmentedObjectLog::open(store.clone(), integrity_config(format));
+        let writer = SegmentedObjectLog::open(store.clone(), integrity_config());
         writer.create_queue(&definition).unwrap();
         writer
             .enqueue(&key, &pushes(1), epoch, index as i64 + 1)
@@ -9382,7 +9352,7 @@ fn shared_authority_mixed_history_with_fences_pages_exactly() {
         writer.seal(&key, epoch, index as i64 + 2).unwrap();
     }
 
-    let reader = SegmentedObjectLog::open(store, integrity_config(SegmentWriterFormat::V2));
+    let reader = SegmentedObjectLog::open(store, integrity_config());
     reader.create_queue(&definition).unwrap();
     let all = reader.read_all(&key).unwrap();
     assert_eq!(

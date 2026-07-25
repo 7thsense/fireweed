@@ -409,6 +409,7 @@ fn change_record_kind_wire_value(kind: fireweed_engine::ChangeRecordKind) -> &'s
         fireweed_engine::ChangeRecordKind::ResumeQueue => "resume-queue",
         fireweed_engine::ChangeRecordKind::PurgeItems => "purge-items",
         fireweed_engine::ChangeRecordKind::SetGates => "set-gates",
+        fireweed_engine::ChangeRecordKind::MutateItems => "mutate-items",
     }
 }
 
