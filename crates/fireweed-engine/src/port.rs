@@ -79,6 +79,11 @@ pub struct AddressedMutation {
 pub struct SelectedMutation {
     pub selector_id: String,
     pub selector: ItemSelector,
+    /// Preconditions evaluated after this selector wins first-match ownership.
+    /// A failed precondition remains a matched, rejected result and MUST NOT
+    /// fall through to a later selector.
+    #[serde(default)]
+    pub predicates: Vec<ItemPredicate>,
     #[serde(default)]
     pub lease_guard: LeaseGuard,
     pub patch: ItemPatch,
