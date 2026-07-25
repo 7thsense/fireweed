@@ -89,6 +89,7 @@ fn addressed_request(
                     gate_keys: GateKeyDelta {
                         add: vec!["queue-hold".into()],
                         remove: vec![],
+                        remove_prefixes: vec![],
                     },
                     field_edits: BTreeMap::from([(
                         "owner".into(),
