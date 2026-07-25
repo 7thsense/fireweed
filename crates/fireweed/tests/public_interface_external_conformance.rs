@@ -6,13 +6,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fireweed::{
-    BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue, ClientItemKey,
-    ConfigSecret, ControlPlaneConfig, DiscoveryGranularity, EligibilityPolicy, Fireweed,
-    GateKeyPolicy, NewItem, ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, OwnerId,
-    PostgresCoordinationConfig, PostgresMode, PostgresRuntimeConfig, PriorityDirection,
-    PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue, ProjectionConfig,
-    QueueDefinition, QueueId, QueueKey, RecoveryAction, RecoveryPolicy, RecurrencePolicy,
-    RequestId, ResponseBarrier, RetryPolicy, SegmentConfig, SystemClock, TenantId,
+    AddressedMutation, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateRequest, BatchUpdateValue,
+    ClientItemKey, ConfigSecret, ControlPlaneConfig, DiscoveryGranularity, EligibilityPolicy,
+    EngineError, Fireweed, GateKeyPolicy, ItemMutationOperation, ItemMutationRequest,
+    ItemMutationResponse, ItemMutationReturning, ItemPatch, LeaseGuard, NewItem,
+    ObjectLogRuntimeConfig, ObjectLogStorage, OrderingMode, OwnerId, PostgresCoordinationConfig,
+    PostgresMode, PostgresRuntimeConfig, PriorityDirection, PriorityModel, PriorityModelKind,
+    PriorityTieBreaker, PriorityValue, ProjectionConfig, QueueDefinition, QueueId, QueueKey,
+    RecoveryAction, RecoveryPolicy, RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy,
+    SegmentConfig, SystemClock, TenantId, UtcTimestamp,
 };
 use fireweed_objectlog::segmented::{BlobStore, S3BlobStore};
 use postgres::{Client, NoTls};
@@ -265,6 +267,8 @@ struct ReopenProbe {
     item_id: fireweed::ItemId,
     batch: BatchUpdateRequest,
     batch_response: fireweed::BatchUpdateResponse,
+    mutation: ItemMutationRequest,
+    mutation_response: ItemMutationResponse,
 }
 
 fn reopen_definition(cell: &str) -> QueueDefinition {
@@ -351,6 +355,34 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
         }],
     };
     let batch_response = fireweed.batch_update(&queue, batch.clone()).await.unwrap();
+    let mutation = ItemMutationRequest {
+        request_id: RequestId::new("reopen-mutation-v1").unwrap(),
+        evaluated_at: UtcTimestamp::new(1_800_000_000, 0).unwrap(),
+        dry_run: false,
+        returning: ItemMutationReturning::BeforeSnapshot,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::Addressed {
+            entries: vec![AddressedMutation {
+                item_id,
+                expected_item_version: None,
+                predicates: vec![],
+                lease_guard: LeaseGuard::RejectActive,
+                patch: ItemPatch {
+                    priority: BatchUpdateValue::Replace(Some(PriorityValue::Int64(2))),
+                    field_edits: std::collections::BTreeMap::from([(
+                        "mutation-proof".into(),
+                        Some(bytes::Bytes::from_static(b"durable")),
+                    )]),
+                    ..ItemPatch::default()
+                },
+            }],
+        },
+    };
+    let mutation_response = fireweed
+        .mutate_items(&queue, mutation.clone())
+        .await
+        .unwrap();
+    assert_eq!(mutation_response.summary.changed, 1);
     fireweed
         .push(
             &queue,
@@ -372,6 +404,8 @@ async fn seed_reopen_probe(cell: &str, fireweed: &Fireweed) -> ReopenProbe {
         item_id,
         batch,
         batch_response,
+        mutation,
+        mutation_response,
     }
 }
 
@@ -393,18 +427,43 @@ async fn verify_reopen_probe(fireweed: &Fireweed, probe: ReopenProbe) {
     );
     assert_eq!(
         fireweed
-            .batch_update(&probe.queue, probe.batch)
+            .batch_update(&probe.queue, probe.batch.clone())
             .await
             .unwrap(),
         probe.batch_response
+    );
+    assert_eq!(
+        fireweed
+            .mutate_items(&probe.queue, probe.mutation.clone())
+            .await
+            .unwrap(),
+        probe.mutation_response,
+        "item mutation response must replay exactly after close/reopen"
+    );
+    let mut conflicting_mutation = probe.mutation;
+    let ItemMutationOperation::Addressed { entries } = &mut conflicting_mutation.operation else {
+        unreachable!("reopen mutation is addressed")
+    };
+    entries[0].patch.priority = BatchUpdateValue::Replace(Some(PriorityValue::Int64(1)));
+    assert_eq!(
+        fireweed
+            .mutate_items(&probe.queue, conflicting_mutation)
+            .await
+            .unwrap_err(),
+        EngineError::RequestIdConflict,
+        "changed mutation body must conflict after close/reopen"
     );
     let item = fireweed
         .live_item(&probe.queue, ClientItemKey::new("reopen-primary").unwrap())
         .await
         .unwrap()
         .expect("primary item survives close/reopen");
-    assert_eq!(item.priority, Some(PriorityValue::Int64(3)));
+    assert_eq!(item.priority, Some(PriorityValue::Int64(2)));
     assert_eq!(item.payload.as_deref(), Some(b"after".as_slice()));
+    assert_eq!(
+        item.fields.get("mutation-proof").map(bytes::Bytes::as_ref),
+        Some(b"durable".as_slice())
+    );
     assert!(
         fireweed
             .peek(&probe.queue, 10)
