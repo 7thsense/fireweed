@@ -190,6 +190,11 @@ pub enum LifecyclePatch {
 pub struct GateKeyDelta {
     pub add: Vec<String>,
     pub remove: Vec<String>,
+    /// Remove every current membership whose key starts with one of these
+    /// non-empty prefixes. Resolution happens during planning; the durable
+    /// command stores only the final gate-key set.
+    #[serde(default)]
+    pub remove_prefixes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

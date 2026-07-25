@@ -3240,7 +3240,17 @@ impl ProjectionData {
         let payload = replacement_value(&patch.payload, &record.payload);
         let metadata = replacement_value(&patch.metadata, &record.metadata);
         let mut gate_keys = record.gate_keys.clone();
+        if patch.gate_keys.remove_prefixes.iter().any(String::is_empty) {
+            return Ok((ItemMutationOutcome::Invalid, None));
+        }
         gate_keys.retain(|key| !patch.gate_keys.remove.contains(key));
+        gate_keys.retain(|key| {
+            !patch
+                .gate_keys
+                .remove_prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+        });
         gate_keys.extend(patch.gate_keys.add.iter().cloned());
         gate_keys.sort();
         gate_keys.dedup();
