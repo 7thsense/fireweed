@@ -15,7 +15,8 @@ use fireweed_engine::{
     CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError, EngineResult, FinalizeKind,
     FinalizeTarget, IdempotencyDecision, ItemView, LeaseView, LiveItemView, PayloadUpdate,
     PendingPage, PendingSummary, PushFingerprint, PushItem, QueueCommand, QueueKey, QueueMetrics,
-    RenewTarget, RequestOutcome, RichClaimSelection, TerminalEmissionMetrics,
+    RenewTarget, RequestOutcome, ResolvedItemMutationAction, RichClaimSelection,
+    TerminalEmissionMetrics,
 };
 use fireweed_relational::{
     async_projection as sql, elig_sort, fields_from_json, fields_to_json, lease_hash,
@@ -182,7 +183,8 @@ fn validate_minimal_command(envelope: &CommandEnvelope) -> EngineResult<()> {
         | QueueCommand::PurgeItems(_)
         | QueueCommand::SetGates(_)
         | QueueCommand::WriteSideRecords(_)
-        | QueueCommand::AdvanceInstanceFence(_) => {}
+        | QueueCommand::AdvanceInstanceFence(_)
+        | QueueCommand::MutateItems(_) => {}
         QueueCommand::Push(_)
         | QueueCommand::CohortClaim(_)
         | QueueCommand::CohortRenewLease(_)
@@ -2524,6 +2526,309 @@ async fn apply_owned(
                     .await
                     .map_err(storage)?;
             }
+            QueueCommand::MutateItems(mutation) => {
+                let definition = definition_in_transaction(&transaction, &position.queue).await?;
+                let item_ids = mutation
+                    .items
+                    .iter()
+                    .map(|item| item.item_id)
+                    .collect::<Vec<_>>();
+                let groups = groups_for_items(&transaction, &tenant, &queue, &item_ids).await?;
+                let now = ts_nanos(envelope.created_at);
+
+                for item in &mutation.items {
+                    let item_id = item.item_id.to_string();
+                    match &item.action {
+                        ResolvedItemMutationAction::Purge => {
+                            let row = one_row(
+                                &transaction,
+                                "SELECT client_item_key,lifecycle_state FROM fireweed_items \
+                                 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                                vec![
+                                    Value::Text(tenant.clone()),
+                                    Value::Text(queue.clone()),
+                                    Value::Text(item_id.clone()),
+                                ],
+                            )
+                            .await?
+                            .ok_or(EngineError::Conflict)?;
+                            let _state = parse_state(&text(&row[1])?)?;
+                            if definition.client_item_key_retention_ms > 0 {
+                                let expires_at = now.saturating_add(
+                                    i64::try_from(definition.client_item_key_retention_ms)
+                                        .unwrap_or(i64::MAX)
+                                        .saturating_mul(1_000_000),
+                                );
+                                transaction
+                                    .execute(
+                                        sql::UPSERT_KEY_RETENTION,
+                                        vec![
+                                            Value::Text(tenant.clone()),
+                                            Value::Text(queue.clone()),
+                                            Value::Text(text(&row[0])?),
+                                            Value::Text(item_id.clone()),
+                                            Value::Integer(expires_at),
+                                        ],
+                                    )
+                                    .await
+                                    .map_err(storage)?;
+                            }
+                            execute_for_items(
+                                &transaction,
+                                sql::delete_item_gates,
+                                vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                                std::slice::from_ref(&item.item_id),
+                            )
+                            .await?;
+                            delete_typed_index_rows(
+                                &transaction,
+                                &tenant,
+                                &queue,
+                                std::slice::from_ref(&item.item_id),
+                            )
+                            .await?;
+                            let deleted = execute_for_items(
+                                &transaction,
+                                sql::delete_items,
+                                vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                                std::slice::from_ref(&item.item_id),
+                            )
+                            .await?;
+                            if deleted != 1 {
+                                return Err(EngineError::Conflict);
+                            }
+                            token_ops.push(TokenOp::Clear(position.queue.clone(), item.item_id));
+                        }
+                        ResolvedItemMutationAction::Replace(values) => {
+                            let previous_version = values
+                                .item_version
+                                .checked_sub(1)
+                                .ok_or(EngineError::Conflict)?;
+                            let priority = values
+                                .priority
+                                .as_ref()
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(storage)?;
+                            let entity = values
+                                .entity_document
+                                .as_ref()
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(storage)?;
+                            let state = match values.state {
+                                ItemState::Pending => "Pending",
+                                ItemState::Leased => "Leased",
+                                ItemState::Complete => "Complete",
+                                ItemState::Failed => "Failed",
+                            };
+                            let terminal =
+                                matches!(values.state, ItemState::Complete | ItemState::Failed);
+                            let changed = transaction
+                                .execute(
+                                    "UPDATE fireweed_items SET lifecycle_state=?,priority=?,priority_sort=?,\
+                                     not_before=?,eligible_since=?,payload=?,fields=?,metadata=?,entity_document=?,\
+                                     lease_token_hash=CASE WHEN ?!=0 THEN NULL ELSE lease_token_hash END,\
+                                     lease_expires_at=CASE WHEN ?!=0 THEN NULL ELSE lease_expires_at END,\
+                                     worker_id=CASE WHEN ?!=0 THEN NULL ELSE worker_id END,\
+                                     fenced=CASE WHEN ?!=0 THEN 0 ELSE fenced END,item_version=?,terminal_at=?,\
+                                     terminal_command_epoch=?,updated_at=?,last_command_sequence=? \
+                                     WHERE tenant_id=? AND queue_id=? AND item_id=? AND item_version=?",
+                                    vec![
+                                        Value::Text(state.to_string()),
+                                        priority.map_or(Value::Null, Value::Text),
+                                        Value::Blob(elig_sort(
+                                            &values.priority,
+                                            &definition.priority_model,
+                                        )),
+                                        ts_nanos_opt(values.not_before)
+                                            .map_or(Value::Null, Value::Integer),
+                                        Value::Integer(ts_nanos(values.eligible_since)),
+                                        values.payload.as_ref().map_or(Value::Null, |payload| {
+                                            Value::Blob(payload.to_vec())
+                                        }),
+                                        Value::Text(fields_to_json(&values.fields)?),
+                                        Value::Text(metadata_to_json(&values.metadata)?),
+                                        entity.map_or(Value::Null, Value::Text),
+                                        Value::Integer(i64::from(values.invalidate_lease)),
+                                        Value::Integer(i64::from(values.invalidate_lease)),
+                                        Value::Integer(i64::from(values.invalidate_lease)),
+                                        Value::Integer(i64::from(values.invalidate_lease)),
+                                        Value::Integer(
+                                            i64::try_from(values.item_version).map_err(storage)?,
+                                        ),
+                                        terminal.then_some(now).map_or(Value::Null, Value::Integer),
+                                        terminal
+                                            .then(|| i64::try_from(position.backend_epoch))
+                                            .transpose()
+                                            .map_err(storage)?
+                                            .map_or(Value::Null, Value::Integer),
+                                        Value::Integer(now),
+                                        Value::Integer(incoming),
+                                        Value::Text(tenant.clone()),
+                                        Value::Text(queue.clone()),
+                                        Value::Text(item_id.clone()),
+                                        Value::Integer(i64::try_from(previous_version).map_err(storage)?),
+                                    ],
+                                )
+                                .await
+                                .map_err(storage)?;
+                            if changed != 1 {
+                                return Err(EngineError::Conflict);
+                            }
+
+                            execute_for_items(
+                                &transaction,
+                                sql::delete_item_gates,
+                                vec![Value::Text(tenant.clone()), Value::Text(queue.clone())],
+                                std::slice::from_ref(&item.item_id),
+                            )
+                            .await?;
+                            for gate_key in &values.gate_keys {
+                                transaction
+                                    .execute(
+                                        sql::INSERT_ITEM_GATE,
+                                        vec![
+                                            Value::Text(tenant.clone()),
+                                            Value::Text(queue.clone()),
+                                            Value::Text(item_id.clone()),
+                                            Value::Text(gate_key.clone()),
+                                        ],
+                                    )
+                                    .await
+                                    .map_err(storage)?;
+                            }
+
+                            delete_typed_index_rows(
+                                &transaction,
+                                &tenant,
+                                &queue,
+                                std::slice::from_ref(&item.item_id),
+                            )
+                            .await?;
+                            let keys = typed_index_keys(
+                                &definition.typed_indexes,
+                                values.entity_document.as_ref(),
+                            )?;
+                            check_typed_unique_conflicts(
+                                &transaction,
+                                &tenant,
+                                &queue,
+                                &definition.typed_indexes,
+                                &keys,
+                            )
+                            .await?;
+                            insert_typed_index_rows(&transaction, &tenant, &queue, &item_id, &keys)
+                                .await?;
+                            if values.invalidate_lease {
+                                token_ops
+                                    .push(TokenOp::Clear(position.queue.clone(), item.item_id));
+                            }
+                        }
+                    }
+                }
+
+                for gate_change in &mutation.gate_changes {
+                    let chunk_size = if gate_change.blocked {
+                        GATE_BLOCK_WRITE_CHUNK
+                    } else {
+                        GATE_UNBLOCK_WRITE_CHUNK
+                    };
+                    for chunk in gate_change.gate_keys.chunks(chunk_size) {
+                        let (statement, params) = if gate_change.blocked {
+                            let mut params = Vec::with_capacity(chunk.len() * 3);
+                            for gate in chunk {
+                                params.extend([
+                                    Value::Text(tenant.clone()),
+                                    Value::Text(queue.clone()),
+                                    Value::Text(gate.as_str().to_string()),
+                                ]);
+                            }
+                            (
+                                format!(
+                                    "INSERT INTO fireweed_gate_state (tenant_id,queue_id,gate_key) \
+                                     VALUES {} ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING",
+                                    values_rows(chunk.len(), 3)
+                                ),
+                                params,
+                            )
+                        } else {
+                            let mut params =
+                                vec![Value::Text(tenant.clone()), Value::Text(queue.clone())];
+                            params.extend(
+                                chunk
+                                    .iter()
+                                    .map(|gate| Value::Text(gate.as_str().to_string())),
+                            );
+                            (
+                                format!(
+                                    "DELETE FROM fireweed_gate_state WHERE tenant_id=? AND queue_id=? \
+                                     AND gate_key IN ({})",
+                                    vec!["?"; chunk.len()].join(",")
+                                ),
+                                params,
+                            )
+                        };
+                        transaction
+                            .execute(statement, params)
+                            .await
+                            .map_err(storage)?;
+                    }
+                }
+
+                refresh_group_summaries(&transaction, &tenant, &queue, &groups, now).await?;
+
+                if let (
+                    Some(request_id),
+                    Some(fingerprint),
+                    Some(RequestOutcome::ItemMutation { response_payload }),
+                ) = (
+                    &envelope.request_id,
+                    envelope.request_fingerprint,
+                    &envelope.request_outcome,
+                ) {
+                    let _: fireweed_engine::ItemMutationResponse =
+                        serde_json::from_str(response_payload).map_err(storage)?;
+                    let command_positions =
+                        serde_json::to_string(&vec![(position.backend_epoch, position.sequence)])
+                            .map_err(storage)?;
+                    let expires_at = now.saturating_add(
+                        i64::try_from(definition.request_id_retention_ms)
+                            .unwrap_or(i64::MAX)
+                            .saturating_mul(1_000_000),
+                    );
+                    let affected = transaction
+                        .execute(
+                            "INSERT INTO fireweed_request_idempotency \
+                             (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+                              command_positions,expires_at,created_at) \
+                             VALUES (?1,?2,'item_mutation',?3,?4,?5,?6,?7,?8) \
+                             ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+                              request_fingerprint=excluded.request_fingerprint,\
+                              response_payload=excluded.response_payload,\
+                              command_positions=excluded.command_positions,expires_at=excluded.expires_at,\
+                              created_at=excluded.created_at \
+                             WHERE fireweed_request_idempotency.expires_at<=excluded.created_at OR \
+                              (fireweed_request_idempotency.request_fingerprint=excluded.request_fingerprint \
+                               AND fireweed_request_idempotency.response_payload=excluded.response_payload)",
+                            vec![
+                                Value::Text(tenant.clone()),
+                                Value::Text(queue.clone()),
+                                Value::Text(request_id.as_str().to_string()),
+                                Value::Blob(fingerprint.to_be_bytes().to_vec()),
+                                Value::Text(response_payload.clone()),
+                                Value::Text(command_positions),
+                                Value::Integer(expires_at),
+                                Value::Integer(now),
+                            ],
+                        )
+                        .await
+                        .map_err(storage)?;
+                    if affected == 0 {
+                        return Err(EngineError::RequestIdConflict);
+                    }
+                }
+            }
             QueueCommand::PurgeItems(purge) => {
                 if !purge.item_ids.is_empty() {
                     let groups =
@@ -4359,5 +4664,432 @@ mod deterministic_cancellation_tests {
             .await,
             IdempotencyDecision::Conflict
         ));
+    }
+}
+
+#[cfg(test)]
+mod item_mutation_tests {
+    use bytes::Bytes;
+    use fireweed_conformance::{envelope, item, qdef, ts};
+    use fireweed_core::{ItemState, LeaseToken, RequestId};
+    use fireweed_engine::{
+        AsyncProjectionStore, ClaimCommand, CommandPosition, GateChange, ItemMutationResponse,
+        ItemMutationSummary, MutateItemsCommand, PushCommand, QueueCommand, QueueKey,
+        RequestOutcome, ResolvedItemMutation, ResolvedItemMutationAction, ResolvedItemValues,
+    };
+    use turso::Value;
+
+    use super::ts_nanos;
+    use crate::{TursoConfig, TursoRelational};
+
+    fn replacement(
+        pushed: &fireweed_engine::PushItem,
+        version: u64,
+        payload: &'static [u8],
+    ) -> ResolvedItemMutation {
+        let mut fields = pushed.fields.clone();
+        fields.insert("phase".to_string(), Bytes::from_static(b"mutated"));
+        ResolvedItemMutation {
+            item_id: pushed.item_id,
+            action: ResolvedItemMutationAction::Replace(ResolvedItemValues {
+                state: ItemState::Pending,
+                item_version: version,
+                priority: pushed.priority.clone(),
+                not_before: Some(ts(50)),
+                eligible_since: ts(50),
+                payload: Some(Bytes::from_static(payload)),
+                fields,
+                metadata: pushed.metadata.clone(),
+                gate_keys: vec!["item-block".to_string()],
+                entity_document: pushed.entity_document.clone(),
+                invalidate_lease: false,
+            }),
+        }
+    }
+
+    fn mutation_envelope(
+        item_mutations: Vec<ResolvedItemMutation>,
+        request_id: &str,
+        fingerprint: u64,
+    ) -> fireweed_engine::CommandEnvelope {
+        let item_ids = item_mutations.iter().map(|item| item.item_id).collect();
+        let request_id = RequestId::new(request_id).unwrap();
+        let response = ItemMutationResponse {
+            request_id: request_id.clone(),
+            position: None,
+            dry_run: false,
+            results: Vec::new(),
+            selectors: Vec::new(),
+            summary: ItemMutationSummary::default(),
+        };
+        let mut command = envelope(
+            QueueCommand::MutateItems(MutateItemsCommand {
+                items: item_mutations,
+                gate_changes: vec![GateChange {
+                    gate_keys: vec!["queue-block".to_string()],
+                    blocked: true,
+                }],
+            }),
+            item_ids,
+        );
+        command.created_at = ts(10);
+        command.request_id = Some(request_id);
+        command.request_fingerprint = Some(fingerprint);
+        command.request_outcome = Some(RequestOutcome::ItemMutation {
+            response_payload: serde_json::to_string(&response).unwrap(),
+        });
+        command
+    }
+
+    #[tokio::test]
+    async fn resolved_mutation_is_durable_and_exact_replay_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("item-mutation.db");
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let pushed = item("700", "mutation-key", 7);
+        let store = TursoRelational::open(TursoConfig::local(&path))
+            .await
+            .unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition.clone())
+            .await
+            .unwrap();
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 0)],
+            vec![envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![pushed.clone()],
+                }),
+                vec![pushed.item_id],
+            )],
+        )
+        .await
+        .unwrap();
+
+        let mutation = mutation_envelope(vec![replacement(&pushed, 2, b"durable")], "mut-1", 91);
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![mutation.clone()],
+        )
+        .await
+        .unwrap();
+
+        let rows = store
+            .query(
+                "SELECT lifecycle_state,item_version,payload,not_before,eligible_since \
+                 FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                vec![
+                    Value::Text(shard.tenant_id.as_str().to_string()),
+                    Value::Text(shard.queue_id.as_str().to_string()),
+                    Value::Text(pushed.item_id.to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values[0], Value::Text("Pending".to_string()));
+        assert_eq!(rows[0].values[1], Value::Integer(2));
+        assert_eq!(rows[0].values[2], Value::Blob(b"durable".to_vec()));
+        assert_eq!(rows[0].values[3], Value::Integer(ts_nanos(ts(50))));
+        assert_eq!(rows[0].values[4], Value::Integer(ts_nanos(ts(50))));
+        let gates = store
+            .query(
+                "SELECT gate_key FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND item_id=?3 ORDER BY gate_key",
+                vec![
+                    Value::Text(shard.tenant_id.as_str().to_string()),
+                    Value::Text(shard.queue_id.as_str().to_string()),
+                    Value::Text(pushed.item_id.to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(gates[0].values[0], Value::Text("item-block".to_string()));
+        let replay_rows = store
+            .query(
+                "SELECT request_fingerprint,response_payload,command_positions \
+                 FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                 AND operation='item_mutation' AND request_id='mut-1'",
+                vec![
+                    Value::Text(shard.tenant_id.as_str().to_string()),
+                    Value::Text(shard.queue_id.as_str().to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay_rows.len(), 1);
+        assert_eq!(
+            replay_rows[0].values[0],
+            Value::Blob(91_u64.to_be_bytes().to_vec())
+        );
+        assert_eq!(replay_rows[0].values[2], Value::Text("[[0,1]]".to_string()));
+
+        // Reusing a retained request id for another body must roll back the resolved row update and the
+        // projection cursor together with the conflicting durable outcome.
+        let conflicting = mutation_envelope(vec![replacement(&pushed, 3, b"wrong")], "mut-1", 92);
+        let error = AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 2)],
+            vec![conflicting],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            fireweed_engine::EngineError::RequestIdConflict
+        ));
+        assert_eq!(
+            AsyncProjectionStore::item_version(&store, shard.clone(), pushed.item_id)
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(
+            AsyncProjectionStore::recovery_high_water(&store, shard.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence,
+            1
+        );
+
+        drop(store);
+        let reopened = TursoRelational::open(TursoConfig::local(&path))
+            .await
+            .unwrap();
+        assert_eq!(
+            AsyncProjectionStore::item_version(&reopened, shard.clone(), pushed.item_id)
+                .await
+                .unwrap(),
+            Some(2)
+        );
+        AsyncProjectionStore::apply_recovery(
+            &reopened,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![mutation],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            AsyncProjectionStore::item_version(&reopened, shard, pushed.item_id)
+                .await
+                .unwrap(),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_batch_conflict_rolls_back_every_item_and_cursor() {
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let first = item("801", "first", 1);
+        let second = item("802", "second", 2);
+        let store = TursoRelational::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 0)],
+            vec![envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![first.clone(), second.clone()],
+                }),
+                vec![first.item_id, second.item_id],
+            )],
+        )
+        .await
+        .unwrap();
+
+        let invalid = mutation_envelope(
+            vec![
+                replacement(&first, 2, b"first-new"),
+                replacement(&second, 3, b"second-new"),
+            ],
+            "mut-conflict",
+            92,
+        );
+        let error = AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![invalid],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, fireweed_engine::EngineError::Conflict));
+        assert_eq!(
+            AsyncProjectionStore::item_version(&store, shard.clone(), first.item_id)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_version(&store, shard.clone(), second.item_id)
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            AsyncProjectionStore::recovery_high_water(&store, shard.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .sequence,
+            0
+        );
+
+        let valid = mutation_envelope(
+            vec![
+                replacement(&first, 2, b"first-new"),
+                replacement(&second, 2, b"second-new"),
+            ],
+            "mut-valid",
+            93,
+        );
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![valid],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            AsyncProjectionStore::item_version(&store, shard, second.item_id)
+                .await
+                .unwrap(),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn required_active_transition_invalidates_lease_and_purge_is_atomic() {
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let leased = item("901", "leased", 1);
+        let purged = item("902", "purged", 2);
+        let lease_token = LeaseToken::new("mutation-lease").unwrap();
+        let store = TursoRelational::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 0)],
+            vec![envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![leased.clone(), purged.clone()],
+                }),
+                vec![leased.item_id, purged.item_id],
+            )],
+        )
+        .await
+        .unwrap();
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![envelope(
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: vec![leased.item_id],
+                    lease_token: lease_token.clone(),
+                    lease_expires_at: ts(100),
+                    worker_id: None,
+                }),
+                vec![leased.item_id],
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(
+            store
+                .live_tokens
+                .lock()
+                .await
+                .contains_key(&(shard.clone(), leased.item_id))
+        );
+
+        let mut terminal = replacement(&leased, 3, b"terminal");
+        let ResolvedItemMutationAction::Replace(values) = &mut terminal.action else {
+            unreachable!()
+        };
+        values.state = ItemState::Complete;
+        values.not_before = None;
+        values.invalidate_lease = true;
+        let purge = ResolvedItemMutation {
+            item_id: purged.item_id,
+            action: ResolvedItemMutationAction::Purge,
+        };
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 2)],
+            vec![mutation_envelope(vec![terminal, purge], "mut-active", 94)],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            AsyncProjectionStore::item_state(&store, shard.clone(), leased.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Complete)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_version(&store, shard.clone(), leased.item_id)
+                .await
+                .unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_state(&store, shard.clone(), purged.item_id)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            !store
+                .live_tokens
+                .lock()
+                .await
+                .contains_key(&(shard.clone(), leased.item_id))
+        );
+        let rows = store
+            .query(
+                "SELECT lease_token_hash,lease_expires_at,worker_id,terminal_at,\
+                 terminal_command_epoch FROM fireweed_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                vec![
+                    Value::Text(shard.tenant_id.as_str().to_string()),
+                    Value::Text(shard.queue_id.as_str().to_string()),
+                    Value::Text(leased.item_id.to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows[0].values,
+            vec![
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Integer(ts_nanos(ts(10))),
+                Value::Integer(0),
+            ]
+        );
+        let retained = store
+            .query(
+                "SELECT item_id FROM fireweed_item_key_retention \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key='purged'",
+                vec![
+                    Value::Text(shard.tenant_id.as_str().to_string()),
+                    Value::Text(shard.queue_id.as_str().to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retained[0].values[0],
+            Value::Text(purged.item_id.to_string())
+        );
     }
 }
