@@ -4671,9 +4671,9 @@ mod deterministic_cancellation_tests {
 mod item_mutation_tests {
     use bytes::Bytes;
     use fireweed_conformance::{envelope, item, qdef, ts};
-    use fireweed_core::{ItemState, RequestId};
+    use fireweed_core::{ItemState, LeaseToken, RequestId};
     use fireweed_engine::{
-        AsyncProjectionStore, CommandPosition, GateChange, ItemMutationResponse,
+        AsyncProjectionStore, ClaimCommand, CommandPosition, GateChange, ItemMutationResponse,
         ItemMutationSummary, MutateItemsCommand, PushCommand, QueueCommand, QueueKey,
         RequestOutcome, ResolvedItemMutation, ResolvedItemMutationAction, ResolvedItemValues,
     };
@@ -4960,6 +4960,136 @@ mod item_mutation_tests {
                 .await
                 .unwrap(),
             Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn required_active_transition_invalidates_lease_and_purge_is_atomic() {
+        let definition = qdef();
+        let shard = QueueKey::new(definition.tenant_id.clone(), definition.queue_id.clone());
+        let leased = item("901", "leased", 1);
+        let purged = item("902", "purged", 2);
+        let lease_token = LeaseToken::new("mutation-lease").unwrap();
+        let store = TursoRelational::in_memory().await.unwrap();
+        AsyncProjectionStore::ensure_shard(&store, definition)
+            .await
+            .unwrap();
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 0)],
+            vec![envelope(
+                QueueCommand::Push(PushCommand {
+                    items: vec![leased.clone(), purged.clone()],
+                }),
+                vec![leased.item_id, purged.item_id],
+            )],
+        )
+        .await
+        .unwrap();
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 1)],
+            vec![envelope(
+                QueueCommand::Claim(ClaimCommand {
+                    item_ids: vec![leased.item_id],
+                    lease_token: lease_token.clone(),
+                    lease_expires_at: ts(100),
+                    worker_id: None,
+                }),
+                vec![leased.item_id],
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(
+            store
+                .live_tokens
+                .lock()
+                .await
+                .contains_key(&(shard.clone(), leased.item_id))
+        );
+
+        let mut terminal = replacement(&leased, 3, b"terminal");
+        let ResolvedItemMutationAction::Replace(values) = &mut terminal.action else {
+            unreachable!()
+        };
+        values.state = ItemState::Complete;
+        values.not_before = None;
+        values.invalidate_lease = true;
+        let purge = ResolvedItemMutation {
+            item_id: purged.item_id,
+            action: ResolvedItemMutationAction::Purge,
+        };
+        AsyncProjectionStore::apply_live(
+            &store,
+            vec![CommandPosition::new(shard.clone(), 0, 2)],
+            vec![mutation_envelope(vec![terminal, purge], "mut-active", 94)],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            AsyncProjectionStore::item_state(&store, shard.clone(), leased.item_id)
+                .await
+                .unwrap(),
+            Some(ItemState::Complete)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_version(&store, shard.clone(), leased.item_id)
+                .await
+                .unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            AsyncProjectionStore::item_state(&store, shard.clone(), purged.item_id)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(
+            !store
+                .live_tokens
+                .lock()
+                .await
+                .contains_key(&(shard.clone(), leased.item_id))
+        );
+        let rows = store
+            .query(
+                "SELECT lease_token_hash,lease_expires_at,worker_id,terminal_at,\
+                 terminal_command_epoch FROM fireweed_items \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                vec![
+                    Value::Text(shard.tenant_id.as_str().to_string()),
+                    Value::Text(shard.queue_id.as_str().to_string()),
+                    Value::Text(leased.item_id.to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows[0].values,
+            vec![
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Integer(ts_nanos(ts(10))),
+                Value::Integer(0),
+            ]
+        );
+        let retained = store
+            .query(
+                "SELECT item_id FROM fireweed_item_key_retention \
+                 WHERE tenant_id=?1 AND queue_id=?2 AND client_item_key='purged'",
+                vec![
+                    Value::Text(shard.tenant_id.as_str().to_string()),
+                    Value::Text(shard.queue_id.as_str().to_string()),
+                ],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            retained[0].values[0],
+            Value::Text(purged.item_id.to_string())
         );
     }
 }
