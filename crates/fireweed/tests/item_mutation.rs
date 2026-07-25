@@ -243,6 +243,42 @@ async fn selector_first_match_invalidates_lease_and_retained_terminal_can_be_pur
         }
     ));
 
+    let terminal_overlay = fireweed
+        .mutate_items(
+            &queue,
+            ItemMutationRequest {
+                request_id: RequestId::new("terminal-overlay").unwrap(),
+                evaluated_at: ts(11),
+                dry_run: false,
+                returning: ItemMutationReturning::Identity,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed {
+                    entries: vec![AddressedMutation {
+                        item_id,
+                        expected_item_version: Some(3),
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::RejectActive,
+                        patch: ItemPatch {
+                            field_edits: BTreeMap::from([(
+                                "terminal-overlay".into(),
+                                Some(bytes::Bytes::from_static(b"cleared")),
+                            )]),
+                            ..Default::default()
+                        },
+                    }],
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        terminal_overlay.results[0].outcome,
+        ItemMutationOutcome::Updated {
+            state: fireweed::ItemState::Complete,
+            ..
+        }
+    ));
+
     let purge = fireweed
         .mutate_items(
             &queue,
