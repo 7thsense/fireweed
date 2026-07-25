@@ -246,12 +246,25 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
             .or_default()
             .push(text(&row.values[1]));
     }
+    let blocked_gates = store
+        .query(
+            "SELECT gate_key FROM fireweed_gate_state WHERE tenant_id=?1 AND queue_id=?2 \
+             ORDER BY gate_key",
+            vec![tenant.clone(), queue.clone()],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| text(&row.values[0]))
+        .collect();
 
     let rows = store
         .query(
             "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
              fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,\
-             fenced,superseded,max_attempts,created_seq FROM fireweed_items \
+             fenced,superseded,max_attempts,created_seq,last_command_sequence,terminal_at,\
+             terminal_command_epoch \
+             FROM fireweed_items \
              WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
             vec![tenant.clone(), queue.clone()],
         )
@@ -287,8 +300,10 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
                 superseded: integer(&values[17]) != 0,
                 max_attempts: integer(&values[18]) as u32,
                 created_seq: integer(&values[19]) as u64,
-                terminal_at: None,
-                terminal_position: None,
+                terminal_at: optional_integer(&values[21]).map(nanos),
+                terminal_position: optional_integer(&values[22]).map(|epoch| {
+                    CommandPosition::new(shard.clone(), epoch as u64, integer(&values[20]) as u64)
+                }),
             }
         })
         .collect();
@@ -327,7 +342,7 @@ async fn turso_projection_image(store: &TursoRelational, shard: &QueueKey) -> Pr
         }),
         paused: integer(&queue_row[0]) != 0,
         pause_drain_intake: integer(&queue_row[1]) != 0,
-        blocked_gates: Default::default(),
+        blocked_gates,
         next_seq: next_item_seq,
         items,
         side_records,

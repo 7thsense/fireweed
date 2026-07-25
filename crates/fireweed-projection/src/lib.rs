@@ -3206,7 +3206,7 @@ impl ProjectionData {
             && state != ItemState::Leased
             && !matches!(
                 lease_guard,
-                LeaseGuard::Match(_) | LeaseGuard::InvalidateActive
+                LeaseGuard::RequireActive | LeaseGuard::Match(_) | LeaseGuard::InvalidateActive
             )
         {
             return Ok((

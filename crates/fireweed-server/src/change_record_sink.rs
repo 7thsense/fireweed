@@ -401,6 +401,7 @@ fn change_record_kind_wire_value(kind: fireweed_engine::ChangeRecordKind) -> &'s
         fireweed_engine::ChangeRecordKind::CohortFinalize => "cohort-finalize",
         fireweed_engine::ChangeRecordKind::ReplacePending => "replace-pending",
         fireweed_engine::ChangeRecordKind::UpdateFields => "update-fields",
+        fireweed_engine::ChangeRecordKind::MutateItems => "mutate-items",
         fireweed_engine::ChangeRecordKind::LeaseExpired => "lease-expired",
         fireweed_engine::ChangeRecordKind::CohortExpired => "cohort-expired",
         fireweed_engine::ChangeRecordKind::FenceLease => "fence-lease",
@@ -1510,6 +1511,10 @@ mod tests {
         assert_eq!(
             change_record_kind_wire_value(fireweed_engine::ChangeRecordKind::Finalize),
             "finalize"
+        );
+        assert_eq!(
+            change_record_kind_wire_value(fireweed_engine::ChangeRecordKind::MutateItems),
+            "mutate-items"
         );
 
         let headers = change_record_headers(&record);
