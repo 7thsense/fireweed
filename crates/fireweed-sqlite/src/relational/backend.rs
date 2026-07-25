@@ -1338,8 +1338,7 @@ impl ItemMutationPort for SqliteRelationalBackend {
                     }
                     let mut response: ItemMutationResponse = serde_json::from_str(&payload)
                         .map_err(|error| EngineError::Storage(error.to_string()))?;
-                    let positions: Vec<CommandPosition> = serde_json::from_str(&positions)
-                        .map_err(|error| EngineError::Storage(error.to_string()))?;
+                    let positions = positions_from_json(shard, &positions)?;
                     response.position = positions.last().cloned();
                     st(tx.commit())?;
                     return Ok(response);

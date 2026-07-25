@@ -387,8 +387,7 @@ impl ProjectionStore for SqliteRelational {
         }
         let mut response: fireweed_engine::ItemMutationResponse = serde_json::from_str(&response_payload)
             .map_err(|error| EngineError::Storage(error.to_string()))?;
-        let positions: Vec<CommandPosition> = serde_json::from_str(&positions_json)
-            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let positions = positions_from_json(shard, &positions_json)?;
         response.position = positions.last().cloned();
         st(tx.commit())?;
         Ok(Some(response))
