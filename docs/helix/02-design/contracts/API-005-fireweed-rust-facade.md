@@ -306,7 +306,7 @@ The Snorri named-type closure is:
 
 `AggregateGroup`, `BatchUpdateEntry`, `BatchUpdateItemRef`,
 `BatchUpdateOutcome`, `BatchUpdateRequest`, `BatchUpdateResponse`,
-`BatchUpdateValue`, `BucketRule`, `Bytes`, `ClaimAt`, `ClaimByQueryAt`,
+`BatchUpdateValue`, `AddressedMutation`, `BucketRule`, `Bytes`, `ClaimAt`, `ClaimByQueryAt`,
 `ClaimByQueryRequest`, `ClaimCompatibility`, `ClaimRef`, `Claimed`,
 `ClaimedItem`, `ClientItemKey`, `Clock`, `CommitCapabilities`, `CommitEntry`,
 `CommitRecovery`, `CommitRequest`, `CompoundIndexDef`, `CompoundIndexField`,
@@ -315,14 +315,20 @@ The Snorri named-type closure is:
 `EligibilityPolicy`, `EngineError`, `EngineResult`, `EntryOutcome`, `FilterOp`,
 `FinalizeKind`, `GroupByField`, `GroupedAggregateRequest`,
 `GroupedAggregateResponse`, `IndexDeclaration`, `IndexHit`, `IndexType`,
-`InstanceFence`, `ItemId`, `LeaseToken`, `LiveItemView`, `Metadata`,
+`EntityEdit`, `EntityEditOperation`, `EntityPredicateValue`, `GateChange`,
+`GateKeyDelta`, `InstanceFence`, `ItemId`, `ItemMutationOperation`,
+`ItemMutationOutcome`, `ItemMutationPrecondition`, `ItemMutationRequest`,
+`ItemMutationResponse`, `ItemMutationResult`, `ItemMutationReturning`,
+`ItemMutationSelectorAggregate`, `ItemMutationSnapshot`, `ItemMutationSummary`,
+`ItemPatch`, `ItemPredicate`, `ItemSelector`, `ItemSelectorScope`, `LeaseGuard`,
+`LeaseToken`, `LifecyclePatch`, `LiveItemView`, `Metadata`,
 `MetadataValue`, `MetricsByQueryRequest`, `Nack`, `NewItem`, `OrderField`,
 `OrderingMode`, `PriorityModel`, `PriorityValue`, `QueryCapabilityFlags`,
 `QueryCursor`, `QueryFilter`, `QueueDefinition`, `QueueId`, `QueueIndex`,
 `QueueKey`, `QueueMetrics`, `RangeScanRequest`, `RangeScanResponse`,
 `RecurrencePolicy`, `RequestId`, `RetryPolicy`, `ScheduleUpdate`, `SideRecord`,
 `SortDirection`, `TenantId`, `TimeBucket`, `TypedValue`, `UpsertOutcome`,
-`UtcTimestamp`, and `WorkerId`.
+`SelectedMutation`, `TimestampComparison`, `UtcTimestamp`, and `WorkerId`.
 
 ### Snorri acceptance slice
 

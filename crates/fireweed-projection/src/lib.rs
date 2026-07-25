@@ -3160,7 +3160,7 @@ impl ProjectionData {
         if record.state.is_terminal()
             && !matches!(
                 patch.lifecycle,
-                LifecyclePatch::SetPending | LifecyclePatch::Purge
+                LifecyclePatch::Keep | LifecyclePatch::SetPending | LifecyclePatch::Purge
             )
         {
             return Ok((ItemMutationOutcome::Terminal, None));
