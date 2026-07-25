@@ -190,8 +190,10 @@ priority, retry, claim, and state logic with different table shapes.
    model and at least one non-timestamp model.
 3. Strict and bounded-relaxed ordering modes with mandatory progress guarantees.
 4. Priority and eligibility as separate concepts.
-5. Idempotent batch push and batch update, including priority updates before an
-   item is terminal.
+5. Idempotent batch push and client batch update, plus one atomic operator
+   mutation operation that can resolve addressed items or selectors, enforce
+   caller version and lease policy, change lifecycle/schedule/caller data, and
+   persist the resolved outcome for exact replay on every supported backend.
 6. Batch claim and group-aware batch claim.
 7. Durable claim leases with at-least-once execution and single active lease per
    item.
@@ -325,7 +327,12 @@ priority, retry, claim, and state logic with different table shapes.
 - **FR-19** - Duplicate pushes for the same logical item key converge on one
   logical item according to documented conflict rules.
 - **FR-20** - Clients can batch update priority, not-before timing, payload
-  references, and metadata for non-terminal items.
+  references, and metadata for non-terminal items. Operator/embedder clients
+  can instead use one backend-independent atomic mutation operation for
+  lifecycle, schedule, caller-data, field/entity, and gate-key changes. That
+  operation resolves selectors and validates version/lease guards under the
+  queue's serialization boundary, commits all item and queue-gate changes as
+  one durable unit, and replays the stored resolved outcome by request ID.
 - **FR-21** - Batch push and update return per-item results for accepted,
   duplicate, conflicted, rejected, and failed items.
 - **FR-22** - The queue defines an idempotency retention window so deduplication

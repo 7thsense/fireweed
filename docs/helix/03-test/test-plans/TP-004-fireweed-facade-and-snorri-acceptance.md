@@ -28,6 +28,7 @@ release artifacts, and runtime-hardening work not exposed by API-005
 | --- | --- | --- |
 | Contract compile | 100% of API-005 constructors, Snorri methods, named types, and forbidden retired Rust names | P0 |
 | Fireweed integration | The same capability-complete operation suite succeeds through every supported constructor | P0 |
+| Atomic item mutation | Addressed and selector mutation, dry-run, CAS, lease rejection/match/invalidation, lifecycle transitions, purge, schedule/caller-data/gate/field/entity edits, atomic rollback, and exact replay pass through every supported constructor | P0 |
 | Million-cycle parity | Insert 1,000,000, batch-update 500,000, and read/verify 1,000,000 through every supported constructor | P0 |
 | Downstream integration | All five Snorri feature combinations compile against one concrete type | P0 |
 | Garage integration | SQLite and PostgreSQL projection lifecycle plus retry/idempotency run against Garage on `eldir` without skips | P0 |
@@ -64,7 +65,7 @@ required.
    alias exemption for these Rust symbols.
 5. One shared suite creates a queue, appends, claims, mutates, commits, queries,
    and finalizes through every supported constructor. It MUST include
-   `batch_update` and `live_items`; `Unavailable`, a skip, or substituting a
+   `batch_update`, `mutate_items`, and `live_items`; `Unavailable`, a skip, or substituting a
    different method is failure. Merely receiving `Ok` is not evidence: every
    operation asserts its returned value and an independent observable
    postcondition. Empty claim results may not skip finalize/renew/reassign
@@ -72,6 +73,11 @@ required.
    results fail when seeded data requires a non-empty result. Gate coverage
    uses an item with real gate membership and proves both blocked and unblocked
    claim behavior.
+   `mutate_items` additionally proves selector resolution and item application
+   are one atomic durable unit, exact request replay never reevaluates a
+   selector, dry-run leaves no durable or in-memory trace, each logical patch
+   bumps the item version once, and lease invalidation removes every claim-token
+   and selection-index reference before a replacement claim can succeed.
 6. Plain profiles return `None` from `projection_control`. Object-log plus
    disposable-projection profiles return `Some` and retain existing lifecycle
    verification/delete/rebuild tests.

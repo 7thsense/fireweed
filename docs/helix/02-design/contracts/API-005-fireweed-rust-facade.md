@@ -208,7 +208,7 @@ execution characteristics, but MUST NOT excuse missing core functionality.
 | Finalize and commit | `ack`, `complete`, `nack`, `retry`, `release`, `nack_retry_after`, `retry_after`, `commit`, `commit_multi_claim`, `commit_capabilities`, `explain_commit`, `side_record`, `fail` |
 | Read and discovery | `peek`, `current_position`, `discover_active_scopes`, `discover_active_scopes_stamped`, `discover`, `live_item`, `live_items`, `query_index_unique`, `query_index`, `query_index_unique_typed`, `query_index_typed`, `claimed` |
 | Metrics and projection query | `metrics`, `metrics_by_query`, `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, `declared_bucket_segment` |
-| Mutation and maintenance | `renew`, `reassign`, `update_fields`, `batch_update`, `update`, `set_gates`, `reclaim_expired`, `reclaim_expired_at`, `rearm`, `rearm_at`, `rearm_after`, `purge`, `bounded_mutation` |
+| Mutation and maintenance | `renew`, `reassign`, `update_fields`, `batch_update`, `mutate_items`, `update`, `set_gates`, `reclaim_expired`, `reclaim_expired_at`, `rearm`, `rearm_at`, `rearm_after`, `purge`, `bounded_mutation` |
 
 Per-constructor parity is a release invariant. One shared conformance suite
 MUST invoke every method family against every supported constructor, including
@@ -333,7 +333,7 @@ non-generic `Fireweed` using these operations:
 `push_batch_with_request_id`, `upsert`, `claim_with`, `claim_by_query`,
 `claim_by_query_at`, `ack`, `nack`, `commit`, `commit_capabilities`,
 `explain_commit`, `side_record`, `live_item`, `query_index_unique_typed`,
-`batch_update`, `update`, `purge`, `claimed`, `metrics`, `metrics_by_query`,
+`batch_update`, `mutate_items`, `update`, `purge`, `claimed`, `metrics`, `metrics_by_query`,
 `hot_projection_capabilities`, `range_scan`, `grouped_aggregate`, and
 `declared_bucket_segment`.
 
@@ -362,6 +362,7 @@ pub async fn side_record(&self, queue: &QueueKey, key: &[u8]) -> EngineResult<Op
 pub async fn live_item(&self, queue: &QueueKey, key: ClientItemKey) -> EngineResult<Option<LiveItemView>>;
 pub async fn query_index_unique_typed(&self, queue: &QueueKey, index: &str, values: &[serde_json::Value]) -> EngineResult<Option<IndexHit>>;
 pub async fn batch_update(&self, queue: &QueueKey, request: BatchUpdateRequest) -> EngineResult<BatchUpdateResponse>;
+pub async fn mutate_items(&self, queue: &QueueKey, request: ItemMutationRequest) -> EngineResult<ItemMutationResponse>;
 pub async fn update(&self, queue: &QueueKey, item_id: ItemId, priority: ScheduleUpdate<PriorityValue>, not_before: ScheduleUpdate<UtcTimestamp>, expected_item_version: Option<u64>) -> EngineResult<u64>;
 pub async fn purge(&self, queue: &QueueKey, ids: impl IntoIterator<Item = ItemId>, force: bool) -> EngineResult<u64>;
 pub async fn claimed(&self, queue: &QueueKey, ids: &[ItemId]) -> EngineResult<Vec<ClaimedItem>>;

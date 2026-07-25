@@ -202,6 +202,12 @@ Against the fixture in "Example Fixture" above (filtered to `action_type = messa
 
 ### Bounded Mutation
 
+`BoundedMutation` is only the declared-index, best-effort operation below. It
+MUST NOT be used to implement API-001 `MutateItems`: that operation requires
+whole-request atomicity, exact resolved replay, explicit lease policy, and may
+scan unindexed caller fields for correctness. API-001 and API-005 govern
+`MutateItems`; absence of an index is never grounds for `Unavailable`.
+
 | Element | Type / Shape | Required | Rules | Notes |
 |---------|--------------|----------|-------|-------|
 | `BoundedMutation` | operation | yes (`bounded_mutation`) | MUST scan a declared-index predicate (same filter shape as `RangeScan.filters[]`) and apply a caller-specified field update to every matching record, with per-record optimistic concurrency. | Backs "safe recycling rule update" style operations. |

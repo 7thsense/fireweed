@@ -316,6 +316,31 @@ the gate key that was blocking it, the item becomes eligible again and is
 measured from its unchanged `eligible_since`. This is distinct from a `SetGates`
 flip, which changes *queue* gate state and touches no item row at all.
 
+### Atomic Item Mutation
+
+`MutateItems` is the operator/embedder mutation boundary. It is distinct from
+the best-effort client `BatchUpdate` operation and from API-004
+`BoundedMutation`.
+
+| Element | Type / Shape | Required | Rules |
+|---------|--------------|----------|-------|
+| `MutateItems` | operation | yes | MUST resolve selection, validate, and apply the complete request under one queue serialization boundary. Any invalid entry aborts the request without mutation. |
+| `request_id` | string | yes | MUST provide exact retained replay. Reuse with a different canonical body fails with `request-id-conflict`; replay MUST return the stored response without reevaluating selectors. |
+| `evaluated_at` | timestamp | yes | MUST be the sole time used for lease and scheduling decisions, including replay. |
+| `dry_run` | boolean | yes | MUST perform the same selection and validation and return the same planned outcomes, but MUST NOT append, mutate, bump versions, or retain idempotency state. |
+| operation | addressed entries or ordered selectors | yes | Addressed entries name an item and MAY supply caller CAS. Selectors target live or retained records using lifecycle, client key, group key, caller field/metadata/entity equality, and gate-key presence. An implementation MUST evaluate a valid selector even when no declared index exists. |
+| lease guard | reject, match token, or invalidate | yes | Active leases MUST never be bypassed implicitly. Invalidation atomically removes the active lease and its token/index state in the same commit. |
+| patch | lifecycle, schedule, caller data, gates, fields, entity | yes | Supports keep/set-pending/set-complete/set-failed/purge lifecycle intent; priority and not-before replacement; payload and metadata replacement; gate-key delta; named field edits; and RFC 6901 entity edits. Missing is distinct from JSON null. |
+| response | per-item outcomes plus selector summaries | yes | MUST identify resolved items and exact outcomes. A successfully mutated item increments `item_version` exactly once, regardless of the number of patched fields. |
+
+Ordered selectors use first-match ownership: once an item is resolved by one
+selector it cannot be selected again by a later selector in the same request.
+The durable command MUST contain resolved item IDs and exact patches, never the
+unresolved selectors. Queue gate changes requested with item changes commit in
+the same durable unit. Pause and suppression remain caller-owned overlays
+represented through opaque Fireweed gate keys; Fireweed owns only its storage
+lifecycle (`pending`, `leased`, `complete`, `failed`, or absent).
+
 ### Gate State
 
 | Element | Type / Shape | Required | Rules | Notes |
