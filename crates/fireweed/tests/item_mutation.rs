@@ -410,6 +410,53 @@ async fn active_lease_boundary_and_composed_predicates_use_evaluated_at() {
 }
 
 #[tokio::test]
+async fn require_active_allows_a_lifecycle_transition_and_invalidates_the_lease() {
+    let fireweed = fireweed::open_memory(Arc::new(SystemClock));
+    let queue = create(&fireweed, "require-active-transition").await;
+    let item_id = fireweed.push(&queue, NewItem::default()).await.unwrap();
+    let claimed = fireweed.claim(&queue, 1, 10_000).await.unwrap().remove(0);
+    let active_at = UtcTimestamp::new(
+        claimed.lease_expires_at.seconds.saturating_sub(1),
+        claimed.lease_expires_at.nanoseconds,
+    )
+    .unwrap();
+
+    let response = fireweed
+        .mutate_items(
+            &queue,
+            ItemMutationRequest {
+                request_id: RequestId::new("require-active-complete").unwrap(),
+                evaluated_at: active_at,
+                dry_run: false,
+                returning: ItemMutationReturning::BeforeSnapshot,
+                gate_changes: vec![],
+                operation: ItemMutationOperation::Addressed {
+                    entries: vec![AddressedMutation {
+                        item_id,
+                        expected_item_version: Some(claimed.item_version),
+                        predicates: vec![],
+                        lease_guard: LeaseGuard::RequireActive,
+                        patch: ItemPatch {
+                            lifecycle: LifecyclePatch::SetComplete,
+                            ..Default::default()
+                        },
+                    }],
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        response.results[0].outcome,
+        ItemMutationOutcome::Updated { .. }
+    ));
+    let metrics = fireweed.metrics(&queue).await.unwrap();
+    assert_eq!(metrics.leased, 0);
+    assert_eq!(metrics.complete, 1);
+}
+
+#[tokio::test]
 async fn selector_precondition_failure_keeps_first_match_ownership() {
     let fireweed = fireweed::open_memory(Arc::new(SystemClock));
     let queue = create(&fireweed, "selector-precondition").await;
