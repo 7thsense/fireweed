@@ -8,7 +8,8 @@ use fireweed_core::{
 };
 use fireweed_engine::{
     CommandPosition, EngineError, EngineResult, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    PayloadUpdate, PushItem, QueueCommand, QueueKey, ScheduleUpdate, compile_entity_schema,
+    PayloadUpdate, PushItem, QueueCommand, QueueKey, ResolvedItemMutationAction, ScheduleUpdate,
+    SetGatesCommand, compile_entity_schema,
 };
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -1752,8 +1753,142 @@ pub(crate) fn apply_command_sql(
             ))?;
             Ok(())
         }
-        // Planned/applied by the dedicated relational mutation slice. The projection planning seam
-        // rejects this command before append until that implementation is linked.
-        QueueCommand::MutateItems(_) => Err(EngineError::Unavailable),
+        QueueCommand::MutateItems(c) => {
+            reset_claim_scan_hint(claim_scan_hints, claim_scan_default_fifo, shard);
+            let item_ids = c.items.iter().map(|item| item.item_id).collect::<Vec<_>>();
+            let groups = groups_of(tx, shard, &item_ids)?;
+            let typed_indexes = queues
+                .get(shard)
+                .map(|definition| definition.typed_indexes.as_slice())
+                .unwrap_or(&[]);
+
+            for item in &c.items {
+                let item_id = item.item_id.to_string();
+                match &item.action {
+                    ResolvedItemMutationAction::Purge => {
+                        let exists: bool = st(tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM fireweed_items \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3)",
+                            params![t, q, item_id],
+                            |row| row.get(0),
+                        ))?;
+                        if !exists {
+                            return Err(EngineError::Conflict);
+                        }
+                        apply_command_sql(
+                            tx,
+                            queues,
+                            grouped_shards,
+                            claim_scan_hints,
+                            claim_scan_default_fifo,
+                            token_ops,
+                            shard,
+                            position,
+                            seq,
+                            now,
+                            &QueueCommand::PurgeItems(fireweed_engine::PurgeItemsCommand {
+                                item_ids: vec![item.item_id],
+                                force: true,
+                            }),
+                        )?;
+                    }
+                    ResolvedItemMutationAction::Replace(values) => {
+                        let priority_json = values.priority.as_ref().map(to_json).transpose()?;
+                        let priority_sort = elig_sort(
+                            &values.priority,
+                            &queues
+                                .get(shard)
+                                .ok_or(EngineError::NotFound)?
+                                .priority_model,
+                        );
+                        let terminal =
+                            matches!(values.state, ItemState::Complete | ItemState::Failed);
+                        let (lease_hash_sql, lease_expiry_sql, worker_sql, fenced_sql) = if values
+                            .invalidate_lease
+                        {
+                            (Value::Null, Value::Null, Value::Null, Value::Integer(0))
+                        } else {
+                            let current: (Option<Vec<u8>>, Option<i64>, Option<String>, i64) = st(tx.query_row(
+                                    "SELECT lease_token_hash,lease_expires_at,worker_id,fenced FROM fireweed_items \
+                                     WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                                    params![t, q, item_id],
+                                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                                ))?;
+                            (
+                                current.0.map(Value::Blob).unwrap_or(Value::Null),
+                                current.1.map(Value::Integer).unwrap_or(Value::Null),
+                                current.2.map(Value::Text).unwrap_or(Value::Null),
+                                Value::Integer(current.3),
+                            )
+                        };
+                        let changed = st(tx.execute(
+                            "UPDATE fireweed_items SET lifecycle_state=?4,priority=?5,priority_sort=?6,not_before=?7,\
+                             eligible_since=?8,payload=?9,fields=?10,metadata=?11,entity_document=?12,\
+                             lease_token_hash=?13,lease_expires_at=?14,worker_id=?15,fenced=?16,item_version=?17,\
+                             terminal_at=?18,terminal_command_epoch=?19,updated_at=?20,last_command_sequence=?21 \
+                             WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3 AND item_version=?22",
+                            params![
+                                t, q, item_id, state_str(values.state), priority_json, priority_sort,
+                                values.not_before.map(ts_nanos), ts_nanos(values.eligible_since),
+                                values.payload.as_ref().map(|payload| payload.to_vec()),
+                                fields_to_json(&values.fields)?, metadata_to_json(&values.metadata)?,
+                                values.entity_document.as_ref().map(to_json).transpose()?,
+                                lease_hash_sql, lease_expiry_sql, worker_sql, fenced_sql,
+                                values.item_version as i64,
+                                terminal.then_some(now_n),
+                                terminal.then_some(position.backend_epoch as i64),
+                                now_n, seq as i64, values.item_version.saturating_sub(1) as i64,
+                            ],
+                        ))?;
+                        if changed != 1 {
+                            return Err(EngineError::Conflict);
+                        }
+                        st(tx.execute(
+                            "DELETE FROM fireweed_item_gates WHERE tenant_id=?1 AND queue_id=?2 AND item_id=?3",
+                            params![t, q, item_id],
+                        ))?;
+                        for gate_key in &values.gate_keys {
+                            st(tx.execute(
+                                "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) VALUES(?1,?2,?3,?4)",
+                                params![t, q, item_id, gate_key],
+                            ))?;
+                        }
+                        if !typed_indexes.is_empty() {
+                            delete_typed_index_rows(tx, &t, &q, std::slice::from_ref(&item_id))?;
+                            let keys = typed_index_keys_for_entity(
+                                typed_indexes,
+                                values.entity_document.as_ref(),
+                            )?;
+                            check_typed_unique_conflicts(tx, &t, &q, typed_indexes, &keys, None)?;
+                            insert_typed_index_rows(tx, &t, &q, &item_id, &keys)?;
+                        }
+                        if values.invalidate_lease {
+                            token_ops.push(TokenOp::Clear(shard.clone(), item.item_id));
+                        }
+                    }
+                }
+            }
+
+            for change in &c.gate_changes {
+                apply_command_sql(
+                    tx,
+                    queues,
+                    grouped_shards,
+                    claim_scan_hints,
+                    claim_scan_default_fifo,
+                    token_ops,
+                    shard,
+                    position,
+                    seq,
+                    now,
+                    &QueueCommand::SetGates(SetGatesCommand {
+                        gate_keys: change.gate_keys.clone(),
+                        blocked: change.blocked,
+                    }),
+                )?;
+            }
+            refresh_group_summaries(tx, shard, &groups, now)?;
+            Ok(())
+        }
     }
 }

@@ -69,6 +69,18 @@ pub(crate) fn positions_to_json(positions: &[CommandPosition]) -> EngineResult<S
     to_json(&raw)
 }
 
+pub(crate) fn positions_from_json(
+    shard: &QueueKey,
+    raw: &str,
+) -> EngineResult<Vec<CommandPosition>> {
+    let decoded: Vec<(u64, u64)> =
+        serde_json::from_str(raw).map_err(|error| EngineError::Storage(error.to_string()))?;
+    Ok(decoded
+        .into_iter()
+        .map(|(epoch, sequence)| CommandPosition::new(shard.clone(), epoch, sequence))
+        .collect())
+}
+
 pub(crate) fn check_request_idempotency(
     tx: &Transaction<'_>,
     shard: &QueueKey,

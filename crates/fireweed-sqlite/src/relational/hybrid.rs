@@ -650,6 +650,16 @@ impl ProjectionStore for HybridProjectionStore {
         self.hydrate_from_sqlite(definition)
     }
 
+    fn plan_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request: &fireweed_engine::ItemMutationRequest,
+    ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
+        self.check_healthy()?;
+        self.require_hydrated(shard)?;
+        self.memory.plan_item_mutation(shard, request)
+    }
+
     fn apply(
         &mut self,
         positions: &[CommandPosition],

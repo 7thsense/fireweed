@@ -970,6 +970,18 @@ pub trait ProjectionStore: Send {
         Ok(None)
     }
 
+    /// Resolve a retained item-mutation response from unified relational authority without
+    /// re-evaluating selectors against the current projection.
+    fn replay_durable_item_mutation(
+        &mut self,
+        _shard: &QueueKey,
+        _request_id: &RequestId,
+        _fingerprint: u64,
+        _now: UtcTimestamp,
+    ) -> EngineResult<Option<ItemMutationResponse>> {
+        Ok(None)
+    }
+
     /// Resolve a retained vectorized commit from unified relational authority.
     fn replay_durable_commit(
         &mut self,
@@ -3669,7 +3681,7 @@ fn batch_update_body_hash(request: &BatchUpdateRequest) -> EngineResult<BodyHash
     )))
 }
 
-fn item_mutation_body_hash(request: &ItemMutationRequest) -> EngineResult<BodyHash> {
+pub fn item_mutation_fingerprint(request: &ItemMutationRequest) -> EngineResult<u64> {
     use sha2::{Digest, Sha256};
 
     #[derive(serde::Serialize)]
@@ -3689,11 +3701,15 @@ fn item_mutation_body_hash(request: &ItemMutationRequest) -> EngineResult<BodyHa
     })
     .map_err(|error| EngineError::Storage(error.to_string()))?;
     let digest = Sha256::digest(bytes);
-    Ok(BodyHash(u64::from_be_bytes(
+    Ok(u64::from_be_bytes(
         digest[..8]
             .try_into()
             .expect("SHA-256 prefix is eight bytes"),
-    )))
+    ))
+}
+
+fn item_mutation_body_hash(request: &ItemMutationRequest) -> EngineResult<BodyHash> {
+    item_mutation_fingerprint(request).map(BodyHash)
 }
 
 struct PlannedBatchUpdate {
@@ -5269,6 +5285,14 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ItemMutationPort
             let request_id = request.request_id.clone();
             let mut inner = self.inner.lock().expect("poisoned");
             Self::require_known_shard(&inner, shard)?;
+            if let Some(response) = inner.projection.replay_durable_item_mutation(
+                shard,
+                &request_id,
+                fingerprint.0,
+                request.evaluated_at,
+            )? {
+                return Ok(response);
+            }
             let group_commit = self.gc_active(&inner);
             if group_commit {
                 Self::gc_force_seal(&mut inner, shard, ts_to_ms(request.evaluated_at))?;

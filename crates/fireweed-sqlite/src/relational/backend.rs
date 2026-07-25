@@ -21,13 +21,14 @@ use fireweed_engine::{
     CommitEntryStatus, CommitRecovery, CommitTransition, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, EngineError, EngineResult, EntryRecovery,
     FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort, IndexHit, IndexQueryPort,
-    ItemView, LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate, PendingPage,
-    PendingSummary, ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort,
-    PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand,
-    RenewLeasePort, ReplacePendingCommand, SetGatesCommand, SetGatesPort, TickReport,
-    UpdateFieldsCommand, UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand,
-    build_push_items, validate_api001_reserved_write_fields, validate_claim_compatibility,
+    ItemMutationPort, ItemMutationRequest, ItemMutationResponse, ItemView, LeaseExpiredCommand,
+    LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary, ProjectionRead,
+    PurgeItemsCommand, PurgePort, PushCommand, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
+    SetGatesCommand, SetGatesPort, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
+    item_mutation_fingerprint, validate_api001_reserved_write_fields, validate_claim_compatibility,
     validate_entity, validate_gate_push, validate_instance_fence, validate_purge_force,
 };
 use rusqlite::types::Value as SqlValue;
@@ -1277,6 +1278,131 @@ impl PushPort for SqliteRelationalBackend {
 }
 
 impl fireweed_engine::ReschedulePort for SqliteRelationalBackend {}
+
+impl ItemMutationPort for SqliteRelationalBackend {
+    fn mutate_items(
+        &self,
+        shard: &QueueKey,
+        request: ItemMutationRequest,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<ItemMutationResponse>> + Send {
+        let result = (|| {
+            let fingerprint = item_mutation_fingerprint(&request)?;
+            let mut g = self.inner.lock().expect("poisoned");
+            let definition = g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+            let live_tokens = g.live_tokens.get(shard).cloned().unwrap_or_default();
+            let expires_at = request_expires_at(&g.queues, shard, request.evaluated_at)?;
+            let Inner {
+                conn,
+                queues,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                live_tokens: committed_tokens,
+                live_tokens_by_consumer,
+                ..
+            } = &mut *g;
+            let (tenant, queue) = parts(shard);
+            let tx = st(conn.transaction_with_behavior(TransactionBehavior::Immediate))?;
+            let (seq, epoch): (i64, i64) = st(tx
+                .query_row(
+                    "SELECT next_seq,assignment_epoch FROM relational_cursor WHERE tenant=?1 AND queue=?2",
+                    params![tenant, queue],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional())?
+            .ok_or(EngineError::NotFound)?;
+            if expected_epoch.is_some_and(|expected| expected != epoch as u64) {
+                return Err(EngineError::EpochFenced);
+            }
+
+            let prior: Option<(Vec<u8>, String, String, i64)> = st(tx
+                .query_row(
+                    "SELECT request_fingerprint,response_payload,command_positions,expires_at \
+                     FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                     AND operation=?3 AND request_id=?4",
+                    params![
+                        tenant,
+                        queue,
+                        IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+                        request.request_id.as_str()
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional())?;
+            if let Some((stored, payload, positions, retained_until)) = prior {
+                if retained_until > ts_nanos(request.evaluated_at) {
+                    if stored != fingerprint.to_be_bytes() {
+                        return Err(EngineError::RequestIdConflict);
+                    }
+                    let mut response: ItemMutationResponse = serde_json::from_str(&payload)
+                        .map_err(|error| EngineError::Storage(error.to_string()))?;
+                    let positions = positions_from_json(shard, &positions)?;
+                    response.position = positions.last().cloned();
+                    st(tx.commit())?;
+                    return Ok(response);
+                }
+                st(tx.execute(
+                    "DELETE FROM fireweed_request_idempotency WHERE tenant_id=?1 AND queue_id=?2 \
+                     AND operation=?3 AND request_id=?4",
+                    params![
+                        tenant,
+                        queue,
+                        IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+                        request.request_id.as_str()
+                    ],
+                ))?;
+            }
+
+            let mut image = export_projection_image_sql(&tx, shard)?;
+            for item in &mut image.items {
+                item.lease_token = live_tokens.get(&item.item_id).cloned();
+            }
+            let projection = fireweed_projection::ProjectionData::from_image(&definition, image)?;
+            let mut plan = projection.plan_item_mutation(&request)?;
+            if request.dry_run {
+                return Ok(plan.response);
+            }
+
+            let position = CommandPosition::new(shard.clone(), epoch as u64, seq as u64);
+            let mut token_ops = Vec::new();
+            apply_command_sql(
+                &tx,
+                queues,
+                grouped_shards,
+                claim_scan_hints,
+                claim_scan_default_fifo,
+                &mut token_ops,
+                shard,
+                &position,
+                seq as u64,
+                request.evaluated_at,
+                &QueueCommand::MutateItems(plan.command),
+            )?;
+            st(tx.execute(
+                "UPDATE relational_cursor SET next_seq=?3 WHERE tenant=?1 AND queue=?2",
+                params![tenant, queue, seq + 1],
+            ))?;
+            let payload = serde_json::to_string(&plan.response)
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            record_item_mutation_idempotency(
+                &tx,
+                shard,
+                &request.request_id,
+                fingerprint,
+                &payload,
+                &position,
+                request.evaluated_at,
+                expires_at,
+            )?;
+            st(tx.commit())?;
+            apply_token_ops(committed_tokens, live_tokens_by_consumer, token_ops);
+            plan.response.position = Some(position);
+            Ok(plan.response)
+        })();
+        std::future::ready(result)
+    }
+}
 
 impl SetGatesPort for SqliteRelationalBackend {
     fn set_gates(

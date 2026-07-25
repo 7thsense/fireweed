@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bytes::Bytes;
 use fireweed_core::{
-    ClientItemKey, GroupKey, ItemId, QueueDefinition, QueueId, RequestId, TenantId, WorkerId,
+    ClientItemKey, GroupKey, ItemId, QueueDefinition, QueueId, RequestId, TenantId, UtcTimestamp,
+    WorkerId,
 };
 use fireweed_engine::{
     BatchUpdateResponse, CommandEnvelope, CommandPosition, CreateQueueOutcome, EngineError,
@@ -15,6 +16,40 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use super::*;
 
 pub(crate) const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
+pub(crate) const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
+
+pub(crate) fn record_item_mutation_idempotency(
+    tx: &Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: u64,
+    response_payload: &str,
+    position: &CommandPosition,
+    created_at: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (tenant, queue) = parts(shard);
+    st(tx.execute(
+        "INSERT INTO fireweed_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,\
+          command_positions,expires_at,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+          request_fingerprint=excluded.request_fingerprint,response_payload=excluded.response_payload,\
+          command_positions=excluded.command_positions,expires_at=excluded.expires_at",
+        params![
+            tenant,
+            queue,
+            IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+            request_id.as_str(),
+            fingerprint.to_be_bytes().as_slice(),
+            response_payload,
+            positions_to_json(std::slice::from_ref(position))?,
+            expires_at,
+            ts_nanos(created_at),
+        ],
+    ))?;
+    Ok(())
+}
 
 /// Advance the durable per-queue item-id high-water past the greatest of `reaped` (ADR-009 mint-counter
 /// recovery floor). MONOTONIC by `(epoch, counter)`: a reap that deletes only lower-id rows never lowers the
@@ -178,6 +213,30 @@ pub(crate) fn persist_request_outcome_sql(
     env: &CommandEnvelope,
     pos: &CommandPosition,
 ) -> EngineResult<()> {
+    if let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::ItemMutation { response_payload }),
+    ) = (
+        env.request_id.as_ref(),
+        env.request_fingerprint,
+        env.request_outcome.as_ref(),
+    ) {
+        let _: fireweed_engine::ItemMutationResponse = serde_json::from_str(response_payload)
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let expires_at = request_expires_at(queues, shard, env.created_at)?;
+        record_item_mutation_idempotency(
+            tx,
+            shard,
+            request_id,
+            fingerprint,
+            response_payload,
+            pos,
+            env.created_at,
+            expires_at,
+        )?;
+        return Ok(());
+    }
     if let (
         Some(request_id),
         Some(fingerprint),
@@ -599,7 +658,7 @@ pub(crate) fn export_projection_image_sql(
     let mut stmt = st(conn.prepare(
         "SELECT item_id,client_item_key,lifecycle_state,priority,not_before,eligible_since,group_key,cohort_size,payload,\
          fields,metadata,entity_document,retry_count,item_version,lease_expires_at,worker_id,fenced,\
-         superseded,max_attempts,created_seq \
+         superseded,max_attempts,created_seq,terminal_at,terminal_command_epoch,last_command_sequence \
          FROM fireweed_items WHERE tenant_id=?1 AND queue_id=?2 ORDER BY created_seq,item_id",
     ))?;
     let rows = st(stmt.query_map(params![t, q], |row| {
@@ -624,6 +683,9 @@ pub(crate) fn export_projection_image_sql(
             row.get::<_, i64>(17)?,
             row.get::<_, i64>(18)?,
             row.get::<_, i64>(19)?,
+            row.get::<_, Option<i64>>(20)?,
+            row.get::<_, Option<i64>>(21)?,
+            row.get::<_, i64>(22)?,
         ))
     }))?;
     let mut items = Vec::new();
@@ -649,6 +711,9 @@ pub(crate) fn export_projection_image_sql(
             superseded,
             max_attempts,
             created_seq,
+            terminal_at,
+            terminal_command_epoch,
+            last_command_sequence,
         ) = st(row)?;
         let item_id = ItemId::new(item_id).map_err(|e| EngineError::Storage(e.to_string()))?;
         let entity_document = entity_document
@@ -688,8 +753,10 @@ pub(crate) fn export_projection_image_sql(
                 .map_err(|e| EngineError::Storage(e.to_string()))?,
             fenced: fenced != 0,
             superseded: superseded != 0,
-            terminal_at: None,
-            terminal_position: None,
+            terminal_at: terminal_at.map(nanos_ts),
+            terminal_position: terminal_command_epoch.map(|epoch| {
+                CommandPosition::new(shard.clone(), epoch as u64, last_command_sequence as u64)
+            }),
         });
     }
 
@@ -741,6 +808,26 @@ pub(crate) fn export_projection_image_sql(
         instance_fences,
         metrics: metrics_sql(conn, shard)?,
     })
+}
+
+/// Build the planner image while the caller holds the relational unit-of-work lock. Durable rows carry
+/// only lease hashes, so active cleartext capabilities are overlaid from the process-local token map.
+pub(crate) fn projection_data_sql(
+    inner: &Inner,
+    shard: &QueueKey,
+) -> EngineResult<fireweed_projection::ProjectionData> {
+    let definition = inner
+        .queues
+        .get(shard)
+        .cloned()
+        .ok_or(EngineError::NotFound)?;
+    let mut image = export_projection_image_sql(&inner.conn, shard)?;
+    if let Some(tokens) = inner.live_tokens.get(shard) {
+        for item in &mut image.items {
+            item.lease_token = tokens.get(&item.item_id).cloned();
+        }
+    }
+    fireweed_projection::ProjectionData::from_image(&definition, image)
 }
 
 pub(crate) fn apply_committed_sql(

@@ -714,11 +714,7 @@ impl SqliteProjectionStore {
     }
 
     fn projection_data(&self, shard: &QueueKey) -> EngineResult<ProjectionData> {
-        let definition = {
-            let g = self.lock();
-            g.queues.get(shard).cloned().ok_or(EngineError::NotFound)?
-        };
-        ProjectionData::from_image(&definition, self.export_projection_image(shard)?)
+        projection_data_sql(&self.lock(), shard)
     }
 
     /// The object-log lineage the async checkpoint worker durably recorded for `shard`, or `None` if no
@@ -969,6 +965,14 @@ impl ProjectionStore for SqliteProjectionStore {
         let mut g = self.lock();
         create_queue_sql(&mut g, definition.clone())?;
         Ok(())
+    }
+
+    fn plan_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request: &fireweed_engine::ItemMutationRequest,
+    ) -> EngineResult<fireweed_engine::ItemMutationPlan> {
+        self.projection_data(shard)?.plan_item_mutation(request)
     }
 
     fn apply(
