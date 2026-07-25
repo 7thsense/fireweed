@@ -149,7 +149,7 @@ access to `eldir` is a prerequisite; inability to reach the host blocks this
 P0 row rather than converting it to a local skip. The runner exports
 `SNORRI_S3_TEST_ENDPOINT`, `SNORRI_S3_TEST_BUCKET`,
 `SNORRI_S3_TEST_REGION`, `SNORRI_S3_TEST_ACCESS_KEY`,
-`SNORRI_S3_TEST_SECRET_KEY`, and `SNORRI_PQUEUE_POSTGRES_URL` from host-managed
+`SNORRI_S3_TEST_SECRET_KEY`, and `SNORRI_FIREWEED_POSTGRES_URL` from host-managed
 secrets. Values MUST NOT be copied into the repository or logs. From the Snorri
 checkout pinned to the accepted Fireweed revision, run:
 
