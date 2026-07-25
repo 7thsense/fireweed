@@ -7,14 +7,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fireweed::{
     Bytes, ClaimRef, CommitEntry, CommitRequest, CommitResponseBarrier, ComposedStorageConfig,
-    CompoundIndexDef, CompoundIndexField, ConfigSecret, EligibilityPolicy, EngineError,
-    EntryOutcome, FilterOp, FinalizeKind, IndexDeclaration, IndexType, InstanceFence, NewItem,
-    ObjectLogConfig, ObjectLogRuntimeConfig, ObjectLogStorage, OrderField, OrderingMode,
+    CompoundIndexDef, CompoundIndexField, ConfigSecret, EligibilityPolicy, EngineError, EntityEdit,
+    EntityEditOperation, EntityPredicateValue, EntryOutcome, FilterOp, FinalizeKind, GateChange,
+    IndexDeclaration, IndexType, InstanceFence, ItemMutationOperation, ItemMutationRequest,
+    ItemMutationReturning, ItemPatch, ItemPredicate, ItemSelector, ItemSelectorScope, LeaseGuard,
+    NewItem, ObjectLogConfig, ObjectLogRuntimeConfig, ObjectLogStorage, OrderField, OrderingMode,
     PriorityDirection, PriorityModel, PriorityModelKind, PriorityTieBreaker, PriorityValue,
     ProjectionConfig, ProjectionRecoveryPolicy, ProjectionStoreConfig, QueryFilter,
     QueueDefinition, QueueId, QueueIndex, QueueKey, RangeScanRequest, RecoveryPolicy,
     RecurrencePolicy, RequestId, ResponseBarrier, RetryPolicy, SecretValue, SegmentConfig,
-    SegmentSettings, SideRecord, SortDirection, TenantId, TypedValue,
+    SegmentSettings, SelectedMutation, SideRecord, SortDirection, TenantId, TypedValue,
+    UtcTimestamp,
 };
 use fireweed_engine::DurabilityClass;
 use fireweed_memory::ManualClock;
@@ -184,6 +187,107 @@ fn drop_schema(url: &str, namespace: &str) {
     client
         .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
         .unwrap();
+}
+
+#[test]
+fn objectlog_postgres_item_mutation_reopens_and_replays_resolved_response() {
+    let Ok(url) = runtime_env("PG_TEST_URL") else {
+        eprintln!(
+            "SKIP objectlog_postgres_item_mutation_reopens_and_replays_resolved_response: \
+             FIREWEED_PG_TEST_URL is unset"
+        );
+        return;
+    };
+    let (root, namespace) = unique_fixture("objectlog_postgres_mutation");
+    let durability = config(&root, &namespace, &url);
+    let clock = Arc::new(ManualClock::at(1_000));
+    let queue = queue();
+    let fireweed = fireweed::open_composed_postgres(durability.clone(), clock.clone()).unwrap();
+    block_on(fireweed.create_queue(definition())).unwrap();
+    let item_id = block_on(fireweed.push(&queue, item(10))).unwrap();
+    let request = ItemMutationRequest {
+        request_id: RequestId::new("objectlog-postgres-mutation-replay").unwrap(),
+        evaluated_at: UtcTimestamp::new(1, 0).unwrap(),
+        dry_run: false,
+        returning: ItemMutationReturning::BeforeSnapshot,
+        gate_changes: vec![],
+        operation: ItemMutationOperation::SelectFirst {
+            clauses: vec![SelectedMutation {
+                selector_id: "unindexed-kind".into(),
+                selector: ItemSelector {
+                    scope: ItemSelectorScope::Live,
+                    predicates: vec![ItemPredicate::EntityEq {
+                        pointer: "/kind".into(),
+                        value: EntityPredicateValue::Value(serde_json::json!("composed-lifecycle")),
+                    }],
+                },
+                predicates: vec![],
+                lease_guard: LeaseGuard::RejectActive,
+                patch: ItemPatch {
+                    entity_edits: vec![EntityEdit {
+                        pointer: "/kind".into(),
+                        operation: EntityEditOperation::Set(serde_json::json!("already-mutated")),
+                    }],
+                    ..Default::default()
+                },
+            }],
+        },
+    };
+    let mut rejected = request.clone();
+    rejected.request_id = RequestId::new("objectlog-postgres-mutation-rollback").unwrap();
+    rejected.gate_changes = vec![GateChange {
+        gate_keys: vec!["not-permitted-for-this-queue".into()],
+        blocked: true,
+    }];
+    assert!(matches!(
+        block_on(fireweed.mutate_items(&queue, rejected)),
+        Err(EngineError::Invalid(_))
+    ));
+    assert_eq!(
+        block_on(fireweed.peek(&queue, 1)).unwrap()[0].item_version,
+        1,
+        "a rejected request must not partially apply its accepted item patch"
+    );
+    let committed = block_on(fireweed.mutate_items(&queue, request.clone())).unwrap();
+    assert_eq!(committed.summary.changed, 1);
+    assert_eq!(committed.results[0].item_id, item_id);
+    let reindexed = block_on(fireweed.range_scan(
+        &queue,
+        RangeScanRequest {
+            index: Some("by_kind_priority".into()),
+            filters: vec![QueryFilter {
+                field: "kind".into(),
+                op: FilterOp::Eq,
+                value: TypedValue::String("already-mutated".into()),
+            }],
+            order_by: vec![OrderField {
+                field: "priority".into(),
+                direction: SortDirection::Ascending,
+            }],
+            page_size: 10,
+            cursor: None,
+        },
+    ))
+    .unwrap();
+    assert_eq!(reindexed.rows.len(), 1);
+    assert_eq!(reindexed.rows[0].item_id, item_id);
+    drop(fireweed);
+
+    let reopened = fireweed::open_composed_postgres(durability, clock).unwrap();
+    let replayed = block_on(reopened.mutate_items(&queue, request.clone())).unwrap();
+    assert_eq!(
+        replayed, committed,
+        "replay must not re-evaluate the selector"
+    );
+    let mut changed_body = request;
+    changed_body.returning = ItemMutationReturning::Identity;
+    assert_eq!(
+        block_on(reopened.mutate_items(&queue, changed_body)).unwrap_err(),
+        EngineError::RequestIdConflict
+    );
+    drop(reopened);
+    drop_schema(&url, &namespace);
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

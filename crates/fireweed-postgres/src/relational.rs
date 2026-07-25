@@ -45,7 +45,7 @@
 //! shapes are unit-asserted (`sql_shape_tests`), and the sqlite-relational parity reference is unchanged.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use axon_esf::CompiledSchema;
@@ -57,7 +57,7 @@ use fireweed_core::{
     ItemState, LeaseToken, Metadata, MetricsByQueryRequest, MutationOutcome, MutationResult,
     PriorityModel, PriorityValue, QueryCapabilityFlags, QueryFilter, QueueDefinition, QueueId,
     QueueIndex, RangeScanRequest, RangeScanResponse, RequestId, TenantId, TypedValue, UtcTimestamp,
-    is_retry_exhausted, priority_sort,
+    WorkerId, is_retry_exhausted, priority_sort,
 };
 use fireweed_engine::{
     ActiveScope, AdvanceInstanceFenceCommand, Backend, BatchUpdateItemRef, BatchUpdateOutcome,
@@ -71,15 +71,16 @@ use fireweed_engine::{
     CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, CreateQueueOutcome,
     DiscoveryGranularity, DiscoveryPort, DurabilityClass, DurableIntegrityStage, EngineError,
     EngineResult, EntryRecovery, FinalizeCommand, FinalizeKind, FinalizeOutcome, FinalizePort,
-    HistoricalProjectionRead, IdempotencyDecision, IndexHit, IndexQueryPort, ItemView,
-    LeaseExpiredCommand, LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary,
-    ProjectionRead, PurgeItemsCommand, PurgePort, PushCommand, PushFingerprint, PushItem, PushPort,
-    PushSpec, QueueCommand, QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand,
-    ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeaseCommand,
-    RenewLeasePort, ReplacePendingCommand, RequestOutcome, ReschedulePort, ScheduleUpdate,
-    SetGatesCommand, SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand,
-    UpdateFieldsPort, UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items,
-    compile_entity_schema, generate_query_lease_token, project_scopes,
+    HistoricalProjectionRead, IdempotencyDecision, IndexHit, IndexQueryPort, ItemMutationPlan,
+    ItemMutationRequest, ItemMutationResponse, ItemView, LeaseExpiredCommand, LeaseView,
+    LiveItemView, PayloadUpdate, PendingPage, PendingSummary, ProjectionRead, PurgeItemsCommand,
+    PurgePort, PushCommand, PushFingerprint, PushItem, PushPort, PushSpec, QueueCommand,
+    QueueCounters, QueueKey, QueueMetrics, ReassignLeaseCommand, ReassignLeasePort, ReclaimDriver,
+    ReclaimPort, RecoveryReadPort, RenewLeaseCommand, RenewLeasePort, ReplacePendingCommand,
+    RequestOutcome, ReschedulePort, ResolvedItemMutationAction, ScheduleUpdate, SetGatesCommand,
+    SetGatesPort, TerminalEmissionMetrics, TickReport, UpdateFieldsCommand, UpdateFieldsPort,
+    UpsertOutcome, UpsertPort, WriteSideRecordsCommand, build_push_items, compile_entity_schema,
+    generate_query_lease_token, item_mutation_fingerprint, project_scopes,
     validate_api001_reserved_write_fields, validate_claim_compatibility, validate_entity,
     validate_gate_push, validate_instance_fence, validate_purge_force,
 };
@@ -92,7 +93,9 @@ use postgres::types::ToSql;
 use postgres::{Client, GenericClient};
 use sha2::{Digest, Sha256};
 
-use fireweed_projection::query_projection_from_index_keys;
+use fireweed_projection::{
+    ProjectionData, ProjectionImage, ProjectionImageItem, query_projection_from_index_keys,
+};
 
 use crate::{PostgresConnectConfig, connect};
 
@@ -943,6 +946,123 @@ fn record_request_idempotency(
 
 const IDEMPOTENCY_OPERATION_COMMIT: &str = "commit";
 const IDEMPOTENCY_OPERATION_BATCH_UPDATE: &str = "batch_update";
+const IDEMPOTENCY_OPERATION_ITEM_MUTATION: &str = "item_mutation";
+
+fn check_item_mutation_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    now_n: i64,
+) -> EngineResult<Option<ItemMutationResponse>> {
+    let (tenant, queue) = parts(shard);
+    let prior = st(tx.query_opt(
+        "SELECT request_fingerprint,response_payload,expires_at \
+         FROM fireweed_request_idempotency \
+         WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4 FOR UPDATE",
+        &[
+            &tenant,
+            &queue,
+            &IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+            &request_id.as_str(),
+        ],
+    ))?;
+    let Some(row) = prior else { return Ok(None) };
+    let prior_fingerprint: Vec<u8> = row.get(0);
+    let response_payload: String = row.get(1);
+    let expires_at: i64 = row.get(2);
+    if expires_at <= now_n {
+        st(tx.execute(
+            "DELETE FROM fireweed_request_idempotency \
+             WHERE tenant_id=$1 AND queue_id=$2 AND operation=$3 AND request_id=$4",
+            &[
+                &tenant,
+                &queue,
+                &IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+                &request_id.as_str(),
+            ],
+        ))?;
+        return Ok(None);
+    }
+    if prior_fingerprint != fingerprint {
+        return Err(EngineError::RequestIdConflict);
+    }
+    serde_json::from_str(&response_payload)
+        .map(Some)
+        .map_err(|error| EngineError::Storage(error.to_string()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_item_mutation_idempotency(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &QueueKey,
+    request_id: &RequestId,
+    fingerprint: &[u8],
+    response: &ItemMutationResponse,
+    now: UtcTimestamp,
+    expires_at: i64,
+) -> EngineResult<()> {
+    let (tenant, queue) = parts(shard);
+    let response_payload = to_json(response)?;
+    let affected = st(tx.execute(
+        "INSERT INTO fireweed_request_idempotency \
+         (tenant_id,queue_id,operation,request_id,request_fingerprint,response_payload,expires_at,created_at) \
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8) \
+         ON CONFLICT(tenant_id,queue_id,operation,request_id) DO UPDATE SET \
+           request_fingerprint=EXCLUDED.request_fingerprint,response_payload=EXCLUDED.response_payload, \
+           expires_at=EXCLUDED.expires_at,created_at=EXCLUDED.created_at \
+         WHERE fireweed_request_idempotency.expires_at<=EXCLUDED.created_at OR \
+           (fireweed_request_idempotency.request_fingerprint=EXCLUDED.request_fingerprint AND \
+            fireweed_request_idempotency.response_payload=EXCLUDED.response_payload)",
+        &[
+            &tenant,
+            &queue,
+            &IDEMPOTENCY_OPERATION_ITEM_MUTATION,
+            &request_id.as_str(),
+            &fingerprint,
+            &response_payload,
+            &expires_at,
+            &ts_nanos(now),
+        ],
+    ))?;
+    if affected == 0 {
+        return Err(EngineError::RequestIdConflict);
+    }
+    Ok(())
+}
+
+fn record_item_mutation_envelope(
+    tx: &mut postgres::Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    position: &CommandPosition,
+    envelope: &CommandEnvelope,
+) -> EngineResult<()> {
+    let (
+        Some(request_id),
+        Some(fingerprint),
+        Some(RequestOutcome::ItemMutation { response_payload }),
+    ) = (
+        envelope.request_id.as_ref(),
+        envelope.request_fingerprint,
+        envelope.request_outcome.as_ref(),
+    )
+    else {
+        return Ok(());
+    };
+    let mut response: ItemMutationResponse = serde_json::from_str(response_payload)
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    response.position = Some(position.clone());
+    let expires_at = request_expires_at(queues, &position.queue, envelope.created_at)?;
+    record_item_mutation_idempotency(
+        tx,
+        &position.queue,
+        request_id,
+        &fingerprint.to_be_bytes(),
+        &response,
+        envelope.created_at,
+        expires_at,
+    )
+}
 
 fn check_batch_update_idempotency(
     tx: &mut postgres::Transaction<'_>,
@@ -1451,6 +1571,160 @@ fn lease_hash(token: &LeaseToken) -> Vec<u8> {
 fn parse_priority(raw: Option<String>) -> EngineResult<Option<PriorityValue>> {
     raw.map(|s| serde_json::from_str(&s).map_err(|e| EngineError::Storage(e.to_string())))
         .transpose()
+}
+
+/// Materialize one queue into the shared projection planner. Relational selectors deliberately scan the
+/// authoritative rows, including JSON entity values that have no declared index; indexes are an
+/// acceleration concern and never a functionality gate for `mutate_items`.
+fn plan_item_mutation_sql<C: GenericClient>(
+    client: &mut C,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    live_tokens: &HashMap<ItemId, LeaseToken>,
+    shard: &QueueKey,
+    request: &ItemMutationRequest,
+    lock_rows: bool,
+) -> EngineResult<ItemMutationPlan> {
+    let definition = queues.get(shard).cloned().ok_or(EngineError::NotFound)?;
+    let (tenant, queue) = parts(shard);
+    let queue_sql = if lock_rows {
+        "SELECT paused,pause_drain_intake FROM queues WHERE tenant=$1 AND queue=$2 FOR UPDATE"
+    } else {
+        "SELECT paused,pause_drain_intake FROM queues WHERE tenant=$1 AND queue=$2"
+    };
+    let queue_row =
+        st(client.query_opt(queue_sql, &[&tenant, &queue]))?.ok_or(EngineError::NotFound)?;
+    let paused: bool = queue_row.get(0);
+    let pause_drain_intake: bool = queue_row.get(1);
+
+    let cursor_sql = if lock_rows {
+        "SELECT next_seq,next_item_seq,assignment_epoch FROM relational_cursor \
+         WHERE tenant=$1 AND queue=$2 FOR UPDATE"
+    } else {
+        "SELECT next_seq,next_item_seq,assignment_epoch FROM relational_cursor \
+         WHERE tenant=$1 AND queue=$2"
+    };
+    let cursor =
+        st(client.query_opt(cursor_sql, &[&tenant, &queue]))?.ok_or(EngineError::NotFound)?;
+    let next_seq = u64::try_from(cursor.get::<_, i64>(0))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let next_item_seq = u64::try_from(cursor.get::<_, i64>(1))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let assignment_epoch = u64::try_from(cursor.get::<_, i64>(2))
+        .map_err(|error| EngineError::Storage(error.to_string()))?;
+
+    let item_sql = format!(
+        "SELECT item_id,client_item_key,priority,not_before,eligible_since,group_key,cohort_size, \
+                payload,fields,metadata,entity_document,lifecycle_state,item_version,retry_count, \
+                max_attempts,created_seq,lease_expires_at,worker_id,fenced,superseded,terminal_at, \
+                last_command_sequence \
+         FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 ORDER BY created_seq,item_id{}",
+        if lock_rows { " FOR UPDATE" } else { "" }
+    );
+    let rows = st(client.query(&item_sql, &[&tenant, &queue]))?;
+    let parsed_ids = rows
+        .iter()
+        .map(|row| {
+            ItemId::new(row.get::<_, String>(0))
+                .map_err(|error| EngineError::Storage(error.to_string()))
+        })
+        .collect::<EngineResult<Vec<_>>>()?;
+    let gate_keys = item_gate_keys_by_id(client, shard, &parsed_ids)?;
+    let mut items = Vec::with_capacity(rows.len());
+    for (row, item_id) in rows.into_iter().zip(parsed_ids) {
+        let client_item_key = ClientItemKey::new(row.get::<_, String>(1))
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let group_key = row
+            .get::<_, Option<String>>(5)
+            .map(GroupKey::new)
+            .transpose()
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let entity_document = row
+            .get::<_, Option<String>>(10)
+            .map(|raw| {
+                serde_json::from_str(&raw).map_err(|error| EngineError::Storage(error.to_string()))
+            })
+            .transpose()?;
+        let state = parse_state(&row.get::<_, String>(11))?;
+        let terminal_at = row.get::<_, Option<i64>>(20).map(nanos_ts);
+        let terminal_position = terminal_at.map(|_| {
+            CommandPosition::new(
+                shard.clone(),
+                assignment_epoch,
+                row.get::<_, i64>(21) as u64,
+            )
+        });
+        let cohort_size = row
+            .get::<_, Option<i64>>(6)
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        let worker_id = row
+            .get::<_, Option<String>>(17)
+            .map(WorkerId::new)
+            .transpose()
+            .map_err(|error| EngineError::Storage(error.to_string()))?;
+        items.push(ProjectionImageItem {
+            item_id,
+            client_item_key,
+            priority: parse_priority(row.get(2))?,
+            not_before: row.get::<_, Option<i64>>(3).map(nanos_ts),
+            eligible_since: Some(nanos_ts(row.get(4))),
+            group_key,
+            cohort_size,
+            payload: row.get::<_, Option<Vec<u8>>>(7).map(Bytes::from),
+            fields: fields_from_json(row.get(8))?,
+            metadata: metadata_from_json(row.get(9))?,
+            gate_keys: gate_keys
+                .get(&item_id.to_string())
+                .cloned()
+                .unwrap_or_default(),
+            entity_document,
+            state,
+            item_version: u64::try_from(row.get::<_, i64>(12))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            attempt_count: u32::try_from(row.get::<_, i64>(13))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            max_attempts: u32::try_from(row.get::<_, i64>(14))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            created_seq: u64::try_from(row.get::<_, i64>(15))
+                .map_err(|error| EngineError::Storage(error.to_string()))?,
+            lease_token: live_tokens.get(&item_id).cloned(),
+            lease_expires_at: row.get::<_, Option<i64>>(16).map(nanos_ts),
+            lease_is_cohort: state == ItemState::Leased && cohort_size.is_some(),
+            worker_id,
+            fenced: row.get(18),
+            superseded: row.get(19),
+            terminal_at,
+            terminal_position,
+        });
+    }
+
+    let blocked_gates = st(client.query(
+        "SELECT gate_key FROM fireweed_gate_state \
+         WHERE tenant_id=$1 AND queue_id=$2 ORDER BY gate_key",
+        &[&tenant, &queue],
+    ))?
+    .into_iter()
+    .map(|row| row.get::<_, String>(0))
+    .collect::<BTreeSet<_>>();
+    let high_water = next_seq
+        .checked_sub(1)
+        .map(|sequence| CommandPosition::new(shard.clone(), assignment_epoch, sequence));
+    let projection = ProjectionData::from_image(
+        &definition,
+        ProjectionImage {
+            high_water,
+            paused,
+            pause_drain_intake,
+            blocked_gates,
+            next_seq: next_item_seq,
+            items,
+            side_records: BTreeMap::new(),
+            instance_fences: BTreeMap::new(),
+            metrics: QueueMetrics::default(),
+        },
+    )?;
+    projection.plan_item_mutation(request)
 }
 
 // ---------------------------------------------------------------------------
@@ -2776,6 +3050,191 @@ fn advance_id_high_water(
     Ok(())
 }
 
+fn apply_mutate_items_sql(
+    tx: &mut postgres::Transaction<'_>,
+    queues: &HashMap<QueueKey, QueueDefinition>,
+    token_ops: &mut Vec<TokenOp>,
+    shard: &QueueKey,
+    seq: u64,
+    now: UtcTimestamp,
+    command: &fireweed_engine::MutateItemsCommand,
+) -> EngineResult<()> {
+    let (tenant, queue) = parts(shard);
+    let now_n = ts_nanos(now);
+    let sequence = seq as i64;
+    let definition = queues.get(shard).ok_or(EngineError::NotFound)?;
+
+    let purged = command
+        .items
+        .iter()
+        .filter_map(|mutation| {
+            matches!(mutation.action, ResolvedItemMutationAction::Purge).then_some(mutation.item_id)
+        })
+        .collect::<Vec<_>>();
+    if !purged.is_empty() {
+        apply_command_sql(
+            tx,
+            queues,
+            token_ops,
+            shard,
+            seq,
+            now,
+            &QueueCommand::PurgeItems(PurgeItemsCommand {
+                item_ids: purged,
+                force: true,
+            }),
+        )?;
+    }
+
+    let replacements = command
+        .items
+        .iter()
+        .filter_map(|mutation| match &mutation.action {
+            ResolvedItemMutationAction::Replace(values) => Some((mutation.item_id, values)),
+            ResolvedItemMutationAction::Purge => None,
+        })
+        .collect::<Vec<_>>();
+    let replacement_ids = replacements
+        .iter()
+        .map(|(item_id, _)| item_id.to_string())
+        .collect::<Vec<_>>();
+    let groups = groups_of(
+        tx,
+        shard,
+        &replacements.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    )?;
+
+    // Delete all unique-index and gate rows before inserting any replacement. This permits an atomic
+    // batch to swap unique values or gate memberships without observing a transient sibling collision.
+    delete_typed_index_rows(tx, &tenant, &queue, &replacement_ids)?;
+    if !replacement_ids.is_empty() {
+        st(tx.execute(
+            "DELETE FROM fireweed_item_gates \
+             WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+            &[&tenant, &queue, &replacement_ids],
+        ))?;
+        st(tx.execute(
+            "DELETE FROM fireweed_group_due_pending \
+             WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3)",
+            &[&tenant, &queue, &replacement_ids],
+        ))?;
+    }
+
+    let typed_indexes = definition.typed_indexes.as_slice();
+    for (item_id, values) in &replacements {
+        let item_id_string = item_id.to_string();
+        let priority_json = values.priority.as_ref().map(to_json).transpose()?;
+        let priority_sort_key = elig_sort(&values.priority, &definition.priority_model);
+        let not_before = values.not_before.map(ts_nanos);
+        let eligible_since = ts_nanos(values.eligible_since);
+        let payload = values.payload.as_ref().map(|payload| payload.to_vec());
+        let fields = fields_to_json(&values.fields)?;
+        let metadata = metadata_to_json(&values.metadata)?;
+        let entity_document = values.entity_document.as_ref().map(to_json).transpose()?;
+        let terminal_at = values.state.is_terminal().then_some(now_n);
+        let lease_ends = values.invalidate_lease || values.state != ItemState::Leased;
+        let affected = st(tx.execute(
+            "UPDATE fireweed_items SET lifecycle_state=$4,item_version=$5,priority=$6,priority_sort=$7, \
+               not_before=$8,eligible_since=$9,payload=$10,fields=$11,metadata=$12,entity_document=$13, \
+               lease_token_hash=CASE WHEN $14 THEN NULL ELSE lease_token_hash END, \
+               lease_expires_at=CASE WHEN $14 THEN NULL ELSE lease_expires_at END, \
+               worker_id=CASE WHEN $14 THEN NULL ELSE worker_id END, \
+               fenced=CASE WHEN $14 THEN false ELSE fenced END,terminal_at=$15,updated_at=$16, \
+               last_command_sequence=$17 \
+             WHERE tenant_id=$1 AND queue_id=$2 AND item_id=$3 AND item_version=$18",
+            &[
+                &tenant,
+                &queue,
+                &item_id_string,
+                &state_str(values.state),
+                &(values.item_version as i64),
+                &priority_json,
+                &priority_sort_key,
+                &not_before,
+                &eligible_since,
+                &payload,
+                &fields,
+                &metadata,
+                &entity_document,
+                &lease_ends,
+                &terminal_at,
+                &now_n,
+                &sequence,
+                &(values.item_version.saturating_sub(1) as i64),
+            ],
+        ))?;
+        if affected != 1 {
+            return Err(EngineError::Conflict);
+        }
+
+        if lease_ends {
+            token_ops.push(TokenOp::Clear(*item_id));
+        }
+        if !values.gate_keys.is_empty() {
+            let item_ids = vec![item_id_string.clone(); values.gate_keys.len()];
+            st(tx.execute(
+                "INSERT INTO fireweed_item_gates(tenant_id,queue_id,item_id,gate_key) \
+                 SELECT $1,$2,* FROM UNNEST($3::text[],$4::text[]) \
+                 ON CONFLICT(tenant_id,queue_id,item_id,gate_key) DO NOTHING",
+                &[&tenant, &queue, &item_ids, &values.gate_keys],
+            ))?;
+        }
+        let new_keys = typed_index_keys_for_entity(typed_indexes, values.entity_document.as_ref())?;
+        check_typed_unique_conflicts(
+            tx,
+            &tenant,
+            &queue,
+            typed_indexes,
+            &new_keys,
+            Some(&item_id_string),
+        )?;
+        insert_typed_index_rows(
+            tx,
+            &tenant,
+            &queue,
+            typed_indexes,
+            &item_id_string,
+            &new_keys,
+        )?;
+    }
+
+    if !replacement_ids.is_empty() {
+        st(tx.execute(
+            "INSERT INTO fireweed_group_due_pending( \
+               tenant_id,queue_id,item_id,group_key,due_at,created_seq) \
+             SELECT tenant_id,queue_id,item_id,group_key,not_before,created_seq \
+             FROM fireweed_items WHERE tenant_id=$1 AND queue_id=$2 AND item_id=ANY($3) \
+               AND lifecycle_state='Pending' AND superseded=false AND group_key IS NOT NULL \
+               AND not_before>$4 \
+             ON CONFLICT(tenant_id,queue_id,item_id) DO UPDATE SET \
+               group_key=EXCLUDED.group_key,due_at=EXCLUDED.due_at,created_seq=EXCLUDED.created_seq",
+            &[&tenant, &queue, &replacement_ids, &now_n],
+        ))?;
+        refresh_group_summaries(tx, shard, &groups, now)?;
+    }
+
+    for change in &command.gate_changes {
+        if change.gate_keys.is_empty() {
+            continue;
+        }
+        if change.blocked {
+            st(tx.execute(
+                "INSERT INTO fireweed_gate_state(tenant_id,queue_id,gate_key) \
+                 SELECT $1,$2,gate_key FROM UNNEST($3::text[]) AS incoming(gate_key) \
+                 ON CONFLICT(tenant_id,queue_id,gate_key) DO NOTHING",
+                &[&tenant, &queue, &change.gate_keys],
+            ))?;
+        } else {
+            st(tx.execute(
+                "DELETE FROM fireweed_gate_state \
+                 WHERE tenant_id=$1 AND queue_id=$2 AND gate_key=ANY($3)",
+                &[&tenant, &queue, &change.gate_keys],
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 fn apply_command_sql(
     tx: &mut postgres::Transaction<'_>,
     queues: &HashMap<QueueKey, QueueDefinition>,
@@ -3486,9 +3945,9 @@ fn apply_command_sql(
             ))?;
             Ok(())
         }
-        // Planned/applied by the dedicated relational mutation slice. Its planning seam rejects before
-        // append until that implementation is linked.
-        QueueCommand::MutateItems(_) => Err(EngineError::Unavailable),
+        QueueCommand::MutateItems(command) => {
+            apply_mutate_items_sql(tx, queues, token_ops, shard, seq, now, command)
+        }
     }
 }
 
@@ -5443,6 +5902,7 @@ impl PostgresRelationalBackend {
                         RequestOutcome::ItemMutation { .. } => {}
                     }
                 }
+                record_item_mutation_envelope(&mut tx, queues, &position, &envelope)?;
                 next += 1;
             }
         }
@@ -5976,6 +6436,7 @@ impl PgRelProjectionTxn<'_, '_> {
                     expires_at,
                 )?;
             }
+            record_item_mutation_envelope(&mut tx, self.queues, pos, env)?;
         }
         Ok(())
     }
@@ -8371,17 +8832,110 @@ impl BatchUpdatePort for PostgresRelationalBackend {
     }
 }
 
-// The dedicated PostgreSQL mutation implementation replaces this compile-time hook. Keeping the port
-// explicit makes the public facade type-check while ensuring no unresolved selector command can append.
 impl fireweed_engine::ItemMutationPort for PostgresRelationalBackend {
     fn mutate_items(
         &self,
-        _shard: &QueueKey,
-        _request: fireweed_engine::ItemMutationRequest,
-        _expected_epoch: Option<u64>,
+        shard: &QueueKey,
+        request: ItemMutationRequest,
+        expected_epoch: Option<u64>,
     ) -> impl std::future::Future<Output = EngineResult<fireweed_engine::ItemMutationResponse>> + Send
     {
-        std::future::ready(Err(EngineError::Unavailable))
+        let result = (|| {
+            let fingerprint_u64 = item_mutation_fingerprint(&request)?;
+            let fingerprint = fingerprint_u64.to_be_bytes();
+            let request_id = request.request_id.clone();
+            let now = request.evaluated_at;
+            let now_n = ts_nanos(now);
+            let (tenant, queue) = parts(shard);
+            let mut guard = self.inner.lock().expect("poisoned");
+            let Inner {
+                client,
+                queues,
+                live_tokens,
+                ..
+            } = &mut *guard;
+            let expires_at = request_expires_at(queues, shard, now)?;
+            let mut tx = st(client.transaction())?;
+
+            // The cursor row is the durable per-queue write gate. Selector resolution, replay lookup,
+            // command append, projection changes, queue-gate changes, and idempotency publication all
+            // happen while this lock and transaction remain active.
+            let epoch_row = st(tx.query_opt(
+                "SELECT assignment_epoch FROM relational_cursor \
+                 WHERE tenant=$1 AND queue=$2 FOR UPDATE",
+                &[&tenant, &queue],
+            ))?
+            .ok_or(EngineError::NotFound)?;
+            let epoch = u64::try_from(epoch_row.get::<_, i64>(0))
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            if expected_epoch.is_some_and(|expected| expected != epoch) {
+                return Err(EngineError::EpochFenced);
+            }
+
+            if !request.dry_run
+                && let Some(response) = check_item_mutation_idempotency(
+                    &mut tx,
+                    shard,
+                    &request_id,
+                    &fingerprint,
+                    now_n,
+                )?
+            {
+                st(tx.commit())?;
+                return Ok(response);
+            }
+
+            let mut plan =
+                plan_item_mutation_sql(&mut tx, queues, live_tokens, shard, &request, true)?;
+            if request.dry_run {
+                // A preview deliberately publishes neither a command nor an idempotency record.
+                st(tx.rollback())?;
+                return Ok(plan.response);
+            }
+
+            let sequence = alloc_seq(&mut tx, &tenant, &queue)?;
+            let position = CommandPosition::new(shard.clone(), epoch, sequence);
+            plan.response.position = Some(position.clone());
+            let response_payload = to_json(&plan.response)?;
+            let mut envelope = direct_command_envelope(
+                shard,
+                QueueCommand::MutateItems(plan.command),
+                now,
+                epoch,
+                sequence,
+            );
+            envelope.request_id = Some(request_id.clone());
+            envelope.request_fingerprint = Some(fingerprint_u64);
+            envelope.request_outcome = Some(RequestOutcome::ItemMutation { response_payload });
+            persist_command_envelopes(
+                &mut tx,
+                std::slice::from_ref(&position),
+                std::slice::from_ref(&envelope),
+            )?;
+            let mut token_ops = Vec::new();
+            apply_command_sql(
+                &mut tx,
+                queues,
+                &mut token_ops,
+                shard,
+                sequence,
+                now,
+                &envelope.command,
+            )?;
+            record_item_mutation_idempotency(
+                &mut tx,
+                shard,
+                &request_id,
+                &fingerprint,
+                &plan.response,
+                now,
+                expires_at,
+            )?;
+            st(tx.commit())?;
+            apply_token_ops(live_tokens, token_ops);
+            Ok(plan.response)
+        })();
+        std::future::ready(result)
     }
 }
 
@@ -9740,6 +10294,7 @@ impl ProjectionStore for PostgresRelational {
                     expires_at,
                 )?;
             }
+            record_item_mutation_envelope(&mut tx, queues, pos, env)?;
             let slot = max_position
                 .entry(pos.queue.clone())
                 .or_insert((pos.backend_epoch, pos.sequence));
@@ -10011,6 +10566,44 @@ impl ProjectionStore for PostgresRelational {
         commands: &[UpdateFieldsCommand],
     ) -> EngineResult<Vec<bool>> {
         Ok(vec![true; commands.len()])
+    }
+
+    fn replay_durable_item_mutation(
+        &mut self,
+        shard: &QueueKey,
+        request_id: &RequestId,
+        fingerprint: u64,
+        now: UtcTimestamp,
+    ) -> EngineResult<Option<ItemMutationResponse>> {
+        let mut guard = self.lock();
+        let mut tx = st(guard.client.transaction())?;
+        let response = check_item_mutation_idempotency(
+            &mut tx,
+            shard,
+            request_id,
+            &fingerprint.to_be_bytes(),
+            ts_nanos(now),
+        )?;
+        st(tx.commit())?;
+        Ok(response)
+    }
+
+    fn plan_item_mutation(
+        &self,
+        shard: &QueueKey,
+        request: &ItemMutationRequest,
+    ) -> EngineResult<ItemMutationPlan> {
+        let mut guard = self.lock();
+        let Inner {
+            client,
+            queues,
+            live_tokens,
+            ..
+        } = &mut *guard;
+        let mut tx = st(client.transaction())?;
+        let plan = plan_item_mutation_sql(&mut tx, queues, live_tokens, shard, request, true)?;
+        st(tx.commit())?;
+        Ok(plan)
     }
 
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>> {
@@ -14009,7 +14602,7 @@ mod command_log_recovery_tests {
             .split("impl BatchUpdatePort for PostgresRelationalBackend")
             .nth(1)
             .unwrap()
-            .split("impl ReclaimPort for PostgresRelationalBackend")
+            .split("impl fireweed_engine::ItemMutationPort for PostgresRelationalBackend")
             .next()
             .unwrap();
         assert!(implementation.contains("FROM UNNEST"));
