@@ -43,11 +43,11 @@ use crate::claim_validation::{ClaimCompatibility, ClaimUnit, validate_claim_comp
 use crate::command::{
     AdvanceInstanceFenceCommand, ClaimCommand, CohortClaimCommand, CommandChecksum,
     CommandEnvelope, CommandId, CommitOutcomeEntry, FinalizeCommand, FinalizeKind, FinalizeOutcome,
-    LeaseExpiredCommand, PayloadUpdate, PurgeItemsCommand, PushCommand, PushItem, QueueCommand,
-    QueueCounters, ReassignLeaseCommand, RenewLeaseCommand, ReplacePendingCommand, RequestOutcome,
-    ScheduleUpdate, SetGatesCommand, UpdateFieldsCommand, WriteSideRecordsCommand,
-    build_push_items, command_envelope_change_records, validate_gate_command, validate_gate_push,
-    validate_request_replay_metadata,
+    LeaseExpiredCommand, MutateItemsCommand, PayloadUpdate, PurgeItemsCommand, PushCommand,
+    PushItem, QueueCommand, QueueCounters, ReassignLeaseCommand, RenewLeaseCommand,
+    ReplacePendingCommand, RequestOutcome, ScheduleUpdate, SetGatesCommand, UpdateFieldsCommand,
+    WriteSideRecordsCommand, build_push_items, command_envelope_change_records,
+    validate_gate_command, validate_gate_push, validate_request_replay_metadata,
 };
 use crate::error::{CommitRejection, EngineError, EngineResult};
 use crate::finalize_validation::validate_purge_force;
@@ -62,12 +62,13 @@ use crate::port::{
     ClaimRef, ClaimRequest, Claimed, ClaimedItem, CommandPage, CommitCapabilities,
     CommitEntryOutcome, CommitEntryStatus, CommitRecovery, CommitTransition, CommitTransitionPort,
     ControlPlaneStore, CreateQueueOutcome, EntryRecovery, FinalizePort, HistoricalProjectionRead,
-    IndexHit, IndexQueryPort, ItemView, LeaseView, LiveItemView, LogRead, MaintenanceStopReason,
-    MaintenanceSummary, PendingPage, PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort,
-    PushPort, PushSpec, QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort,
-    RecoveryReadPort, RenewLeasePort, ReschedulePort, SnapshotRef, SnapshotStore,
-    TerminalEmissionMetrics, TickReport, UpdateFieldsPort, UpsertOutcome, UpsertPort,
-    generate_query_lease_token, validate_api001_reserved_write_fields, validate_instance_fence,
+    IndexHit, IndexQueryPort, ItemMutationPort, ItemMutationRequest, ItemMutationResponse,
+    ItemView, LeaseView, LiveItemView, LogRead, MaintenanceStopReason, MaintenanceSummary,
+    PendingPage, PendingSummary, ProjectionRead, ProjectionSnapshot, PurgePort, PushPort, PushSpec,
+    QueueMetrics, ReassignLeasePort, ReclaimDriver, ReclaimPort, RecoveryReadPort, RenewLeasePort,
+    ReschedulePort, SnapshotRef, SnapshotStore, TerminalEmissionMetrics, TickReport,
+    UpdateFieldsPort, UpsertOutcome, UpsertPort, generate_query_lease_token,
+    validate_api001_reserved_write_fields, validate_instance_fence,
 };
 use crate::schema_validation::{compile_entity_schema, validate_entity};
 use crate::sequenced_metadata::{AdvanceThenDelete, RetainedAddress, RetentionFloorClass};
@@ -916,6 +917,12 @@ pub struct BoundedMutationPlan {
     pub updates: Vec<BoundedMutationUpdate>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ItemMutationPlan {
+    pub response: ItemMutationResponse,
+    pub command: MutateItemsCommand,
+}
+
 /// The projection axis: the materialized read model. Exposes the full `ProjectionRead` surface, the
 /// secondary-index queries, the pre-commit VALIDATION helpers the orchestration relies on (so the
 /// post-append `apply` is infallible — commit has no rollback), and the `apply` seam itself.
@@ -1141,6 +1148,16 @@ pub trait ProjectionStore: Send {
         _shard: &QueueKey,
         _commands: &[UpdateFieldsCommand],
     ) -> EngineResult<Vec<bool>> {
+        Err(EngineError::Unavailable)
+    }
+
+    /// Resolve and validate one backend-erased mutation against a single immutable queue image. The
+    /// returned command contains no selectors: only exact item ids and complete post-mutation values.
+    fn plan_item_mutation(
+        &self,
+        _shard: &QueueKey,
+        _request: &ItemMutationRequest,
+    ) -> EngineResult<ItemMutationPlan> {
         Err(EngineError::Unavailable)
     }
     fn expired_leases(&self, shard: &QueueKey, now: UtcTimestamp) -> EngineResult<Vec<ItemId>>;
@@ -3070,6 +3087,7 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ComposedBackend<L, P, C> 
                     // envelope's minted ids (same as the `None` legacy-push path).
                     Some(RequestOutcome::ClaimByQuery { .. })
                     | Some(RequestOutcome::BatchUpdate { .. })
+                    | Some(RequestOutcome::ItemMutation { .. })
                     | Some(RequestOutcome::CommitTransition { .. })
                     | None => env.item_ids.clone(),
                 },
@@ -3643,6 +3661,33 @@ fn batch_update_body_hash(request: &BatchUpdateRequest) -> EngineResult<BodyHash
     // `request_id` is the cache key, not part of the logical request body.
     let bytes = serde_json::to_vec(&request.updates)
         .map_err(|error| EngineError::Storage(error.to_string()))?;
+    let digest = Sha256::digest(bytes);
+    Ok(BodyHash(u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    )))
+}
+
+fn item_mutation_body_hash(request: &ItemMutationRequest) -> EngineResult<BodyHash> {
+    use sha2::{Digest, Sha256};
+
+    #[derive(serde::Serialize)]
+    struct Body<'a> {
+        evaluated_at: UtcTimestamp,
+        dry_run: bool,
+        returning: crate::port::ItemMutationReturning,
+        gate_changes: &'a [crate::port::GateChange],
+        operation: &'a crate::port::ItemMutationOperation,
+    }
+    let bytes = serde_json::to_vec(&Body {
+        evaluated_at: request.evaluated_at,
+        dry_run: request.dry_run,
+        returning: request.returning,
+        gate_changes: &request.gate_changes,
+        operation: &request.operation,
+    })
+    .map_err(|error| EngineError::Storage(error.to_string()))?;
     let digest = Sha256::digest(bytes);
     Ok(BodyHash(u64::from_be_bytes(
         digest[..8]
@@ -5202,6 +5247,87 @@ impl<L: LogStore, P: ProjectionStore, C: ControlPlane> BatchUpdatePort
                 .or_default()
                 .record(request_id, fingerprint, response.clone(), expires_at);
             Ok(response)
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ItemMutationPort
+// ---------------------------------------------------------------------------
+
+impl<L: LogStore, P: ProjectionStore, C: ControlPlane> ItemMutationPort
+    for ComposedBackend<L, P, C>
+{
+    fn mutate_items(
+        &self,
+        shard: &QueueKey,
+        request: ItemMutationRequest,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<ItemMutationResponse>> + Send {
+        queue_serialized(&self.mutation_gate, shard.clone(), move || {
+            let fingerprint = item_mutation_body_hash(&request)?;
+            let request_id = request.request_id.clone();
+            let mut inner = self.inner.lock().expect("poisoned");
+            Self::require_known_shard(&inner, shard)?;
+            let group_commit = self.gc_active(&inner);
+            if group_commit {
+                Self::gc_force_seal(&mut inner, shard, ts_to_ms(request.evaluated_at))?;
+            }
+
+            // The durable response is authoritative. Scan the retained command stream while holding the
+            // same queue mutation gate used for planning; a replay never evaluates selectors again.
+            let mut from = inner.log.retention_floor(shard)?;
+            loop {
+                let page = inner
+                    .log
+                    .read_from(shard, from.clone(), RECOVERY_READ_PAGE_LIMIT)?;
+                for (position, envelope) in &page.entries {
+                    if envelope.request_id.as_ref() != Some(&request_id) {
+                        continue;
+                    }
+                    if envelope.request_fingerprint != Some(fingerprint.0) {
+                        return Err(EngineError::RequestIdConflict);
+                    }
+                    let Some(RequestOutcome::ItemMutation { response_payload }) =
+                        envelope.request_outcome.as_ref()
+                    else {
+                        return Err(EngineError::RequestIdConflict);
+                    };
+                    let mut response: ItemMutationResponse = serde_json::from_str(response_payload)
+                        .map_err(|error| EngineError::Storage(error.to_string()))?;
+                    response.position = Some(position.clone());
+                    return Ok(response);
+                }
+                match page.next {
+                    Some(next) => from = Some(next),
+                    None => break,
+                }
+            }
+
+            let mut plan = inner.projection.plan_item_mutation(shard, &request)?;
+            if request.dry_run {
+                return Ok(plan.response);
+            }
+            let response_payload = serde_json::to_string(&plan.response)
+                .map_err(|error| EngineError::Storage(error.to_string()))?;
+            let item_ids = plan.command.items.iter().map(|item| item.item_id).collect();
+            let mut envelope = Self::make_envelope(
+                &mut inner,
+                self.node_id,
+                QueueCommand::MutateItems(plan.command),
+                item_ids,
+                request.evaluated_at,
+            );
+            envelope.request_id = Some(request_id);
+            envelope.request_fingerprint = Some(fingerprint.0);
+            envelope.request_outcome = Some(RequestOutcome::ItemMutation { response_payload });
+            if group_commit {
+                Self::gc_commit_sync_batch(&mut inner, shard, vec![envelope], expected_epoch)?;
+            } else {
+                Self::commit_locked(&mut inner, shard, envelope, expected_epoch)?;
+            }
+            plan.response.position = Some(inner.log.current_position(shard)?);
+            Ok(plan.response)
         })
     }
 }

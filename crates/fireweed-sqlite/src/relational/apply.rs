@@ -1752,5 +1752,8 @@ pub(crate) fn apply_command_sql(
             ))?;
             Ok(())
         }
+        // Planned/applied by the dedicated relational mutation slice. The projection planning seam
+        // rejects this command before append until that implementation is linked.
+        QueueCommand::MutateItems(_) => Err(EngineError::Unavailable),
     }
 }

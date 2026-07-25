@@ -29,7 +29,7 @@ pub use compose_impls::{AsyncInMemoryProjection, AsyncMemoryLog, InMemoryProject
 use bytes::Bytes;
 use fireweed_core::{
     AggregateGroup, BoundedMutationRequest, BoundedMutationResponse, BucketCount, ClientItemKey,
-    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GroupKey,
+    DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, FilterOp, GateKeyPolicy, GroupKey,
     GroupedAggregateRequest, GroupedAggregateResponse, IndexDeclaration, IndexSpec, IndexType,
     ItemEvent, ItemId, ItemState, LeaseToken, Metadata, MetricsByQueryRequest, MutationOutcome,
     MutationResult, OrderField, OrderingMode, PriorityModel, PriorityValue, QueryCursor,
@@ -40,9 +40,14 @@ use fireweed_core::{
 use fireweed_engine::{
     ActiveScope, BatchUpdateItemRef, BatchUpdateSnapshotItem, BoundedMutationPlan,
     BoundedMutationUpdate, ClaimRef, ClaimedItem, CommandEnvelope, CommandPosition,
-    DiscoveryGranularity, EngineError, EngineResult, FinalizeKind, FinalizeOutcome, IndexHit,
-    ItemView, LeaseView, LiveItemView, PayloadUpdate, PendingPage, PendingSummary,
-    ProjectionSnapshot, PushItem, QueueCommand, QueueCounters, QueueKey, QueueMetrics,
+    DiscoveryGranularity, EngineError, EngineResult, EntityEditOperation, EntityPredicateValue,
+    FinalizeKind, FinalizeOutcome, IndexHit, ItemMutationOperation, ItemMutationOutcome,
+    ItemMutationPlan, ItemMutationPrecondition, ItemMutationRequest, ItemMutationResponse,
+    ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate, ItemMutationSnapshot,
+    ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelectorScope, ItemView, LeaseGuard,
+    LeaseView, LifecyclePatch, LiveItemView, MutateItemsCommand, PayloadUpdate, PendingPage,
+    PendingSummary, ProjectionSnapshot, PushItem, QueueCommand, QueueCounters, QueueKey,
+    QueueMetrics, ResolvedItemMutation, ResolvedItemMutationAction, ResolvedItemValues,
     ScheduleUpdate, SnapshotRef, TerminalEmissionMetrics, UpdateFieldsCommand, project_scopes,
 };
 use serde_json::Value;
@@ -334,6 +339,7 @@ impl EligToken {
     }
 }
 
+#[derive(Clone)]
 enum EligibilityIndex {
     Compact(BTreeSet<(u64, ItemId)>),
     Rich(BTreeSet<EligKey>),
@@ -542,6 +548,7 @@ fn add_millis(ts: UtcTimestamp, ms: u64) -> UtcTimestamp {
 
 /// One per-queue secondary index. Unique maps a composite key to exactly one item; non-unique maps a
 /// key to the (id-ordered) set of items that carry it.
+#[derive(Clone)]
 enum SecondaryIndex {
     Unique(BTreeMap<Vec<u8>, ItemId>),
     NonUnique(BTreeMap<Vec<u8>, BTreeSet<ItemId>>),
@@ -1583,6 +1590,7 @@ pub fn commit(
 // ProjectionData: items + eligibility index + pause flag
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct ProjectionData {
     items: FastHashMap<ItemId, ItemRecord>,
     /// Ordered PEL indexes. These keep cursor/range reads proportional to the
@@ -1613,6 +1621,9 @@ pub struct ProjectionData {
     /// Dynamic operator gate state. A pending item is indexed as eligible only
     /// when none of its `gate_keys` are present here.
     blocked_gates: BTreeSet<String>,
+    gate_key_policy: GateKeyPolicy,
+    max_gate_keys_per_item: Option<u64>,
+    max_gates_per_request: Option<u64>,
     /// Reverse membership index keeps a gate flip proportional to items using
     /// the named gates rather than total resident queue cardinality.
     gate_members: FastHashMap<String, BTreeSet<ItemId>>,
@@ -1667,6 +1678,9 @@ impl ProjectionData {
             paused: false,
             pause_drain_intake: false,
             blocked_gates: BTreeSet::new(),
+            gate_key_policy: GateKeyPolicy::Dynamic,
+            max_gate_keys_per_item: None,
+            max_gates_per_request: None,
             gate_members: FastHashMap::default(),
             indexes,
             index_specs: specs.to_vec(),
@@ -1690,6 +1704,13 @@ impl ProjectionData {
             self.indexes.insert(spec.name.clone(), index);
         }
         self.typed_index_specs = specs.to_vec();
+        self
+    }
+
+    pub fn with_eligibility_policy(mut self, policy: &fireweed_core::EligibilityPolicy) -> Self {
+        self.gate_key_policy = policy.gate_keys;
+        self.max_gate_keys_per_item = policy.max_gate_keys_per_item;
+        self.max_gates_per_request = policy.max_gates_per_request;
         self
     }
 
@@ -1722,7 +1743,8 @@ impl ProjectionData {
             definition.recurrence,
             &definition.secondary_indexes,
         )
-        .with_typed_indexes(&definition.typed_indexes);
+        .with_typed_indexes(&definition.typed_indexes)
+        .with_eligibility_policy(&definition.eligibility_policy);
         projection.paused = image.paused;
         projection.pause_drain_intake = image.pause_drain_intake;
         projection.blocked_gates = image.blocked_gates;
@@ -2028,6 +2050,51 @@ impl ProjectionData {
         Ok(new_state)
     }
 
+    fn apply_gate_change(&mut self, gate_keys: &[String], blocked: bool) -> EngineResult<()> {
+        let affected = gate_keys
+            .iter()
+            .filter_map(|key| self.gate_members.get(key))
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let old = affected
+            .into_iter()
+            .filter_map(|item_id| {
+                self.items.get(&item_id).and_then(|record| {
+                    (record.state == ItemState::Pending && !record.superseded).then(|| {
+                        (
+                            item_id,
+                            gate_keys_blocked(&self.blocked_gates, &record.gate_keys),
+                        )
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        for key in gate_keys {
+            if blocked {
+                self.blocked_gates.insert(key.clone());
+            } else {
+                self.blocked_gates.remove(key);
+            }
+        }
+        for (item_id, was_blocked) in old {
+            let record = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
+            let is_blocked = gate_keys_blocked(&self.blocked_gates, &record.gate_keys);
+            match (was_blocked, is_blocked) {
+                (false, true) => {
+                    self.eligible
+                        .remove(EligibilityIndex::token(record, &self.priority_model));
+                }
+                (true, false) => {
+                    self.eligible
+                        .insert(record, &self.items, &self.priority_model);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn apply_command(&mut self, cmd: &QueueCommand) -> EngineResult<()> {
         self.apply_command_at(None, None, cmd)
     }
@@ -2305,6 +2372,120 @@ impl ProjectionData {
                 }
                 Ok(())
             }
+            QueueCommand::MutateItems(c) => {
+                for mutation in &c.items {
+                    match &mutation.action {
+                        ResolvedItemMutationAction::Purge => {
+                            if let Some(record) = self.items.remove(&mutation.item_id) {
+                                self.remove_record(record)?;
+                            }
+                        }
+                        ResolvedItemMutationAction::Replace(values) => {
+                            let old = self
+                                .items
+                                .get(&mutation.item_id)
+                                .cloned()
+                                .ok_or(EngineError::NotFound)?;
+                            let old_index_keys =
+                                self.record_index_keys(&old.fields, old.entity_document.as_ref())?;
+                            if old.state == ItemState::Pending
+                                && !old.superseded
+                                && !gate_keys_blocked(&self.blocked_gates, &old.gate_keys)
+                            {
+                                self.eligible
+                                    .remove(EligibilityIndex::token(&old, &self.priority_model));
+                            }
+                            let lease_ends = old.state == ItemState::Leased
+                                && (values.invalidate_lease || values.state != ItemState::Leased);
+                            if lease_ends {
+                                self.leased_ids.remove(&mutation.item_id);
+                                if !old.lease_is_cohort
+                                    && let Some(expires) = old.lease_expires_at
+                                {
+                                    self.remove_ordinary_lease(expires, &mutation.item_id);
+                                }
+                                if let Some(token) = old.lease_token.as_ref()
+                                    && let Some(ids) = self.leased_by_consumer.get_mut(token)
+                                {
+                                    ids.remove(&mutation.item_id);
+                                    if ids.is_empty() {
+                                        self.leased_by_consumer.remove(token);
+                                    }
+                                }
+                            }
+
+                            let new_index_keys = self.record_index_keys(
+                                &values.fields,
+                                values.entity_document.as_ref(),
+                            )?;
+                            let record = self
+                                .items
+                                .get_mut(&mutation.item_id)
+                                .ok_or(EngineError::NotFound)?;
+                            record.state = values.state;
+                            record.item_version = values.item_version;
+                            record.priority = values.priority.clone();
+                            record.not_before = values.not_before;
+                            record.eligible_since = values.eligible_since;
+                            record.payload = values.payload.clone();
+                            record.fields = values.fields.clone();
+                            record.metadata = values.metadata.clone();
+                            record.gate_keys = values.gate_keys.clone();
+                            record.entity_document = values.entity_document.clone();
+                            if lease_ends {
+                                record.lease_token = None;
+                                record.lease_expires_at = None;
+                                record.lease_is_cohort = false;
+                                record.worker_id = None;
+                                record.fenced = false;
+                            }
+                            if values.state.is_terminal() {
+                                record.terminal_at = terminal_at;
+                                record.terminal_position = terminal_position.cloned();
+                            } else {
+                                record.terminal_at = None;
+                                record.terminal_position = None;
+                            }
+
+                            let removed = old_index_keys
+                                .iter()
+                                .filter(|key| !new_index_keys.contains(key))
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let added = new_index_keys
+                                .iter()
+                                .filter(|key| !old_index_keys.contains(key))
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            self.index_remove_keys(mutation.item_id, &removed);
+                            self.index_insert_keys(mutation.item_id, &added);
+                            self.replace_gate_memberships(
+                                mutation.item_id,
+                                &old.gate_keys,
+                                &values.gate_keys,
+                            );
+                            if old.state != values.state {
+                                self.metrics_transition(old.state, values.state);
+                            }
+                            let record = self
+                                .items
+                                .get(&mutation.item_id)
+                                .ok_or(EngineError::NotFound)?;
+                            if record.state == ItemState::Pending
+                                && !record.superseded
+                                && !gate_keys_blocked(&self.blocked_gates, &record.gate_keys)
+                            {
+                                self.eligible
+                                    .insert(record, &self.items, &self.priority_model);
+                            }
+                        }
+                    }
+                }
+                for change in &c.gate_changes {
+                    self.apply_gate_change(&change.gate_keys, change.blocked)?;
+                }
+                Ok(())
+            }
             QueueCommand::Finalize(c) => {
                 for o in &c.outcomes {
                     let ev = match o.kind {
@@ -2523,53 +2704,7 @@ impl ProjectionData {
                 self.pause_drain_intake = false;
                 Ok(())
             }
-            QueueCommand::SetGates(c) => {
-                // Capture eligibility under the old gate state, then update the
-                // derived eligibility index only for items whose blocked state changed.
-                let affected = c
-                    .gate_keys
-                    .iter()
-                    .filter_map(|key| self.gate_members.get(key))
-                    .flatten()
-                    .copied()
-                    .collect::<BTreeSet<_>>();
-                let old = affected
-                    .into_iter()
-                    .filter_map(|item_id| {
-                        self.items.get(&item_id).and_then(|record| {
-                            (record.state == ItemState::Pending && !record.superseded).then(|| {
-                                (
-                                    item_id,
-                                    gate_keys_blocked(&self.blocked_gates, &record.gate_keys),
-                                )
-                            })
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                for key in &c.gate_keys {
-                    if c.blocked {
-                        self.blocked_gates.insert(key.clone());
-                    } else {
-                        self.blocked_gates.remove(key);
-                    }
-                }
-                for (item_id, was_blocked) in old {
-                    let record = self.items.get(&item_id).ok_or(EngineError::NotFound)?;
-                    let is_blocked = gate_keys_blocked(&self.blocked_gates, &record.gate_keys);
-                    match (was_blocked, is_blocked) {
-                        (false, true) => {
-                            let token = EligibilityIndex::token(record, &self.priority_model);
-                            self.eligible.remove(token);
-                        }
-                        (true, false) => {
-                            self.eligible
-                                .insert(record, &self.items, &self.priority_model);
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(())
-            }
+            QueueCommand::SetGates(c) => self.apply_gate_change(&c.gate_keys, c.blocked),
             // Opaque non-work side records (Snorri authoritative-commit boundary): write each key -> payload
             // into the SEPARATE side-record map. Deliberately touches NOTHING in the work-item projection —
             // not `items`, `eligible`, `by_key`, the secondary indexes, nor metrics — so a side record is
@@ -2604,7 +2739,588 @@ impl ProjectionData {
 // Read / decision queries the orchestration ports build on
 // ---------------------------------------------------------------------------
 
+fn replacement_value<T: Clone>(update: &fireweed_engine::BatchUpdateValue<T>, current: &T) -> T {
+    match update {
+        fireweed_engine::BatchUpdateValue::Keep => current.clone(),
+        fireweed_engine::BatchUpdateValue::Replace(value) => value.clone(),
+    }
+}
+
+fn valid_gate_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 256
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
+fn mutation_snapshot(record: &ItemRecord) -> ItemMutationSnapshot {
+    ItemMutationSnapshot {
+        item_id: record.item_id,
+        client_item_key: record.client_item_key(),
+        item_version: record.item_version,
+        lifecycle_state: record.state,
+        priority: record.priority.clone(),
+        group_key: record.group_key.clone(),
+        cohort_size: record.cohort_size,
+        not_before: record.not_before,
+        eligible_since: record.eligible_since,
+        attempt_count: record.attempt_count,
+        max_attempts: record.max_attempts,
+        payload: record.payload.clone(),
+        fields: record.fields.clone(),
+        metadata: record.metadata.clone(),
+        gate_keys: record.gate_keys.clone(),
+        entity: record.entity_document.clone(),
+        lease_token: record.lease_token.clone(),
+        lease_expires_at: record.lease_expires_at,
+        lease_is_cohort: record.lease_is_cohort,
+        worker_id: record.worker_id.clone(),
+        fenced: record.fenced,
+        superseded: record.superseded,
+        terminal_at: record.terminal_at,
+        terminal_position: record.terminal_position.clone(),
+    }
+}
+
+fn mutation_predicate_matches(
+    record: &ItemRecord,
+    predicate: &ItemPredicate,
+    evaluated_at: UtcTimestamp,
+) -> bool {
+    match predicate {
+        ItemPredicate::Any(predicates) => predicates
+            .iter()
+            .any(|predicate| mutation_predicate_matches(record, predicate, evaluated_at)),
+        ItemPredicate::All(predicates) => predicates
+            .iter()
+            .all(|predicate| mutation_predicate_matches(record, predicate, evaluated_at)),
+        ItemPredicate::Not(predicate) => {
+            !mutation_predicate_matches(record, predicate, evaluated_at)
+        }
+        ItemPredicate::StateIn(states) => states.contains(&record.state),
+        ItemPredicate::AttemptCountEq(expected) => record.attempt_count == *expected,
+        ItemPredicate::LeaseActive(expected) => {
+            let active = record.state == ItemState::Leased
+                && record
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at > evaluated_at);
+            active == *expected
+        }
+        ItemPredicate::NotBefore { comparison, value } => {
+            record.not_before.is_some_and(|actual| match comparison {
+                fireweed_engine::TimestampComparison::Equal => actual == *value,
+                fireweed_engine::TimestampComparison::Before => actual < *value,
+                fireweed_engine::TimestampComparison::BeforeOrEqual => actual <= *value,
+                fireweed_engine::TimestampComparison::After => actual > *value,
+                fireweed_engine::TimestampComparison::AfterOrEqual => actual >= *value,
+            })
+        }
+        ItemPredicate::ClientItemKeyEq(key) => &record.client_item_key() == key,
+        ItemPredicate::GroupKeyEq(group) => &record.group_key == group,
+        ItemPredicate::FieldEq { name, value } => record.fields.get(name) == value.as_ref(),
+        ItemPredicate::MetadataEq { name, value } => record.metadata.get(name) == value.as_ref(),
+        ItemPredicate::EntityEq { pointer, value } => {
+            if pointer_tokens(pointer).is_err() {
+                return false;
+            }
+            let actual = record
+                .entity_document
+                .as_ref()
+                .and_then(|document| document.pointer(pointer));
+            match value {
+                EntityPredicateValue::Missing => actual.is_none(),
+                EntityPredicateValue::Value(expected) => actual == Some(expected),
+            }
+        }
+        ItemPredicate::GateKeyPresent(key) => record.gate_keys.contains(key),
+        ItemPredicate::GateKeyAbsent(key) => !record.gate_keys.contains(key),
+    }
+}
+
+fn pointer_tokens(pointer: &str) -> Result<Vec<String>, ()> {
+    if pointer.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(rest) = pointer.strip_prefix('/') else {
+        return Err(());
+    };
+    rest.split('/')
+        .map(|token| {
+            let mut decoded = String::with_capacity(token.len());
+            let mut chars = token.chars();
+            while let Some(ch) = chars.next() {
+                if ch != '~' {
+                    decoded.push(ch);
+                    continue;
+                }
+                match chars.next() {
+                    Some('0') => decoded.push('~'),
+                    Some('1') => decoded.push('/'),
+                    _ => return Err(()),
+                }
+            }
+            Ok(decoded)
+        })
+        .collect()
+}
+
+fn apply_entity_edit(
+    entity: &mut Option<Value>,
+    pointer: &str,
+    operation: &EntityEditOperation,
+) -> Result<(), ()> {
+    let tokens = pointer_tokens(pointer)?;
+    if tokens.is_empty() {
+        *entity = match operation {
+            EntityEditOperation::Set(value) => Some(value.clone()),
+            EntityEditOperation::Remove => None,
+        };
+        return Ok(());
+    }
+    let mut current = entity.as_mut().ok_or(())?;
+    for token in &tokens[..tokens.len() - 1] {
+        current = match current {
+            Value::Object(map) => map.get_mut(token).ok_or(())?,
+            Value::Array(values) => values
+                .get_mut(token.parse::<usize>().map_err(|_| ())?)
+                .ok_or(())?,
+            _ => return Err(()),
+        };
+    }
+    let leaf = tokens.last().expect("non-root pointer has a leaf");
+    match (current, operation) {
+        (Value::Object(map), EntityEditOperation::Set(value)) => {
+            map.insert(leaf.clone(), value.clone());
+        }
+        (Value::Object(map), EntityEditOperation::Remove) => {
+            if map.remove(leaf).is_none() {
+                return Err(());
+            }
+        }
+        (Value::Array(values), EntityEditOperation::Set(value)) => {
+            let index = leaf.parse::<usize>().map_err(|_| ())?;
+            let slot = values.get_mut(index).ok_or(())?;
+            *slot = value.clone();
+        }
+        (Value::Array(values), EntityEditOperation::Remove) => {
+            let index = leaf.parse::<usize>().map_err(|_| ())?;
+            if index >= values.len() {
+                return Err(());
+            }
+            values.remove(index);
+        }
+        _ => return Err(()),
+    }
+    Ok(())
+}
+
+fn update_selector_aggregate(
+    aggregate: &mut ItemMutationSelectorAggregate,
+    outcome: &ItemMutationOutcome,
+) {
+    match outcome {
+        ItemMutationOutcome::Updated { .. } | ItemMutationOutcome::WouldUpdate { .. } => {
+            aggregate.changed += 1;
+        }
+        ItemMutationOutcome::Purged | ItemMutationOutcome::WouldPurge => {
+            aggregate.changed += 1;
+            aggregate.purged += 1;
+        }
+        ItemMutationOutcome::NoChange => {}
+        _ => aggregate.rejected += 1,
+    }
+}
+
 impl ProjectionData {
+    pub fn plan_item_mutation(
+        &self,
+        request: &ItemMutationRequest,
+    ) -> EngineResult<ItemMutationPlan> {
+        let mut results = Vec::new();
+        let mut commands = Vec::new();
+        let mut selectors = match &request.operation {
+            ItemMutationOperation::SelectFirst { clauses } => clauses
+                .iter()
+                .map(|clause| ItemMutationSelectorAggregate {
+                    selector_id: clause.selector_id.clone(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+            ItemMutationOperation::Addressed { .. } => Vec::new(),
+        };
+        let mut seen = BTreeSet::new();
+
+        match &request.operation {
+            ItemMutationOperation::Addressed { entries } => {
+                for entry in entries {
+                    let before = self.items.get(&entry.item_id);
+                    let before_snapshot = before.and_then(|record| {
+                        (request.returning == ItemMutationReturning::BeforeSnapshot)
+                            .then(|| mutation_snapshot(record))
+                    });
+                    let (outcome, command) = if !seen.insert(entry.item_id) {
+                        (ItemMutationOutcome::Invalid, None)
+                    } else if let Some(record) = before {
+                        if entry
+                            .expected_item_version
+                            .is_some_and(|expected| expected != record.item_version)
+                        {
+                            (
+                                ItemMutationOutcome::Conflict {
+                                    actual_version: record.item_version,
+                                },
+                                None,
+                            )
+                        } else if !entry.predicates.iter().all(|predicate| {
+                            mutation_predicate_matches(record, predicate, request.evaluated_at)
+                        }) {
+                            (
+                                ItemMutationOutcome::PreconditionFailed(
+                                    ItemMutationPrecondition::Predicate,
+                                ),
+                                None,
+                            )
+                        } else {
+                            self.plan_record_mutation(
+                                record,
+                                &entry.lease_guard,
+                                &entry.patch,
+                                request.evaluated_at,
+                                request.dry_run,
+                            )?
+                        }
+                    } else {
+                        (ItemMutationOutcome::NotFound, None)
+                    };
+                    if let Some(command) = command {
+                        commands.push(command);
+                    }
+                    results.push(ItemMutationResult {
+                        item_id: entry.item_id,
+                        selector_id: None,
+                        outcome,
+                        before: before_snapshot,
+                    });
+                }
+            }
+            ItemMutationOperation::SelectFirst { clauses } => {
+                let mut records = self.items.values().collect::<Vec<_>>();
+                records.sort_by_key(|record| (record.created_seq, record.item_id));
+                for record in records {
+                    let Some((selector_index, clause)) =
+                        clauses.iter().enumerate().find(|(_, clause)| {
+                            let in_scope = match clause.selector.scope {
+                                ItemSelectorScope::Live => {
+                                    !record.superseded && !record.state.is_terminal()
+                                }
+                                ItemSelectorScope::Retained => !record.superseded,
+                            };
+                            in_scope
+                                && clause.selector.predicates.iter().all(|predicate| {
+                                    mutation_predicate_matches(
+                                        record,
+                                        predicate,
+                                        request.evaluated_at,
+                                    )
+                                })
+                        })
+                    else {
+                        continue;
+                    };
+                    selectors[selector_index].matched += 1;
+                    let (outcome, command) = self.plan_record_mutation(
+                        record,
+                        &clause.lease_guard,
+                        &clause.patch,
+                        request.evaluated_at,
+                        request.dry_run,
+                    )?;
+                    update_selector_aggregate(&mut selectors[selector_index], &outcome);
+                    if let Some(command) = command {
+                        commands.push(command);
+                    }
+                    results.push(ItemMutationResult {
+                        item_id: record.item_id,
+                        selector_id: Some(clause.selector_id.clone()),
+                        outcome,
+                        before: (request.returning == ItemMutationReturning::BeforeSnapshot)
+                            .then(|| mutation_snapshot(record)),
+                    });
+                }
+            }
+        }
+
+        let mut summary = ItemMutationSummary::default();
+        for result in &results {
+            summary.matched += 1;
+            match result.outcome {
+                ItemMutationOutcome::Updated { .. } | ItemMutationOutcome::WouldUpdate { .. } => {
+                    summary.changed += 1;
+                }
+                ItemMutationOutcome::Purged | ItemMutationOutcome::WouldPurge => {
+                    summary.changed += 1;
+                    summary.purged += 1;
+                }
+                ItemMutationOutcome::NoChange => summary.unchanged += 1,
+                _ => summary.rejected += 1,
+            }
+        }
+        let request_gate_keys = request
+            .gate_changes
+            .iter()
+            .flat_map(|change| change.gate_keys.iter())
+            .collect::<BTreeSet<_>>();
+        if (!request_gate_keys.is_empty() && self.gate_key_policy != GateKeyPolicy::Dynamic)
+            || self
+                .max_gates_per_request
+                .is_some_and(|limit| request_gate_keys.len() as u64 > limit)
+        {
+            return Err(EngineError::Invalid("gate changes violate queue policy"));
+        }
+        for change in &request.gate_changes {
+            if change.gate_keys.iter().any(|key| !valid_gate_key(key)) {
+                return Err(EngineError::Invalid("invalid gate key"));
+            }
+        }
+        // Unique keys produced by successful siblings must not collide with each other. Existing-row
+        // collisions were checked while planning each record.
+        let mut batch_unique = BTreeMap::<(String, Vec<u8>), ItemId>::new();
+        for command in &commands {
+            let ResolvedItemMutationAction::Replace(values) = &command.action else {
+                continue;
+            };
+            for (name, key) in
+                self.record_index_keys(&values.fields, values.entity_document.as_ref())?
+            {
+                if matches!(self.indexes.get(&name), Some(SecondaryIndex::Unique(_)))
+                    && let Some(other) = batch_unique.insert((name, key), command.item_id)
+                    && other != command.item_id
+                {
+                    return Err(EngineError::Conflict);
+                }
+            }
+        }
+        let command = MutateItemsCommand {
+            items: commands,
+            gate_changes: request.gate_changes.clone(),
+        };
+        // Apply to a private image before append. This proves the resolved command cannot fail halfway
+        // through the serving projection after the log has accepted it.
+        if !request.dry_run {
+            let mut scratch = self.clone();
+            scratch.apply_command(&QueueCommand::MutateItems(command.clone()))?;
+        }
+        Ok(ItemMutationPlan {
+            response: ItemMutationResponse {
+                request_id: request.request_id.clone(),
+                position: None,
+                dry_run: request.dry_run,
+                results,
+                selectors,
+                summary,
+            },
+            command,
+        })
+    }
+
+    fn plan_record_mutation(
+        &self,
+        record: &ItemRecord,
+        lease_guard: &LeaseGuard,
+        patch: &ItemPatch,
+        evaluated_at: UtcTimestamp,
+        dry_run: bool,
+    ) -> EngineResult<(ItemMutationOutcome, Option<ResolvedItemMutation>)> {
+        let stored_lease = record.state == ItemState::Leased;
+        let active_lease = stored_lease
+            && record
+                .lease_expires_at
+                .is_some_and(|expires_at| expires_at > evaluated_at);
+        match lease_guard {
+            LeaseGuard::RejectActive if active_lease => {
+                return Ok((
+                    ItemMutationOutcome::PreconditionFailed(ItemMutationPrecondition::ActiveLease),
+                    None,
+                ));
+            }
+            LeaseGuard::RequireActive if !active_lease => {
+                return Ok((
+                    ItemMutationOutcome::PreconditionFailed(ItemMutationPrecondition::ActiveLease),
+                    None,
+                ));
+            }
+            LeaseGuard::Match(token)
+                if !active_lease || record.lease_token.as_ref() != Some(token) =>
+            {
+                return Ok((ItemMutationOutcome::StaleLease, None));
+            }
+            _ => {}
+        }
+        if record.state.is_terminal()
+            && !matches!(
+                patch.lifecycle,
+                LifecyclePatch::SetPending | LifecyclePatch::Purge
+            )
+        {
+            return Ok((ItemMutationOutcome::Terminal, None));
+        }
+        if matches!(patch.lifecycle, LifecyclePatch::Purge) {
+            return Ok((
+                if dry_run {
+                    ItemMutationOutcome::WouldPurge
+                } else {
+                    ItemMutationOutcome::Purged
+                },
+                (!dry_run).then_some(ResolvedItemMutation {
+                    item_id: record.item_id,
+                    action: ResolvedItemMutationAction::Purge,
+                }),
+            ));
+        }
+
+        let state = match patch.lifecycle {
+            LifecyclePatch::Keep
+                if stored_lease && matches!(lease_guard, LeaseGuard::InvalidateActive) =>
+            {
+                ItemState::Pending
+            }
+            LifecyclePatch::Keep => record.state,
+            LifecyclePatch::SetPending => ItemState::Pending,
+            LifecyclePatch::SetComplete => ItemState::Complete,
+            LifecyclePatch::SetFailed => ItemState::Failed,
+            LifecyclePatch::Purge => unreachable!(),
+        };
+        if active_lease
+            && state != ItemState::Leased
+            && !matches!(
+                lease_guard,
+                LeaseGuard::Match(_) | LeaseGuard::InvalidateActive
+            )
+        {
+            return Ok((
+                ItemMutationOutcome::PreconditionFailed(ItemMutationPrecondition::ActiveLease),
+                None,
+            ));
+        }
+
+        let priority = replacement_value(&patch.priority, &record.priority);
+        if priority.as_ref().is_some_and(|priority| {
+            !matches!(
+                (&self.priority_model.kind, priority),
+                (
+                    fireweed_core::PriorityModelKind::Timestamp,
+                    PriorityValue::Timestamp(_)
+                ) | (
+                    fireweed_core::PriorityModelKind::Int64,
+                    PriorityValue::Int64(_)
+                ) | (
+                    fireweed_core::PriorityModelKind::Decimal,
+                    PriorityValue::Decimal(_)
+                ) | (
+                    fireweed_core::PriorityModelKind::Text,
+                    PriorityValue::Text(_)
+                )
+            )
+        }) {
+            return Ok((ItemMutationOutcome::Invalid, None));
+        }
+        let not_before = replacement_value(&patch.not_before, &record.not_before);
+        let payload = replacement_value(&patch.payload, &record.payload);
+        let metadata = replacement_value(&patch.metadata, &record.metadata);
+        let mut gate_keys = record.gate_keys.clone();
+        gate_keys.retain(|key| !patch.gate_keys.remove.contains(key));
+        gate_keys.extend(patch.gate_keys.add.iter().cloned());
+        gate_keys.sort();
+        gate_keys.dedup();
+        if gate_keys.iter().any(|key| !valid_gate_key(key))
+            || (!gate_keys.is_empty() && self.gate_key_policy != GateKeyPolicy::Dynamic)
+            || self
+                .max_gate_keys_per_item
+                .is_some_and(|limit| gate_keys.len() as u64 > limit)
+        {
+            return Ok((ItemMutationOutcome::Invalid, None));
+        }
+        let mut fields = record.fields.clone();
+        for (name, value) in &patch.field_edits {
+            if fireweed_engine::is_api001_reserved_write_field(name) {
+                return Ok((ItemMutationOutcome::Invalid, None));
+            }
+            match value {
+                Some(value) => {
+                    fields.insert(name.clone(), value.clone());
+                }
+                None => {
+                    fields.remove(name);
+                }
+            }
+        }
+        let mut entity = record.entity_document.clone();
+        for edit in &patch.entity_edits {
+            if apply_entity_edit(&mut entity, &edit.pointer, &edit.operation).is_err() {
+                return Ok((ItemMutationOutcome::Invalid, None));
+            }
+        }
+        if self
+            .index_validate_with_entity(&record.item_id, &fields, entity.as_ref(), None)
+            .is_err()
+        {
+            return Ok((ItemMutationOutcome::Invalid, None));
+        }
+        let invalidate_lease = stored_lease
+            && (matches!(lease_guard, LeaseGuard::InvalidateActive) || state != ItemState::Leased);
+        let changed = state != record.state
+            || priority != record.priority
+            || not_before != record.not_before
+            || payload != record.payload
+            || metadata != record.metadata
+            || gate_keys != record.gate_keys
+            || fields != record.fields
+            || entity != record.entity_document
+            || invalidate_lease;
+        if !changed {
+            return Ok((ItemMutationOutcome::NoChange, None));
+        }
+        let item_version = record.item_version.saturating_add(1);
+        let eligible_since = if state == ItemState::Pending
+            && (not_before != record.not_before || record.state != ItemState::Pending)
+        {
+            not_before.unwrap_or(evaluated_at).max(evaluated_at)
+        } else {
+            record.eligible_since
+        };
+        let outcome = if dry_run {
+            ItemMutationOutcome::WouldUpdate {
+                item_version,
+                state,
+            }
+        } else {
+            ItemMutationOutcome::Updated {
+                item_version,
+                state,
+            }
+        };
+        Ok((
+            outcome,
+            (!dry_run).then_some(ResolvedItemMutation {
+                item_id: record.item_id,
+                action: ResolvedItemMutationAction::Replace(ResolvedItemValues {
+                    state,
+                    item_version,
+                    priority,
+                    not_before,
+                    eligible_since,
+                    payload,
+                    fields,
+                    metadata,
+                    gate_keys,
+                    entity_document: entity,
+                    invalidate_lease,
+                }),
+            }),
+        ))
+    }
+
     pub fn is_paused(&self) -> bool {
         self.paused
     }
@@ -4459,6 +5175,7 @@ mod tests {
             not_before: None,
             eligible_since: ts(0),
             group_key: None,
+            cohort_size: None,
             payload: None,
             fields: BTreeMap::new(),
             metadata: Metadata::default(),
@@ -4636,6 +5353,7 @@ mod tests {
             not_before: None,
             eligible_since: ts(0),
             group_key: None,
+            cohort_size: None,
             payload: None,
             fields: BTreeMap::new(),
             metadata: Metadata::default(),

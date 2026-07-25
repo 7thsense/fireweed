@@ -51,11 +51,11 @@ pub use facade::{
 use fireweed_engine::{
     Backend, BatchUpdatePort, ClaimPort, ClaimRequest, CommitEntryOutcome, CommitTransition,
     CommitTransitionEntry, CommitTransitionPort, ControlPlaneStore, DiscoveryPort, FinalizeOutcome,
-    FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort, IndexQueryPort, LeaseState,
-    OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort, PushPort, PushSpec,
-    QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort, RenewLeasePort,
-    ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort, acquire_and_fence,
-    validate_api001_reserved_write_fields, validate_claim_compatibility,
+    FinalizePort, HistoricalProjectionRead, HotProjectionQueryPort, IndexQueryPort,
+    ItemMutationPort, LeaseState, OwnedSession, OwnershipOutcome, ProjectionRead, PurgePort,
+    PushPort, PushSpec, QueueControlPlane, ReassignLeasePort, ReclaimPort, RecoveryReadPort,
+    RenewLeasePort, ReschedulePort, SetGatesCommand, SetGatesPort, UpdateFieldsPort, UpsertPort,
+    acquire_and_fence, validate_api001_reserved_write_fields, validate_claim_compatibility,
 };
 
 // ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ pub use fireweed_core::{
     DecimalValue, DeclaredBucketSegmentRequest, DeclaredBucketSegmentResponse, EligibilityPolicy,
     EntitySchemaDocument, FilterOp, GateKeyPolicy, GroupByField, GroupKey, GroupedAggregateRequest,
     GroupedAggregateResponse, IdentifierError, IndexDeclaration, IndexDef, IndexSpec, IndexType,
-    ItemId, LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, MutationOutcome,
+    ItemId, ItemState, LeaseToken, Metadata, MetadataValue, MetricsByQueryRequest, MutationOutcome,
     MutationResult, OrderField, OrderingMode, OwnerId, PriorityDirection, PriorityModel,
     PriorityModelKind, PriorityTieBreaker, PriorityValue, QueryCapabilityFlags, QueryCursor,
     QueryFilter, QueryRequestError, QueueCreationPolicy, QueueDefinition, QueueId, QueueIndex,
@@ -80,12 +80,17 @@ pub use fireweed_core::{
     WorkerId,
 };
 pub use fireweed_engine::{
-    ActiveScope, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome, BatchUpdateRequest,
-    BatchUpdateResponse, BatchUpdateValue, ClaimCompatibility, ClaimRef, Claimed, ClaimedItem,
-    Clock, CommandPosition, CommitCapabilities, CommitEntryStatus, CommitRecovery,
-    ControlPlaneConfig, CreateQueueOutcome, DiscoveryGranularity, EngineError, EngineResult,
-    EntryRecovery, FinalizeKind, GroupBatching, IndexHit, InstanceFence, ItemView, LiveItemView,
-    PayloadUpdate, QueueKey, QueueMetrics, ScheduleUpdate, SideRecord, UpsertOutcome,
+    ActiveScope, AddressedMutation, BatchUpdateEntry, BatchUpdateItemRef, BatchUpdateOutcome,
+    BatchUpdateRequest, BatchUpdateResponse, BatchUpdateValue, ClaimCompatibility, ClaimRef,
+    Claimed, ClaimedItem, Clock, CommandPosition, CommitCapabilities, CommitEntryStatus,
+    CommitRecovery, ControlPlaneConfig, CreateQueueOutcome, DiscoveryGranularity, EngineError,
+    EngineResult, EntityEdit, EntityEditOperation, EntityPredicateValue, EntryRecovery,
+    FinalizeKind, GateChange, GateKeyDelta, GroupBatching, IndexHit, InstanceFence,
+    ItemMutationOperation, ItemMutationOutcome, ItemMutationPrecondition, ItemMutationRequest,
+    ItemMutationResponse, ItemMutationResult, ItemMutationReturning, ItemMutationSelectorAggregate,
+    ItemMutationSnapshot, ItemMutationSummary, ItemPatch, ItemPredicate, ItemSelector,
+    ItemSelectorScope, ItemView, LeaseGuard, LifecyclePatch, LiveItemView, PayloadUpdate, QueueKey,
+    QueueMetrics, ScheduleUpdate, SelectedMutation, SideRecord, TimestampComparison, UpsertOutcome,
 };
 
 /// An active-scope result stamped with the exact queue and granularity used for discovery.
@@ -1144,7 +1149,7 @@ impl<B> ComposedRuntime<B> {
 
     fn into_fireweed(self) -> Fireweed
     where
-        B: LibBackend + BatchUpdatePort + 'static,
+        B: LibBackend + BatchUpdatePort + ItemMutationPort + 'static,
     {
         Fireweed::from_runtime_with_projection(self.runtime, self.lifecycle)
     }
@@ -3531,6 +3536,22 @@ impl<B: LibBackend> RuntimeCore<B> {
         let epoch = self.session_epoch(queue).await?;
         let now = self.clock.now();
         let result = self.backend.batch_update(queue, request, now, epoch).await;
+        self.note(queue, result)
+    }
+
+    /// Atomically mutate addressed items or the first matching selector clause through the mandatory,
+    /// backend-erased Fireweed contract. Selector resolution, lease/version/predicate checks, item patches,
+    /// and queue gate changes share one queue-local durable command.
+    pub async fn mutate_items(
+        &self,
+        queue: &QueueKey,
+        request: ItemMutationRequest,
+    ) -> EngineResult<ItemMutationResponse>
+    where
+        B: ItemMutationPort,
+    {
+        let epoch = self.session_epoch(queue).await?;
+        let result = self.backend.mutate_items(queue, request, epoch).await;
         self.note(queue, result)
     }
 

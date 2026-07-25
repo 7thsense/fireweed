@@ -16,6 +16,277 @@ use fireweed_core::{
     RangeScanRequest, RangeScanResponse, RequestId, TenantId, UtcTimestamp, WorkerId,
 };
 
+// ---------------------------------------------------------------------------
+// Backend-erased item mutation
+// ---------------------------------------------------------------------------
+
+/// Mandatory, backend-independent item mutation port. Implementations resolve selectors and plan the
+/// complete mutation while holding their queue-local write gate, then persist only addressed item ids and
+/// exact patches. A selector is never part of the durable application command.
+pub trait ItemMutationPort: Send + Sync {
+    fn mutate_items(
+        &self,
+        shard: &QueueKey,
+        request: ItemMutationRequest,
+        expected_epoch: Option<u64>,
+    ) -> impl std::future::Future<Output = EngineResult<ItemMutationResponse>> + Send;
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ItemMutationRequest {
+    pub request_id: RequestId,
+    pub evaluated_at: UtcTimestamp,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub returning: ItemMutationReturning,
+    #[serde(default)]
+    pub gate_changes: Vec<GateChange>,
+    pub operation: ItemMutationOperation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemMutationReturning {
+    #[default]
+    Identity,
+    BeforeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GateChange {
+    pub gate_keys: Vec<String>,
+    pub blocked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ItemMutationOperation {
+    Addressed { entries: Vec<AddressedMutation> },
+    SelectFirst { clauses: Vec<SelectedMutation> },
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AddressedMutation {
+    pub item_id: ItemId,
+    pub expected_item_version: Option<u64>,
+    #[serde(default)]
+    pub predicates: Vec<ItemPredicate>,
+    #[serde(default)]
+    pub lease_guard: LeaseGuard,
+    pub patch: ItemPatch,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SelectedMutation {
+    pub selector_id: String,
+    pub selector: ItemSelector,
+    #[serde(default)]
+    pub lease_guard: LeaseGuard,
+    pub patch: ItemPatch,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ItemSelector {
+    pub scope: ItemSelectorScope,
+    #[serde(default)]
+    pub predicates: Vec<ItemPredicate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemSelectorScope {
+    Live,
+    Retained,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ItemPredicate {
+    Any(Vec<ItemPredicate>),
+    All(Vec<ItemPredicate>),
+    Not(Box<ItemPredicate>),
+    StateIn(Vec<ItemState>),
+    AttemptCountEq(u32),
+    LeaseActive(bool),
+    NotBefore {
+        comparison: TimestampComparison,
+        value: UtcTimestamp,
+    },
+    ClientItemKeyEq(ClientItemKey),
+    GroupKeyEq(Option<GroupKey>),
+    FieldEq {
+        name: String,
+        value: Option<Bytes>,
+    },
+    MetadataEq {
+        name: String,
+        value: Option<fireweed_core::MetadataValue>,
+    },
+    EntityEq {
+        pointer: String,
+        value: EntityPredicateValue,
+    },
+    GateKeyPresent(String),
+    GateKeyAbsent(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TimestampComparison {
+    Equal,
+    Before,
+    BeforeOrEqual,
+    After,
+    AfterOrEqual,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum EntityPredicateValue {
+    Missing,
+    Value(serde_json::Value),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum LeaseGuard {
+    #[default]
+    RejectActive,
+    RequireActive,
+    Match(LeaseToken),
+    InvalidateActive,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ItemPatch {
+    #[serde(default)]
+    pub lifecycle: LifecyclePatch,
+    #[serde(default)]
+    pub priority: BatchUpdateValue<Option<PriorityValue>>,
+    #[serde(default)]
+    pub not_before: BatchUpdateValue<Option<UtcTimestamp>>,
+    #[serde(default)]
+    pub payload: BatchUpdateValue<Option<Bytes>>,
+    #[serde(default)]
+    pub metadata: BatchUpdateValue<Metadata>,
+    #[serde(default)]
+    pub gate_keys: GateKeyDelta,
+    #[serde(default)]
+    pub field_edits: BTreeMap<String, Option<Bytes>>,
+    #[serde(default)]
+    pub entity_edits: Vec<EntityEdit>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LifecyclePatch {
+    #[default]
+    Keep,
+    SetPending,
+    SetComplete,
+    SetFailed,
+    Purge,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GateKeyDelta {
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EntityEdit {
+    /// RFC 6901 JSON Pointer. The empty pointer addresses the document root.
+    pub pointer: String,
+    pub operation: EntityEditOperation,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum EntityEditOperation {
+    Set(serde_json::Value),
+    Remove,
+}
+
+/// Complete caller-owned projection row returned by `BeforeSnapshot`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ItemMutationSnapshot {
+    pub item_id: ItemId,
+    pub client_item_key: ClientItemKey,
+    pub item_version: u64,
+    pub lifecycle_state: ItemState,
+    pub priority: Option<PriorityValue>,
+    pub group_key: Option<GroupKey>,
+    pub cohort_size: Option<u64>,
+    pub not_before: Option<UtcTimestamp>,
+    pub eligible_since: UtcTimestamp,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+    pub payload: Option<Bytes>,
+    pub fields: BTreeMap<String, Bytes>,
+    pub metadata: Metadata,
+    pub gate_keys: Vec<String>,
+    pub entity: Option<serde_json::Value>,
+    pub lease_token: Option<LeaseToken>,
+    pub lease_expires_at: Option<UtcTimestamp>,
+    pub lease_is_cohort: bool,
+    pub worker_id: Option<WorkerId>,
+    pub fenced: bool,
+    pub superseded: bool,
+    pub terminal_at: Option<UtcTimestamp>,
+    pub terminal_position: Option<CommandPosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemMutationOutcome {
+    Updated { item_version: u64, state: ItemState },
+    Purged,
+    WouldUpdate { item_version: u64, state: ItemState },
+    WouldPurge,
+    NoChange,
+    NotFound,
+    Conflict { actual_version: u64 },
+    StaleLease,
+    PreconditionFailed(ItemMutationPrecondition),
+    Invalid,
+    Terminal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ItemMutationPrecondition {
+    ActiveLease,
+    Lifecycle,
+    Predicate,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ItemMutationResult {
+    pub item_id: ItemId,
+    pub selector_id: Option<String>,
+    pub outcome: ItemMutationOutcome,
+    pub before: Option<ItemMutationSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemMutationSelectorAggregate {
+    pub selector_id: String,
+    pub matched: u64,
+    pub changed: u64,
+    pub purged: u64,
+    pub rejected: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ItemMutationSummary {
+    pub matched: u64,
+    pub changed: u64,
+    pub purged: u64,
+    pub unchanged: u64,
+    pub rejected: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ItemMutationResponse {
+    pub request_id: RequestId,
+    pub position: Option<CommandPosition>,
+    pub dry_run: bool,
+    pub results: Vec<ItemMutationResult>,
+    pub selectors: Vec<ItemMutationSelectorAggregate>,
+    pub summary: ItemMutationSummary,
+}
+
 use crate::claim_validation::ClaimCompatibility;
 use crate::command::{
     ChangeRecord, CommandEnvelope, CommandId, FinalizeKind, FinalizeOutcome, SetGatesCommand,

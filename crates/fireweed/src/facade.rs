@@ -285,6 +285,24 @@ trait FireweedBatchPlane: Send + Sync {
     ) -> FacadeFuture<'a, BatchUpdateResponse>;
 }
 
+trait FireweedMutationPlane: Send + Sync {
+    fn mutate_items<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        request: ItemMutationRequest,
+    ) -> FacadeFuture<'a, ItemMutationResponse>;
+}
+
+impl<B: LibBackend + ItemMutationPort + 'static> FireweedMutationPlane for RuntimeCore<B> {
+    fn mutate_items<'a>(
+        &'a self,
+        queue: &'a QueueKey,
+        request: ItemMutationRequest,
+    ) -> FacadeFuture<'a, ItemMutationResponse> {
+        Box::pin(RuntimeCore::mutate_items(self, queue, request))
+    }
+}
+
 impl<B: LibBackend + BatchUpdatePort + 'static> FireweedBatchPlane for RuntimeCore<B> {
     fn batch_update<'a>(
         &'a self,
@@ -742,6 +760,7 @@ impl<B: LibBackend + 'static> FireweedDataPlane for RuntimeCore<B> {
 pub struct Fireweed {
     inner: Arc<dyn FireweedDataPlane>,
     batch: Arc<dyn FireweedBatchPlane>,
+    mutation: Arc<dyn FireweedMutationPlane>,
     projection: Option<ProjectionLifecycleHandle>,
 }
 
@@ -752,25 +771,29 @@ impl fmt::Debug for Fireweed {
 }
 
 impl Fireweed {
-    pub(crate) fn from_runtime<B: LibBackend + BatchUpdatePort + 'static>(
+    pub(crate) fn from_runtime<B: LibBackend + BatchUpdatePort + ItemMutationPort + 'static>(
         queue: RuntimeCore<B>,
     ) -> Self {
         let queue = Arc::new(queue);
         Self {
             inner: queue.clone(),
-            batch: queue,
+            batch: queue.clone(),
+            mutation: queue,
             projection: None,
         }
     }
 
-    pub(crate) fn from_runtime_with_projection<B: LibBackend + BatchUpdatePort + 'static>(
+    pub(crate) fn from_runtime_with_projection<
+        B: LibBackend + BatchUpdatePort + ItemMutationPort + 'static,
+    >(
         queue: RuntimeCore<B>,
         projection: ProjectionLifecycleHandle,
     ) -> Self {
         let queue = Arc::new(queue);
         Self {
             inner: queue.clone(),
-            batch: queue,
+            batch: queue.clone(),
+            mutation: queue,
             projection: Some(projection),
         }
     }
@@ -1138,6 +1161,13 @@ impl Fireweed {
             return Err(EngineError::Invalid("empty batch update"));
         }
         self.batch.batch_update(queue, request).await
+    }
+    pub async fn mutate_items(
+        &self,
+        queue: &QueueKey,
+        request: ItemMutationRequest,
+    ) -> EngineResult<ItemMutationResponse> {
+        self.mutation.mutate_items(queue, request).await
     }
     pub async fn update(
         &self,
