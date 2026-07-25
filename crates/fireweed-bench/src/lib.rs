@@ -25,6 +25,14 @@ use fireweed_core::{
 };
 use fireweed_engine::{Clock, QueueKey};
 
+pub mod performance_matrix;
+pub mod performance_matrix_analysis;
+pub mod performance_matrix_checkpoint;
+pub mod performance_matrix_evidence;
+pub mod performance_matrix_lifecycle;
+pub mod performance_matrix_provenance;
+pub mod performance_matrix_services;
+
 /// Historical E0 product-capacity reference: 10,000,000 accepted items/hr. Diagnostic only.
 pub const FLOOR_ITEMS_PER_HR: f64 = 10_000_000.0;
 /// Historical capacity reference expressed per-second (2,777.78/s).

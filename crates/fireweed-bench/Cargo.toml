@@ -25,6 +25,10 @@ path = "src/main.rs"
 name = "pqueue-bench"
 path = "src/main.rs"
 
+[[bin]]
+name = "fireweed-performance-matrix"
+path = "src/bin/fireweed-performance-matrix.rs"
+
 # At-scale performance harness (TP-002 E0/E1/E3 substantiation): drives the four durable-log backends —
 # the realized "log store" axis; the projection is the single shared `fireweed-projection` materialization —
 # through ingest / claim+ack / recovery / queue-density workloads and reports throughput vs the E0 floor
@@ -38,8 +42,13 @@ fireweed = { path = "../fireweed", features = ["postgres"] }
 fireweed-core = { path = "../fireweed-core" }
 fireweed-engine = { path = "../fireweed-engine" }
 futures = "0.3"
+ctrlc = "3"
+postgres = "0.19"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+fireweed-objectlog = { path = "../fireweed-objectlog" }
 
 [dev-dependencies]
 # The scale/density evidence suites emit verification-ledger rows (TP-002 E2) via this crate.
 fireweed-release = { path = "../fireweed-release" }
-serde_json = "1"
