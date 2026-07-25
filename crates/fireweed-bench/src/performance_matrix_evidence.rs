@@ -18,7 +18,7 @@ const FULL_CELLS: &[(&str, &str)] = &[
     ("sqlite-relational", "local-durable-visible"),
     ("postgres-log", "postgres-durable-visible"),
     ("postgres-relational", "postgres-durable-visible"),
-    ("objectlog-local-memory-legacy", "legacy-objectlog-visible"),
+    ("objectlog-local-direct", "objectlog-durable-visible"),
     (
         "objectlog-local-sqlite-strict",
         "objectlog-projection-visible",
@@ -40,7 +40,7 @@ const SMOKE_CELLS: &[(&str, &str)] = &[
     ("memory", "volatile-visible"),
     ("sqlite-log", "local-durable-visible"),
     ("sqlite-relational", "local-durable-visible"),
-    ("objectlog-local-memory-legacy", "legacy-objectlog-visible"),
+    ("objectlog-local-direct", "objectlog-durable-visible"),
     (
         "objectlog-local-sqlite-strict",
         "objectlog-projection-visible",
@@ -101,7 +101,7 @@ pub fn build_schedule(tier: &str) -> Result<Vec<ScheduleEntry>, String> {
         }
         for (cell, _) in FULL_CELLS
             .iter()
-            .filter(|(cell, _)| cell.starts_with("objectlog-") && !cell.ends_with("memory-legacy"))
+            .filter(|(cell, _)| cell.starts_with("objectlog-") && *cell != "objectlog-local-direct")
         {
             for repetition in 0..3 {
                 push("maintenance", repetition, "record-1k", cell);
@@ -773,7 +773,7 @@ fn verify_evidence(evidence: &MatrixEvidence) -> Result<(), String> {
         let maintenance_cells = FULL_CELLS
             .iter()
             .map(|(cell, _)| *cell)
-            .filter(|cell| cell.starts_with("objectlog-") && !cell.ends_with("memory-legacy"))
+            .filter(|cell| cell.starts_with("objectlog-") && *cell != "objectlog-local-direct")
             .collect::<BTreeSet<_>>();
         let expected_maintenance = maintenance_cells.len() * 3;
         if evidence.maintenance.len() != expected_maintenance {

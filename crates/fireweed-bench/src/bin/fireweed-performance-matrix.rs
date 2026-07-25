@@ -39,7 +39,7 @@ const CELLS_FULL: &[&str] = &[
     "sqlite-relational",
     "postgres-log",
     "postgres-relational",
-    "objectlog-local-memory-legacy",
+    "objectlog-local-direct",
     "objectlog-local-sqlite-strict",
     "objectlog-local-sqlite-async",
     "objectlog-local-postgres-strict",
@@ -93,7 +93,7 @@ const CELLS_SMOKE: &[&str] = &[
     "memory",
     "sqlite-log",
     "sqlite-relational",
-    "objectlog-local-memory-legacy",
+    "objectlog-local-direct",
     "objectlog-local-sqlite-strict",
     "objectlog-local-sqlite-async",
 ];
@@ -102,7 +102,7 @@ const RECOVERY_CELLS: &[&str] = &[
     "sqlite-relational",
     "postgres-log",
     "postgres-relational",
-    "objectlog-local-memory-legacy",
+    "objectlog-local-direct",
     "objectlog-local-sqlite-strict",
     "objectlog-local-sqlite-async",
     "objectlog-local-postgres-strict",
@@ -267,7 +267,7 @@ fn barrier_class(cell: &str) -> &'static str {
         "memory" => "volatile-visible",
         "sqlite-log" | "sqlite-relational" => "local-durable-visible",
         "postgres-log" | "postgres-relational" => "postgres-durable-visible",
-        "objectlog-local-memory-legacy" => "legacy-objectlog-visible",
+        "objectlog-local-direct" => "objectlog-durable-visible",
         value if value.ends_with("sqlite-async") => "objectlog-hot-visible",
         _ => "objectlog-projection-visible",
     }
@@ -358,8 +358,8 @@ fn construct(
                 .map_err(|e| e.to_string())?,
             CleanupRecipe::Local,
         )),
-        "objectlog-local-memory-legacy" => Ok((
-            open_objectlog(root.join("legacy"), clock()).map_err(|e| e.to_string())?,
+        "objectlog-local-direct" => Ok((
+            open_objectlog(root.join("objectlog"), clock()).map_err(|e| e.to_string())?,
             CleanupRecipe::Local,
         )),
         "postgres-log" | "postgres-relational" => {

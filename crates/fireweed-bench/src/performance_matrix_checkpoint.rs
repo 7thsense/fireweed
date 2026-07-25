@@ -155,7 +155,7 @@ fn validate_lifecycle_fragment(fragment: &LifecycleFragment) -> Result<(), Strin
         "sqlite-relational",
         "postgres-log",
         "postgres-relational",
-        "objectlog-local-memory-legacy",
+        "objectlog-local-direct",
         "objectlog-local-sqlite-strict",
         "objectlog-local-sqlite-async",
         "objectlog-local-postgres-strict",

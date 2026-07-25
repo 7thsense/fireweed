@@ -67,7 +67,7 @@ never `pass` or a silent skip. `unsupported` is an explicit product boundary.
 | `sqlite-relational` | `open_sqlite_relational` | SQLite relational | relational / atomic | required |
 | `postgres-log` | `open_postgres_runtime(LogReplay)` | PostgreSQL command log | in-memory replay | conditional on PostgreSQL |
 | `postgres-relational` | `open_postgres_runtime(Relational)` | PostgreSQL relational | relational / atomic | conditional on PostgreSQL |
-| `objectlog-local-memory-legacy` | `open_objectlog` | local filesystem object log | in-memory, authority + hot view visible | required standalone baseline |
+| `objectlog-local-direct` | `open_objectlog` | local filesystem object log | durable object-log state visible | required direct object-log baseline |
 | `objectlog-local-sqlite-strict` | `open_objectlog_sqlite` | local filesystem object log | SQLite / strict | required |
 | `objectlog-local-sqlite-async` | `open_objectlog_sqlite` | local filesystem object log | SQLite / authority + hot view visible; SQLite deferred | required diagnostic; not release-promotable |
 | `objectlog-local-postgres-strict` | `open_objectlog_postgres` | local filesystem object log | PostgreSQL / strict | conditional on PostgreSQL |
@@ -79,10 +79,10 @@ never `pass` or a silent skip. `unsupported` is an explicit product boundary.
 
 The matrix records unsupported rows in its manifest but never fabricates timing
 samples for them. Composed local and S3-compatible object-log cells use the
-same segmented-log target and maximum-latency settings. The legacy local-memory
-constructor writes one command per segment and exposes no segment size or
-latency controls; it is retained as a standalone public-API baseline and is not
-compared with segmented object-log cells.
+same segmented-log target and maximum-latency settings. API-005 specifies the
+direct `open_objectlog` constructor separately; it exposes no segment settings,
+is reported as its own public-API baseline, and is not compared with composed
+segmented object-log cells.
 
 ### Response-barrier classes
 
@@ -94,7 +94,7 @@ classes together but computes comparative verdicts only inside a class.
 | `volatile-visible` | `memory` | Volatile state visible |
 | `local-durable-visible` | `sqlite-log`, `sqlite-relational` | Local durable authority and serving view visible |
 | `postgres-durable-visible` | `postgres-log`, `postgres-relational` | PostgreSQL durable authority and serving view visible |
-| `legacy-objectlog-visible` | `objectlog-local-memory-legacy` | Legacy per-command local object-log and in-memory view visible |
+| `objectlog-durable-visible` | `objectlog-local-direct` | Direct local object-log commit visible |
 | `objectlog-hot-visible` | `objectlog-*-sqlite-async` | Segmented object-log authority and synchronous hot view visible; disposable SQLite may lag |
 | `objectlog-projection-visible` | `objectlog-*-sqlite-strict`, `objectlog-*-postgres-strict` | Object-log authority and durable serving projection visible |
 
@@ -117,7 +117,7 @@ All `PostgresRuntimeConfig` cells set `schema` to a unique run-owned value,
 `node_id = None`, and `coordination = None`. Mode is exactly `LogReplay` or
 `Relational` as named by the cell.
 
-All object-log cells except `objectlog-local-memory-legacy` use:
+All composed object-log cells except `objectlog-local-direct` use:
 
 ```text
 SegmentConfig::new(262144, 20)
@@ -129,9 +129,9 @@ RecoveryPolicy {
 ```
 
 `ObjectLogStorage`, `ProjectionConfig`, and `ResponseBarrier` match the matrix
-row exactly. The legacy cell records its fixed behavior as
-`legacy_per_command_segments`; it has no synthetic `SegmentConfig` and no
-pairwise comparator. Every local root, SQLite projection path, PostgreSQL schema, and
+row exactly. The direct object-log cell records the fixed behavior of the
+specified `open_objectlog` constructor; it has no synthetic `SegmentConfig` and
+no pairwise comparator. Every local root, SQLite projection path, PostgreSQL schema, and
 object-log namespace is derived from the run ID, cell ID, shape ID, and
 repetition. The full resolved non-secret configuration is serialized with the
 row. A mismatch between the resolved config and the cell definition fails

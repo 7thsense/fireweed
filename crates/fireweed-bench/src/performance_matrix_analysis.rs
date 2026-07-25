@@ -23,7 +23,7 @@ fn barrier_class(cell: &str) -> &'static str {
         "memory" => "volatile-visible",
         "sqlite-log" | "sqlite-relational" => "local-durable-visible",
         "postgres-log" | "postgres-relational" => "postgres-durable-visible",
-        "objectlog-local-memory-legacy" => "legacy-objectlog-visible",
+        "objectlog-local-direct" => "objectlog-durable-visible",
         value if value.ends_with("sqlite-async") => "objectlog-hot-visible",
         _ => "objectlog-projection-visible",
     }

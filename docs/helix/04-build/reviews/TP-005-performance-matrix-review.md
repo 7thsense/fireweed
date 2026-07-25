@@ -16,8 +16,8 @@ PASS from both, with no implementation-blocking contradictions.
 
 ## Material corrections
 
-- Distinguished the legacy per-command local object log from segmented
-  object-log compositions and prohibited misleading comparisons.
+- Distinguished the API-005 direct local object log from segmented object-log
+  compositions and prohibited misleading comparisons.
 - Defined comparison classes by the actual response success barrier.
 - Bound constructors, queue methods, workloads, sample counts, statistics, and
   smoke/full verifier semantics to exact executable contracts.
@@ -34,7 +34,7 @@ PASS from both, with no implementation-blocking contradictions.
 
 Round one blocked on incomplete construction, cleanup, correctness, sampling,
 and evidence contracts. Round two blocked on concrete implementation mismatches
-in the legacy object log, derived PostgreSQL schemas, S3 namespace encoding,
+in the direct object log, derived PostgreSQL schemas, S3 namespace encoding,
 smoke thresholds, maintenance population, and runtime controls. Round three
 verified those fixes against the current public constructors and methods and
 returned two PASS verdicts.
